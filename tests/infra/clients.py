@@ -18,9 +18,12 @@ from http.client import HTTPResponse
 from io import BytesIO
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import asymmetric
-from websocket import create_connection
+import struct
+
+import requests
 from loguru import logger as LOG
+from requests_http_signature import HTTPSignatureAuth
+import websocket
 
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.poolmanager import PoolManager
@@ -383,7 +386,17 @@ class RequestClient:
             else:
                 request_args["json"] = request.params
 
-        response = self.session.request(timeout=self.request_timeout, **request_args)
+        try:
+            response = self.session.request(
+                timeout=self.request_timeout, **request_args
+            )
+        except requests.exceptions.ReadTimeout as exc:
+            raise TimeoutError from exc
+        except requests.exceptions.SSLError as exc:
+            raise CCFConnectionException from exc
+        except Exception as exc:
+            raise RuntimeError("Request client failed with unexpected error") from exc
+
         return Response.from_requests_response(response)
 
     def _request(self, request, is_signed=False):
@@ -416,16 +429,7 @@ class RequestClient:
 
 class WSClient:
     def __init__(
-        self,
-        host,
-        port,
-        cert,
-        key,
-        ca,
-        connection_timeout,
-        request_timeout,
-        *args,
-        **kwargs,
+        self, host, port, cert, key, ca, request_timeout, *args, **kwargs,
     ):
         self.host = host
         self.port = port
@@ -433,15 +437,46 @@ class WSClient:
         self.key = key
         self.ca = ca
         self.request_timeout = request_timeout
+        self.ws = None
 
-    def request(self, request):
-        ws = create_connection(
-            f"wss://{self.host}:{self.port}",
-            sslopt={"certfile": self.cert, "keyfile": self.key, "ca_certs": self.ca},
+    def request(self, request, is_signed=False):
+        assert not is_signed
+
+        if not self.ws:
+            LOG.info("Creating WSS connection")
+            try:
+                self.ws = websocket.create_connection(
+                    f"wss://{self.host}:{self.port}",
+                    sslopt={
+                        "certfile": self.cert,
+                        "keyfile": self.key,
+                        "ca_certs": self.ca,
+                    },
+                    timeout=self.request_timeout,
+                )
+            except Exception as exc:
+                raise CCFConnectionException from exc
+        payload = json.dumps(request.params).encode()
+        path = ("/" + request.method).encode()
+        header = struct.pack("<h", len(path)) + path
+        # FIN, no RSV, BIN, UNMASKED every time, because it's all we support right now
+        frame = websocket.ABNF(
+            1, 0, 0, 0, websocket.ABNF.OPCODE_BINARY, 0, header + payload
         )
-
-    def signed_request(self, request):
-        raise NotImplementedError("Signed requests not yet implemented over WebSockets")
+        self.ws.send_frame(frame)
+        out = self.ws.recv_frame().data
+        (status,) = struct.unpack("<h", out[:2])
+        (commit,) = struct.unpack("<Q", out[2:10])
+        (term,) = struct.unpack("<Q", out[10:18])
+        (global_commit,) = struct.unpack("<Q", out[18:26])
+        payload = out[26:]
+        if status == 200:
+            result = json.loads(payload) if payload else None
+            error = None
+        else:
+            result = None
+            error = payload.decode()
+        return Response(status, result, error, commit, term, global_commit)
 
 
 class CCFClient:
@@ -453,7 +488,7 @@ class CCFClient:
 
         if os.getenv("CURL_CLIENT"):
             self.client_impl = CurlClient(*args, **kwargs)
-        elif os.getenv("WEBSOCKETS_CLIENT"):
+        elif os.getenv("WEBSOCKETS_CLIENT") or kwargs.get("ws"):
             self.client_impl = WSClient(*args, **kwargs)
         else:
             self.client_impl = RequestClient(*args, **kwargs)
@@ -485,10 +520,23 @@ class CCFClient:
         return self._response(self.client_impl.signed_request(r))
 
     def rpc(self, *args, **kwargs):
-        if "signed" in kwargs and kwargs.pop("signed"):
-            return self.signed_request(*args, **kwargs)
-        else:
-            return self.request(*args, **kwargs)
+        end_time = time.time() + self.connection_timeout
+        while True:
+            try:
+                response = self._just_rpc(*args, **kwargs)
+                # Only the first request gets this timeout logic - future calls
+                # call _just_rpc directly
+                self.rpc = self._just_rpc
+                return response
+            except (CCFConnectionException, TimeoutError) as e:
+                # If the initial connection fails (e.g. due to node certificate
+                # not yet being endorsed by the network) sleep briefly and try again
+                if time.time() > end_time:
+                    raise CCFConnectionException(
+                        f"Connection still failing after {self.connection_timeout}s"
+                    ) from e
+                LOG.debug(f"Got exception: {e}")
+                time.sleep(0.1)
 
     def get(self, *args, **kwargs):
         return self.rpc(*args, http_verb="GET", **kwargs)
@@ -507,6 +555,7 @@ def client(
     binary_dir=".",
     connection_timeout=3,
     request_timeout=3,
+    ws=False,
 ):
     c = CCFClient(
         host=host,
@@ -519,6 +568,7 @@ def client(
         binary_dir=binary_dir,
         connection_timeout=connection_timeout,
         request_timeout=request_timeout,
+        ws=ws,
     )
 
     if log_file is not None:

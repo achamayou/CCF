@@ -560,6 +560,12 @@ if(BUILD_TESTS)
 
   foreach(CONSENSUS ${CONSENSUSES})
     add_e2e_test(
+      NAME ws_scaffold_${CONSENSUS}
+      PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/ws_scaffold.py
+      CONSENSUS ${CONSENSUS}
+    )
+
+    add_e2e_test(
       NAME member_client_test_${CONSENSUS}
       PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/memberclient.py
       CONSENSUS ${CONSENSUS}

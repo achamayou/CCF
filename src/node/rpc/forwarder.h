@@ -75,7 +75,8 @@ namespace ccf
       }
       serialized::write(data_, size_, raw_request.data(), raw_request.size());
 
-      ForwardedHeader msg = {ForwardedMsg::forwarded_cmd, self};
+      ForwardedHeader msg = {
+        ForwardedMsg::forwarded_cmd, self, rpc_ctx->frame_format()};
 
       return n2n_channels->send_encrypted(
         NodeMsgType::forwarded_msg, to, plain, msg);
@@ -113,9 +114,17 @@ namespace ccf
       auto session = std::make_shared<enclave::SessionContext>(
         client_session_id, caller_id, caller_cert);
 
-      auto context = enclave::make_rpc_context(session, raw_request);
-
-      return std::make_tuple(context, r.first.from_node);
+      try
+      {
+        auto context = enclave::make_fwd_rpc_context(
+          session, raw_request, r.first.frame_format);
+        return std::make_tuple(context, r.first.from_node);
+      }
+      catch (const std::exception& err)
+      {
+        LOG_FAIL_FMT("Invalid forwarded request: {}", err.what());
+        return std::nullopt;
+      }
     }
 
     bool send_forwarded_response(
@@ -129,6 +138,8 @@ namespace ccf
       serialized::write(data_, size_, client_session_id);
       serialized::write(data_, size_, data.data(), data.size());
 
+      // frame_format is deliberately unset, the forwarder ignores it
+      // and expects the same format they forwarded.
       ForwardedHeader msg = {ForwardedMsg::forwarded_response, self};
 
       return n2n_channels->send_encrypted(

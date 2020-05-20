@@ -138,7 +138,8 @@ namespace ccf
       kv::TxHistory::RequestID id,
       CallerId caller_id,
       const std::vector<uint8_t>& caller_cert,
-      const std::vector<uint8_t>& request) override
+      const std::vector<uint8_t>& request,
+      uint8_t frame_format) override
     {
       return true;
     }
@@ -558,7 +559,8 @@ namespace ccf
       kv::TxHistory::RequestID id,
       CallerId caller_id,
       const std::vector<uint8_t>& caller_cert,
-      const std::vector<uint8_t>& request) override
+      const std::vector<uint8_t>& request,
+      uint8_t frame_format) override
     {
       LOG_DEBUG_FMT("HISTORY: add_request {0}", id);
       requests[id] = request;
@@ -569,7 +571,8 @@ namespace ccf
         return false;
       }
 
-      return consensus->on_request({id, request, caller_id, caller_cert});
+      return consensus->on_request(
+        {id, request, caller_id, caller_cert, frame_format});
     }
 
     struct PendingInsert
