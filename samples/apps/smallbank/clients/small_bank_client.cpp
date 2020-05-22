@@ -51,7 +51,7 @@ private:
       LOG_INFO_FMT(header);
     }
 
-    auto conn = get_connection();
+    auto conn = create_connection(true, false);
 
     nlohmann::json accs = nlohmann::json::array();
 
@@ -231,7 +231,7 @@ private:
     }
 
     // Create new connection to read balances
-    auto conn = get_connection();
+    auto conn = create_connection(true, false);
 
     for (const auto& entry : expected)
     {
@@ -262,6 +262,8 @@ private:
           std::to_string(actual_balance));
       }
     }
+
+    LOG_INFO_FMT("VERIFIED {}", prefix);
   }
 
   void verify_initial_state(const nlohmann::json& expected) override
