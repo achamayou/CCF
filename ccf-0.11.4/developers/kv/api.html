@@ -1,0 +1,509 @@
+
+
+<!DOCTYPE html>
+
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Key-Value Store API &#8212; CCF  documentation</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.11.2/css/all.min.css" integrity="sha384-KA6wR/X5RY4zFAHpv/CnoG2UW1uogYfdnP67Uv7eULvTveboZJg0qUpmJZb5VqzN" crossorigin="anonymous">
+    <link href="../../_static/css/index.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../_static/basic.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css" />
+    <script id="documentation_options" data-url_root="../../" src="../../_static/documentation_options.js"></script>
+    <script src="../../_static/jquery.js"></script>
+    <script src="../../_static/underscore.js"></script>
+    <script src="../../_static/doctools.js"></script>
+    <script src="../../_static/language_data.js"></script>
+    <script src="../../_static/clipboard.min.js"></script>
+    <script src="../../_static/copybutton.js"></script>
+    <link rel="shortcut icon" href="../../_static/favicon.ico"/>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Ledger" href="../ledger.html" />
+    <link rel="prev" title="KV Serialisation" href="kv_serialisation.html" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="docsearch:language" content="en">
+  </head>
+  <body data-spy="scroll" data-target="#bd-toc-nav" data-offset="80">
+    
+    <nav class="navbar navbar-light navbar-expand-lg bg-light fixed-top bd-navbar" id="navbar-main"><div class="container-xl">
+
+    
+    <a class="navbar-brand" href="../../index.html">
+      <img src="../../_static/ccf.svg" class="logo" alt="logo">
+    </a>
+    
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div id="navbar-menu" class="col-11 collapse navbar-collapse">
+      <ul id="navbar-main-elements" class="navbar-nav mr-auto">
+        
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../concepts.html">Concepts</a>
+        </li>
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../quickstart/index.html">Start Here</a>
+        </li>
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../members/index.html">Governance</a>
+        </li>
+        
+        <li class="nav-item active">
+            <a class="nav-link" href="../index.html">Building Apps</a>
+        </li>
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../operators/index.html">Operations</a>
+        </li>
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../users/index.html">Using Apps</a>
+        </li>
+        
+        <li class="nav-item ">
+            <a class="nav-link" href="../../glossary.html">Glossary</a>
+        </li>
+        
+        
+      </ul>
+
+      <ul class="navbar-nav">
+        
+          <li class="nav-item">
+            <a class="nav-link" href="https://github.com/Microsoft/CCF" target="_blank" rel="noopener">
+              <span><i class="fab fa-github-square"></i></span>
+            </a>
+          </li>
+        
+        
+      </ul>
+    </div>
+</div>
+    </nav>
+    
+
+    <div class="container-xl">
+      <div class="row">
+          
+          <div class="col-12 col-md-3 bd-sidebar"><form class="bd-search d-flex align-items-center" action="../../search.html" method="get">
+  <i class="icon fas fa-search"></i>
+  <input type="search" class="form-control" name="q" id="search-input" placeholder="Search the docs ..." aria-label="Search the docs ..." autocomplete="off" >
+</form>
+
+
+<nav class="bd-links" id="bd-docs-nav" aria-label="Main navigation">
+
+  <div class="bd-toc-item active">
+  
+
+  <ul class="nav bd-sidenav">
+      
+      
+      
+      
+      
+      
+      
+      
+        
+          
+              <li class="">
+                  <a href="../example.html">Example Application</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../build_app.html">Build and Sign Application</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../demo.html">End-to-end demo</a>
+              </li>
+          
+        
+          
+
+              <li class="active">
+                  <a href="index.html">Key-Value Store</a>
+                  <ul>
+                  
+                      <li class="">
+                          <a href="kv_how_to.html">Key-Value Store How-To</a>
+                      </li>
+                  
+                      <li class="">
+                          <a href="kv_serialisation.html">KV Serialisation</a>
+                      </li>
+                  
+                      <li class="active">
+                          <a href="">Key-Value Store API</a>
+                      </li>
+                  
+                  </ul>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../ledger.html">Ledger</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../consensus.html">Consensus Protocols</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../cryptography.html">Cryptography</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../threading.html">Threading</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../performance.html">Performance</a>
+              </li>
+          
+        
+          
+              <li class="">
+                  <a href="../api.html">Developer API</a>
+              </li>
+          
+        
+      
+      
+      
+      
+      
+      
+      
+      
+    </ul>
+
+    
+      <ul>
+        <li>
+          <a href="../../../v0.11.1/developers/kv/api.html" class="badge">v0.11.1</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="../../../v0.11/developers/kv/api.html" class="badge">v0.11</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="../../../v0.10/developers/kv/api.html" class="badge">v0.10</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="../../../master/developers/kv/api.html" class="badge">master</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="../../../ccf-0.11.7/developers/kv/api.html" class="badge">ccf-0.11.7</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="api.html" class="badge">ccf-0.11.4</a>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          <a href="../../../ccf-0.11.1/developers/kv/api.html" class="badge">ccf-0.11.1</a>
+        </li>
+      </ul>
+    
+
+</nav>
+          </div>
+          
+
+          
+          <div class="d-none d-xl-block col-xl-2 bd-toc">
+              
+<div class="tocsection onthispage pt-5 pb-3">
+    <i class="fas fa-list"></i> On this page
+</div>
+
+<nav id="bd-toc-nav">
+    <ul class="nav section-nav flex-column">
+    
+        <li class="nav-item toc-entry toc-h2">
+            <a href="#store" class="nav-link">Store</a>
+        </li>
+    
+        <li class="nav-item toc-entry toc-h2">
+            <a href="#map" class="nav-link">Map</a>
+        </li>
+    
+        <li class="nav-item toc-entry toc-h2">
+            <a href="#transaction" class="nav-link">Transaction</a>
+        </li>
+    
+        <li class="nav-item toc-entry toc-h2">
+            <a href="#transaction-view" class="nav-link">Transaction View</a>
+        </li>
+    
+    </ul>
+</nav>
+
+
+
+<div class="tocsection editthispage">
+    <a href="https://github.com/Microsoft/CCF/edit/master/doc/developers/kv/api.rst">
+        <i class="fas fa-pencil-alt"></i> Edit this page
+    </a>
+</div>
+
+              
+          </div>
+          
+
+          
+          <main class="col-12 col-md-9 col-xl-7 py-md-5 pl-md-5 pr-md-4 bd-content" role="main">
+              
+              <div>
+                
+  <div class="section" id="key-value-store-api">
+<h1>Key-Value Store API<a class="headerlink" href="#key-value-store-api" title="Permalink to this headline">¶</a></h1>
+<p>This page presents the API that a CCF application must use to read and mutate the replicated key-value store.</p>
+<p>A CCF application should define one or multiple public or private <a class="reference internal" href="#_CPPv4N2kv3MapE" title="kv::Map"><code class="xref cpp cpp-type docutils literal notranslate"><span class="pre">kv::Map</span></code></a>. Then, each <a class="reference internal" href="../api.html#_CPPv4N3ccf16EndpointRegistry8EndpointE" title="ccf::EndpointRegistry::Endpoint"><code class="xref cpp cpp-class docutils literal notranslate"><span class="pre">ccf::EndpointRegistry::Endpoint</span></code></a> should use the <a class="reference internal" href="#_CPPv4N2kv2TxE" title="kv::Tx"><code class="xref cpp cpp-class docutils literal notranslate"><span class="pre">kv::Tx</span></code></a> transaction object to read and write to specific <a class="reference internal" href="#_CPPv4N2kv3MapE" title="kv::Map"><code class="xref cpp cpp-type docutils literal notranslate"><span class="pre">kv::Map</span></code></a>.</p>
+<div class="section" id="store">
+<h2>Store<a class="headerlink" href="#store" title="Permalink to this headline">¶</a></h2>
+<dl class="cpp class">
+<dt id="_CPPv4N2kv5StoreE">
+<span id="_CPPv3N2kv5StoreE"></span><span id="_CPPv2N2kv5StoreE"></span><span id="kv::Store"></span><span class="target" id="classkv_1_1Store"></span><em class="property">class </em><code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">Store</code> : <em class="property">public</em> kv::AbstractStore<a class="headerlink" href="#_CPPv4N2kv5StoreE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><div class="breathe-sectiondef docutils container">
+<p class="breathe-sectiondef-title rubric">Public Functions</p>
+<dl class="cpp function">
+<dt id="_CPPv4I0EN2kv5Store3getEP1MRKNSt6stringE">
+<span id="_CPPv3I0EN2kv5Store3getERKNSt6stringE"></span><span id="_CPPv2I0EN2kv5Store3getERKNSt6stringE"></span>template&lt;class <code class="sig-name descname">M</code>&gt;<br /><span class="target" id="classkv_1_1Store_1ad8478826e0ee11b082d9dcbcecab0fbb"></span><a class="reference internal" href="#_CPPv4I0EN2kv5Store3getEP1MRKNSt6stringE" title="kv::Store::get::M">M</a> *<code class="sig-name descname">get</code><span class="sig-paren">(</span><em class="property">const</em> std::string &amp;<em>name</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0EN2kv5Store3getEP1MRKNSt6stringE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get Map by name</p>
+<p><dl class="simple">
+<dt><strong>Return</strong></dt><dd><p>Map </p>
+</dd>
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">name</span></code>: Map name</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+<dl class="cpp function">
+<dt id="_CPPv4I0EN2kv5Store3getEP1MRK1M">
+<span id="_CPPv3I0EN2kv5Store3getERK1M"></span><span id="_CPPv2I0EN2kv5Store3getERK1M"></span>template&lt;class <code class="sig-name descname">M</code>&gt;<br /><span class="target" id="classkv_1_1Store_1ad2f63775bf858037d1118ed17709969d"></span><a class="reference internal" href="#_CPPv4I0EN2kv5Store3getEP1MRK1M" title="kv::Store::get::M">M</a> *<code class="sig-name descname">get</code><span class="sig-paren">(</span><em class="property">const</em> <a class="reference internal" href="#_CPPv4I0EN2kv5Store3getEP1MRK1M" title="kv::Store::get::M">M</a> &amp;<em>other</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0EN2kv5Store3getEP1MRK1M" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get Map by type and name</p>
+<p>Using type and name of other Map, retrieve the equivalent Map from this <a class="reference internal" href="#classkv_1_1Store"><span class="std std-ref">Store</span></a></p>
+<p><dl class="simple">
+<dt><strong>Return</strong></dt><dd><p>Map </p>
+</dd>
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">other</span></code>: Other map</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+<dl class="cpp function">
+<dt id="_CPPv4I00EN2kv5Store6createER3MapI1K1VENSt6stringE14SecurityDomain">
+<span id="_CPPv3I00EN2kv5Store6createENSt6stringE14SecurityDomain"></span><span id="_CPPv2I00EN2kv5Store6createENSt6stringE14SecurityDomain"></span>template&lt;class <code class="sig-name descname">K</code>, class <code class="sig-name descname">V</code>&gt;<br /><span class="target" id="classkv_1_1Store_1a1beae1f871feeb65f75a329648494560"></span><a class="reference internal" href="#_CPPv4N2kv3MapE" title="kv::Map">Map</a>&lt;<a class="reference internal" href="#_CPPv4I00EN2kv5Store6createER3MapI1K1VENSt6stringE14SecurityDomain" title="kv::Store::create::K">K</a>, <a class="reference internal" href="#_CPPv4I00EN2kv5Store6createER3MapI1K1VENSt6stringE14SecurityDomain" title="kv::Store::create::V">V</a>&gt; &amp;<code class="sig-name descname">create</code><span class="sig-paren">(</span>std::string <em>name</em>, SecurityDomain <em>security_domain</em> = kv::SecurityDomain::PRIVATE<span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I00EN2kv5Store6createER3MapI1K1VENSt6stringE14SecurityDomain" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Create a Map</p>
+<p>Note this call will throw a logic_error if a map by that name already exists.</p>
+<p><dl class="simple">
+<dt><strong>Return</strong></dt><dd><p>Newly created Map </p>
+</dd>
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">name</span></code>: Map name </p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">global_hook</span></code>: Handler to execute on global commit</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+<dl class="cpp function">
+<dt id="_CPPv4I0EN2kv5Store6createER1MNSt6stringE14SecurityDomain">
+<span id="_CPPv3I0EN2kv5Store6createENSt6stringE14SecurityDomain"></span><span id="_CPPv2I0EN2kv5Store6createENSt6stringE14SecurityDomain"></span>template&lt;class <code class="sig-name descname">M</code>&gt;<br /><span class="target" id="classkv_1_1Store_1a6d2af1b68f7a72888c311ba57d157515"></span><a class="reference internal" href="#_CPPv4I0EN2kv5Store6createER1MNSt6stringE14SecurityDomain" title="kv::Store::create::M">M</a> &amp;<code class="sig-name descname">create</code><span class="sig-paren">(</span>std::string <em>name</em>, SecurityDomain <em>security_domain</em> = kv::SecurityDomain::PRIVATE<span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0EN2kv5Store6createER1MNSt6stringE14SecurityDomain" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Create a Map</p>
+<p>Note this call will throw a logic_error if a map by that name already exists.</p>
+<p><dl class="simple">
+<dt><strong>Return</strong></dt><dd><p>Newly created Map </p>
+</dd>
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">name</span></code>: Map name </p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">global_hook</span></code>: Handler to execute on global commit</p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+</div>
+</dd></dl>
+
+</div>
+<div class="section" id="map">
+<h2>Map<a class="headerlink" href="#map" title="Permalink to this headline">¶</a></h2>
+<dl class="cpp type">
+<dt id="_CPPv4N2kv7VersionE">
+<span id="_CPPv3N2kv7VersionE"></span><span id="_CPPv2N2kv7VersionE"></span><span class="target" id="kv__types_8h_1a75828f8e4b8183362032501cf54d798d"></span><em class="property">using </em><code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">Version</code> = int64_t<a class="headerlink" href="#_CPPv4N2kv7VersionE" title="Permalink to this definition">¶</a><br /></dt>
+<dd></dd></dl>
+
+<dl class="cpp var">
+<dt id="_CPPv4N2kv9NoVersionE">
+<span id="_CPPv3N2kv9NoVersionE"></span><span id="_CPPv2N2kv9NoVersionE"></span><span id="kv::NoVersion__VersionC"></span><span class="target" id="kv__types_8h_1a11bba90e680b375096d99579821c264a"></span><em class="property">const</em> <a class="reference internal" href="#_CPPv4N2kv7VersionE" title="kv::Version">Version</a> <code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">NoVersion</code> = std::numeric_limits&lt;<a class="reference internal" href="#_CPPv4N2kv7VersionE" title="kv::Version">Version</a>&gt;::min()<a class="headerlink" href="#_CPPv4N2kv9NoVersionE" title="Permalink to this definition">¶</a><br /></dt>
+<dd></dd></dl>
+
+<dl class="cpp class">
+<dt id="_CPPv4I0000EN2kv8TypedMapE">
+<span id="_CPPv3I0000EN2kv8TypedMapE"></span><span id="_CPPv2I0000EN2kv8TypedMapE"></span>template&lt;typename <code class="sig-name descname">K</code>, typename <code class="sig-name descname">V</code>, typename <code class="sig-name descname">KSerialiser</code>, typename <code class="sig-name descname">VSerialiser</code>&gt;<br /><span class="target" id="classkv_1_1TypedMap"></span><em class="property">class </em><code class="sig-name descname">TypedMap</code> : <em class="property">public</em> kv::AbstractMap<a class="headerlink" href="#_CPPv4I0000EN2kv8TypedMapE" title="Permalink to this definition">¶</a><br /></dt>
+<dd></dd></dl>
+
+<dl class="cpp type">
+<dt id="_CPPv4N2kv3MapE">
+<span id="_CPPv3N2kv3MapE"></span><span id="_CPPv2N2kv3MapE"></span><span class="target" id="map_8h_1ad598fe605cf9cab8a6783f64ed7e0fb0"></span><em class="property">using </em><code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">Map</code> = MsgPackSerialisedMap&lt;K, V&gt;<a class="headerlink" href="#_CPPv4N2kv3MapE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Short name for default-serialised maps, using msgpack serialisers. Support for custom types can be added through the MSGPACK_DEFINE macro </p>
+</dd></dl>
+
+</div>
+<div class="section" id="transaction">
+<h2>Transaction<a class="headerlink" href="#transaction" title="Permalink to this headline">¶</a></h2>
+<dl class="cpp class">
+<dt id="_CPPv4N2kv10ReadOnlyTxE">
+<span id="_CPPv3N2kv10ReadOnlyTxE"></span><span id="_CPPv2N2kv10ReadOnlyTxE"></span><span id="kv::ReadOnlyTx"></span><span class="target" id="classkv_1_1ReadOnlyTx"></span><em class="property">class </em><code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">ReadOnlyTx</code> : <em class="property">public</em> kv::BaseTx<a class="headerlink" href="#_CPPv4N2kv10ReadOnlyTxE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Subclassed by <a class="reference internal" href="#classkv_1_1Tx"><span class="std std-ref">kv::Tx</span></a></p>
+<div class="breathe-sectiondef docutils container">
+<p class="breathe-sectiondef-title rubric">Public Functions</p>
+<dl class="cpp function">
+<dt id="_CPPv4I0EN2kv10ReadOnlyTx18get_read_only_viewEPN1M14ReadOnlyTxViewER1M">
+<span id="_CPPv3I0EN2kv10ReadOnlyTx18get_read_only_viewER1M"></span><span id="_CPPv2I0EN2kv10ReadOnlyTx18get_read_only_viewER1M"></span>template&lt;class <code class="sig-name descname">M</code>&gt;<br /><span class="target" id="classkv_1_1ReadOnlyTx_1ac7cbe224c1b0c8d0a7d2d612aa72617f"></span><a class="reference internal" href="#_CPPv4I0EN2kv10ReadOnlyTx18get_read_only_viewEPN1M14ReadOnlyTxViewER1M" title="kv::ReadOnlyTx::get_read_only_view::M">M</a>::ReadOnlyTxView *<code class="sig-name descname">get_read_only_view</code><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv4I0EN2kv10ReadOnlyTx18get_read_only_viewEPN1M14ReadOnlyTxViewER1M" title="kv::ReadOnlyTx::get_read_only_view::M">M</a> &amp;<em>m</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0EN2kv10ReadOnlyTx18get_read_only_viewEPN1M14ReadOnlyTxViewER1M" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get a read-only transaction view on a map.</p>
+<p>This adds the map to the transaction set if it is not yet present.</p>
+<p><dl class="simple">
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">m</span></code>: Map </p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+<dl class="cpp function">
+<dt id="_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms">
+<span id="_CPPv3I0DpEN2kv10ReadOnlyTx18get_read_only_viewER1MDpR2Ms"></span><span id="_CPPv2I0DpEN2kv10ReadOnlyTx18get_read_only_viewER1MDpR2Ms"></span>template&lt;class <code class="sig-name descname">M</code>, class ...<code class="sig-name descname">Ms</code>&gt;<br /><span class="target" id="classkv_1_1ReadOnlyTx_1a8d9c387cdc0cb554fe1ded38583c6d3a"></span>std::tuple&lt;<em class="property">typename</em> <a class="reference internal" href="#_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms" title="kv::ReadOnlyTx::get_read_only_view::M">M</a>::ReadOnlyTxView*, <em class="property">typename</em> <a class="reference internal" href="#_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms" title="kv::ReadOnlyTx::get_read_only_view::Ms">Ms</a>::ReadOnlyTxView*...&gt; <code class="sig-name descname">get_read_only_view</code><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms" title="kv::ReadOnlyTx::get_read_only_view::M">M</a> &amp;<em>m</em>, <a class="reference internal" href="#_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms" title="kv::ReadOnlyTx::get_read_only_view::Ms">Ms</a>&amp;... <em>ms</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0DpEN2kv10ReadOnlyTx18get_read_only_viewENSt5tupleIPN1M14ReadOnlyTxViewEDpPN2Ms14ReadOnlyTxViewEEER1MDpR2Ms" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get read-only transaction views over multiple maps.</p>
+<p><dl class="simple">
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">m</span></code>: Map </p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ms</span></code>: Map </p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+</div>
+</dd></dl>
+
+<dl class="cpp class">
+<dt id="_CPPv4N2kv2TxE">
+<span id="_CPPv3N2kv2TxE"></span><span id="_CPPv2N2kv2TxE"></span><span id="kv::Tx"></span><span class="target" id="classkv_1_1Tx"></span><em class="property">class </em><code class="sig-prename descclassname">kv<code class="sig-prename descclassname">::</code></code><code class="sig-name descname">Tx</code> : <em class="property">public</em> kv::<a class="reference internal" href="#_CPPv4N2kv10ReadOnlyTxE" title="kv::ReadOnlyTx">ReadOnlyTx</a><a class="headerlink" href="#_CPPv4N2kv2TxE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><div class="breathe-sectiondef docutils container">
+<p class="breathe-sectiondef-title rubric">Public Functions</p>
+<dl class="cpp function">
+<dt id="_CPPv4I0EN2kv2Tx8get_viewEPN1M6TxViewER1M">
+<span id="_CPPv3I0EN2kv2Tx8get_viewER1M"></span><span id="_CPPv2I0EN2kv2Tx8get_viewER1M"></span>template&lt;class <code class="sig-name descname">M</code>&gt;<br /><span class="target" id="classkv_1_1Tx_1a075a5f09a1f5b361d040ca21213fac1f"></span><a class="reference internal" href="#_CPPv4I0EN2kv2Tx8get_viewEPN1M6TxViewER1M" title="kv::Tx::get_view::M">M</a>::TxView *<code class="sig-name descname">get_view</code><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv4I0EN2kv2Tx8get_viewEPN1M6TxViewER1M" title="kv::Tx::get_view::M">M</a> &amp;<em>m</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0EN2kv2Tx8get_viewEPN1M6TxViewER1M" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get a transaction view on a map.</p>
+<p>This adds the map to the transaction set if it is not yet present.</p>
+<p><dl class="simple">
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">m</span></code>: Map </p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+<dl class="cpp function">
+<dt id="_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms">
+<span id="_CPPv3I0DpEN2kv2Tx8get_viewER1MDpR2Ms"></span><span id="_CPPv2I0DpEN2kv2Tx8get_viewER1MDpR2Ms"></span>template&lt;class <code class="sig-name descname">M</code>, class ...<code class="sig-name descname">Ms</code>&gt;<br /><span class="target" id="classkv_1_1Tx_1a788a3f0b654757135471913f83491d85"></span>std::tuple&lt;<em class="property">typename</em> <a class="reference internal" href="#_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms" title="kv::Tx::get_view::M">M</a>::TxView*, <em class="property">typename</em> <a class="reference internal" href="#_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms" title="kv::Tx::get_view::Ms">Ms</a>::TxView*...&gt; <code class="sig-name descname">get_view</code><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms" title="kv::Tx::get_view::M">M</a> &amp;<em>m</em>, <a class="reference internal" href="#_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms" title="kv::Tx::get_view::Ms">Ms</a>&amp;... <em>ms</em><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv4I0DpEN2kv2Tx8get_viewENSt5tupleIPN1M6TxViewEDpPN2Ms6TxViewEEER1MDpR2Ms" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Get transaction views over multiple maps.</p>
+<p><dl class="simple">
+<dt><strong>Parameters</strong></dt><dd><ul class="breatheparameterlist simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">m</span></code>: Map </p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ms</span></code>: Map </p></li>
+</ul>
+</dd>
+</dl>
+</p>
+</dd></dl>
+
+</div>
+</dd></dl>
+
+</div>
+<div class="section" id="transaction-view">
+<h2>Transaction View<a class="headerlink" href="#transaction-view" title="Permalink to this headline">¶</a></h2>
+<dl class="cpp class">
+<dt id="_CPPv4I0000EN2kv6TxViewE">
+<span id="_CPPv3I0000EN2kv6TxViewE"></span><span id="_CPPv2I0000EN2kv6TxViewE"></span>template&lt;typename <code class="sig-name descname">K</code>, typename <code class="sig-name descname">V</code>, typename <code class="sig-name descname">KSerialiser</code>, typename <code class="sig-name descname">VSerialiser</code>&gt;<br /><span class="target" id="classkv_1_1TxView"></span><em class="property">class </em><code class="sig-name descname">TxView</code> : <em class="property">public</em> kv::ReadOnlyTxView&lt;<a class="reference internal" href="#_CPPv4I0000EN2kv6TxViewE" title="kv::TxView::K">K</a>, <a class="reference internal" href="#_CPPv4I0000EN2kv6TxViewE" title="kv::TxView::V">V</a>, <a class="reference internal" href="#_CPPv4I0000EN2kv6TxViewE" title="kv::TxView::KSerialiser">KSerialiser</a>, <a class="reference internal" href="#_CPPv4I0000EN2kv6TxViewE" title="kv::TxView::VSerialiser">VSerialiser</a>&gt;<a class="headerlink" href="#_CPPv4I0000EN2kv6TxViewE" title="Permalink to this definition">¶</a><br /></dt>
+<dd><p>Subclassed by kv::untyped::Map::ConcreteTxView</p>
+</dd></dl>
+
+</div>
+</div>
+
+
+              </div>
+              
+              
+              <div class='prev-next-bottom'>
+                
+    <a class='left-prev' id="prev-link" href="kv_serialisation.html" title="previous page">KV Serialisation</a>
+    <a class='right-next' id="next-link" href="../ledger.html" title="next page">Ledger</a>
+
+              </div>
+              
+          </main>
+          
+
+      </div>
+    </div>
+
+    <script src="../../_static/js/index.js"></script>
+    <footer class="footer mt-5 mt-md-0">
+  <div class="container">
+    <p>
+          &copy; Copyright 2018, Microsoft Research.<br/>
+        Created using <a href="http://sphinx-doc.org/">Sphinx</a> 3.1.2.<br/>
+    </p>
+  </div>
+</footer>
+  </body>
+</html>
