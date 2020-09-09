@@ -1153,6 +1153,7 @@ namespace aft
 
       // Rollback unreplicated commits.
       rollback(state->commit_idx);
+      // TODO: hang on to the last verifiable commit
       committable_indices.clear();
 
       LOG_INFO_FMT(
