@@ -880,10 +880,15 @@ namespace aft
     {
       LOG_INFO_FMT("Send request vote from {} to {}", state->my_node_id, to);
 
+      auto last_committable_index = committable_indices.empty() ? state->commit_idx : committable_indices.back();
+      CCF_ASSERT(last_committable_index >= state->commit_idx);
+      // TODO: check term of last committable index?
+
       RequestVote rv = {{raft_request_vote, state->my_node_id},
                         state->current_view,
                         state->commit_idx,
-                        get_term_internal(state->commit_idx)};
+                        get_term_internal(state->commit_idx),
+                        last_committable_index};
 
       channels->send_authenticated(ccf::NodeMsgType::consensus_msg, to, rv);
     }
@@ -953,6 +958,7 @@ namespace aft
       // If the candidate's log is at least as up-to-date as ours, vote yes
       auto last_commit_term = get_term_internal(state->commit_idx);
 
+      // TODO: split on last_committable_index if equality
       auto answer = (r.last_commit_term > last_commit_term) ||
         ((r.last_commit_term == last_commit_term) &&
          (r.last_commit_idx >= state->commit_idx));
