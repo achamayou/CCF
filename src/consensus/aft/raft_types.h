@@ -146,7 +146,7 @@ namespace aft
     Term term;
     Index last_commit_idx;
     Term last_commit_term;
-    Index last_verifiable_idx;
+    Index last_committable_idx;
   };
 
   struct RequestVoteResponse : RaftHeader

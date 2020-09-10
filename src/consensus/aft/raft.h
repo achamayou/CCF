@@ -175,6 +175,11 @@ namespace aft
       return replica_state == Follower;
     }
 
+    Index last_committable_index() const
+    {
+      return committable_indices.empty() ? state->commit_idx : committable_indices.back();
+    }
+
     void enable_all_domains()
     {
       // When receiving append entries as a follower, all security domains will
@@ -880,15 +885,15 @@ namespace aft
     {
       LOG_INFO_FMT("Send request vote from {} to {}", state->my_node_id, to);
 
-      auto last_committable_index = committable_indices.empty() ? state->commit_idx : committable_indices.back();
-      CCF_ASSERT(last_committable_index >= state->commit_idx);
+      auto last_committable_idx = last_committable_index();
+      CCF_ASSERT(last_committable_idx >= state->commit_idx, "lci < ci");
       // TODO: check term of last committable index?
 
       RequestVote rv = {{raft_request_vote, state->my_node_id},
                         state->current_view,
                         state->commit_idx,
                         get_term_internal(state->commit_idx),
-                        last_committable_index};
+                        last_committable_idx};
 
       channels->send_authenticated(ccf::NodeMsgType::consensus_msg, to, rv);
     }
@@ -958,10 +963,10 @@ namespace aft
       // If the candidate's log is at least as up-to-date as ours, vote yes
       auto last_commit_term = get_term_internal(state->commit_idx);
 
-      // TODO: split on last_committable_index if equality
       auto answer = (r.last_commit_term > last_commit_term) ||
         ((r.last_commit_term == last_commit_term) &&
-         (r.last_commit_idx >= state->commit_idx));
+         (r.last_commit_idx >= state->commit_idx) &&
+         (r.last_committable_idx >= last_committable_index()));
 
       if (answer)
       {
@@ -1111,7 +1116,6 @@ namespace aft
         store->set_term(state->current_view);
       }
 
-      committable_indices.clear();
       replica_state = Leader;
       leader_id = state->my_node_id;
 
@@ -1151,10 +1155,8 @@ namespace aft
       voted_for = NoNode;
       votes_for_me.clear();
 
-      // Rollback unreplicated commits.
-      rollback(state->commit_idx);
-      // TODO: hang on to the last verifiable commit
-      committable_indices.clear();
+      // Rollback un-committable commits
+      rollback(last_committable_index());
 
       LOG_INFO_FMT(
         "Becoming follower {}: {}", state->my_node_id, state->current_view);
