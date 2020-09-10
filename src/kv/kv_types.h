@@ -229,6 +229,7 @@ namespace kv
           port(other.port),
           cert(other.cert)
         {}
+
       };
 
       using Nodes = std::unordered_map<NodeId, NodeInfo>;

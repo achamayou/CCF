@@ -217,6 +217,13 @@ namespace aft
       state->commit_idx = commit_idx_;
       state->view_history.update(index, term);
       state->current_view += 2;
+      // TODO: snapshot last_committable_index
+      // if last_committable_index > state->commit_idx
+      // then uncertainty = true
+      // we should not respond to primary() -> unknown
+      // writes are forbidden (is this too conservative?)
+      // we refuse to serve tx status and commit level (or do we stick to existing values?)
+
       become_leader();
     }
 
