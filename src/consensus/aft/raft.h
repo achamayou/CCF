@@ -1110,12 +1110,12 @@ namespace aft
 
     void become_leader()
     {
-      // Discard any un-committed updates we may hold,
+      // Discard any un-committable updates we may hold,
       // since we have no signature for them. Except at startup,
       // where we do not want to roll back the genesis transaction.
       if (state->commit_idx)
       {
-        rollback(state->commit_idx);
+        rollback(last_committable_index());
       }
       else
       {

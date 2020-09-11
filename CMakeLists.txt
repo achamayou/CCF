@@ -616,6 +616,13 @@ if(BUILD_TESTS)
 
   if(QUOTES_ENABLED)
     add_e2e_test(
+      NAME fes_test
+      PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/fes.py
+      CONSENSUS cft
+      ADDITIONAL_ARGS --raft-election-timeout 4000
+    )
+
+    add_e2e_test(
       NAME reconfiguration_test
       PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/reconfiguration.py
       CONSENSUS cft
