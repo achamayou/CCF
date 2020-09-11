@@ -17,6 +17,7 @@ from cryptography.hazmat.backends import default_backend
 import struct
 import base64
 from typing import Union, Optional
+import datetime
 
 import requests
 from loguru import logger as LOG  # type: ignore
@@ -26,7 +27,7 @@ import websocket  # type: ignore
 import ccf.commit
 
 
-def truncate(string: str, max_len: int = 256):
+def truncate(string: str, max_len: int = 128):
     if len(string) > max_len:
         return f"{string[: max_len]} + {len(string) - max_len} chars"
     else:
@@ -59,12 +60,11 @@ class Request:
     headers: dict
 
     def __str__(self):
-        string = f"{self.http_verb} {self.path}"
+        string = f"<magenta>{self.http_verb}</> <red>{self.path}</>"
         if self.headers:
             string += f" {self.headers}"
         if self.body is not None:
-            string += f'{truncate(f"{self.body}")}'
-
+            string += f' {truncate(f"{self.body}")}'
         return string
 
 
@@ -101,10 +101,11 @@ class Response:
 
     def __str__(self):
         versioned = (self.view, self.seqno) != (None, None)
+        sc = "red" if self.status_code / 100 in (4, 5) else "green"
         return (
-            f"{self.status_code} "
-            + (f"@{self.view}.{self.seqno} " if versioned else "")
-            + truncate(f"{self.body}")
+            f"<{sc}>{self.status_code}</> "
+            + (f"<cyan>@{self.view}.{self.seqno}</> " if versioned else "")
+            + f"<magenta>{truncate(str(self.body))}</>"
         )
 
     @staticmethod
@@ -533,11 +534,7 @@ class CCFClient:
         else:
             self.client_impl = RequestClient(host, port, ca, cert, key)
 
-    def _response(self, response: Response) -> Response:
-        LOG.info(response)
-        return response
-
-    def _direct_call(
+    def _call(
         self,
         path: str,
         body: Optional[Union[str, dict, bytes]] = None,
@@ -548,13 +545,17 @@ class CCFClient:
     ) -> Response:
         description = ""
         if self.description:
-            description = f"({self.description})" + (" [signed]" if signed else "")
+            description = f"{self.description}" + (" (sig)" if signed else "")
+        else:
+            description = self.name
 
         if headers is None:
             headers = {}
         r = Request(path, body, http_verb, headers)
-        LOG.info(f"{self.name} {r} {description}")
-        return self._response(self.client_impl.request(r, signed, timeout))
+        LOG.opt(colors=True, depth=3).info(f"{description} {r}")
+        response = self.client_impl.request(r, signed, timeout)
+        LOG.opt(colors=True, depth=3).info(str(response))
+        return response
 
     def call(
         self,
@@ -582,16 +583,16 @@ class CCFClient:
             raise ValueError(f"URL path '{path}' is invalid, must start with /")
 
         if self.is_connected:
-            return self._direct_call(path, body, http_verb, headers, signed, timeout)
+            return self._call(path, body, http_verb, headers, signed, timeout)
 
         end_time = time.time() + self.connection_timeout
         while True:
             try:
-                response = self._direct_call(
+                response = self._call(
                     path, body, http_verb, headers, signed, timeout
                 )
                 # Only the first request gets this timeout logic - future calls
-                # call _direct_call
+                # call _call
                 self.is_connected = True
                 return response
             except (CCFConnectionException, TimeoutError) as e:
@@ -601,7 +602,6 @@ class CCFClient:
                     raise CCFConnectionException(
                         f"Connection still failing after {self.connection_timeout}s"
                     ) from e
-                LOG.debug(f"Got exception: {e}")
                 time.sleep(0.1)
 
     def get(self, *args, **kwargs) -> Response:

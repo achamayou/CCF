@@ -22,9 +22,11 @@ def check_can_progress(node, timeout=3):
         assert False, f"Stuck at {r}"
 
 def print_configs(network):
+    LOG.error("=" * 80)
     for node in network.nodes:
         with node.client() as nc:
             r = nc.get("/node/config")
+    LOG.error("=" * 80)
 
 
 @reqs.description("Adding a valid node from primary")
@@ -99,16 +101,19 @@ def test_add_node_untrusted_code(network, args):
 @reqs.description("Retiring a backup")
 @reqs.at_least_n_nodes(2)
 def test_retire_backup(network, args):
+    print_configs(network)
     primary, _ = network.find_primary()
     backup_to_retire = network.find_any_backup()
     network.consortium.retire_node(primary, backup_to_retire)
     backup_to_retire.stop()
+    print_configs(network)
     return network
 
 
 @reqs.description("Retiring the primary")
 @reqs.can_kill_n_nodes(1)
 def test_retire_primary(network, args):
+    print_configs(network)
     primary, backup = network.find_primary_and_any_backup()
     network.consortium.retire_node(primary, primary)
     LOG.debug(
@@ -119,7 +124,9 @@ def test_retire_primary(network, args):
     assert new_primary.node_id != primary.node_id
     LOG.debug(f"New primary is {new_primary.node_id} in term {new_term}")
     check_can_progress(backup)
+    print_configs(network)
     primary.stop()
+    network.nodes.remove(primary)
     return network
 
 
@@ -130,9 +137,9 @@ def run(args):
         hosts, args.binary_dir, args.debug_nodes, args.perf_nodes, pdb=args.pdb
     ) as network:
         network.start_and_join(args)
-        test_add_node(network, args)
-        test_retire_primary(network, args)
-
+        for i in range(0, 20):
+            test_add_node(network, args)
+            test_retire_primary(network, args)
 
 if __name__ == "__main__":
 

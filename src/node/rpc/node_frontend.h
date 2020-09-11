@@ -366,7 +366,7 @@ namespace ccf
           {
             nlohmann::json n;
             n["address"] = fmt::format("{}:{}", ninfo.hostname, ninfo.port); 
-            c[nid] = n;
+            c[fmt::format("{}", nid)] = n;
           }
           args.rpc_ctx->set_response_body(c.dump());
         }
@@ -377,7 +377,7 @@ namespace ccf
       };
 
       make_command_endpoint(
-        "config", HTTP_POST, consensus_config)
+        "config", HTTP_GET, consensus_config)
         .set_forwarding_required(ForwardingRequired::Never)
         .install();
     }
