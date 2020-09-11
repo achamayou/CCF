@@ -110,6 +110,25 @@ def test_retire_backup(network, args):
     return network
 
 
+@reqs.description("Suspend and resume primary")
+@reqs.at_least_n_nodes(3)
+def test_suspend_primary(network, args):
+    print_configs(network)
+    primary, _ = network.find_primary()
+    primary.suspend()
+    LOG.debug(
+        f"Waiting {network.election_duration}s for a new primary to be elected..."
+    )
+    time.sleep(network.election_duration)
+    new_primary, new_term = network.find_primary()
+    assert new_primary.node_id != primary.node_id
+    LOG.debug(f"New primary is {new_primary.node_id} in term {new_term}")
+    check_can_progress(new_primary)
+    primary.resume()
+    check_can_progress(new_primary)
+    return network
+
+
 @reqs.description("Retiring the primary")
 @reqs.can_kill_n_nodes(1)
 def test_retire_primary(network, args):
@@ -137,9 +156,12 @@ def run(args):
         hosts, args.binary_dir, args.debug_nodes, args.perf_nodes, pdb=args.pdb
     ) as network:
         network.start_and_join(args)
+        #for i in range(0, 20):
+        #    test_add_node(network, args)
+        #    test_retire_primary(network, args)
+        test_add_node(network, args)
         for i in range(0, 20):
-            test_add_node(network, args)
-            test_retire_primary(network, args)
+            test_suspend_primary(network, args)
 
 if __name__ == "__main__":
 
