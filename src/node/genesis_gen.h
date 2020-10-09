@@ -91,12 +91,13 @@ namespace ccf
       const tls::Pem& member_keyshare_pub,
       const nlohmann::json& member_data = nullptr)
     {
-      auto [m, mc, v, ma, sig] = tx.get_view(
+      auto [m, mc, v, ma, sig, mctrs] = tx.get_view(
         tables.members,
         tables.member_certs,
         tables.values,
         tables.member_acks,
-        tables.signatures);
+        tables.signatures,
+        tables.member_counters);
 
       // The key to a CertDERs table must be a DER, for easy comparison against
       // the DER peer cert retrieved from the connection
@@ -128,6 +129,7 @@ namespace ccf
       {
         ma->put(id, MemberAck(s->root));
       }
+      mctrs->put(id, 0);
       return id;
     }
 

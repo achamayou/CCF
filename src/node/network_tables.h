@@ -60,6 +60,8 @@ namespace ccf
 
     CACertDERs& ca_certs;
 
+    MemberCounters& member_counters;
+
     //
     // User tables
     //
@@ -120,6 +122,7 @@ namespace ccf
         tables->create<SubmittedShares>(Tables::SUBMITTED_SHARES)),
       config(tables->create<Configuration>(Tables::CONFIGURATION)),
       ca_certs(tables->create<CACertDERs>(Tables::CA_CERT_DERS)),
+      member_counters(tables->create<MemberCounters>(Tables::MEMBER_COUNTERS)),
       users(tables->create<Users>(Tables::USERS)),
       user_certs(tables->create<CertDERs>(Tables::USER_CERT_DERS)),
       user_client_signatures(

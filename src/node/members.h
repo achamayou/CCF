@@ -135,4 +135,6 @@ namespace ccf
   DECLARE_JSON_TYPE_WITH_BASE(MemberAck, StateDigest)
   DECLARE_JSON_REQUIRED_FIELDS(MemberAck, signed_req)
   using MemberAcks = kv::Map<MemberId, MemberAck>;
+
+  using MemberCounters = kv::Map<MemberId, size_t>;
 }
