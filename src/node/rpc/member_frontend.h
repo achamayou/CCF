@@ -848,6 +848,11 @@ namespace ccf
     {
       auto governance_history = tx.get_view(network.governance_history);
       governance_history->put(caller_id, {signed_request});
+      auto member_counters = tx.get_view(network.member_counters);
+      auto count = member_counters->get(caller_id);
+      if (!count.has_value())
+        throw std::logic_error("Missing member counter");
+      member_counters->put(caller_id, count.value() + 1);
     }
 
     static ProposalInfo get_proposal_info(
