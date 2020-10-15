@@ -30,10 +30,12 @@ namespace loggingapp
     const nlohmann::json get_public_params_schema;
     const nlohmann::json get_public_result_schema;
 
+    ccfapp::AbstractNodeContext& context;
+
   public:
     // SNIPPET_START: constructor
     LoggerHandlers(
-      ccf::NetworkTables& nwt, ccfapp::AbstractNodeContext& context) :
+      ccf::NetworkTables& nwt, ccfapp::AbstractNodeContext& context_) :
       ccf::UserEndpointRegistry(nwt),
       records(nwt.tables->create<Table>("records")),
       public_records(nwt.tables->create<Table>("public:records")),
@@ -41,7 +43,8 @@ namespace loggingapp
       record_public_params_schema(nlohmann::json::parse(j_record_public_in)),
       record_public_result_schema(nlohmann::json::parse(j_record_public_out)),
       get_public_params_schema(nlohmann::json::parse(j_get_public_in)),
-      get_public_result_schema(nlohmann::json::parse(j_get_public_out))
+      get_public_result_schema(nlohmann::json::parse(j_get_public_out)),
+      context(context_)
     {
       // SNIPPET_START: record
       auto record = [this](kv::Tx& tx, nlohmann::json&& params) {
@@ -268,11 +271,53 @@ namespace loggingapp
 
       auto get_historical = [this](
                               ccf::EndpointContext& args,
-                              ccf::historical::StorePtr historical_store,
+                              ccf::historical::StorePtr historical_store_,
                               kv::Consensus::View historical_view,
                               kv::Consensus::SeqNo historical_seqno) {
+        (void) historical_store_;
         const auto [pack, params] =
           ccf::jsonhandler::get_json_params(args.rpc_ctx);
+
+        // Check that the requested transaction ID is committed
+        {
+          const auto tx_view = consensus->get_view(historical_view);
+          const auto committed_seqno = consensus->get_committed_seqno();
+          const auto committed_view = consensus->get_view(committed_seqno);
+
+          const auto tx_status = ccf::get_tx_status(
+            historical_view, historical_seqno, tx_view, committed_view, committed_seqno);
+          if (tx_status != ccf::TxStatus::Committed)
+          {
+            args.rpc_ctx->set_response_status(HTTP_STATUS_BAD_REQUEST);
+            args.rpc_ctx->set_response_header(
+              http::headers::CONTENT_TYPE,
+              http::headervalues::contenttype::TEXT);
+            args.rpc_ctx->set_response_body(fmt::format(
+              "Only committed transactions can be retrieved historically. "
+              "Transaction {}.{} is {}",
+              historical_view,
+              historical_seqno,
+              ccf::tx_status_to_str(tx_status)));
+            return;
+          }
+        }
+
+        auto historical_store =
+          context.get_historical_state().get_store_at(historical_seqno);
+        if (historical_store == nullptr)
+        {
+          args.rpc_ctx->set_response_status(HTTP_STATUS_ACCEPTED);
+          static constexpr size_t retry_after_seconds = 3;
+          args.rpc_ctx->set_response_header(
+            http::headers::RETRY_AFTER, retry_after_seconds);
+          args.rpc_ctx->set_response_header(
+            http::headers::CONTENT_TYPE, http::headervalues::contenttype::TEXT);
+          args.rpc_ctx->set_response_body(fmt::format(
+            "Historical transaction {}.{} is not currently available.",
+            historical_view,
+            historical_seqno));
+          return;
+        }
 
         auto* historical_map = historical_store->get(records);
         if (historical_map == nullptr)
@@ -281,25 +326,25 @@ namespace loggingapp
           args.rpc_ctx->set_response_header(
             http::headers::CONTENT_TYPE, http::headervalues::contenttype::TEXT);
           args.rpc_ctx->set_response_body(fmt::format(
-            "Unable to get table '{}' at {}.{}",
-            records.get_name(),
-            historical_view,
-            historical_seqno));
+            "Unable to get historical table '{}'.", records.get_name()));
           return;
         }
 
         const auto in = params.get<LoggingGetHistorical::In>();
 
-        auto historical_tx = historical_store->create_read_only_tx();
+        kv::ReadOnlyTx historical_tx;
         auto view = historical_tx.get_read_only_view(*historical_map);
-        const auto v = view->get(in.id);
+        auto v = view->get(in.id);
 
         if (v.has_value())
         {
-          LoggingGetHistorical::Out out;
-          out.msg = v.value();
-          nlohmann::json j = out;
-          ccf::jsonhandler::set_response(std::move(j), args.rpc_ctx, pack);
+          args.rpc_ctx->set_response_status(HTTP_STATUS_OK);
+          args.rpc_ctx->set_response_header(
+            http::headers::CONTENT_TYPE, http::headervalues::contenttype::JSON);
+          LoggingGetHistorical::Out out{v.value()};
+          const auto out_string = nlohmann::json(out).dump(2);
+          std::vector<uint8_t> out_vector(out_string.begin(), out_string.end());
+          args.rpc_ctx->set_response_body(std::move(out_vector));
         }
         else
         {
