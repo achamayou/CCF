@@ -35,7 +35,6 @@ fi
 
 echo "Python environment successfully setup"
 
-export CURL_CLIENT=ON
 exec python "${START_NETWORK_SCRIPT}" \
     --binary-dir "${BINARY_DIR}" \
     --enclave-type virtual \
