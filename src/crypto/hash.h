@@ -22,6 +22,7 @@ namespace crypto
 
     static void mbedtls_sha256(const CBuffer& data, uint8_t* h);
     static void evercrypt_sha256(const CBuffer& data, uint8_t* h);
+    static void evercrypt_sha256_scalar32(const CBuffer& data, uint8_t* h);
 
     friend std::ostream& operator<<(
       std::ostream& os, const crypto::Sha256Hash& h)

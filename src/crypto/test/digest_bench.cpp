@@ -9,7 +9,8 @@
 enum HashImpl
 {
   mbedtls,
-  evercrypt
+  evercrypt,
+  evercrypt_scalar32
 };
 
 template <HashImpl IMPL>
@@ -34,6 +35,10 @@ static void sha256_bench(picobench::state& s)
     {
       crypto::Sha256Hash::evercrypt_sha256(v, h.h.data());
     }
+    else if constexpr (IMPL == HashImpl::evercrypt_scalar32)
+    {
+      crypto::Sha256Hash::evercrypt_sha256_scalar32(v, h.h.data());
+    }
   }
   s.stop_timer();
 }
@@ -44,6 +49,8 @@ PICOBENCH_SUITE("SHA-256");
 
 auto mbedtls_digest_sha256 = sha256_bench<HashImpl::mbedtls>;
 auto evercrypt_digest_sha256 = sha256_bench<HashImpl::evercrypt>;
+auto evercrypt_s32_sha256 = sha256_bench<HashImpl::evercrypt_scalar32>;
 
 PICOBENCH(evercrypt_digest_sha256).iterations(hash_sizes).baseline();
+PICOBENCH(evercrypt_s32_sha256).iterations(hash_sizes);
 PICOBENCH(mbedtls_digest_sha256).iterations(hash_sizes);

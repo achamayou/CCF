@@ -8,6 +8,7 @@
 extern "C"
 {
 #include <evercrypt/EverCrypt_Hash.h>
+#include <evercrypt/Hacl_SHA2_Scalar32.h>
 }
 
 using namespace std;
@@ -80,6 +81,11 @@ namespace crypto
     CSha256HashImpl csha;
     csha.update(data);
     csha.finalize(reinterpret_cast<std::array<uint8_t, Sha256Hash::SIZE>&>(*h));
+  }
+
+  void Sha256Hash::evercrypt_sha256_scalar32(const CBuffer& data, uint8_t* h)
+  {
+    Hacl_SHA2_Scalar32_sha256(h, data.n, (uint8_t *) data.p);
   }
 
   CSha256Hash::CSha256Hash() : p(std::make_unique<CSha256HashImpl>()) {}
