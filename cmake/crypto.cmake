@@ -16,27 +16,6 @@ file(GLOB_RECURSE EVERCRYPT_SRC "${EVERCRYPT_PREFIX}/*.[cS]")
 
 # We need two versions of EverCrypt, because it depends on libc
 
-if("sgx" IN_LIST COMPILE_TARGETS)
-  add_library(
-    evercrypt.enclave STATIC ${EVERCRYPT_SRC} ${CCF_DIR}/3rdparty/stub/mem.c
-  )
-  target_compile_options(
-    evercrypt.enclave PRIVATE -Wno-implicit-function-declaration
-                              -Wno-return-type
-  )
-  target_compile_definitions(
-    evercrypt.enclave PRIVATE INSIDE_ENCLAVE KRML_HOST_PRINTF=oe_printf
-                              KRML_HOST_EXIT=oe_abort
-  )
-  target_link_libraries(evercrypt.enclave PRIVATE ${OE_TARGET_LIBC})
-  set_property(TARGET evercrypt.enclave PROPERTY POSITION_INDEPENDENT_CODE ON)
-  target_include_directories(evercrypt.enclave PRIVATE ${EVERCRYPT_INC})
-  install(
-    TARGETS evercrypt.enclave
-    EXPORT ccf
-    DESTINATION lib
-  )
-endif()
 
 add_library(evercrypt.host STATIC ${EVERCRYPT_SRC})
 add_san(evercrypt.host)
@@ -55,28 +34,6 @@ set(CCFCRYPTO_SRC ${CCF_DIR}/src/crypto/hash.cpp
 )
 
 set(CCFCRYPTO_INC ${CCF_DIR}/src/crypto/ ${EVERCRYPT_INC})
-
-if("sgx" IN_LIST COMPILE_TARGETS)
-  add_library(ccfcrypto.enclave STATIC ${CCFCRYPTO_SRC})
-  target_compile_definitions(
-    ccfcrypto.enclave PRIVATE INSIDE_ENCLAVE _LIBCPP_HAS_THREAD_API_PTHREAD
-  )
-  target_compile_options(ccfcrypto.enclave PRIVATE -nostdinc++)
-  target_include_directories(ccfcrypto.enclave PRIVATE ${EVERCRYPT_INC})
-  target_link_libraries(
-    ccfcrypto.enclave
-    PRIVATE -nostdlib -nodefaultlibs -nostartfiles -Wl,--no-undefined
-            -Wl,-Bstatic,-Bsymbolic,--export-dynamic,-pie evercrypt.enclave
-  )
-  use_oe_mbedtls(ccfcrypto.enclave)
-  set_property(TARGET ccfcrypto.enclave PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-  install(
-    TARGETS ccfcrypto.enclave
-    EXPORT ccf
-    DESTINATION lib
-  )
-endif()
 
 add_library(ccfcrypto.host STATIC ${CCFCRYPTO_SRC})
 add_san(ccfcrypto.host)
