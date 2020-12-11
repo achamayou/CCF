@@ -61,6 +61,9 @@ if(${COLORED_OUTPUT})
   endif()
 endif()
 
+add_compile_options(-O3)
+add_compile_options(-march=native)
+
 function(add_warning_checks name)
   target_compile_options(
     ${name} PRIVATE -Wall -Wextra -Werror -Wundef -Wpedantic
