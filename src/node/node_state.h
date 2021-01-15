@@ -362,6 +362,16 @@ namespace ccf
 
           return {node_cert, {}};
         }
+        case StartType::HTTP_Test:
+        {
+          // TLS connections are not endorsed by the network until the node
+          // has joined
+          accept_node_tls_connections();
+
+          sm.advance(State::pending);
+
+          return {node_cert, {}};
+        }
         case StartType::Recover:
         {
           node_info_network = config.node_info_network;
@@ -667,6 +677,43 @@ namespace ccf
           jwt_key_auto_refresh->schedule_once();
           return kv::ConsensusHookPtr(nullptr);
         });
+    }
+
+    void http_test(CCFConfig& config)
+    {
+      (void)config;
+      std::lock_guard<SpinLock> guard(lock);
+      
+      auto ca = std::make_shared<tls::CA>(config.http_test.ca_cert);
+      auto ca_cert = std::make_shared<tls::Cert>(ca);
+
+      auto client = rpcsessions->create_client(ca_cert);
+
+      auto host = config.http_test.target_host;
+      auto port = config.http_test.target_port;
+      auto path = config.http_test.target_path;
+
+      LOG_INFO_FMT("Starting HTTP test for https://{}:{}{}", host, port, path);
+
+      client->connect(
+        host, port, [](http_status status, http::HeaderMap&&, std::vector<uint8_t>&& data) {
+          LOG_INFO_FMT(
+            "HTTP response: {} {}{}",
+            status,
+            http_status_str(status),
+            data.empty() ?
+              "" :
+              fmt::format("  '{}'", std::string(data.begin(), data.end())));
+          return true;
+        });
+
+      http::Request r(path, HTTP_GET);
+      r.set_header(http::headers::HOST, host);
+      std::vector<uint8_t> req = r.build_request();
+      LOG_INFO_FMT(
+        "Request data: {}",
+        std::string(req.begin(), req.end()));
+      client->send_request(std::move(req));
     }
 
     //

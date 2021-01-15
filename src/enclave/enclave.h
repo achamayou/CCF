@@ -324,6 +324,10 @@ namespace enclave
         {
           node->start_ledger_recovery();
         }
+        else if (start_type == StartType::HTTP_Test)
+        {
+          node->http_test(ccf_config);
+        }
 
         // Maximum number of inbound ringbuffer messages which will be
         // processed in a single iteration
