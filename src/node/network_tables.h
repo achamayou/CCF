@@ -62,7 +62,6 @@ namespace ccf
     MmeberPublicEncryptionKeys member_encryption_public_keys;
     MemberInfo member_info;
 
-    Scripts gov_scripts;
     Modules modules;
     Proposals proposals;
     Whitelists whitelists;
@@ -123,7 +122,6 @@ namespace ccf
       member_certs(Tables::MEMBER_CERTS),
       member_encryption_public_keys(Tables::MEMBER_ENCRYPTION_PUBLIC_KEYS),
       member_info(Tables::MEMBER_INFO),
-      gov_scripts(Tables::GOV_SCRIPTS),
       modules(Tables::MODULES),
       proposals(Tables::PROPOSALS),
       whitelists(Tables::WHITELISTS),
@@ -165,7 +163,6 @@ namespace ccf
         std::ref(member_certs),
         std::ref(member_encryption_public_keys),
         std::ref(member_info),
-        std::ref(gov_scripts),
         std::ref(modules),
         std::ref(proposals),
         std::ref(whitelists),

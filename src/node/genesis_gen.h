@@ -25,24 +25,7 @@ namespace ccf
   class GenesisGenerator
   {
     NetworkTables& tables;
-
     kv::Tx& tx;
-
-    template <typename T>
-    void set_scripts(
-      std::map<std::string, std::string> scripts,
-      T& table,
-      const bool compile = false)
-    {
-      auto tx_scripts = tx.rw(table);
-      for (auto& rs : scripts)
-      {
-        if (compile)
-          tx_scripts->put(rs.first, lua::compile(rs.second));
-        else
-          tx_scripts->put(rs.first, rs.second);
-      }
-    }
 
   public:
     GenesisGenerator(NetworkTables& tables_, kv::Tx& tx_) :
@@ -417,13 +400,6 @@ namespace ccf
     void set_whitelist(WlIds id, Whitelist wl)
     {
       tx.rw(tables.whitelists)->put(id, wl);
-    }
-
-    void set_gov_scripts(std::map<std::string, std::string> scripts)
-    {
-      // don't compile, because gov scripts are important functionally but not
-      // performance-wise
-      set_scripts(scripts, tables.gov_scripts, false);
     }
 
     void trust_node_code_id(const CodeDigest& node_code_id)

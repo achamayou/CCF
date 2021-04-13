@@ -1775,9 +1775,6 @@ namespace ccf
           g.set_whitelist(wl.first, wl.second);
         }
 
-        g.set_gov_scripts(
-          lua::Interpreter().invoke<nlohmann::json>(in.gov_script));
-
         ctx.tx.rw(this->network.constitution)->put(0, in.constitution);
 
         LOG_INFO_FMT("Created service");
