@@ -48,10 +48,7 @@ def count_governance_operations(ledger):
                     )
                     request_target_line = req.decode().splitlines()[0]
                     if "/gov/proposals" in request_target_line:
-                        vote_suffix = (
-                            "/ballots" if os.getenv("JS_GOVERNANCE") else "/votes"
-                        )
-                        if request_target_line.endswith(vote_suffix):
+                        if request_target_line.endswith("/ballots"):
                             verified_votes += 1
                         elif request_target_line.endswith("/withdraw"):
                             verified_withdrawals += 1

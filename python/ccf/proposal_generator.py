@@ -17,7 +17,7 @@ import cryptography.hazmat.backends as crypto_backends
 from loguru import logger as LOG  # type: ignore
 
 
-GENERATE_JS_PROPOSALS = os.getenv("JS_GOVERNANCE")
+GENERATE_JS_PROPOSALS = True
 
 
 def dump_to_file(output_path: str, obj: dict, dump_args: dict):

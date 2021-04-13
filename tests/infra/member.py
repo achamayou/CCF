@@ -14,8 +14,7 @@ from typing import NamedTuple, Optional
 
 from loguru import logger as LOG
 
-# To remove once JS governance migration is complete
-PROPOSAL_ENDPOINT = f"/gov/proposals{('.js' if os.getenv('JS_GOVERNANCE') else '')}"
+PROPOSAL_ENDPOINT = f"/gov/proposals"
 
 
 class NoRecoveryShareFound(Exception):
@@ -146,7 +145,7 @@ class Member:
     def vote(self, remote_node, proposal, ballot):
         with remote_node.client(*self.auth(write=True)) as mc:
             r = mc.post(
-                f"{PROPOSAL_ENDPOINT}/{proposal.proposal_id}/{'ballots' if os.getenv('JS_GOVERNANCE') else 'votes'}",
+                f"{PROPOSAL_ENDPOINT}/{proposal.proposal_id}/ballots",
                 body=ballot,
             )
 

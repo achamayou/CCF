@@ -487,9 +487,6 @@ namespace ccf
     {
       if (
         ctx.get_request_path() == "/gov/proposals"
-#ifdef ENABLE_JS_GOV
-        || ctx.get_request_path() == "/gov/proposals.js"
-#endif
       )
       {
         update_history();
