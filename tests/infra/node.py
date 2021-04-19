@@ -404,6 +404,11 @@ class Node:
         akwargs.update(kwargs)
         return ccf.clients.client(self.pubhost, self.pubport, **akwargs)
 
+    def node_client(self, **kwargs):
+        akwargs = {"ca": os.path.join(self.common_dir, f"{self.local_node_id}.pem")}
+        akwargs.update(kwargs)
+        return ccf.clients.client(self.pubhost, self.pubport, **akwargs)
+
     def suspend(self):
         assert not self.suspended
         self.suspended = True

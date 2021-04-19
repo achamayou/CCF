@@ -575,18 +575,8 @@ class Network:
             target_node,
             **kwargs,
         )
-        primary, _ = self.find_primary()
         try:
-            self.consortium.wait_for_node_to_exist_in_store(
-                primary,
-                new_node.node_id,
-                timeout=timeout,
-                node_status=(
-                    NodeStatus.PENDING
-                    if self.status == ServiceStatus.OPEN
-                    else NodeStatus.TRUSTED
-                ),
-            )
+            self.wait_for_state(new_node, NodeStatus.PENDING.value, timeout)
         except TimeoutError as e:
             LOG.error(f"New pending node {new_node.node_id} failed to join the network")
             errors, _ = new_node.stop()
@@ -680,8 +670,8 @@ class Network:
         end_time = time.time() + timeout
         while time.time() < end_time:
             try:
-                with node.client(connection_timeout=timeout) as c:
-                    r = c.get("/node/state")
+                with node.node_client(connection_timeout=timeout) as c:
+                    r = c.get("/node/state", allow_redirects=False)
                     if r.body.json()["state"] == state:
                         break
             except ConnectionRefusedError:

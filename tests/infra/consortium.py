@@ -295,8 +295,7 @@ class Consortium:
             assert r.body.json()["status"] == NodeStatus.RETIRED.value
 
     def trust_node(self, remote_node, node_id, timeout=3):
-        if not self._check_node_exists(remote_node, node_id, NodeStatus.PENDING):
-            raise ValueError(f"Node {node_id} does not exist in state PENDING")
+        self.wait_for_node_to_exist_in_store(remote_node, node_id, timeout)
 
         proposal_body, careful_vote = self.make_proposal(
             "transition_node_to_trusted", node_id
