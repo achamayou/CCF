@@ -11,3 +11,4 @@ sphinx-copybutton
 sphinxcontrib.openapi
 sphinx-panels
 sphinx-js
+furo
