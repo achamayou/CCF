@@ -114,7 +114,7 @@ namespace kv
       bool track_read_versions = false,
       std::function<std::tuple<Version, Version>(bool has_new_map)>
         version_resolver = nullptr,
-      kv::Version replicated_max_conflict_version = kv::NoVersion)
+      kv::Version replicated_max_conflict_version = kv::NoVersion) // TODO: forward claims here
     {
       if (committed)
         throw std::logic_error("Transaction already committed");
@@ -206,6 +206,7 @@ namespace kv
             return CommitResult::SUCCESS;
           }
 
+          // TODO: forward claims here
           return store->commit(
             {view, version},
             std::make_unique<MovePendingTx>(std::move(data), std::move(hooks)),

@@ -144,6 +144,12 @@ namespace enclave
 
   using PathParams = std::map<std::string, std::string>;
 
+  struct CustomClaim
+  {
+    crypto::Sha256Hash digest;
+    bool is_public = true;
+  };
+
   class RpcContext
   {
   public:
@@ -157,6 +163,8 @@ namespace enclave
     bool is_create_request = false;
     bool execute_on_node = false;
 
+    std::vector<CustomClaim> custom_claims = {};
+
     RpcContext(std::shared_ptr<SessionContext> s) : session(s) {}
 
     RpcContext(
@@ -166,6 +174,11 @@ namespace enclave
     {}
 
     virtual ~RpcContext() {}
+
+    void add_public_custom_claim(const crypto::Sha256Hash& digest)
+    {
+      custom_claims.emplace_back(CustomClaim{digest, true});
+    }
 
     /// Request details
     virtual size_t get_request_index() const = 0;

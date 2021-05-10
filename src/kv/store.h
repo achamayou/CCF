@@ -753,6 +753,7 @@ namespace kv
       ConsensusType consensus_type,
       bool public_only = false) override
     {
+      // TODO: parse out and forward custom claims to the right wrapper
       if (consensus_type == ConsensusType::CFT)
       {
         auto exec = std::make_unique<CFTExecutionWrapper>(
@@ -960,6 +961,7 @@ namespace kv
           last_committable = txid.version;
         }
 
+        // TODO: forward claims
         pending_txs.insert(
           {txid.version,
            std::make_pair(std::move(pending_tx), globally_committable)});
@@ -993,9 +995,10 @@ namespace kv
 
           if (h)
           {
-            h->append(*data_shared);
+            h->append(*data_shared); // TODO: assemble leaf
           }
 
+          // TODO: tack on serialised claims
           LOG_DEBUG_FMT(
             "Batching {} ({})", last_replicated + offset, data_shared->size());
 
