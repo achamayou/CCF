@@ -7,23 +7,17 @@
 #include "ds/dl_list.h"
 #include "ds/logger.h"
 #include "ds/thread_messaging.h"
-#include "endian.h"
 #include "entities.h"
 #include "kv/kv_types.h"
 #include "kv/store.h"
 #include "nodes.h"
 #include "signatures.h"
 #include "tls/tls.h"
+#include "merkle_tree.h"
 
 #include <array>
 #include <deque>
 #include <string.h>
-
-#define HAVE_OPENSSL
-#define HAVE_MBEDTLS
-// merklecpp traces are off by default, even when CCF tracing is enabled
-// #include "merklecpp_trace.h"
-#include <merklecpp/merklecpp.h>
 
 namespace fmt
 {
@@ -212,8 +206,6 @@ namespace ccf
       return {};
     }
   };
-
-  typedef merkle::TreeT<32, merkle::sha256_openssl> HistoryTree;
 
   class Proof
   {
