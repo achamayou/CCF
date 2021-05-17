@@ -38,6 +38,11 @@ namespace ccf
                 std::copy(root.bytes, root.bytes + root.size(), result.h.begin());
                 return result;
             }
+
+            std::vector<uint8_t> serialise()
+            {
+                return {};
+            }
         };
     }
 }

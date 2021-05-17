@@ -978,9 +978,9 @@ namespace kv
           }
 
           auto& [pending_tx_, committable_] = search->second;
-          auto [success_, data_, hooks_] = pending_tx_->call();
-          auto data_shared =
-            std::make_shared<std::vector<uint8_t>>(std::move(data_));
+          auto [success_, ledger_entry_, hooks_] = pending_tx_->call();
+          auto entry_shared =
+            std::make_shared<kv::WriteSetWithClaims>(std::move(ledger_entry_));
           auto hooks_shared =
             std::make_shared<kv::ConsensusHookPtrs>(std::move(hooks_));
 
@@ -995,15 +995,15 @@ namespace kv
 
           if (h)
           {
-            h->append(*data_shared); // TODO: assemble leaf
+            h->append(entry_shared->write_set); // TODO: assemble leaf
           }
 
           // TODO: tack on serialised claims
           LOG_DEBUG_FMT(
-            "Batching {} ({})", last_replicated + offset, data_shared->size());
+            "Batching {} ({})", last_replicated + offset, entry_shared->write_set.size());
 
           batch.emplace_back(
-            last_replicated + offset, data_shared, committable_, hooks_shared);
+            last_replicated + offset, entry_shared->write_set, committable_, hooks_shared);
           pending_txs.erase(search);
         }
 

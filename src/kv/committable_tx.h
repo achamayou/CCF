@@ -95,6 +95,13 @@ namespace kv
       return replicated_serialiser.get_raw_data();
     }
 
+    WriteSetWithClaims serialise_with_claims(bool include_reads = false, std::optional<ccf::receipt::Claims> claims = std::nullopt)
+    {
+      WriteSetWithClaims ws;
+      ws.write_set = serialise(include_reads);
+      return ws;
+    }
+
   public:
     CommittableTx(AbstractStore* _store) : Tx(_store) {}
 
@@ -114,7 +121,8 @@ namespace kv
       bool track_read_versions = false,
       std::function<std::tuple<Version, Version>(bool has_new_map)>
         version_resolver = nullptr,
-      kv::Version replicated_max_conflict_version = kv::NoVersion) // TODO: forward claims here
+      kv::Version replicated_max_conflict_version = kv::NoVersion,
+      std::optional<ccf::receipt::Claims> claims = std::nullopt)
     {
       if (committed)
         throw std::logic_error("Transaction already committed");
@@ -199,9 +207,9 @@ namespace kv
         // recover.
         try
         {
-          auto data = serialise();
+          auto ledger_entry = serialise_with_claims(false, claims);
 
-          if (data.empty())
+          if (ledger_entry.empty())
           {
             return CommitResult::SUCCESS;
           }
@@ -209,7 +217,7 @@ namespace kv
           // TODO: forward claims here
           return store->commit(
             {view, version},
-            std::make_unique<MovePendingTx>(std::move(data), std::move(hooks)),
+            std::make_unique<MovePendingTx>(std::move(ledger_entry), std::move(hooks)),
             false);
         }
         catch (const std::exception& e)
@@ -361,7 +369,7 @@ namespace kv
         throw std::logic_error("Failed to commit reserved transaction");
 
       committed = true;
-      return {CommitResult::SUCCESS, serialise(), std::move(hooks)};
+      return {CommitResult::SUCCESS, serialise_with_claims(), std::move(hooks)};
     }
   };
 }

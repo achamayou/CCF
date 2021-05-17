@@ -9,6 +9,7 @@
 #include "ds/nonstd.h"
 #include "enclave/consensus_type.h"
 #include "serialiser_declare.h"
+#include "enclave/claims.h"
 
 #include <array>
 #include <chrono>
@@ -369,18 +370,26 @@ namespace kv
     virtual ConsensusType type() = 0;
   };
 
+  struct WriteSetWithClaims
+  {
+    std::vector<uint8_t> write_set = {}; 
+    std::optional<ccf::receipt::Claims> claims = std::nullopt;
+
+    bool empty() const { return write_set.empty(); }
+  };
+
   struct PendingTxInfo
   {
     CommitResult success;
-    std::vector<uint8_t> data;
+    WriteSetWithClaims ledger_entry;
     std::vector<ConsensusHookPtr> hooks;
 
     PendingTxInfo(
       CommitResult success_,
-      std::vector<uint8_t>&& data_,
+      WriteSetWithClaims&& ledger_entry_,
       std::vector<ConsensusHookPtr>&& hooks_) :
       success(success_),
-      data(std::move(data_)),
+      ledger_entry(std::move(ledger_entry_)),
       hooks(std::move(hooks_))
     {}
   };
@@ -395,19 +404,19 @@ namespace kv
   class MovePendingTx : public PendingTx
   {
   private:
-    std::vector<uint8_t> data;
+    WriteSetWithClaims ledger_entry;
     ConsensusHookPtrs hooks;
 
   public:
-    MovePendingTx(std::vector<uint8_t>&& data_, ConsensusHookPtrs&& hooks_) :
-      data(std::move(data_)),
+    MovePendingTx(WriteSetWithClaims&& ledger_entry_, ConsensusHookPtrs&& hooks_) :
+      ledger_entry(std::move(ledger_entry_)),
       hooks(std::move(hooks_))
     {}
 
     PendingTxInfo call() override
     {
       return PendingTxInfo(
-        CommitResult::SUCCESS, std::move(data), std::move(hooks));
+        CommitResult::SUCCESS, std::move(ledger_entry), std::move(hooks));
     }
   };
 
