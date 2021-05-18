@@ -39,6 +39,8 @@ namespace ccf
                 return result;
             }
 
+            si
+
             std::vector<uint8_t> serialise()
             {
                 return {};

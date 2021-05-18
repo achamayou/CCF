@@ -995,7 +995,7 @@ namespace kv
 
           if (h)
           {
-            h->append(entry_shared->write_set); // TODO: assemble leaf
+            h->append(entry_shared->digest());
           }
 
           // TODO: tack on serialised claims

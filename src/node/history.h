@@ -849,6 +849,13 @@ namespace ccf
       log_hash(rh, APPEND);
       replicated_state_tree.append(rh);
     }
+
+    void append_digest(const crypto::Sha256Hash& digest)
+    {
+      std::lock_guard<SpinLock> guard(state_lock);
+      log_hash(digest, APPEND);
+      replicated_state_tree.append(digest);
+    }
   };
 
   using MerkleTxHistory = HashedTxHistory<MerkleTreeHistory>;
