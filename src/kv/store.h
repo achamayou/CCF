@@ -995,15 +995,17 @@ namespace kv
 
           if (h)
           {
-            h->append(entry_shared->digest());
+            h->append_digest(entry_shared->digest());
           }
 
+          auto data = std::make_shared<std::vector<uint8_t>>(entry_shared->write_set.begin(), entry_shared->write_set.end());
           // TODO: tack on serialised claims
+          
           LOG_DEBUG_FMT(
-            "Batching {} ({})", last_replicated + offset, entry_shared->write_set.size());
+            "Batching {} ({})", last_replicated + offset, data.size());
 
           batch.emplace_back(
-            last_replicated + offset, entry_shared->write_set, committable_, hooks_shared);
+            last_replicated + offset, data, committable_, hooks_shared);
           pending_txs.erase(search);
         }
 

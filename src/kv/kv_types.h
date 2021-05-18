@@ -278,6 +278,7 @@ namespace kv
       const std::vector<uint8_t>& request,
       uint8_t frame_format) = 0;
     virtual void append(const std::vector<uint8_t>& data) = 0;
+    virtual void append_digest(const crypto::Sha256Hash& digest) = 0;
     virtual void rollback(Version v, kv::Term) = 0;
     virtual void compact(Version v) = 0;
     virtual void set_term(kv::Term) = 0;

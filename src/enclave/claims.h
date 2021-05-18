@@ -4,6 +4,7 @@
 
 #include "crypto/hash_provider.h"
 #include "node/merkle_tree.h"
+#include "ds/serialized.h"
 
 namespace ccf
 {
@@ -25,7 +26,7 @@ namespace ccf
                 claims.emplace_back(Claim{digest, true});
             }
 
-            crypto::Sha256Hash ledger_leaf(const crypto::Sha256Hash& write_set_digest)
+            crypto::Sha256Hash ledger_leaf(const crypto::Sha256Hash& write_set_digest) const
             {
                 HistoryTree tree;
                 tree.insert(merkle::Hash(write_set_digest.h));
@@ -39,11 +40,23 @@ namespace ccf
                 return result;
             }
 
-            si
+            size_t serialised_size() const
+            {
+                return sizeof(size_t) + claims.size() * crypto::Sha256Hash::SIZE;
+            }
 
             std::vector<uint8_t> serialise()
             {
-                return {};
+                auto size = serialised_size();
+                std::vector<uint8_t> buffer(size);
+                uint8_t * cursor = buffer.data();
+                size_t claims_size = claims.size() * crypto::Sha256Hash::SIZE;
+                serialized::write(cursor, size, claims_size);
+                for (auto& claim: claims)
+                {
+                    serialized::write(cursor, size, claim.digest.h.data(), crypto::Sha256Hash::SIZE);
+                }
+                return buffer;
             }
         };
     }
