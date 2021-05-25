@@ -74,7 +74,7 @@ static std::vector<uint8_t> kv_serialized_data(std::vector<uint8_t>& data)
   tx0->put(0, {{}, data, {}});
 
   auto pending_tx = tx.commit_reserved();
-  return pending_tx.data;
+  return pending_tx.ledger_entry.write_set;
 }
 // End Helper functions
 

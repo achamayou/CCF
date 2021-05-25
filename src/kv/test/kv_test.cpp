@@ -1263,7 +1263,7 @@ TEST_CASE("Deserialising from other Store")
   clone.set_encryptor(encryptor);
 
   REQUIRE(
-    clone.deserialize(data, ConsensusType::CFT)->apply() ==
+    clone.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
     kv::ApplyResult::PASS);
 }
 
@@ -1293,7 +1293,7 @@ TEST_CASE("Deserialise return status")
     REQUIRE(success == kv::CommitResult::SUCCESS);
 
     REQUIRE(
-      store.deserialize(data, ConsensusType::CFT)->apply() ==
+      store.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
       kv::ApplyResult::PASS);
   }
 
@@ -1308,7 +1308,7 @@ TEST_CASE("Deserialise return status")
     REQUIRE(success == kv::CommitResult::SUCCESS);
 
     REQUIRE(
-      store.deserialize(data, ConsensusType::CFT)->apply() ==
+      store.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
       kv::ApplyResult::PASS_SIGNATURE);
   }
 
@@ -1324,7 +1324,7 @@ TEST_CASE("Deserialise return status")
     REQUIRE(success == kv::CommitResult::SUCCESS);
 
     REQUIRE(
-      store.deserialize(data, ConsensusType::CFT)->apply() ==
+      store.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
       kv::ApplyResult::FAIL);
   }
 }
