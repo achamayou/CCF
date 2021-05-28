@@ -214,7 +214,6 @@ namespace kv
             return CommitResult::SUCCESS;
           }
 
-          // TODO: forward claims here
           return store->commit(
             {view, version},
             std::make_unique<MovePendingTx>(std::move(ledger_entry), std::move(hooks)),
