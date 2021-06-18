@@ -17,7 +17,7 @@ class StubDirective(Directive):
 
 class TablesVisitor(docutils.nodes.NodeVisitor):
     prefix = None
-    tables = []
+    maps = []
 
     def visit_section(self, node):
         (name,) = node.attributes["names"]
@@ -25,7 +25,7 @@ class TablesVisitor(docutils.nodes.NodeVisitor):
             self.prefix = name
         else:
             if self.prefix:
-                self.tables.append(f"{self.prefix}{name}")
+                self.maps.append(f"{self.prefix}{name}")
 
     def unknown_visit(self, node) -> None:
         pass
@@ -45,6 +45,6 @@ def parse(text):
 
 
 def extract_table_names(doc):
-    v = TablesVisitor(doc)
+    v = MapsVisitor(doc)
     doc.walk(v)
-    return v.tables
+    return v.maps

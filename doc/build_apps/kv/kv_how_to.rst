@@ -5,7 +5,7 @@ The Key-Value :cpp:class:`kv::Store` is a collection of :cpp:class:`kv::Map` obj
 
 .. code-block:: cpp
 
-    Store tables;
+    Store maps;
 
 Creating a Map
 --------------
