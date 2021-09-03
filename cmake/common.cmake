@@ -378,7 +378,8 @@ add_ccf_app(
   SRCS ${CCF_DIR}/src/apps/v8rt/rt.cpp
   INCLUDE_DIRS /usr/include/v8
   LINK_LIBS_ENCLAVE quickjs.enclave -lgcc
-  LINK_LIBS_VIRTUAL quickjs.host INSTALL_LIBS ON
+  LINK_LIBS_VIRTUAL quickjs.host v8 v8_libbase v8_libplatform
+  INSTALL_LIBS ON
 )
 
 # Samples
