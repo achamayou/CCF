@@ -373,6 +373,14 @@ install(DIRECTORY ${CCF_DIR}/samples/apps/logging/js
         DESTINATION samples/logging
 )
 
+add_ccf_app(
+  v8rt
+  SRCS ${CCF_DIR}/src/apps/v8rt/rt.cpp
+  INCLUDE_DIRS /usr/include/v8
+  LINK_LIBS_ENCLAVE quickjs.enclave -lgcc
+  LINK_LIBS_VIRTUAL quickjs.host INSTALL_LIBS ON
+)
+
 # Samples
 
 # Helper for building clients inheriting from perf_client
