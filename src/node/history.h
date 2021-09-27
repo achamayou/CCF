@@ -7,10 +7,10 @@
 #include "ds/dl_list.h"
 #include "ds/logger.h"
 #include "ds/thread_messaging.h"
-#include "endian.h"
 #include "entities.h"
 #include "kv/kv_types.h"
 #include "kv/store.h"
+#include "merkle_tree.h"
 #include "node_signature_verify.h"
 #include "nodes.h"
 #include "signatures.h"
@@ -222,8 +222,6 @@ namespace ccf
 
     void set_endorsed_certificate(const crypto::Pem& cert) override {}
   };
-
-  typedef merkle::TreeT<32, merkle::sha256_openssl> HistoryTree;
 
   class Proof
   {
