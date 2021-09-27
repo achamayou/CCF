@@ -8,6 +8,7 @@
 #include "node/client_signatures.h"
 #include "node/entities.h"
 #include "node/rpc/error.h"
+#include "claims.h"
 
 #include <llhttp/llhttp.h>
 #include <variant>
@@ -133,6 +134,8 @@ namespace enclave
 
     bool is_create_request = false;
     bool execute_on_node = false;
+
+    ccf::receipt::Claims claims;
 
     RpcContext(std::shared_ptr<SessionContext> s) : session(s) {}
 

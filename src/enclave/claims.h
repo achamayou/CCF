@@ -25,6 +25,11 @@ namespace ccf
                 claims.emplace_back(Claim{digest});
             }
 
+            void clear()
+            {
+                claims.clear();
+            }
+
             crypto::Sha256Hash ledger_leaf(const crypto::Sha256Hash& write_set_digest) const
             {
                 HistoryTree tree;
