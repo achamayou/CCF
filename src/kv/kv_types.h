@@ -11,6 +11,7 @@
 #include "node/identity.h"
 #include "node/resharing_types.h"
 #include "serialiser_declare.h"
+#include "ws.h"
 
 #include <array>
 #include <chrono>
@@ -366,6 +367,7 @@ namespace kv
       const std::vector<uint8_t>& request,
       uint8_t frame_format) = 0;
     virtual void append(const std::vector<uint8_t>& data) = 0;
+    virtual void append_digest(const crypto::Sha256Hash& digest) = 0;
     virtual void rollback(
       const kv::TxID& tx_id, kv::Term term_of_next_version_) = 0;
     virtual void compact(Version v) = 0;
@@ -468,15 +470,15 @@ namespace kv
   struct PendingTxInfo
   {
     CommitResult success;
-    std::vector<uint8_t> data;
+    WriteSetWithClaims ledger_entry;
     std::vector<ConsensusHookPtr> hooks;
 
     PendingTxInfo(
       CommitResult success_,
-      std::vector<uint8_t>&& data_,
+      WriteSetWithClaims&& ledger_entry_,
       std::vector<ConsensusHookPtr>&& hooks_) :
       success(success_),
-      data(std::move(data_)),
+      ledger_entry(std::move(ledger_entry_)),
       hooks(std::move(hooks_))
     {}
   };
@@ -491,19 +493,19 @@ namespace kv
   class MovePendingTx : public PendingTx
   {
   private:
-    std::vector<uint8_t> data;
+    WriteSetWithClaims ledger_entry;
     ConsensusHookPtrs hooks;
 
   public:
-    MovePendingTx(std::vector<uint8_t>&& data_, ConsensusHookPtrs&& hooks_) :
-      data(std::move(data_)),
+    MovePendingTx(WriteSetWithClaims&& ledger_entry_, ConsensusHookPtrs&& hooks_) :
+      ledger_entry(std::move(ledger_entry_)),
       hooks(std::move(hooks_))
     {}
 
     PendingTxInfo call() override
     {
       return PendingTxInfo(
-        CommitResult::SUCCESS, std::move(data), std::move(hooks));
+        CommitResult::SUCCESS, std::move(ledger_entry), std::move(hooks));
     }
   };
 

@@ -9,6 +9,7 @@
 // #include "merklecpp_trace.h"
 #include <merklecpp/merklecpp.h>
 
-namespace ccf {
-    using HistoryTree = merkle::TreeT<32, merkle::sha256_openssl>;
-} 
+namespace ccf
+{
+  using HistoryTree = merkle::TreeT<32, merkle::sha256_openssl>;
+}
