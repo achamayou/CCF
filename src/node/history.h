@@ -14,6 +14,7 @@
 #include "node_signature_verify.h"
 #include "nodes.h"
 #include "signatures.h"
+#include "merkle_tree.h"
 #include "tls/tls.h"
 
 #include <array>
@@ -132,6 +133,11 @@ namespace ccf
     {}
 
     void append(const std::vector<uint8_t>&) override
+    {
+      version++;
+    }
+
+    void append(const crypto::Sha256Hash& digest) override
     {
       version++;
     }
@@ -406,7 +412,7 @@ namespace ccf
       tree = new HistoryTree(serialised);
     }
 
-    void append(crypto::Sha256Hash& hash)
+    void append(const crypto::Sha256Hash& hash)
     {
       tree->insert(merkle::Hash(hash.h));
     }
@@ -867,6 +873,13 @@ namespace ccf
       crypto::Sha256Hash rh({data.data(), data.size()});
       log_hash(rh, APPEND);
       replicated_state_tree.append(rh);
+    }
+
+    void append(const crypto::Sha256Hash& digest) override
+    {
+      std::lock_guard<std::mutex> guard(state_lock);
+      log_hash(digest, APPEND);
+      replicated_state_tree.append(digest);
     }
 
     void set_endorsed_certificate(const crypto::Pem& cert) override

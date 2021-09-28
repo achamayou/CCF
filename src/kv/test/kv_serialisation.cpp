@@ -571,7 +571,7 @@ TEST_CASE_TEMPLATE(
     kv_store.compact(kv_store.current_version());
 
     REQUIRE(
-      kv_store2.deserialize(data, ConsensusType::CFT)->apply() ==
+      kv_store2.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
       kv::ApplyResult::PASS);
     auto tx2 = kv_store2.create_tx();
     auto handle2 = tx2.rw(map2);
@@ -671,13 +671,13 @@ TEST_CASE(
     auto [success, data, hooks] = tx.commit_reserved();
     REQUIRE(success == kv::CommitResult::SUCCESS);
     REQUIRE(
-      store.deserialize(data, ConsensusType::CFT)->apply() ==
+      store.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
       kv::ApplyResult::PASS);
 
     INFO("check that second store derived data is not populated");
     {
       REQUIRE(
-        kv_store_target.deserialize(data, ConsensusType::CFT)->apply() ==
+        kv_store_target.deserialize(data.write_set, ConsensusType::CFT)->apply() ==
         kv::ApplyResult::PASS);
       auto tx = kv_store_target.create_tx();
       auto data_handle_r = tx.rw<T>(data_replicated);
