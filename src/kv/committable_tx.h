@@ -91,6 +91,13 @@ namespace kv
       return replicated_serialiser.get_raw_data();
     }
 
+    WriteSetWithClaims serialise_with_claims(bool include_reads = false, std::optional<ccf::receipt::Claims> claims = std::nullopt)
+    {
+      WriteSetWithClaims ws;
+      ws.write_set = serialise(include_reads);
+      return ws;
+    }
+
   public:
     CommittableTx(AbstractStore* _store) : Tx(_store) {}
 

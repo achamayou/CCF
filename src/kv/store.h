@@ -781,6 +781,7 @@ namespace kv
       ConsensusType consensus_type,
       bool public_only = false) override
     {
+      // TODO: parse out and forward custom claims
       if (consensus_type == ConsensusType::CFT)
       {
         auto exec = std::make_unique<CFTExecutionWrapper>(
@@ -1015,6 +1016,7 @@ namespace kv
           last_committable = txid.version;
         }
 
+        // Forward claims
         pending_txs.insert(
           {txid.version,
            std::make_pair(std::move(pending_tx), globally_committable)});
@@ -1031,9 +1033,9 @@ namespace kv
           }
 
           auto& [pending_tx_, committable_] = search->second;
-          auto [success_, data_, hooks_] = pending_tx_->call();
-          auto data_shared =
-            std::make_shared<std::vector<uint8_t>>(std::move(data_));
+          auto [success_, ledger_entry_, hooks_] = pending_tx_->call();
+          auto entry_shared =
+            std::make_shared<kv::WriteSetWithClaims>(std::move(ledger_entry_));
           auto hooks_shared =
             std::make_shared<kv::ConsensusHookPtrs>(std::move(hooks_));
 
@@ -1048,14 +1050,17 @@ namespace kv
 
           if (h)
           {
-            h->append(*data_shared);
+            h->append(entry_shared->digest()));
           }
 
+          auto data = std::make_shared<std::vector<uint8_t>>(entry_shared->write_set.begin(), entry_shared->write_set.end());
+          // TODO: add on serialised claims
+
           LOG_DEBUG_FMT(
-            "Batching {} ({})", last_replicated + offset, data_shared->size());
+            "Batching {} ({})", last_replicated + offset, data->size());
 
           batch.emplace_back(
-            last_replicated + offset, data_shared, committable_, hooks_shared);
+            last_replicated + offset, data, committable_, hooks_shared);
           pending_txs.erase(search);
         }
 
