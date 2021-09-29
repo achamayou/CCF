@@ -117,7 +117,8 @@ namespace kv
       bool track_read_versions = false,
       std::function<std::tuple<Version, Version>(bool has_new_map)>
         version_resolver = nullptr,
-      kv::Version replicated_max_conflict_version = kv::NoVersion)
+      kv::Version replicated_max_conflict_version = kv::NoVersion,
+      std::optional<ccf::receipt::Claims> claims = std::nullopt)
     {
       if (committed)
         throw std::logic_error("Transaction already committed");
@@ -208,16 +209,16 @@ namespace kv
         // recover.
         try
         {
-          auto data = serialise();
+          auto ledger_entry = serialise_with_claims(false, claims);
 
-          if (data.empty())
+          if (ledger_entry.empty())
           {
             return CommitResult::SUCCESS;
           }
 
           return store->commit(
             {commit_view, version},
-            std::make_unique<MovePendingTx>(std::move(data), std::move(hooks)),
+            std::make_unique<MovePendingTx>(std::move(ledger_entry), std::move(hooks)),
             false);
         }
         catch (const std::exception& e)
