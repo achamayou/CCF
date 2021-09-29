@@ -391,7 +391,7 @@ namespace kv
         throw std::logic_error("Failed to commit reserved transaction");
 
       committed = true;
-      return {CommitResult::SUCCESS, serialise(), std::move(hooks)};
+      return {CommitResult::SUCCESS, serialise_with_claims(), std::move(hooks)};
     }
   };
 }

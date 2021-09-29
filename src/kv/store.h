@@ -1050,7 +1050,7 @@ namespace kv
 
           if (h)
           {
-            h->append(entry_shared->digest()));
+            h->append_digest(entry_shared->digest());
           }
 
           auto data = std::make_shared<std::vector<uint8_t>>(entry_shared->write_set.begin(), entry_shared->write_set.end());
