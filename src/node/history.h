@@ -137,7 +137,7 @@ namespace ccf
       version++;
     }
 
-    void append(const crypto::Sha256Hash& digest) override
+    void append_digest(const crypto::Sha256Hash& digest) override
     {
       version++;
     }
@@ -875,7 +875,7 @@ namespace ccf
       replicated_state_tree.append(rh);
     }
 
-    void append(const crypto::Sha256Hash& digest) override
+    void append_digest(const crypto::Sha256Hash& digest) override
     {
       std::lock_guard<std::mutex> guard(state_lock);
       log_hash(digest, APPEND);
