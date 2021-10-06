@@ -1053,7 +1053,8 @@ namespace kv
             h->append_digest(entry_shared->digest());
           }
 
-          auto data = std::make_shared<std::vector<uint8_t>>(entry_shared->write_set.begin(), entry_shared->write_set.end());
+          auto entry_contents = entry_shared->entry();
+          auto data = std::make_shared<std::vector<uint8_t>>(std::move(entry_contents));
           // TODO: add on serialised claims
 
           LOG_DEBUG_FMT(
