@@ -11,6 +11,9 @@ import os
 from infra.checker import check_can_progress, check_does_not_progress
 import ccf.ledger
 import json
+import infra.crypto
+from datetime import datetime
+
 
 from loguru import logger as LOG
 
@@ -39,18 +42,49 @@ def count_nodes(configs, network):
 def test_add_node(network, args):
     new_node = network.create_node("local://localhost")
     network.join_node(new_node, args.package, args, from_snapshot=False)
-    network.trust_node(new_node, args)
+
+    # Verify self-signed node certificate validity period
+    new_node.verify_certificate_validity_period()
+
+    network.trust_node(
+        new_node,
+        args,
+        validity_period_days=args.max_allowed_node_cert_validity_days // 2,
+    )
     with new_node.client() as c:
         s = c.get("/node/state")
         assert s.body.json()["node_id"] == new_node.node_id
         assert (
             s.body.json()["startup_seqno"] == 0
         ), "Node started without snapshot but reports startup seqno != 0"
-    assert new_node
+
+    # Now that the node is trusted, verify endorsed certificate validity period
+    new_node.verify_certificate_validity_period()
+
     return network
 
 
-@reqs.description("Adding a node on different curve")
+@reqs.description("Adding a node with an invalid certificate validity period")
+def test_add_node_invalid_validity_period(network, args):
+    new_node = network.create_node("local://localhost")
+    network.join_node(new_node, args.package, args)
+    try:
+        network.trust_node(
+            new_node,
+            args,
+            validity_period_days=args.max_allowed_node_cert_validity_days + 1,
+        )
+    except infra.proposal.ProposalNotAccepted:
+        LOG.info(
+            "As expected, not could not be trusted since its certificate validity period is invalid"
+        )
+    else:
+        raise Exception(
+            "Node should not be trusted if its certificate validity period is invalid"
+        )
+    return network
+
+
 def test_add_node_on_other_curve(network, args):
     original_curve = args.curve_id
     args.curve_id = (
@@ -118,18 +152,19 @@ def test_add_node_from_snapshot(
         copy_ledger_read_only=copy_ledger_read_only,
         target_node=target_node,
         snapshot_dir=snapshot_dir,
+        from_snapshot=True,
     )
     network.trust_node(new_node, args)
 
-    if copy_ledger_read_only:
-        with new_node.client() as c:
-            r = c.get("/node/state")
-            assert (
-                r.body.json()["startup_seqno"] != 0
-            ), "Node started from snapshot but reports startup seqno of 0"
+    with new_node.client() as c:
+        r = c.get("/node/state")
+        assert (
+            r.body.json()["startup_seqno"] != 0
+        ), "Node started from snapshot but reports startup seqno of 0"
 
     # Finally, verify all app entries on the new node, including historical ones
-    network.txs.verify(node=new_node)
+    # from the historical ledger
+    network.txs.verify(node=new_node, include_historical=copy_ledger_read_only)
 
     return network
 
@@ -215,7 +250,6 @@ def test_node_filter(network, args):
         assert all(info["status"] == "Trusted" for info in trusted_after), trusted_after
         assert all(info["status"] == "Pending" for info in pending_after), pending_after
         assert all(info["status"] == "Retired" for info in retired_after), retired_after
-    assert new_node
     return network
 
 
@@ -236,21 +270,16 @@ def test_version(network, args):
 
 
 @reqs.description("Replace a node on the same addresses")
-@reqs.can_kill_n_nodes(1)
 def test_node_replacement(network, args):
     primary, backups = network.find_nodes()
 
-    nodes = network.get_joined_nodes()
     node_to_replace = backups[-1]
-    f = infra.e2e_args.max_f(args, len(nodes))
-    f_backups = backups[:f]
-
-    # Retire one node
+    LOG.info(f"Retiring node {node_to_replace.local_node_id}")
     network.retire_node(primary, node_to_replace)
     node_to_replace.stop()
     check_can_progress(primary)
 
-    # Add in a node using the same address
+    LOG.info("Adding one node on same address as retired node")
     replacement_node = network.create_node(
         f"local://{node_to_replace.rpc_host}:{node_to_replace.rpc_port}",
         node_port=node_to_replace.node_port,
@@ -262,14 +291,17 @@ def test_node_replacement(network, args):
     assert replacement_node.rpc_host == node_to_replace.rpc_host
     assert replacement_node.node_port == node_to_replace.node_port
     assert replacement_node.rpc_port == node_to_replace.rpc_port
+
+    allowed_to_suspend_count = network.get_f() - len(network.get_stopped_nodes())
+    backups_to_suspend = backups[:allowed_to_suspend_count]
     LOG.info(
-        f"Stopping {len(f_backups)} other nodes to make progress depend on the replacement"
+        f"Suspending {len(backups_to_suspend)} other nodes to make progress depend on the replacement"
     )
-    for other_backup in f_backups:
+    for other_backup in backups_to_suspend:
         other_backup.suspend()
     # Confirm the network can make progress
     check_can_progress(primary)
-    for other_backup in f_backups:
+    for other_backup in backups_to_suspend:
         other_backup.resume()
 
     return network
@@ -290,7 +322,12 @@ def test_join_straddling_primary_replacement(network, args):
         "actions": [
             {
                 "name": "transition_node_to_trusted",
-                "args": {"node_id": new_node.node_id},
+                "args": {
+                    "node_id": new_node.node_id,
+                    "valid_from": str(
+                        infra.crypto.datetime_to_X509time(datetime.now())
+                    ),
+                },
             },
             {
                 "name": "remove_node",
@@ -317,6 +354,7 @@ def test_join_straddling_primary_replacement(network, args):
     return network
 
 
+@reqs.description("Test retired nodes have emitted at most one signature")
 def test_retiring_nodes_emit_at_most_one_signature(network, args):
     primary, _ = network.find_primary()
 
@@ -412,6 +450,26 @@ def test_learner_does_not_take_part(network, args):
     return network
 
 
+@reqs.description("Test node certificates validity period")
+def test_node_certificates_validity_period(network, args):
+    for node in network.get_joined_nodes():
+        node.verify_certificate_validity_period()
+    return network
+
+
+@reqs.description("Add a new node without a snapshot but with the historical ledger")
+def test_add_node_with_read_only_ledger(network, args):
+    network.txs.issue(network, number_txs=10)
+    network.txs.issue(network, number_txs=2, repeat=True)
+
+    new_node = network.create_node("local://localhost")
+    network.join_node(
+        new_node, args.package, args, from_snapshot=False, copy_ledger_read_only=True
+    )
+    network.trust_node(new_node, args)
+    return network
+
+
 def run(args):
     txs = app.LoggingTxs("user0")
     with infra.network.network(
@@ -436,17 +494,11 @@ def run(args):
             test_add_as_many_pending_nodes(network, args)
             test_add_node(network, args)
             test_retire_primary(network, args)
+            test_add_node_with_read_only_ledger(network, args)
 
             test_add_node_from_snapshot(network, args)
             test_add_node_from_snapshot(network, args, from_backup=True)
             test_add_node_from_snapshot(network, args, copy_ledger_read_only=False)
-            latest_node_log = network.get_joined_nodes()[-1].remote.log_path()
-            with open(latest_node_log, "r+", encoding="utf-8") as log:
-                assert any(
-                    "No snapshot found: Node will replay all historical transactions"
-                    in l
-                    for l in log.readlines()
-                ), "New nodes shouldn't join from snapshot if snapshot evidence cannot be verified"
 
             test_node_filter(network, args)
             test_retiring_nodes_emit_at_most_one_signature(network, args)
@@ -454,6 +506,8 @@ def run(args):
             test_learner_catches_up(network, args)
             # test_learner_does_not_take_part(network, args)
             test_retire_backup(network, args)
+        test_node_certificates_validity_period(network, args)
+        test_add_node_invalid_validity_period(network, args)
 
 
 def run_join_old_snapshot(args):

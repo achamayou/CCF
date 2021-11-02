@@ -240,24 +240,23 @@ namespace ccfapp
             auto tx_id = state->transaction_id;
             auto receipt = state->receipt;
             assert(receipt);
-            do_execute_request(props, endpoint_ctx, tx, tx_id, receipt);
+            do_execute_request(props, endpoint_ctx, &tx, tx_id, receipt);
           },
           context.get_historical_state(),
           is_tx_committed)(endpoint_ctx);
       }
       else
       {
-        do_execute_request(
-          props, endpoint_ctx, endpoint_ctx.tx, std::nullopt, nullptr);
+        do_execute_request(props, endpoint_ctx, nullptr, std::nullopt, nullptr);
       }
     }
 
     void do_execute_request(
       const ccf::endpoints::EndpointProperties& props,
       ccf::endpoints::EndpointContext& endpoint_ctx,
-      kv::Tx& target_tx,
+      kv::Tx* historical_tx,
       const std::optional<ccf::TxID>& transaction_id,
-      ccf::historical::TxReceiptPtr receipt)
+      ccf::TxReceiptPtr receipt)
     {
       js::Runtime rt;
       rt.add_ccf_classdefs();
@@ -266,17 +265,21 @@ namespace ccfapp
         rt, nullptr, js::js_app_module_loader, &endpoint_ctx.tx);
 
       js::Context ctx(rt);
-      js::TxContext txctx{&target_tx, js::TxAccess::APP};
+      js::TxContext txctx{&endpoint_ctx.tx, js::TxAccess::APP};
+      js::TxContext historical_txctx{historical_tx, js::TxAccess::APP};
 
       js::register_request_body_class(ctx);
       js::populate_global(
         &txctx,
+        historical_tx ? &historical_txctx : nullptr,
         endpoint_ctx.rpc_ctx.get(),
         transaction_id,
         receipt,
         nullptr,
         &context.get_node_state(),
         nullptr,
+        &context.get_historical_state(),
+        this,
         ctx);
 
       JSValue export_func;
@@ -570,6 +573,40 @@ namespace ccfapp
       }
 
       return ccf::endpoints::EndpointRegistry::find_endpoint(tx, rpc_ctx);
+    }
+
+    std::set<RESTVerb> get_allowed_verbs(
+      kv::Tx& tx, const enclave::RpcContext& rpc_ctx) override
+    {
+      const auto method = rpc_ctx.get_method();
+
+      std::set<RESTVerb> verbs =
+        ccf::endpoints::EndpointRegistry::get_allowed_verbs(tx, rpc_ctx);
+
+      auto endpoints =
+        tx.ro<ccf::endpoints::EndpointsMap>(ccf::Tables::ENDPOINTS);
+
+      endpoints->foreach_key([this, &verbs, &method](const auto& key) {
+        const auto opt_spec = ccf::endpoints::parse_path_template(key.uri_path);
+        if (opt_spec.has_value())
+        {
+          const auto& template_spec = opt_spec.value();
+          // This endpoint has templates in its path - now check if template
+          // matches the current request's path
+          std::smatch match;
+          if (std::regex_match(method, match, template_spec.template_regex))
+          {
+            verbs.insert(key.verb);
+          }
+        }
+        else if (key.uri_path == method)
+        {
+          verbs.insert(key.verb);
+        }
+        return true;
+      });
+
+      return verbs;
     }
 
     void execute_endpoint(

@@ -10,6 +10,7 @@ from contextlib import AbstractContextManager
 import tempfile
 import json
 import time
+from ccf.log_capture import flush_info
 from loguru import logger as LOG
 
 
@@ -48,7 +49,6 @@ class OpenIDProviderServer(AbstractContextManager):
         self.jwks = jwks
         self.tls_key_pem = tls_key_pem
         self.tls_cert_pem = tls_cert_pem
-        self.self_ = self
         self.bind_port = None
         self.start(self.port)
 
@@ -108,9 +108,12 @@ class JwtIssuer:
         cert = infra.crypto.generate_cert(key_priv, cn=cn)
         return (key_priv, key_pub), cert
 
-    def __init__(self, name=TEST_JWT_ISSUER_NAME, cert=None, cn=None):
+    def __init__(
+        self, name=TEST_JWT_ISSUER_NAME, cert=None, refresh_interval=3, cn=None
+    ):
         self.name = name
         self.server = None
+        self.refresh_interval = refresh_interval
         # Auto-refresh ON if issuer name starts with "https://"
         self.auto_refresh = self.name.startswith("https://")
         stripped_host = self.name[len("https://") :] if self.auto_refresh else None
@@ -173,18 +176,22 @@ class JwtIssuer:
     def issue_jwt(self, kid=TEST_JWT_KID, claims=None):
         return infra.crypto.create_jwt(claims or {}, self.key_priv_pem, kid)
 
-    def wait_for_refresh(self, network, kid=TEST_JWT_KID, timeout=3):
+    def wait_for_refresh(self, network, kid=TEST_JWT_KID):
+        timeout = self.refresh_interval * 3
         LOG.info(f"Waiting {timeout}s for JWT key refresh")
         primary, _ = network.find_nodes()
         end_time = time.time() + timeout
         with primary.client(network.consortium.get_any_active_member().local_id) as c:
             while time.time() < end_time:
-                r = c.get("/gov/jwt_keys/all")
+                logs = []
+                r = c.get("/gov/jwt_keys/all", log_capture=logs)
                 assert r.status_code == 200, r
                 stored_cert = r.body.json()[kid]
                 if self.cert_pem == stored_cert:
+                    flush_info(logs)
                     return
                 time.sleep(0.1)
+        flush_info(logs)
         raise TimeoutError(
             f"JWT public signing keys were not refreshed after {timeout}s"
         )

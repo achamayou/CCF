@@ -102,7 +102,7 @@ namespace kv
 
     ccf::SeqNo idx;
     Nodes nodes;
-    uint32_t bft_offset;
+    uint32_t bft_offset = 0;
     ReconfigurationId rid;
   };
 
@@ -138,8 +138,9 @@ namespace kv
      {ReplicaState::Learner, "Learner"},
      {ReplicaState::Retiring, "Retiring"}});
 
-  DECLARE_JSON_TYPE(Configuration);
-  DECLARE_JSON_REQUIRED_FIELDS(Configuration, idx, nodes, bft_offset, rid);
+  DECLARE_JSON_TYPE_WITH_OPTIONAL_FIELDS(Configuration);
+  DECLARE_JSON_REQUIRED_FIELDS(Configuration, idx, nodes, rid);
+  DECLARE_JSON_OPTIONAL_FIELDS(Configuration, bft_offset);
 
   struct ConsensusDetails
   {
@@ -184,6 +185,13 @@ namespace kv
       ReconfigurationId rid,
       const ccf::ResharingResult& result) = 0;
     virtual bool orc(kv::ReconfigurationId rid, const NodeId& node_id) = 0;
+    virtual void record_signature(
+      kv::Version version,
+      const std::vector<uint8_t>& sig,
+      const NodeId& node_id,
+      const crypto::Pem& node_cert) = 0;
+    virtual void record_serialised_tree(
+      kv::Version version, const std::vector<uint8_t>& tree) = 0;
   };
 
   class ConsensusHook
@@ -703,7 +711,8 @@ namespace kv
     virtual std::vector<uint8_t> serialise_snapshot(
       std::unique_ptr<AbstractSnapshot> snapshot) = 0;
     virtual ApplyResult deserialise_snapshot(
-      const std::vector<uint8_t>& data,
+      const uint8_t* data,
+      size_t size,
       ConsensusHookPtrs& hooks,
       std::vector<Version>* view_history = nullptr,
       bool public_only = false) = 0;

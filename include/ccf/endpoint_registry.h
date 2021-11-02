@@ -9,7 +9,6 @@
 #include "ds/json_schema.h"
 #include "ds/openapi.h"
 #include "http/http_consts.h"
-#include "node/certs.h"
 #include "node/endpoint_metrics.h"
 #include "node/rpc/serialization.h"
 
@@ -250,7 +249,7 @@ namespace ccf::endpoints
       EndpointDefinitionPtr e, EndpointContext& args);
 
     virtual std::set<RESTVerb> get_allowed_verbs(
-      const enclave::RpcContext& rpc_ctx);
+      kv::Tx&, const enclave::RpcContext& rpc_ctx);
 
     virtual void report_ambiguous_templated_path(
       const std::string& path,
