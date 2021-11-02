@@ -28,7 +28,8 @@ namespace kv
             uint8_t* buffer = ledger_entry.data();
             serialized::write(buffer, size, write_set.size());
             serialized::write(buffer, size, write_set.data(), write_set.size());
-            serialized::write(buffer, size, claims->serialised_size());
+            if (claims.has_value())
+              serialized::write(buffer, size, claims->serialised_size());
         }
         return ledger_entry;
     }
