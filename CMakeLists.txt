@@ -619,6 +619,12 @@ if(BUILD_TESTS)
   )
 
   add_e2e_test(
+    NAME e2e_notify_cft
+    PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/e2e_notify.py
+    CONSENSUS cft
+  )
+
+  add_e2e_test(
     NAME membership
     PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/membership.py
     CONSENSUS cft

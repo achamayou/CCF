@@ -1161,6 +1161,38 @@ namespace loggingapp
         .set_auto_schema<void, std::string>()
         .install();
 
+      auto host_notify_entry = [this](auto& ctx) {
+        const auto expected = http::headervalues::contenttype::TEXT;
+        const auto actual =
+          ctx.rpc_ctx->get_request_header(http::headers::CONTENT_TYPE)
+            .value_or("");
+        if (expected != actual)
+        {
+          ctx.rpc_ctx->set_error(
+            HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE,
+            ccf::errors::InvalidHeaderValue,
+            fmt::format(
+              "Expected content-type '{}'. Got '{}'.", expected, actual));
+          return;
+        }
+
+        const std::vector<uint8_t>& content = ctx.rpc_ctx->get_request_body();
+        const std::string payload(content.begin(), content.end());
+
+        auto handle = ctx.tx.template rw<ccf::ServiceValue<std::string>>(
+          "public:host_notify");
+        handle->put(payload);
+
+        ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
+      };
+
+      make_endpoint(
+        "/log/public/notify",
+        HTTP_POST,
+        host_notify_entry,
+        ccf::no_auth_required)
+        .install();
+
       metrics_tracker.install_endpoint(*this);
     }
 
@@ -1170,18 +1202,42 @@ namespace loggingapp
 
       ccf::UserEndpointRegistry::tick(elapsed, tx_count);
     }
+
+    void pass_write_to_host(kv::Version v, const std::string& w)
+    {
+      context.get_node_state().trigger_host_process_launch(
+        {"logger",
+         fmt::format(
+           "version {} on node {}", v, context.get_node_state().get_node_id()),
+         w});
+    }
   };
 
   class Logger : public ccf::RpcFrontend
   {
   private:
     LoggerHandlers logger_handlers;
+    ccf::ServiceValue<std::string> host_notify;
 
   public:
     Logger(ccf::NetworkTables& network, ccfapp::AbstractNodeContext& context) :
       ccf::RpcFrontend(*network.tables, logger_handlers),
-      logger_handlers(context)
-    {}
+      logger_handlers(context),
+      host_notify("public:host_notify")
+    {
+      network.tables->set_map_hook(
+        host_notify.get_name(),
+        host_notify.wrap_map_hook(
+          [this](kv::Version v, const ccf::ServiceValue<std::string>::Write& w)
+            -> kv::ConsensusHookPtr {
+            if (w.has_value())
+            {
+              logger_handlers.pass_write_to_host(v, w.value());
+            }
+
+            return kv::ConsensusHookPtr(nullptr);
+          }));
+    }
 
     void open(std::optional<crypto::Pem*> identity = std::nullopt) override
     {
