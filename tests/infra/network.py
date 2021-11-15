@@ -10,6 +10,7 @@ import infra.path
 import infra.proc
 import infra.node
 import infra.consortium
+import infra.e2e_args
 from ccf.ledger import NodeStatus, Ledger, COMMITTED_FILE_SUFFIX
 from ccf.tx_status import TxStatus
 from ccf.tx_id import TxID

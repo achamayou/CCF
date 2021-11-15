@@ -99,7 +99,7 @@ def max_f(args, number_nodes):
         return (number_nodes - 1) // 2
 
 
-def cli_args(add=lambda x: None, parser=None, accept_unknown=False):
+def cli_args(add=lambda x: None, parser=None, accept_unknown=False, args_=None):
     LOG.remove()
     LOG.add(
         sys.stdout,
@@ -368,7 +368,7 @@ def cli_args(add=lambda x: None, parser=None, accept_unknown=False):
     if accept_unknown:
         args, unknown_args = parser.parse_known_args()
     else:
-        args = parser.parse_args()
+        args = parser.parse_args(args=args_)
 
     args.binary_dir = os.path.abspath(args.binary_dir)
 
