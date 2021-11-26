@@ -171,7 +171,7 @@ function setNodeCertificateValidityPeriod(
 
   const default_validity_period_days = 365;
   const max_allowed_cert_validity_period_days =
-    serviceConfig.node_cert_allowed_validity_period_days ??
+    serviceConfig.maximum_node_certificate_validity_days ??
     default_validity_period_days;
 
   if (
@@ -844,7 +844,7 @@ const actions = new Map([
             // Note: CSR and node certificate validity config are only present from 2.x
             const default_validity_period_days = 365;
             const max_allowed_cert_validity_period_days =
-              serviceConfig.node_cert_allowed_validity_period_days ??
+              serviceConfig.maximum_node_certificate_validity_days ??
               default_validity_period_days;
             if (
               args.validity_period_days !== undefined &&
@@ -936,7 +936,8 @@ const actions = new Map([
         if (node !== undefined) {
           const node_obj = ccf.bufToJsonCompatible(node);
           node_obj.status =
-            serviceConfig.reconfiguration_type == "TwoTransaction"
+            serviceConfig.reconfiguration_type === "TwoTransaction" &&
+            node_obj.status !== "Pending"
               ? "Retiring"
               : "Retired";
           ccf.kv["public:ccf.gov.nodes.info"].set(
