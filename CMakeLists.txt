@@ -324,6 +324,15 @@ if(BUILD_TESTS)
     )
     target_link_libraries(history_test PRIVATE ccfcrypto.host http_parser.host)
 
+
+if("sgx" IN_LIST COMPILE_TARGETS)
+    add_unit_test(
+      attestation_bench ${CMAKE_CURRENT_SOURCE_DIR}/src/node/test/attestation_bench.cpp
+    )
+    target_link_libraries(attestation_bench PRIVATE openenclave::oehost ccfcrypto.host)
+    target_link_libraries(attestation_bench PRIVATE /opt/openenclave/lib/openenclave/host/liboehostverify.a)
+endif()
+
     add_unit_test(
       secret_sharing_test
       ${CMAKE_CURRENT_SOURCE_DIR}/src/node/test/secret_share.cpp
