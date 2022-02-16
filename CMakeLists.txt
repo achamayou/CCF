@@ -329,7 +329,7 @@ if("sgx" IN_LIST COMPILE_TARGETS)
     add_unit_test(
       attestation_bench ${CMAKE_CURRENT_SOURCE_DIR}/src/node/test/attestation_bench.cpp
     )
-    target_link_libraries(attestation_bench PRIVATE openenclave::oehost ccfcrypto.host)
+    target_link_libraries(attestation_bench PRIVATE ccfcrypto.host)
     target_link_libraries(attestation_bench PRIVATE /opt/openenclave/lib/openenclave/host/liboehostverify.a)
 endif()
 

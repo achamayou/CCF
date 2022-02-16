@@ -42,9 +42,16 @@ inline void clobber_memory()
 
 static void verify_attestation(picobench::state& s)
 {
+      auto rc = oe_verifier_initialize();
+    if (rc != OE_OK)
+    {
+      std::cout << oe_result_str(rc) << std::endl;
+      throw std::logic_error("Failed to load plugin");
+    }
+
     oe_uuid_t oe_quote_format = {OE_FORMAT_UUID_SGX_ECDSA};
 
-    auto quote_info_data = files::slurp("/home/amchamay/CCF/build/quote_info.json");
+    auto quote_info_data = files::slurp("/home/amchamay/CCF/quote_info.json");
     auto quote_info = nlohmann::json::parse(quote_info_data);
 
     auto quote = quote_info["quote"].get<std::string_view>();
@@ -61,7 +68,12 @@ static void verify_attestation(picobench::state& s)
 
     Claims claims;
 
-    auto rc = oe_verify_evidence(
+  size_t idx = 0;
+  s.start_timer();
+  for (auto _ : s)
+  {
+    (void)_;
+    rc = oe_verify_evidence(
       &oe_quote_format,
       evidence,
       evidence_size,
@@ -73,23 +85,16 @@ static void verify_attestation(picobench::state& s)
       &claims.length);
     if (rc != OE_OK)
     {
-      std::cout << rc << std::endl;
+      std::cout << oe_result_str(rc) << std::endl;
       throw std::logic_error("Failed to verify");
     }
-
-  size_t idx = 0;
-  s.start_timer();
-  for (auto _ : s)
-  {
-    (void)_;
-    //auto data = txs[idx++];
-    //do_not_optimize(h);
+    do_not_optimize(rc);
     clobber_memory();
   }
   s.stop_timer();
 }
 
-const std::vector<int> sizes = {10};
+const std::vector<int> sizes = {10, 100, 1000};
 
 PICOBENCH_SUITE("attestation");
 PICOBENCH(verify_attestation).iterations(sizes).samples(10).baseline();
