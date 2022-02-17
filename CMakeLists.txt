@@ -514,6 +514,12 @@ endif()
     CONSENSUS cft
   )
 
+  add_e2e_test(
+    NAME client_creation
+    PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/client_creation.py
+    CONSENSUS cft
+  )
+
   if(LONG_TESTS)
     add_e2e_test(
       NAME recovery_test_curve_256
