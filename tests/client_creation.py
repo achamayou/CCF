@@ -27,7 +27,7 @@ def run(args):
         primary, _ = network.find_primary()
 
         start = time.time()
-        it = 1000
+        it = 100
         for i in range(it):
             with primary.client() as nc:
                 #nc.get("/node/commit", log_capture=[]).body.text
