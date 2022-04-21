@@ -232,7 +232,7 @@ namespace asynchost
           auto [id, host, service] =
             ringbuffer::read_message<tls::tls_connect>(data, size);
 
-          LOG_DEBUG_FMT("rpc connect request from enclave {}", id);
+          LOG_DEBUG_FMT("rpc connect request from enclave {} (to {}:{})", id, host, service);
 
           if (check_enclave_side_id(id))
           {

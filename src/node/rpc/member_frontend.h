@@ -809,8 +809,18 @@ namespace ccf
       using JWTKeyMap = std::map<JwtKeyId, KeyIdInfo>;
 
       auto get_jwt_keys = [this](auto& ctx, nlohmann::json&& body) {
+        LOG_INFO_FMT("Executing GET /jwt_keys/all");
         auto keys = ctx.tx.ro(network.jwt_public_signing_keys);
         auto keys_to_issuer = ctx.tx.ro(network.jwt_public_signing_key_issuer);
+
+        LOG_INFO_FMT("{} keys (== {}?)", keys->size(), keys_to_issuer->size());
+
+        auto issuers = ctx.tx.ro(network.jwt_issuers);
+        LOG_INFO_FMT("There are {} issuers", issuers->size());
+        issuers->foreach([](const auto& issuer, const auto&) {
+          LOG_INFO_FMT("  {}", issuer);
+          return true;
+        });
 
         JWTKeyMap kmap;
         keys->foreach(
@@ -820,6 +830,7 @@ namespace ccf
             {
               throw std::logic_error(fmt::format("kid {} has no issuer", kid));
             }
+            LOG_INFO_FMT("Adding kid {}, issued by {}", kid, issuer.value());
             kmap.emplace(
               kid, KeyIdInfo{issuer.value(), crypto::cert_der_to_pem(kpem)});
             return true;
