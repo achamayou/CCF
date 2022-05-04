@@ -110,7 +110,7 @@ def cli_args(add=lambda x: None, parser=None, accept_unknown=False):
     parser.add_argument(
         "--host-log-level",
         help="Runtime host log level",
-        default="info",
+        default="debug",
         choices=("trace", "debug", "info", "fail", "fatal"),
     )
     parser.add_argument(
