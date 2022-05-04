@@ -40,25 +40,29 @@ namespace tls
           SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION |
           SSL_OP_NO_RENEGOTIATION);
 
-      // Set cipher for TLS 1.2 (TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
-      SSL_CTX_set_cipher_list(
-        cfg,
-        "ECDHE-ECDSA-AES256-GCM-SHA384:"
-        "ECDHE-ECDSA-AES128-GCM-SHA256");
-      SSL_set_cipher_list(
-        ssl,
-        "ECDHE-ECDSA-AES256-GCM-SHA384:"
-        "ECDHE-ECDSA-AES128-GCM-SHA256");
+      // Restrict accepted ciphers when operating as server
+      if (!client)
+      {
+        // Set cipher for TLS 1.2 (TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+        SSL_CTX_set_cipher_list(
+          cfg,
+          "ECDHE-ECDSA-AES256-GCM-SHA384:"
+          "ECDHE-ECDSA-AES128-GCM-SHA256");
+        SSL_set_cipher_list(
+          ssl,
+          "ECDHE-ECDSA-AES256-GCM-SHA384:"
+          "ECDHE-ECDSA-AES128-GCM-SHA256");
 
-      // Set cipher for TLS 1.3 (same as above)
-      SSL_CTX_set_ciphersuites(
-        cfg,
-        "TLS_AES_256_GCM_SHA384:"
-        "TLS_AES_128_GCM_SHA256");
-      SSL_set_ciphersuites(
-        ssl,
-        "TLS_AES_256_GCM_SHA384:"
-        "TLS_AES_128_GCM_SHA256");
+        // Set cipher for TLS 1.3 (same as above)
+        SSL_CTX_set_ciphersuites(
+          cfg,
+          "TLS_AES_256_GCM_SHA384:"
+          "TLS_AES_128_GCM_SHA256");
+        SSL_set_ciphersuites(
+          ssl,
+          "TLS_AES_256_GCM_SHA384:"
+          "TLS_AES_128_GCM_SHA256");
+      }
 
       // Restrict the curves to approved ones
       SSL_CTX_set1_curves_list(cfg, "P-521:P-384");
