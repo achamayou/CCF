@@ -84,9 +84,11 @@ namespace tls
               err,
               depth,
               X509_verify_cert_error_string(err));
-              PEM_write_X509(stdout, err_cert);
+            PEM_write_X509(stdout, err_cert);
           }
           // return ok;
+          // TODO: This is an unsafe hack! Accepting unverified certs for
+          // debugging purposes
           return 1;
         };
         SSL_CTX_set_verify(ssl_ctx, opts, cb);
