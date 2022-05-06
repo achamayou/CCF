@@ -58,14 +58,13 @@ namespace ccf
         [](std::unique_ptr<threading::Tmsg<RefreshTimeMsg>> msg) {
           if (!msg->data.self.consensus->can_replicate())
           {
-            LOG_DEBUG_FMT(
-              "JWT key auto-refresh: Node is not primary, skipping");
+            LOG_INFO_FMT("JWT key auto-refresh: Node is not primary, skipping");
           }
           else
           {
             msg->data.self.refresh_jwt_keys();
           }
-          LOG_DEBUG_FMT(
+          LOG_INFO_FMT(
             "JWT key auto-refresh: Scheduling in {}s",
             msg->data.self.refresh_interval_s);
           auto delay = std::chrono::seconds(msg->data.self.refresh_interval_s);
@@ -74,7 +73,7 @@ namespace ccf
         },
         *this);
 
-      LOG_DEBUG_FMT(
+      LOG_INFO_FMT(
         "JWT key auto-refresh: Scheduling in {}s", refresh_interval_s);
       auto delay = std::chrono::seconds(refresh_interval_s);
       threading::ThreadMessaging::thread_messaging.add_task_after(
@@ -87,7 +86,7 @@ namespace ccf
         [](std::unique_ptr<threading::Tmsg<RefreshTimeMsg>> msg) {
           if (!msg->data.self.consensus->can_replicate())
           {
-            LOG_DEBUG_FMT(
+            LOG_INFO_FMT(
               "JWT key one-off refresh: Node is not primary, skipping");
           }
           else
@@ -97,7 +96,7 @@ namespace ccf
         },
         *this);
 
-      LOG_DEBUG_FMT("JWT key one-off refresh: Scheduling without delay");
+      LOG_INFO_FMT("JWT key one-off refresh: Scheduling without delay");
       auto delay = std::chrono::seconds(0);
       threading::ThreadMessaging::thread_messaging.add_task_after(
         std::move(refresh_msg), delay);
@@ -278,7 +277,7 @@ namespace ccf
                              const JwtIssuerMetadata& metadata) {
         if (!metadata.auto_refresh)
         {
-          LOG_DEBUG_FMT(
+          LOG_INFO_FMT(
             "JWT key auto-refresh: Skipping issuer '{}', auto-refresh is "
             "disabled",
             issuer);
@@ -288,7 +287,7 @@ namespace ccf
         // Increment attempts, only when auto-refresh is enabled.
         attempts++;
 
-        LOG_DEBUG_FMT(
+        LOG_INFO_FMT(
           "JWT key auto-refresh: Refreshing keys for issuer '{}'", issuer);
         auto& ca_cert_bundle_name = metadata.ca_cert_bundle_name.value();
         auto ca_cert_bundle_pem = ca_cert_bundles->get(ca_cert_bundle_name);
@@ -313,7 +312,7 @@ namespace ccf
         auto ca_cert = std::make_shared<tls::Cert>(
           ca, std::nullopt, std::nullopt, metadata_url.host);
 
-        LOG_DEBUG_FMT(
+        LOG_INFO_FMT(
           "JWT key auto-refresh: Requesting OpenID metadata at https://{}:{}{}",
           metadata_url.host,
           metadata_url_port,
@@ -328,6 +327,7 @@ namespace ccf
             http_status status,
             http::HeaderMap&&,
             std::vector<uint8_t>&& data) {
+            LOG_INFO_FMT("Response received");
             handle_jwt_metadata_response(issuer, ca, status, std::move(data));
             return true;
           });

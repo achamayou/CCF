@@ -585,7 +585,7 @@ class CCFRemote(object):
         constitution=None,
         curve_id=None,
         version=None,
-        host_log_level="Info",
+        host_log_level="Debug",
         major_version=None,
         include_addresses=True,
         config_file=None,

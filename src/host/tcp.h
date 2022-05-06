@@ -531,6 +531,8 @@ namespace asynchost
 
     bool connect_resolved()
     {
+      LOG_DEBUG_FMT("Reached connect_resolved");
+
       auto req = new uv_connect_t;
       int rc;
 
@@ -546,6 +548,46 @@ namespace asynchost
         }
 
         assert_status(CONNECTING_RESOLVING, CONNECTING);
+        LOG_DEBUG_FMT("CONNECTING, working out resolved address");
+
+        auto res = addr_current->ai_addr;
+        // obviously INET6_ADDRSTRLEN is expected to be larger
+        // than INET_ADDRSTRLEN, but this may be required in case
+        // if for some unexpected reason IPv6 is not supported, and
+        // INET6_ADDRSTRLEN is defined as 0
+        // but this is not very likely and I am aware of no cases of
+        // this in practice (editor)
+        char
+          s[INET6_ADDRSTRLEN > INET_ADDRSTRLEN ? INET6_ADDRSTRLEN :
+                                                 INET_ADDRSTRLEN] = {0u};
+
+        switch (res->sa_family)
+        {
+          case AF_INET:
+          {
+            struct sockaddr_in* addr_in = (struct sockaddr_in*)res;
+
+            ////char s[INET_ADDRSTRLEN] = '\0';
+            // this is large enough to include terminating null
+
+            inet_ntop(AF_INET, &(addr_in->sin_addr), s, INET_ADDRSTRLEN);
+            break;
+          }
+          case AF_INET6:
+          {
+            struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)res;
+
+            ////char s[INET6_ADDRSTRLEN] = '\0';
+            // not sure if large enough to include terminating null?
+
+            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), s, INET6_ADDRSTRLEN);
+            break;
+          }
+          default:
+            break;
+        }
+        LOG_INFO_FMT("Connecting to: {}", s);
+
         return true;
       }
 
@@ -726,6 +768,7 @@ namespace asynchost
       else
       {
         assert_status(CONNECTING, CONNECTED);
+        LOG_DEBUG_FMT("CONNECTED");
 
         if (!read_start())
         {
@@ -734,6 +777,7 @@ namespace asynchost
 
         for (auto& w : pending_writes)
         {
+          LOG_DEBUG_FMT("Sending pending write of {} bytes", w.len);
           send_write(w.req, w.len);
           w.req = nullptr;
         }
