@@ -395,7 +395,7 @@ namespace ccf
 
         case TLS_ERR_NEED_CERT:
         {
-          LOG_TRACE_FMT(
+          LOG_INFO_FMT(
             "TLS {} verify error on handshake: {}",
             session_id,
             tls::error_string(rc));
@@ -417,7 +417,7 @@ namespace ccf
         {
           auto err = ctx->get_verify_error();
 
-          LOG_TRACE_FMT(
+          LOG_INFO_FMT(
             "TLS {} invalid cert on handshake: {} [{}]",
             session_id,
             err,

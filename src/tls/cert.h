@@ -55,6 +55,7 @@ namespace tls
 
     void use(SSL* ssl, SSL_CTX* ssl_ctx)
     {
+      LOG_INFO_FMT("Cert::use()");
       if (peer_hostname.has_value())
       {
         // Peer hostname for SNI
@@ -63,15 +64,30 @@ namespace tls
 
       if (peer_ca)
       {
+        LOG_INFO_FMT("We have a peer ca, using it");
         peer_ca->use(ssl_ctx);
       }
 
       if (auth_required)
       {
+        LOG_INFO_FMT("Auth required");
         int opts = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-        auto cb = [](int ok, x509_store_ctx_st*) {
-          LOG_DEBUG_FMT("peer certificate verified: {}", ok);
-          return ok;
+        auto cb = [](int ok, x509_store_ctx_st* ctx) {
+          LOG_INFO_FMT("peer certificate verified: {}", ok);
+          if (ok == 0)
+          {
+            auto err_cert = X509_STORE_CTX_get_current_cert(ctx);
+            const auto err = X509_STORE_CTX_get_error(ctx);
+            auto depth = X509_STORE_CTX_get_error_depth(ctx);
+            LOG_FAIL_FMT(
+              "Pre-verify failed ({}) at depth {}: {}",
+              err,
+              depth,
+              X509_verify_cert_error_string(err));
+              PEM_write_X509(stdout, err_cert);
+          }
+          // return ok;
+          return 1;
         };
         SSL_CTX_set_verify(ssl_ctx, opts, cb);
         SSL_set_verify(ssl, opts, cb);
@@ -84,13 +100,18 @@ namespace tls
         // that, so we set this here. We return 1 from the validation callback
         // (a common pattern in OpenSSL implementations) because we don't want
         // to verify it here, just request it.
-        auto cb = [](int, x509_store_ctx_st*) { return 1; };
+        LOG_INFO_FMT("Auth not required");
+        auto cb = [](int, x509_store_ctx_st*) {
+          LOG_INFO_FMT("Verify cb called");
+          return 1;
+        };
         SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, cb);
         SSL_set_verify(ssl, SSL_VERIFY_PEER, cb);
       }
 
       if (has_own_cert)
       {
+        LOG_INFO_FMT("Has own cert");
         CHECK1(SSL_CTX_use_cert_and_key(ssl_ctx, own_cert, *own_pkey, NULL, 1));
         CHECK1(SSL_use_cert_and_key(ssl, own_cert, *own_pkey, NULL, 1));
       }
