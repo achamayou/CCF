@@ -84,12 +84,16 @@ namespace tls
               err,
               depth,
               X509_verify_cert_error_string(err));
+            std::cerr << fmt::format("Pre-verify failed ({}) at depth {}: {}",
+              err,
+              depth,
+              X509_verify_cert_error_string(err)) << std::endl;
             PEM_write_X509(stdout, err_cert);
           }
-          // return ok;
+          return ok;
           // TODO: This is an unsafe hack! Accepting unverified certs for
           // debugging purposes
-          return 1;
+          // return 1;
         };
         SSL_CTX_set_verify(ssl_ctx, opts, cb);
         SSL_set_verify(ssl, opts, cb);
@@ -107,6 +111,11 @@ namespace tls
           LOG_INFO_FMT("Verify cb called");
           return 1;
         };
+        auto ccb = [](x509_store_ctx_st*, void*) {
+          LOG_INFO_FMT("Verify cert cb called");
+          return 1;
+        };
+        SSL_CTX_set_cert_verify_callback(ssl_ctx, ccb, nullptr);
         SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, cb);
         SSL_set_verify(ssl, SSL_VERIFY_PEER, cb);
       }

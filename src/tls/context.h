@@ -39,7 +39,7 @@ namespace tls
         SSL_OP_CIPHER_SERVER_PREFERENCE |
           SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION |
           SSL_OP_NO_RENEGOTIATION);
-
+/*
       // Set cipher for TLS 1.2
       const auto cipher_list =
         "ECDHE-ECDSA-AES256-GCM-SHA384:"
@@ -59,7 +59,7 @@ namespace tls
       // Restrict the curves to approved ones
       SSL_CTX_set1_curves_list(cfg, "P-521:P-384");
       SSL_set1_curves_list(ssl, "P-521:P-384");
-
+*/
       // Initialise connection
       if (client)
         SSL_set_connect_state(ssl);

@@ -282,6 +282,139 @@ unique_ptr<tls::Cert> get_dummy_cert(
   return make_unique<Cert>(move(ca), crt, pk, std::nullopt, auth_required);
 }
 
+unique_ptr<tls::Cert> get_dummy_cert_with_peer_ca(
+  NetworkCA& net_ca, string name, const std::string& peer_ca_str)
+{
+  // Create a CA with a self-signed certificate
+  auto ca = make_unique<tls::CA>(net_ca.cert.str());
+  auto peer_ca = make_unique<tls::CA>(peer_ca_str);
+
+  // Create a signing request and sign with the CA
+  auto kp = crypto::make_key_pair();
+  auto crt = generate_endorsed_cert(kp, "CN=" + name, net_ca.kp, net_ca.cert);
+  LOG_DEBUG_FMT("New CA-signed certificate:\n{}", crt.str());
+
+  // Verify node certificate with the CA's certificate
+  auto v = crypto::make_verifier(crt);
+  REQUIRE(v->verify_certificate({&net_ca.cert}));
+
+  // Create a tls::Cert with the CA, the signed certificate and the private key
+  auto pk = kp->private_key_pem();
+  return make_unique<Cert>(move(peer_ca), crt, pk, std::nullopt, true);
+}
+
+unique_ptr<tls::Cert> get_jwt_cert()
+{
+  std::string pem = "-----BEGIN CERTIFICATE-----\n\
+MIIH0TCCBrmgAwIBAgIQDa3WN8RQbRySgQ7ARZrG6jANBgkqhkiG9w0BAQsFADBN\n\
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMScwJQYDVQQDEx5E\n\
+aWdpQ2VydCBTSEEyIFNlY3VyZSBTZXJ2ZXIgQ0EwHhcNMjIwMjE3MDAwMDAwWhcN\n\
+MjMwMjE3MjM1OTU5WjB/MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3Rv\n\
+bjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0\n\
+aW9uMSkwJwYDVQQDEyBzdGFtcDIubG9naW4ubWljcm9zb2Z0b25saW5lLmNvbTCC\n\
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL5lAjfqErRnPeK7RiYA/6EX\n\
+FYwj8yd5NCD9tRTGEV1zL1IG8hvoyNcSFN24iUk5a7wxT2AHC2WWwh5Ykn6OO0Lw\n\
+k+SZ3P3Wf/zyJqdOkcY4ZzI+8vvuEzHfNUTvab5Z2mryvVxO07XgwUVgHXTcxoSF\n\
+AwSxr2MoVaFRmpD0sEZsja2JifbdoP7zjXeN8kPR6vZgf41i9Ic4Fz6ewaGPHCEr\n\
+NILnNtf8xUaXHnQub0VTznBQFPGWxCUVq0yUWTeD+fYRKj2actTSKCuTMUxEUp5K\n\
+89wuPe9n4vYwqVBPaTN6w2/y5zVU5/vVMAutlVykt6sLYwvmKMqs8AZ/tGygXy0C\n\
+AwEAAaOCBHkwggR1MB8GA1UdIwQYMBaAFA+AYRyCMWHVLyjnjUY4tCzhxtniMB0G\n\
+A1UdDgQWBBS+f4hwqJSMvqBaJnjpRwXasT/e6jCCASYGA1UdEQSCAR0wggEZgiBz\n\
+dGFtcDIubG9naW4ubWljcm9zb2Z0b25saW5lLmNvbYIdbG9naW4ubWljcm9zb2Z0\n\
+b25saW5lLWludC5jb22CG2xvZ2luLm1pY3Jvc29mdG9ubGluZS1wLmNvbYIZbG9n\n\
+aW4ubWljcm9zb2Z0b25saW5lLmNvbYIebG9naW4yLm1pY3Jvc29mdG9ubGluZS1p\n\
+bnQuY29tghpsb2dpbjIubWljcm9zb2Z0b25saW5lLmNvbYIfbG9naW5leC5taWNy\n\
+b3NvZnRvbmxpbmUtaW50LmNvbYIbbG9naW5leC5taWNyb3NvZnRvbmxpbmUuY29t\n\
+giRzdGFtcDIubG9naW4ubWljcm9zb2Z0b25saW5lLWludC5jb20wDgYDVR0PAQH/\n\
+BAQDAgWgMB0GA1UdJQQWMBQGCCsGAQUFBwMBBggrBgEFBQcDAjCBjQYDVR0fBIGF\n\
+MIGCMD+gPaA7hjlodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaWNlcnRTSEEy\n\
+U2VjdXJlU2VydmVyQ0EtMS5jcmwwP6A9oDuGOWh0dHA6Ly9jcmw0LmRpZ2ljZXJ0\n\
+LmNvbS9EaWdpY2VydFNIQTJTZWN1cmVTZXJ2ZXJDQS0xLmNybDA+BgNVHSAENzA1\n\
+MDMGBmeBDAECAjApMCcGCCsGAQUFBwIBFhtodHRwOi8vd3d3LmRpZ2ljZXJ0LmNv\n\
+bS9DUFMwfgYIKwYBBQUHAQEEcjBwMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5k\n\
+aWdpY2VydC5jb20wSAYIKwYBBQUHMAKGPGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0\n\
+LmNvbS9EaWdpQ2VydFNIQTJTZWN1cmVTZXJ2ZXJDQS0yLmNydDAJBgNVHRMEAjAA\n\
+MIIBfQYKKwYBBAHWeQIEAgSCAW0EggFpAWcAdgDoPtDaPvUGNTLnVyi8iWvJA9PL\n\
+0RFr7Otp4Xd9bQa9bgAAAX8Il0RzAAAEAwBHMEUCIGAhBEp01uLVy2j5DfI6Ebsj\n\
+J0hWYu9TwhL4z764PyVQAiEAreOQiRC+mSs/09v3S8uoLNl80Znep9fd54Pqnaqy\n\
+h5IAdgA1zxkbv7FsV78PrUxtQsu7ticgJlHqP+Eq76gDwzvWTAAAAX8Il0S1AAAE\n\
+AwBHMEUCIQCm671rrt6ecZypCbw5k/6j0GRl/xWRdybKVm8lydZ4cwIgP4wA5nBT\n\
+ks4BMPM019L+zSgMaukPYrN9eTlP5zbjw5QAdQC3Pvsk35xNunXyOcW6WPRsXfxC\n\
+z3qfNcSeHQmBJe20mQAAAX8Il0S6AAAEAwBGMEQCIG/DAntp9cA1eJgjuPrrkwc8\n\
+8lNaq4qt17GVg60dSustAiBbiU/1dQQObejXXT+Fh/oKo7biciSySqFDqvdgvJoP\n\
+WDANBgkqhkiG9w0BAQsFAAOCAQEAhZ8P69O7JVD37aPewQge2gOsbcJDDVKXO2sh\n\
+fiiRs0mUktOzPAY6wbc8mBsL1CTZJF3ZthNPSkizCRtG1Ph/PLAux2w73BsvP0vJ\n\
+6ViFYxTe0a/HGcKRZvfKtHmnjxIwerMrIJ9swUT+0V7gfs2QKrcmPtg9pXoQFztp\n\
+lMkxb6WC3ksE1qfd2YClYQAogkCP12xc2rUYPVmOoEicdrTab8f44WniyDF+RRfi\n\
+WKWs708kE/WqjOxR4Hg4rUb1La8xOZPlk8gjM/RzstgfhVDOCuxL0E4ziOKA/gYB\n\
++AYfSC/cPeOX5MeF10zZ730f1JFGbnlToUQfUi356TQeFOnjpQ==\n\
+-----END CERTIFICATE-----\n\
+-----BEGIN CERTIFICATE-----\n\
+MIIE6DCCA9CgAwIBAgIQAnQuqhfKjiHHF7sf/P0MoDANBgkqhkiG9w0BAQsFADBh\n\
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3\n\
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD\n\
+QTAeFw0yMDA5MjMwMDAwMDBaFw0zMDA5MjIyMzU5NTlaME0xCzAJBgNVBAYTAlVT\n\
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxJzAlBgNVBAMTHkRpZ2lDZXJ0IFNIQTIg\n\
+U2VjdXJlIFNlcnZlciBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\n\
+ANyuWJBNwcQwFZA1W248ghX1LFy949v/cUP6ZCWA1O4Yok3wZtAKc24RmDYXZK83\n\
+nf36QYSvx6+M/hpzTc8zl5CilodTgyu5pnVILR1WN3vaMTIa16yrBvSqXUu3R0bd\n\
+KpPDkC55gIDvEwRqFDu1m5K+wgdlTvza/P96rtxcflUxDOg5B6TXvi/TC2rSsd9f\n\
+/ld0Uzs1gN2ujkSYs58O09rg1/RrKatEp0tYhG2SS4HD2nOLEpdIkARFdRrdNzGX\n\
+kujNVA075ME/OV4uuPNcfhCOhkEAjUVmR7ChZc6gqikJTvOX6+guqw9ypzAO+sf0\n\
+/RR3w6RbKFfCs/mC/bdFWJsCAwEAAaOCAa4wggGqMB0GA1UdDgQWBBQPgGEcgjFh\n\
+1S8o541GOLQs4cbZ4jAfBgNVHSMEGDAWgBQD3lA1VtFMu2bwo+IbG8OXsj3RVTAO\n\
+BgNVHQ8BAf8EBAMCAYYwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMBIG\n\
+A1UdEwEB/wQIMAYBAf8CAQAwdgYIKwYBBQUHAQEEajBoMCQGCCsGAQUFBzABhhho\n\
+dHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQAYIKwYBBQUHMAKGNGh0dHA6Ly9jYWNl\n\
+cnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEdsb2JhbFJvb3RDQS5jcnQwewYDVR0f\n\
+BHQwcjA3oDWgM4YxaHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0R2xv\n\
+YmFsUm9vdENBLmNybDA3oDWgM4YxaHR0cDovL2NybDQuZGlnaWNlcnQuY29tL0Rp\n\
+Z2lDZXJ0R2xvYmFsUm9vdENBLmNybDAwBgNVHSAEKTAnMAcGBWeBDAEBMAgGBmeB\n\
+DAECATAIBgZngQwBAgIwCAYGZ4EMAQIDMA0GCSqGSIb3DQEBCwUAA4IBAQB3MR8I\n\
+l9cSm2PSEWUIpvZlubj6kgPLoX7hyA2MPrQbkb4CCF6fWXF7Ef3gwOOPWdegUqHQ\n\
+S1TSSJZI73fpKQbLQxCgLzwWji3+HlU87MOY7hgNI+gH9bMtxKtXc1r2G1O6+x/6\n\
+vYzTUVEgR17vf5irF0LKhVyfIjc0RXbyQ14AniKDrN+v0ebHExfppGlkTIBn6rak\n\
+f4994VH6npdn6mkus5CkHBXIrMtPKex6XF2firjUDLuU7tC8y7WlHgjPxEEDDb0G\n\
+w6D0yDdVSvG/5XlCNatBmO/8EznDu1vr72N8gJzISUZwa6CCUD7QBLbKJcXBBVVf\n\
+8nwvV9GvlW+sbXlr\n\
+-----END CERTIFICATE-----";
+
+return make_unique<Cert>(nullptr, pem, std::nullopt, std::nullopt, false);
+}
+
+std::string get_jwt_ca()
+{
+  return "-----BEGIN CERTIFICATE-----\n\
+MIIE6DCCA9CgAwIBAgIQAnQuqhfKjiHHF7sf/P0MoDANBgkqhkiG9w0BAQsFADBh\n\
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3\n\
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD\n\
+QTAeFw0yMDA5MjMwMDAwMDBaFw0zMDA5MjIyMzU5NTlaME0xCzAJBgNVBAYTAlVT\n\
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxJzAlBgNVBAMTHkRpZ2lDZXJ0IFNIQTIg\n\
+U2VjdXJlIFNlcnZlciBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\n\
+ANyuWJBNwcQwFZA1W248ghX1LFy949v/cUP6ZCWA1O4Yok3wZtAKc24RmDYXZK83\n\
+nf36QYSvx6+M/hpzTc8zl5CilodTgyu5pnVILR1WN3vaMTIa16yrBvSqXUu3R0bd\n\
+KpPDkC55gIDvEwRqFDu1m5K+wgdlTvza/P96rtxcflUxDOg5B6TXvi/TC2rSsd9f\n\
+/ld0Uzs1gN2ujkSYs58O09rg1/RrKatEp0tYhG2SS4HD2nOLEpdIkARFdRrdNzGX\n\
+kujNVA075ME/OV4uuPNcfhCOhkEAjUVmR7ChZc6gqikJTvOX6+guqw9ypzAO+sf0\n\
+/RR3w6RbKFfCs/mC/bdFWJsCAwEAAaOCAa4wggGqMB0GA1UdDgQWBBQPgGEcgjFh\n\
+1S8o541GOLQs4cbZ4jAfBgNVHSMEGDAWgBQD3lA1VtFMu2bwo+IbG8OXsj3RVTAO\n\
+BgNVHQ8BAf8EBAMCAYYwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMBIG\n\
+A1UdEwEB/wQIMAYBAf8CAQAwdgYIKwYBBQUHAQEEajBoMCQGCCsGAQUFBzABhhho\n\
+dHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQAYIKwYBBQUHMAKGNGh0dHA6Ly9jYWNl\n\
+cnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEdsb2JhbFJvb3RDQS5jcnQwewYDVR0f\n\
+BHQwcjA3oDWgM4YxaHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0R2xv\n\
+YmFsUm9vdENBLmNybDA3oDWgM4YxaHR0cDovL2NybDQuZGlnaWNlcnQuY29tL0Rp\n\
+Z2lDZXJ0R2xvYmFsUm9vdENBLmNybDAwBgNVHSAEKTAnMAcGBWeBDAEBMAgGBmeB\n\
+DAECATAIBgZngQwBAgIwCAYGZ4EMAQIDMA0GCSqGSIb3DQEBCwUAA4IBAQB3MR8I\n\
+l9cSm2PSEWUIpvZlubj6kgPLoX7hyA2MPrQbkb4CCF6fWXF7Ef3gwOOPWdegUqHQ\n\
+S1TSSJZI73fpKQbLQxCgLzwWji3+HlU87MOY7hgNI+gH9bMtxKtXc1r2G1O6+x/6\n\
+vYzTUVEgR17vf5irF0LKhVyfIjc0RXbyQ14AniKDrN+v0ebHExfppGlkTIBn6rak\n\
+f4994VH6npdn6mkus5CkHBXIrMtPKex6XF2firjUDLuU7tC8y7WlHgjPxEEDDb0G\n\
+w6D0yDdVSvG/5XlCNatBmO/8EznDu1vr72N8gJzISUZwa6CCUD7QBLbKJcXBBVVf\n\
+8nwvV9GvlW+sbXlr\n\
+-----END CERTIFICATE-----";
+}
+
 /// Helper to write past the maximum buffer (16k)
 int write_helper(Context& handler, const uint8_t* buf, size_t len)
 {
@@ -481,6 +614,27 @@ TEST_CASE("verified handshake")
   // Create bogus certificate
   auto server_cert = get_dummy_cert(ca, "server");
   auto client_cert = get_dummy_cert(ca, "client");
+
+  LOG_INFO_FMT("TEST: verified handshake");
+
+  // Just testing handshake, no communication, but verifies certificates.
+  run_test_case(
+    (const uint8_t*)"",
+    0,
+    (const uint8_t*)"",
+    0,
+    move(server_cert),
+    move(client_cert));
+}
+
+TEST_CASE("verified jwt handshake")
+{
+  // Create a CA
+  auto ca = get_ca();
+
+  // Create bogus certificate
+  auto server_cert = get_jwt_cert();
+  auto client_cert = get_dummy_cert_with_peer_ca(ca, "client", get_jwt_ca());
 
   LOG_INFO_FMT("TEST: verified handshake");
 
