@@ -161,7 +161,7 @@ namespace http
 
         const auto actor_opt = http::extract_actor(*rpc_ctx);
         std::optional<std::shared_ptr<ccf::RpcHandler>> search;
-        ccf::ActorsType actor;
+        ccf::ActorsType actor = ccf::ActorsType::unknown;
         if (actor_opt.has_value())
         {
           const auto& actor_s = actor_opt.value();
@@ -191,6 +191,7 @@ namespace http
             stream_id,
             rpc_ctx->get_response_http_status(),
             rpc_ctx->get_response_headers(),
+            rpc_ctx->get_response_trailers(),
             std::move(rpc_ctx->get_response_body()));
         }
       }

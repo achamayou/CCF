@@ -241,6 +241,9 @@ add_custom_target(
 # Add sample apps
 add_subdirectory(${CCF_DIR}/samples)
 
+# Add external_executor app
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/apps/external_executor)
+
 if(BUILD_TESTS)
   enable_testing()
 
@@ -994,6 +997,12 @@ if(BUILD_TESTS)
     PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/historical_query_perf.py
     CONSENSUS cft
     LABEL perf
+  )
+
+  add_e2e_test(
+    NAME external_executor_test
+    PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/external_executor.py
+    CONSENSUS ${CONSENSUS_FILTER}
   )
 endif()
 
