@@ -11,8 +11,7 @@
             "contentEncoding": "base16"
         },
         "algorithm": {
-            "type": "string",
-            "enum": "sha-256"
+            "type": "string"
         }
       },
       "claims": {
@@ -27,8 +26,7 @@
         }
       },
       "algorithm": {
-        "type": "string",
-        "enum": "hmac-sha-256"
+        "type": "string"
       }
     },
     "$defs": {
@@ -39,7 +37,8 @@
             },
             "digest": {
                 "contentEncoding": "base16"
-            }
+            },
+            "required": [ "name", "digest", "algorithm" ]
         },
         "public_claim": {
             "type": "object",
@@ -51,9 +50,9 @@
                 "contentEncoding": "base64"
             },
             "algorithm": {
-                "type": "string",
-                "enum": "sha-256"
-            }
+                "type": "string"
+            },
+            "required": [ "name", "claim", "algorithm" ]
         },
         "private_claim":  {
             "type": "object",
@@ -69,9 +68,9 @@
                 "contentEncoding": "base16"
             },
             "algorithm": {
-                "type": "string",
-                "enum": "hmac-sha-256"
-            }
+                "type": "string"
+            },
+            "required": [ "name", "claim_key", "claim", "algorithm" ]
         }
     },
     "required": [ "schema", "claims", "algorithm" ]

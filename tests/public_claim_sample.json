@@ -1,0 +1,14 @@
+{
+    "schema": {
+        "digest": "a6f985f6ae38974b47dce6b71f5a5187fcefc7b1834098fd676d95ea6fec10b5",
+        "algorithm": "sha-256"
+    },
+    "claims": [
+        {
+            "name": "collectionId",
+            "claim": "MyLedgerCollection",
+            "algorithm": "sha-256"
+        }
+    ],
+    "algorithm": "sha-256"
+}
