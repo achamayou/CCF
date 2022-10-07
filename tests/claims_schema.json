@@ -32,45 +32,54 @@
     "$defs": {
         "claim_digest": {
             "type": "object",
-            "name": {
-                "type": "string"
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "digest": {
+                    "contentEncoding": "base16"
+                }
             },
-            "digest": {
-                "contentEncoding": "base16"
-            },
-            "required": [ "name", "digest", "algorithm" ]
+            "required": [ "name", "digest", "algorithm" ],
+            "additionalProperties": false
         },
         "public_claim": {
             "type": "object",
-            "name": {
-                "type": "string"
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "claim": {
+                    "type": "string",
+                    "contentEncoding": "base64"
+                },
+                "algorithm": {
+                    "type": "string"
+                }
             },
-            "claim": {
-                "type": "string",
-                "contentEncoding": "base64"
-            },
-            "algorithm": {
-                "type": "string"
-            },
-            "required": [ "name", "claim", "algorithm" ]
+            "required": [ "name", "claim", "algorithm" ],
+            "additionalProperties": false
         },
         "private_claim":  {
             "type": "object",
-            "name": {
-                "type": "string"
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "claim": {
+                    "type": "string",
+                    "contentEncoding": "base64"
+                },
+                "claim_key": {
+                    "type": "string",
+                    "contentEncoding": "base16"
+                },
+                "algorithm": {
+                    "type": "string"
+                }
             },
-            "claim": {
-                "type": "string",
-                "contentEncoding": "base64"
-            },
-            "claim_key": {
-                "type": "string",
-                "contentEncoding": "base16"
-            },
-            "algorithm": {
-                "type": "string"
-            },
-            "required": [ "name", "claim_key", "claim", "algorithm" ]
+            "required": [ "name", "claim", "claim_key", "algorithm" ],
+            "additionalProperties": false
         }
     },
     "required": [ "schema", "claims", "algorithm" ]
