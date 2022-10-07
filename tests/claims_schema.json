@@ -1,0 +1,78 @@
+{
+    "$id": "https://ccf.dev/claims.schema.json",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A schema for JSON claims",
+    "type": "object",
+    "properties": {
+      "schema": {
+        "type": "object",
+        "digest": {
+            "type": "string",
+            "contentEncoding": "base16"
+        },
+        "algorithm": {
+            "type": "string",
+            "enum": "sha-256"
+        }
+      },
+      "claims": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "oneOf": [
+                { "$ref": "#/$defs/claim_digest" },
+                { "$ref": "#/$defs/public_claim" },
+                { "$ref": "#/$defs/private_claim" }
+            ]
+        }
+      },
+      "algorithm": {
+        "type": "string",
+        "enum": "hmac-sha-256"
+      }
+    },
+    "$defs": {
+        "claim_digest": {
+            "type": "object",
+            "name": {
+                "type": "string"
+            },
+            "digest": {
+                "contentEncoding": "base16"
+            }
+        },
+        "public_claim": {
+            "type": "object",
+            "name": {
+                "type": "string"
+            },
+            "claim": {
+                "type": "string",
+                "contentEncoding": "base64"
+            },
+            "algorithm": {
+                "type": "string",
+                "enum": "sha-256"
+            }
+        },
+        "private_claim":  {
+            "type": "object",
+            "name": {
+                "type": "string"
+            },
+            "claim": {
+                "type": "string",
+                "contentEncoding": "base64"
+            },
+            "claim_key": {
+                "type": "string",
+                "contentEncoding": "base16"
+            },
+            "algorithm": {
+                "type": "string",
+                "enum": "hmac-sha-256"
+            }
+        }
+    },
+    "required": [ "schema", "claims", "algorithm" ]
+  }
