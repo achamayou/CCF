@@ -14,6 +14,10 @@
             "claim": "IyEvYmluL2Jhc2gKIyBDb3B5cmlnaHQgKGMpIE1pY3Jvc29mdCBDb3Jwb3JhdGlvbi4gQWxsIHJp",
             "claim_key": "d2f244085b7e495166db61b881fc658f2b3311d1bb714f6dac134c48a3d88a74",
             "algorithm": "sha-256"
+        },
+        {
+            "name": "other_claim",
+            "claim_digest": "9ba14d316a1a3fa647af49ae9af390892783bdeb8f70fbef4b210cab7c14b13c"
         }
     ],
     "algorithm": "sha-256"
