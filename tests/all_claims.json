@@ -5,15 +5,10 @@
     },
     "claims": [
         {
-            "name": "collectionId",
-            "claim": "MyLedgerCollection",
-            "algorithm": "sha-256"
-        },
-        {
             "name": "content",
             "claim": "IyEvYmluL2Jhc2gKIyBDb3B5cmlnaHQgKGMpIE1pY3Jvc29mdCBDb3Jwb3JhdGlvbi4gQWxsIHJp",
             "claim_key": "d2f244085b7e495166db61b881fc658f2b3311d1bb714f6dac134c48a3d88a74",
-            "algorithm": "sha-256"
+            "algorithm": "hmac-sha-256"
         },
         {
             "name": "other_claim",

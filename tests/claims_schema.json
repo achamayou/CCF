@@ -20,8 +20,7 @@
             "type": "object",
             "oneOf": [
                 { "$ref": "#/$defs/claim_digest" },
-                { "$ref": "#/$defs/public_claim" },
-                { "$ref": "#/$defs/private_claim" }
+                { "$ref": "#/$defs/claim" }
             ]
         }
       },
@@ -43,24 +42,7 @@
             "required": [ "name", "digest", "algorithm" ],
             "additionalProperties": false
         },
-        "public_claim": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string"
-                },
-                "claim": {
-                    "type": "string",
-                    "contentEncoding": "base64"
-                },
-                "algorithm": {
-                    "type": "string"
-                }
-            },
-            "required": [ "name", "claim", "algorithm" ],
-            "additionalProperties": false
-        },
-        "private_claim":  {
+        "claim":  {
             "type": "object",
             "properties": {
                 "name": {
