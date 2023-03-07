@@ -100,9 +100,7 @@ METADATA = {
 METADATA_JSON = json.dumps(METADATA)
 
 @reqs.description("Running transactions against logging app and measuring memory usage")
-@reqs.supports_methods("/app/log/private", "/app/log/public")
-@reqs.at_least_n_nodes(2)
-@reqs.no_http2()
+@reqs.supports_methods("/app/log/public")
 def test(network, args):
     primary, _ = network.find_primary()
 
@@ -115,7 +113,7 @@ def test(network, args):
                 assert r.status_code == 200
                 index += 1
             r = c.get("/node/memory", log_capture=[])
-            peak_mb = r.body.json()["peak_allocated_heap_size"] / 1024 ** 2
+            peak_mb = r.body.json()["current_allocated_heap_size"] / 1024 ** 2
             extrapolated = (peak_mb / ((k + 1) * subi) * 1000000) / 1024
             print(f"Using {peak_mb:.2f}Mb after {(k + 1) * subi} iterations (extrapolated: {extrapolated:.2f}Gb for 1m entries)")
     return network
@@ -158,7 +156,7 @@ if __name__ == "__main__":
         "js",
         run,
         package="libjs_generic",
-        nodes=infra.e2e_args.max_nodes(cr.args, f=0),
+        nodes=infra.e2e_args.min_nodes(cr.args, f=0),
         initial_user_count=4,
         initial_member_count=2,
     )
