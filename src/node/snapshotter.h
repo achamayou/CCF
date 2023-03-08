@@ -129,6 +129,7 @@ namespace ccf
       auto snapshot_version = snapshot->get_version();
 
       auto serialised_snapshot = store->serialise_snapshot(std::move(snapshot));
+      LOG_INFO_FMT("SNAPSHOT AT {} IS {} bytes", snapshot_version, serialised_snapshot.size());
 
       auto tx = store->create_tx();
       auto evidence = tx.rw<SnapshotEvidence>(Tables::SNAPSHOT_EVIDENCE);

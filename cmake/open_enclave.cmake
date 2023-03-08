@@ -20,8 +20,8 @@ if(COMPILE_TARGET STREQUAL "sgx")
   )
   # These oe libraries must be linked in specific order
   set(OE_TARGET_ENCLAVE_CORE_LIBS
-#      openenclave::oeenclave openenclave::oesnmalloc openenclave::oecore
-      openenclave::oeenclave openenclave::oecore
+      openenclave::oeenclave openenclave::oesnmalloc openenclave::oecore
+#      openenclave::oeenclave openenclave::oecore
       openenclave::oesyscall
   )
 

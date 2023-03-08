@@ -106,7 +106,7 @@ def test(network, args):
 
     with primary.client("user0") as c:
         index = 0
-        for k in range(100):
+        for k in range(1000):
             subi = 100
             for i in range(subi):
                 r = c.post("/app/log/public", {"id": index, "msg": METADATA_JSON}, log_capture=[])
