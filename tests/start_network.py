@@ -137,6 +137,20 @@ def run(args):
 
                 LOG.info("Automatically shut down network after successful opening")
             else:
+                if args.primary_replacement_delay_s:
+                    LOG.info(
+                        f"Waiting {args.primary_replacement_delay_s}s before reconfiguring primary..."
+                    )
+                    try:
+                        time.sleep(args.primary_replacement_delay_s)
+                        primary, backups = network.find_primary()
+                        LOG.info(f"Reconfiguring primary node: {primary.node_id}")
+                        new_node = network.create_node(primary.host)
+                        primary.stop()
+                        network.join_node(new_node, args.package, args)
+                        LOG.info(f"Primary node reconfigured: {primary.node_id}")
+                    except KeyboardInterrupt:
+                        LOG.info("Stopping all CCF nodes...")
                 if args.primary_shutdown_delay_s:
                     LOG.info(
                         f"Waiting {args.primary_shutdown_delay_s}s before shutting down primary..."
@@ -217,7 +231,13 @@ if __name__ == "__main__":
         )
         parser.add_argument(
             "--primary-shutdown-delay-s",
-            help="If --primary-auto-shutdown is set, delay after which service automatically stop the primary",
+            help="Delay after which service automatically stops the primary",
+            type=int,
+            default=0,
+        )
+        parser.add_argument(
+            "--primary-replacement-delay-s",
+            help="Delay after which service automatically replaces the primary with a new node",
             type=int,
             default=0,
         )
