@@ -390,7 +390,10 @@ const actions = new Map([
 
         let member_info = {};
         member_info.member_data = args.member_data;
-        member_info.status = "Accepted";
+        member_info.status = "Active";
+        // TODO: check max recovery user threshold cap
+        // TODO: reshare if service is open
+
         ccf.kv["public:ccf.gov.members.info"].set(
           rawMemberId,
           ccf.jsonCompatibleToBuf(member_info)

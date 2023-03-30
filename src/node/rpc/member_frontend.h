@@ -800,6 +800,9 @@ namespace ccf
       make_endpoint("/ack", HTTP_POST, ack, member_sig_only_policies("ack"))
         .set_openapi_summary(
           "Provide a member endorsement of a service state digest")
+        .set_openapi_deprecated(true)
+        .set_openapi_summary(
+          "This endpoint is deprecated. Ack can be implemented as a governance action where needed.")
         .set_auto_schema<StateDigest, void>()
         .install();
 
@@ -849,9 +852,9 @@ namespace ccf
         update_state_digest,
         member_cert_or_sig_policies("state_digest"))
         .set_auto_schema<void, StateDigest>()
+        .set_openapi_deprecated(true)
         .set_openapi_summary(
-          "Update and fetch a service state digest, for the purpose of member "
-          "endorsement")
+          "This endpoint is deprecated. Ack can be implemented as a governance action where needed.")
         .install();
 
       auto get_encrypted_recovery_share =

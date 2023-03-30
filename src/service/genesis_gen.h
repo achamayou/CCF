@@ -117,7 +117,7 @@ namespace ccf
 
       member_certs->put(id, member_pub_info.cert);
       member_info->put(
-        id, {MemberStatus::ACCEPTED, member_pub_info.member_data});
+        id, {MemberStatus::ACTIVE, member_pub_info.member_data});
 
       if (member_pub_info.encryption_pub_key.has_value())
       {
