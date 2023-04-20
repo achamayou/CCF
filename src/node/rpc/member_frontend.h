@@ -788,6 +788,10 @@ namespace ccf
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_NO_CONTENT);
         return;
       };
+      // TODO: this can be either
+      // an action (as per https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md#performing-an-action)
+      // in which case it becomes POST /member:ack
+      // or it could become an idempotent POST /ack/{member_id} resource
       make_endpoint("/ack", HTTP_POST, ack, member_sig_only_policies("ack"))
         .set_openapi_summary(
           "Provide a member endorsement of a service state digest")
@@ -836,6 +840,13 @@ namespace ccf
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
         return;
       };
+      // TODO: this can be either
+      // an action (as per https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md#performing-an-action)
+      // in which case it becomes POST /member:stateDigest
+      // or it could become a resource behind a GET /stateDigest/{member_id}
+      // a problem with the latter is that GET cannot contain a (COSE Sign1 in this case) body for authentication
+      // because this creates a write on the ledger, this is also not something we want unauthenticated
+      // a POST /stateDigest/{member_id} seems possible too, returning a 201 created with the new state digest
       make_endpoint(
         "/ack/update_state_digest",
         HTTP_POST,
@@ -1081,6 +1092,9 @@ namespace ccf
         ctx.rpc_ctx->set_response_body(nlohmann::json(recovery_share).dump());
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
       };
+      // TODO: this can also either become an action
+      // POST /recovery-share:submit
+      // or we can think of it as a resource POST /recovery-share/{member_id}
       make_endpoint(
         "/recovery_share",
         HTTP_POST,
@@ -1387,6 +1401,10 @@ namespace ccf
         }
       };
 
+      // TODO: this stays a POST, and created_at header parameter provides idempotence
+      // I am not sure if that need to become /proposal or not
+      // we should return a Location: .../proposal/<id>
+      // Duplicate/stale erros need to become 200
       make_endpoint(
         "/proposals",
         HTTP_POST,
@@ -1414,6 +1432,7 @@ namespace ccf
           return make_success(response);
         };
 
+      // TODO: needs variant with camlCase fields
       make_read_only_endpoint(
         "/proposals",
         HTTP_GET,
@@ -1466,6 +1485,7 @@ namespace ccf
         return make_success(pi_.value());
       };
 
+      // TODO: needs variant with camlCase fields
       make_read_only_endpoint(
         "/proposals/{proposal_id}",
         HTTP_GET,
@@ -1574,6 +1594,8 @@ namespace ccf
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
       };
 
+      // TODO: seems like this should be a DELETE
+      // need to clear up if DELETE can have a (COSE Sign1) body
       make_endpoint(
         "/proposals/{proposal_id}/withdraw",
         HTTP_POST,
@@ -1618,6 +1640,7 @@ namespace ccf
           ctx.rpc_ctx->set_response_body(std::move(p.value()));
         };
 
+      // TODO: convert to caml case
       make_read_only_endpoint(
         "/proposals/{proposal_id}/actions",
         HTTP_GET,
@@ -1775,6 +1798,9 @@ namespace ccf
           return;
         }
       };
+      // TODO: idempotent POST /proposals/{proposal_id}/ballots/{member_id} ?
+      // or a potential action, depending on what's best for immutable resources
+      // since ballots are set once and for all
       make_endpoint(
         "/proposals/{proposal_id}/ballots",
         HTTP_POST,
