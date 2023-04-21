@@ -1596,6 +1596,8 @@ namespace ccf
 
       // TODO: seems like this should be a DELETE
       // need to clear up if DELETE can have a (COSE Sign1) body
+      // Edit: this cannot be a DELETE, DELETE with body is not allowed in Azure
+      // instead it needs to be a POST action
       make_endpoint(
         "/proposals/{proposal_id}/withdraw",
         HTTP_POST,
