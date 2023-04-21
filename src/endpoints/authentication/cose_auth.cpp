@@ -25,7 +25,7 @@ namespace ccf
       "ccf.gov.msg.created_at";
 
     std::pair<ccf::GovernanceProtectedHeader, Signature>
-    extract_protected_header_and_signature(
+    extract_gov_protected_header_and_signature(
       const std::vector<uint8_t>& cose_sign1)
     {
       ccf::GovernanceProtectedHeader parsed;
@@ -192,7 +192,7 @@ namespace ccf
     }
 
     auto [phdr, cose_signature] =
-      cose::extract_protected_header_and_signature(ctx->get_request_body());
+      cose::extract_gov_protected_header_and_signature(ctx->get_request_body());
 
     if (!cose::is_ecdsa_alg(phdr.alg))
     {
