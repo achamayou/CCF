@@ -788,11 +788,11 @@ namespace ccf
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_NO_CONTENT);
         return;
       };
-      // TODO: this can be either
-      // an action (as per https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md#performing-an-action)
-      // in which case it becomes POST /member:ack
-      // or it could become an idempotent POST /ack/{member_id} resource
-      make_endpoint("/ack", HTTP_POST, ack, member_sig_only_policies("ack"))
+      // TODO: this is idempotent, and creates a resource (an ack on the ledger), and so becomes POST /ack/{member_id}
+      // it starts returning the input document, without the authn envelope, on success
+      // {"state_digest": "..."} needs to become {"stateDigest": "..."}
+      // also needs to use MemberCOSESign1AuthnPolicy_v2, with camelCase for the header parameters
+       make_endpoint("/ack", HTTP_POST, ack, member_sig_only_policies("ack"))
         .set_openapi_summary(
           "Provide a member endorsement of a service state digest")
         .set_auto_schema<StateDigest, void>()
@@ -840,13 +840,11 @@ namespace ccf
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
         return;
       };
-      // TODO: this can be either
-      // an action (as per https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md#performing-an-action)
-      // in which case it becomes POST /member:stateDigest
-      // or it could become a resource behind a GET /stateDigest/{member_id}
-      // a problem with the latter is that GET cannot contain a (COSE Sign1 in this case) body for authentication
-      // because this creates a write on the ledger, this is also not something we want unauthenticated
-      // a POST /stateDigest/{member_id} seems possible too, returning a 201 created with the new state digest
+      // TODO: this becomes POST /stateDigest/{member_id} because it is logically idempotent, despite creating a fresh stateDigest in place every time,
+      // ie. it is safe to call multiple times for the user, and no specific handling is necessary other than retry on errors, timeouts etc
+      // it continues to return the input document, without the authn envelope, on success
+      // {"state_digest": "..."} needs to become {"stateDigest": "..."}
+      // also needs to use MemberCOSESign1AuthnPolicy_v2, with camelCase for the header parameters
       make_endpoint(
         "/ack/update_state_digest",
         HTTP_POST,
@@ -952,6 +950,7 @@ namespace ccf
           ctx.rpc_ctx->set_response_status(HTTP_STATUS_OK);
           return;
         };
+      // TODO: this needs to adjust its payload to return JSON with camlCase fields
       make_endpoint(
         "/encrypted_recovery_share/{member_id}",
         HTTP_GET,
@@ -1095,6 +1094,12 @@ namespace ccf
       // TODO: this can also either become an action
       // POST /recovery-share:submit
       // or we can think of it as a resource POST /recovery-share/{member_id}
+
+      // TODO: this becomes POST /recoveryShare/{member_id} because it is logically idempotent, and safe to call repeatedly
+      // ie. it is safe to call multiple times for the user, and no specific handling is necessary other than retry on errors, timeouts etc
+      // it continues to return the input document, without the authn envelope, on success
+      // {"state_digest": "..."} needs to become {"stateDigest": "..."}
+      // also needs to use MemberCOSESign1AuthnPolicy_v2, with camelCase for the header parameters
       make_endpoint(
         "/recovery_share",
         HTTP_POST,
