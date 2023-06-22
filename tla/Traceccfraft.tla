@@ -9,12 +9,7 @@ RaftMsgType ==
 LeadershipState ==
     Leader :> "Leader" @@ Follower :> "Follower" @@ Candidate :> "Candidate" @@ Pending :> "Pending"
 
-\* In:  <<[idx |-> 0, nodes |-> [0 |-> [address |-> ":"]], rid |-> 0]>>
-\* Out: (0 :> {0})
-ToConfigurations(c) ==
-    IF c = <<>> 
-    THEN (0 :> {})
-    ELSE FoldSeq(LAMBDA x,y: (x.idx :> DOMAIN x.nodes) @@ y, <<>>, c)
+ToConfiguration(c) == (c.idx - 1 :> DOMAIN c.nodes)
 
 IsAppendEntriesRequest(msg, dst, src, logline) ==
     (*
@@ -120,7 +115,7 @@ TraceInit ==
      \* (see  \E c \in SUBSET Servers: ...  in ccraft!InitReconfigurationVars).
     /\ TraceLog[1].msg.function = "add_configuration"
     /\ ts = TraceLog[1].h_ts
-    /\ ToConfigurations(<<TraceLog[1].msg.new_configuration>>) = configurations[TraceLog[1].msg.state.node_id]
+    /\ ToConfiguration(TraceLog[1].msg.new_configuration) = configurations[TraceLog[1].msg.state.node_id]
 
 -------------------------------------------------------------------------------------
 
@@ -291,7 +286,7 @@ IsRcvRequestVoteResponse ==
 IsBecomeFollower ==
     /\ IsEvent("become_follower")
     /\ state[logline.msg.state.node_id] \in {Follower, Pending}
-    /\ configurations[logline.msg.state.node_id] = ToConfigurations(logline.msg.configurations)
+    /\ configurations[logline.msg.state.node_id] = ToConfiguration(logline.msg.configurations)
     /\ UNCHANGED vars \* UNCHANGED implies that it doesn't matter if we prime the previous variables.
 
 IsCheckQuorum ==
