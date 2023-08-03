@@ -222,15 +222,20 @@ void store_parquet_results(ArgumentParser args, ParquetData data_handler)
         raw_response_builder.Append(raw_response.data(), raw_response.size()));
     }
 
+    arrow::UInt32Builder status_code_builder(arrow::uint32(), arrow::default_memory_pool());
+    PARQUET_THROW_NOT_OK(status_code_builder.AppendValues(data_handler.status_code));
+
     auto table = arrow::Table::Make(
       arrow::schema({
         arrow::field("messageID", arrow::utf8()),
         arrow::field("receiveTime", us_timestamp_type),
         arrow::field("rawResponse", arrow::binary()),
+        arrow::field("statusCode", arrow::uint32())
       }),
       {message_id_builder.Finish().ValueOrDie(),
        receive_time_builder.Finish().ValueOrDie(),
-       raw_response_builder.Finish().ValueOrDie()});
+       raw_response_builder.Finish().ValueOrDie(),
+       status_code_builder.Finish().ValueOrDie()});
 
     std::shared_ptr<arrow::io::FileOutputStream> outfile;
     PARQUET_ASSIGN_OR_THROW(
@@ -274,6 +279,7 @@ int main(int argc, char** argv)
 
   // Store responses until they are processed to be written in parquet
   std::vector<std::vector<uint8_t>> resp_text(data_handler.ids.size());
+  std::vector<uint32_t> resp_status_code(data_handler.ids.size());
 
   LOG_INFO_FMT("Start Request Submission");
 
@@ -298,7 +304,9 @@ int main(int argc, char** argv)
           connection->bytes_available() or
           ridx - read_reqs >= args.max_inflight_requests)
         {
-          resp_text[read_reqs] = connection->read_raw_response();
+          const auto resp = connection->read_response();
+          resp_text[read_reqs] = resp.body;
+          resp_status_code[read_reqs] = resp.status;
           clock_gettime(CLOCK_MONOTONIC, &end[read_reqs]);
           read_reqs++;
         }
@@ -310,7 +318,9 @@ int main(int argc, char** argv)
       // Read remaining responses
       while (read_reqs < requests_size)
       {
-        resp_text[read_reqs] = connection->read_raw_response();
+        const auto resp = connection->read_response();
+        resp_text[read_reqs] = resp.body;
+        resp_status_code[read_reqs] = resp.status;
         clock_gettime(CLOCK_MONOTONIC, &end[read_reqs]);
         read_reqs++;
       }
@@ -332,6 +342,7 @@ int main(int argc, char** argv)
   for (size_t req = 0; req < requests_size; req++)
   {
     data_handler.raw_response.push_back(resp_text[req]);
+    data_handler.status_code.push_back(resp_status_code[req]);
     size_t send_time = start[req].tv_sec * 1'000'000 + start[req].tv_nsec / 1000;
     size_t response_time = end[req].tv_sec * 1'000'000 + end[req].tv_nsec / 1000;
     data_handler.send_time.push_back(send_time);

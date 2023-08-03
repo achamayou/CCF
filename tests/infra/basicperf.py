@@ -378,6 +378,7 @@ def run(args):
                 agg = pl.concat(agg, rechunk=True)
                 LOG.info("Aggregate results")
                 print(agg)
+                print(agg.groupby("statusCode").agg(pl.count()))
                 agg_path = os.path.join(
                     network.common_dir, "aggregated_basicperf_output.parquet"
                 )

@@ -14,6 +14,7 @@ public:
   std::vector<std::string> ids;
   std::vector<std::vector<uint8_t>> request;
   std::vector<std::vector<uint8_t>> raw_response;
+  std::vector<uint32_t> status_code;
   std::vector<int64_t> send_time;
   std::vector<int64_t> response_time;
 };
