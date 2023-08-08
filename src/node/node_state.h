@@ -614,6 +614,7 @@ namespace ccf
 
           if (status != HTTP_STATUS_OK)
           {
+            return;
             const auto& location = headers.find(http::headers::LOCATION);
             if (
               status == HTTP_STATUS_PERMANENT_REDIRECT &&

@@ -21,6 +21,7 @@ import copy
 import json
 import time
 import http
+import traceback
 
 import ccf._versionifier
 
@@ -627,6 +628,7 @@ class Node:
         **kwargs,
     ):
         if self.network_state == NodeNetworkState.stopped:
+            traceback.print_exc()
             raise RuntimeError(
                 f"Cannot create client for node {self.local_node_id} as node is stopped"
             )

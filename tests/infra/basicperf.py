@@ -353,7 +353,7 @@ def run(args):
                         statistics[
                             "initial_primary_shutdown_time"
                         ] = datetime.datetime.now().isoformat()
-                        primary.stop()
+                        # primary.stop()
                         primary_has_stopped = True
                         old_primary = primary
                         # primary, _ = network.wait_for_new_primary(primary)

@@ -329,7 +329,7 @@ class Network:
         read_only_ledger_dirs=None,
         from_snapshot=True,
         snapshots_dir=None,
-        wait_for_target_to_become_primary=True,
+        wait_for_target_to_become_primary=False,
         **kwargs,
     ):
         # Contact primary if no target node is set
@@ -388,8 +388,9 @@ class Network:
 
         if wait_for_target_to_become_primary:
             current_primary, _ = self.find_primary()
-            while current_primary != target_node:
-                current_primary, _ = self.find_primary()
+            current_primary.stop()
+        #     while current_primary != target_node:
+        #         current_primary, _ = self.find_primary()
 
         node.join(
             lib_name=lib_name,
