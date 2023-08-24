@@ -154,9 +154,36 @@ namespace ccf::js
     return W(JS_Call(ctx, f, JS_UNDEFINED, argv.size(), argvn.data()));
   }
 
+  static void * wrapped_js_def_malloc(JSMallocState *s, size_t size)
+  {
+    const auto ptr = js_def_malloc(s, size);
+    if (ptr == nullptr)
+    {
+      throw std::bad_alloc(); // Replace with QJS specific exceptions
+    }
+    return ptr;
+  }
+
+  static void * wrapped_js_def_realloc(JSMallocState *s, void *ptr_, size_t size)
+  {
+    const auto ptr = js_def_realloc(s, ptr_, size);
+    if (ptr == nullptr)
+    {
+      throw std::bad_alloc(); // Replace with QJS specific exceptions
+    }
+    return ptr;
+  }
+
+  static const JSMallocFunctions wrapped_malloc_funcs = {
+    .js_malloc = wrapped_js_def_malloc,
+    .js_free = js_def_free,
+    .js_realloc = wrapped_js_def_realloc,
+    .js_malloc_usable_size = js_def_malloc_usable_size
+  };
+
   Runtime::Runtime(kv::Tx* tx)
   {
-    rt = JS_NewRuntime();
+    rt = JS_NewRuntime2(&wrapped_malloc_funcs, nullptr);
     if (rt == nullptr)
     {
       throw std::runtime_error("Failed to initialise QuickJS runtime");

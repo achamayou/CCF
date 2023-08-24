@@ -1696,7 +1696,10 @@ static inline size_t js_def_malloc_usable_size(void *ptr)
 #endif
 }
 
-static void *js_def_malloc(JSMallocState *s, size_t size)
+// vvv CCF Patch vvv
+// Expose functions to allow wrapping (remove static)
+void *js_def_malloc(JSMallocState *s, size_t size)
+// ^^^
 {
     void *ptr;
 
@@ -1715,7 +1718,10 @@ static void *js_def_malloc(JSMallocState *s, size_t size)
     return ptr;
 }
 
-static void js_def_free(JSMallocState *s, void *ptr)
+// vvv CCF Patch vvv
+// Expose functions to allow wrapping (remove static)
+void js_def_free(JSMallocState *s, void *ptr)
+// ^^^
 {
     if (!ptr)
         return;
@@ -1725,7 +1731,10 @@ static void js_def_free(JSMallocState *s, void *ptr)
     free(ptr);
 }
 
-static void *js_def_realloc(JSMallocState *s, void *ptr, size_t size)
+// vvv CCF Patch vvv
+// Expose functions to allow wrapping (remove static)
+void *js_def_realloc(JSMallocState *s, void *ptr, size_t size)
+// ^^^
 {
     size_t old_size;
 
