@@ -698,6 +698,15 @@ namespace aft
             break;
           }
 
+          case raft_request_pre_vote:
+          {
+            RequestPreVote r =
+              channels->template recv_authenticated<RequestPreVote>(
+                from, data, size);
+            recv_request_pre_vote(from, r);
+            break;
+          }
+
           default:
           {
             RAFT_FAIL_FMT("Unhandled AFT message type: {}", type);
@@ -1639,6 +1648,21 @@ namespace aft
         to, ccf::NodeMsgType::consensus_msg, response);
     }
 
+    void send_request_pre_vote_response(const ccf::NodeId& to, bool answer)
+    {
+      RAFT_INFO_FMT(
+        "Send request pre-vote response from {} to {}: {}",
+        state->node_id,
+        to,
+        answer);
+
+      RequestPreVoteResponse response = {
+        {raft_request_pre_vote_response}, state->current_view, answer};
+
+      channels->send_authenticated(
+        to, ccf::NodeMsgType::consensus_msg, response);
+    }
+
     void recv_request_vote_response(
       const ccf::NodeId& from, RequestVoteResponse r)
     {
@@ -1739,6 +1763,75 @@ namespace aft
       {
         RAFT_INFO_FMT("Ignoring propose request vote from {}", from);
       }
+    }
+
+    void recv_request_pre_vote(const ccf::NodeId& from, RequestPreVote rpv)
+    {
+      std::lock_guard<ccf::pal::Mutex> guard(state->lock);
+
+#ifdef CCF_RAFT_TRACING
+      nlohmann::json j = {};
+      j["function"] = "recv_request_pre_vote";
+      j["packet"] = rpv;
+      j["state"] = *state;
+      j["from_node_id"] = from;
+      j["committable_indices"] = committable_indices;
+      RAFT_TRACE_JSON_OUT(j);
+#endif
+
+      if (state->current_view > rpv.term)
+      {
+        // Early reject, since our term is strictly later than the received
+        // term.
+        RAFT_DEBUG_FMT(
+          "Recv request pre-vote to {} from {}: our term is later ({} > {})",
+          state->node_id,
+          from,
+          state->current_view,
+          rpv.term);
+        send_request_pre_vote_response(from, false);
+        return;
+      }
+
+      if (leader_id.has_value())
+      {
+        // Early reject, we already know the leader in the current term.
+        RAFT_DEBUG_FMT(
+          "Recv request pre-vote to {} from {}: leader {} already known in "
+          "term {}",
+          state->node_id,
+          from,
+          leader_id.value(),
+          state->current_view);
+        send_request_pre_vote_response(from, false);
+        return;
+      }
+
+      // If the candidate's committable log is at least as up-to-date as ours,
+      // pre-vote yes, we may vote for them in a later term.
+      const auto last_committable_idx = last_committable_index();
+      const auto term_of_last_committable_idx =
+        get_term_internal(last_committable_idx);
+
+      const auto answer = (rpv.term >= term_of_last_committable_idx) ||
+        ((rpv.term == term_of_last_committable_idx) &&
+         (rpv.last_committable_idx >= last_committable_idx));
+
+      if (answer)
+      {
+        send_request_pre_vote_response(from, true);
+      }
+      else
+      {
+        RAFT_INFO_FMT(
+          "Pre-voting against candidate at {}.{} because local state is at "
+          "{}.{}",
+          rpv.term,
+          rpv.last_committable_idx,
+          term_of_last_committable_idx,
+          last_committable_idx);
+      }
+      send_request_pre_vote_response(from, false);
     }
 
     void restart_election_timeout()

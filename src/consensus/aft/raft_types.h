@@ -100,6 +100,8 @@ namespace aft
     raft_request_vote,
     raft_request_vote_response,
     raft_propose_request_vote,
+    raft_request_pre_vote,
+    raft_request_pre_vote_response,
   };
   DECLARE_JSON_ENUM(
     RaftMsgType,
@@ -112,6 +114,9 @@ namespace aft
       {RaftMsgType::raft_request_vote, "raft_request_vote"},
       {RaftMsgType::raft_request_vote_response, "raft_request_vote_response"},
       {RaftMsgType::raft_propose_request_vote, "raft_propose_request_vote"},
+      {RaftMsgType::raft_request_pre_vote, "raft_request_pre_vote"},
+      {RaftMsgType::raft_request_pre_vote_response,
+       "raft_request_pre_vote_response"},
     });
 
 #pragma pack(push, 1)
@@ -200,6 +205,22 @@ namespace aft
   };
   DECLARE_JSON_TYPE_WITH_BASE(ProposeRequestVote, RaftHeader);
   DECLARE_JSON_REQUIRED_FIELDS(ProposeRequestVote, term);
+
+  struct RequestPreVote : RaftHeader
+  {
+    Term term;
+    Index last_committable_idx;
+  };
+  DECLARE_JSON_TYPE_WITH_BASE(RequestPreVote, RaftHeader);
+  DECLARE_JSON_REQUIRED_FIELDS(RequestPreVote, term, last_committable_idx);
+
+  struct RequestPreVoteResponse : RaftHeader
+  {
+    Term term;
+    bool vote_granted;
+  };
+  DECLARE_JSON_TYPE_WITH_BASE(RequestPreVoteResponse, RaftHeader);
+  DECLARE_JSON_REQUIRED_FIELDS(RequestPreVoteResponse, term);
 
 #pragma pack(pop)
 }
