@@ -112,6 +112,8 @@ namespace aft
       size_t quorum;
     };
     std::map<Index, Votes> votes_for_me;
+    // Keep track of pre-votes in each active configuration
+    std::map<Index, Votes> pre_votes_for_me;
 
     std::optional<kv::RetirementPhase> retirement_phase = std::nullopt;
     std::chrono::milliseconds timeout_elapsed;
@@ -707,6 +709,15 @@ namespace aft
             break;
           }
 
+          case raft_request_pre_vote_response:
+          {
+            RequestPreVoteResponse r =
+              channels->template recv_authenticated<RequestPreVoteResponse>(
+                from, data, size);
+            recv_request_pre_vote_response(from, r);
+            break;
+          }
+
           default:
           {
             RAFT_FAIL_FMT("Unhandled AFT message type: {}", type);
@@ -801,8 +812,8 @@ namespace aft
           can_endorse_primary() && ticking &&
           timeout_elapsed >= election_timeout)
         {
-          // Start an election.
-          become_candidate();
+          // Attempt to start an election.
+          initiate_pre_vote();
         }
       }
     }
@@ -1502,6 +1513,32 @@ namespace aft
       update_commit();
     }
 
+    void send_request_pre_vote(const ccf::NodeId& to)
+    {
+      auto last_committable_idx = last_committable_index();
+      RAFT_INFO_FMT(
+        "Send request pre-vote from {} to {} at {}",
+        state->node_id,
+        to,
+        last_committable_idx);
+      CCF_ASSERT(last_committable_idx >= state->commit_idx, "lci < ci");
+
+      RequestPreVote rpv = {
+        {raft_request_pre_vote}, state->current_view, last_committable_idx};
+
+#ifdef CCF_RAFT_TRACING
+      nlohmann::json j = {};
+      j["function"] = "send_request_pre_vote";
+      j["packet"] = rpv;
+      j["state"] = *state;
+      j["to_node_id"] = to;
+      j["committable_indices"] = committable_indices;
+      RAFT_TRACE_JSON_OUT(j);
+#endif
+
+      channels->send_authenticated(to, ccf::NodeMsgType::consensus_msg, rpv);
+    }
+
     void send_request_vote(const ccf::NodeId& to)
     {
       auto last_committable_idx = last_committable_index();
@@ -1663,6 +1700,73 @@ namespace aft
         to, ccf::NodeMsgType::consensus_msg, response);
     }
 
+    void recv_request_pre_vote_response(
+      const ccf::NodeId& from, RequestPreVoteResponse r)
+    {
+      std::lock_guard<ccf::pal::Mutex> guard(state->lock);
+
+#ifdef CCF_RAFT_TRACING
+      nlohmann::json j = {};
+      j["function"] = "recv_request_pre_vote_response";
+      j["packet"] = r;
+      j["state"] = *state;
+      j["from_node_id"] = from;
+      j["committable_indices"] = committable_indices;
+      RAFT_TRACE_JSON_OUT(j);
+#endif
+
+      // Ignore if we don't recognise the node.
+      auto node = all_other_nodes.find(from);
+      if (node == all_other_nodes.end())
+      {
+        RAFT_DEBUG_FMT(
+          "Recv request pre-vote response to {} from {}: unknown node",
+          state->node_id,
+          from);
+        return;
+      }
+
+      if (state->current_view < r.term)
+      {
+        RAFT_DEBUG_FMT(
+          "Recv request pre-vote response to {} from {}: their term is more recent "
+          "({} < {})",
+          state->node_id,
+          from,
+          state->current_view,
+          r.term);
+        become_aware_of_new_term(r.term);
+        return;
+      }
+      else if (state->current_view != r.term)
+      {
+        // Ignore as it is stale.
+        RAFT_DEBUG_FMT(
+          "Recv request pre-vote response to {} from {}: stale ({} != {})",
+          state->node_id,
+          from,
+          state->current_view,
+          r.term);
+        return;
+      }
+      else if (!r.vote_granted)
+      {
+        // Do nothing.
+        RAFT_INFO_FMT(
+          "Recv request pre-vote response to {} from {}: they voted no",
+          state->node_id,
+          from);
+        return;
+      }
+
+      RAFT_INFO_FMT(
+        "Recv request pre-vote response to {} from {}: they voted yes",
+        state->node_id,
+        from);
+
+      add_pre_vote_for_me(from);
+    }
+
     void recv_request_vote_response(
       const ccf::NodeId& from, RequestVoteResponse r)
     {
@@ -1783,7 +1887,7 @@ namespace aft
       {
         // Early reject, since our term is strictly later than the received
         // term.
-        RAFT_DEBUG_FMT(
+        RAFT_INFO_FMT(
           "Recv request pre-vote to {} from {}: our term is later ({} > {})",
           state->node_id,
           from,
@@ -1792,19 +1896,15 @@ namespace aft
         send_request_pre_vote_response(from, false);
         return;
       }
-
-      if (leader_id.has_value())
+      else if (state->current_view < rpv.term)
       {
-        // Early reject, we already know the leader in the current term.
-        RAFT_DEBUG_FMT(
-          "Recv request pre-vote to {} from {}: leader {} already known in "
-          "term {}",
+        RAFT_INFO_FMT(
+          "Recv request pre-vote to {} from {}: their term is later ({} < {})",
           state->node_id,
           from,
-          leader_id.value(),
-          state->current_view);
-        send_request_pre_vote_response(from, false);
-        return;
+          state->current_view,
+          rpv.term);
+        become_aware_of_new_term(rpv.term);
       }
 
       // If the candidate's committable log is at least as up-to-date as ours,
@@ -1830,8 +1930,8 @@ namespace aft
           rpv.last_committable_idx,
           term_of_last_committable_idx,
           last_committable_idx);
+        send_request_pre_vote_response(from, false);
       }
-      send_request_pre_vote_response(from, false);
     }
 
     void restart_election_timeout()
@@ -1841,6 +1941,16 @@ namespace aft
       timeout_elapsed = std::chrono::milliseconds(distrib(rand));
     }
 
+    void reset_pre_votes_for_me()
+    {
+      pre_votes_for_me.clear();
+      for (auto const& conf : configurations)
+      {
+        pre_votes_for_me[conf.idx].quorum = get_quorum(conf.nodes.size());
+        pre_votes_for_me[conf.idx].votes.clear();
+      }
+    }
+
     void reset_votes_for_me()
     {
       votes_for_me.clear();
@@ -1848,6 +1958,31 @@ namespace aft
       {
         votes_for_me[conf.idx].quorum = get_quorum(conf.nodes.size());
         votes_for_me[conf.idx].votes.clear();
+      }
+    }
+
+    void initiate_pre_vote()
+    {
+      RAFT_INFO_FMT(
+        "Initiate pre-vote {}: {}", state->node_id, state->current_view);
+
+#ifdef CCF_RAFT_TRACING
+      nlohmann::json j = {};
+      j["function"] = "initiate_pre_vote";
+      j["state"] = *state;
+      j["configurations"] = configurations;
+      j["committable_indices"] = committable_indices;
+      RAFT_TRACE_JSON_OUT(j);
+#endif
+      reset_pre_votes_for_me();
+      add_pre_vote_for_me(state->node_id);
+
+      restart_election_timeout();
+      reset_last_ack_timeouts();
+
+      for (auto const& node : all_other_nodes)
+      {
+        send_request_pre_vote(node.first);
       }
     }
 
@@ -2159,6 +2294,58 @@ namespace aft
       if (is_elected)
       {
         become_leader();
+      }
+    }
+
+    void add_pre_vote_for_me(const ccf::NodeId& from)
+    {
+      if (configurations.empty())
+      {
+        LOG_INFO_FMT(
+          "Not voting for myself {} due to lack of a configuration.",
+          state->node_id);
+        return;
+      }
+
+      // Add vote for from node in each configuration where it is present
+      for (auto const& conf : configurations)
+      {
+        auto const& nodes = conf.nodes;
+        if (nodes.find(from) == nodes.end())
+        {
+          // from node is no longer in any active configuration.
+          continue;
+        }
+
+        pre_votes_for_me[conf.idx].votes.insert(from);
+        RAFT_INFO_FMT(
+          "Node {} pre-voted for {} in configuration {} with quorum {}",
+          from,
+          state->node_id,
+          conf.idx,
+          pre_votes_for_me[conf.idx].quorum);
+      }
+
+      // We need a quorum of votes in _all_ configurations to become (a
+      // plausible) candidate
+      bool is_eligible = true;
+      for (auto const& v : votes_for_me)
+      {
+        auto const& quorum = v.second.quorum;
+        auto const& pre_votes = v.second.votes;
+
+        if (pre_votes.size() < quorum)
+        {
+          is_eligible = false;
+          break;
+        }
+      }
+
+      if (is_eligible)
+      {
+        RAFT_INFO_FMT(
+          "Node {} is eligible to become candidate", state->node_id);
+        become_candidate();
       }
     }
 
