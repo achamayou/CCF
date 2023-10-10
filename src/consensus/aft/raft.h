@@ -813,7 +813,8 @@ namespace aft
           timeout_elapsed >= election_timeout)
         {
           // Attempt to start an election.
-          initiate_pre_vote();
+          // initiate_pre_vote();
+          become_candidate();
         }
       }
     }
@@ -1885,8 +1886,8 @@ namespace aft
 
       if (state->current_view > rpv.term)
       {
-        // Early reject, since our term is strictly later than the received
-        // term.
+        // Early reject, since our term is strictly later than the term
+        // of the node that initiated the pre-vote: we would not vote for them.
         RAFT_INFO_FMT(
           "Recv request pre-vote to {} from {}: our term is later ({} > {})",
           state->node_id,
@@ -1913,12 +1914,14 @@ namespace aft
       const auto term_of_last_committable_idx =
         get_term_internal(last_committable_idx);
 
-      const auto answer = (rpv.term >= term_of_last_committable_idx) ||
+      const auto answer = (rpv.term > term_of_last_committable_idx) ||
         ((rpv.term == term_of_last_committable_idx) &&
          (rpv.last_committable_idx >= last_committable_idx));
 
       if (answer)
       {
+        // TODO: must check if we have a recent heartbeat from the primary,
+        // and if not, reject the pre-vote.
         send_request_pre_vote_response(from, true);
       }
       else
@@ -2151,6 +2154,7 @@ namespace aft
 
       state->current_view = term;
       voted_for.reset();
+      reset_pre_votes_for_me();
       reset_votes_for_me();
       become_follower();
       is_new_follower = true;
@@ -2334,6 +2338,7 @@ namespace aft
         auto const& quorum = v.second.quorum;
         auto const& pre_votes = v.second.votes;
 
+        RAFT_INFO_FMT("{} PRE-VOTES IN CONFIG {}, QUORUM {}", pre_votes.size(), v.first, quorum);
         if (pre_votes.size() < quorum)
         {
           is_eligible = false;
