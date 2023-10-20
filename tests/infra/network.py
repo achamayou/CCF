@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from infra.consortium import slurp_file
 from infra.snp import IS_SNP
 from collections import deque
-
+from alive_progress import alive_bar
 
 from loguru import logger as LOG
 
@@ -1395,24 +1395,26 @@ class Network:
         error = TimeoutError
         logs = []
 
-        while time.time() < end_time:
-            try:
-                logs = []
-                new_primary, new_term = self.find_primary(
-                    nodes=nodes, log_capture=logs, **kwargs
-                )
-                if new_primary.node_id != old_primary.node_id:
-                    flush_info(logs, None)
-                    delay = time.time() - start_time
-                    LOG.info(
-                        f"New primary after {delay:.2f}s is {new_primary.local_node_id} ({new_primary.node_id}) in term {new_term}"
+        with alive_bar(10) as bar:
+            while time.time() < end_time:
+                try:
+                    logs = []
+                    new_primary, new_term = self.find_primary(
+                        nodes=nodes, log_capture=logs, **kwargs
                     )
-                    return (new_primary, new_term)
-            except PrimaryNotFound:
-                error = PrimaryNotFound
-            except Exception:
-                pass
-            time.sleep(0.1)
+                    if new_primary.node_id != old_primary.node_id:
+                        flush_info(logs, None)
+                        delay = time.time() - start_time
+                        LOG.info(
+                            f"New primary after {delay:.2f}s is {new_primary.local_node_id} ({new_primary.node_id}) in term {new_term}"
+                        )
+                        return (new_primary, new_term)
+                except PrimaryNotFound:
+                    error = PrimaryNotFound
+                except Exception:
+                    pass
+                time.sleep(0.1)
+                bar()
         flush_info(logs, None)
         raise error(f"A new primary was not elected after {timeout} seconds")
 
