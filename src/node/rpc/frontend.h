@@ -73,6 +73,10 @@ namespace ccf
       const std::shared_ptr<ccf::RpcContextImpl>& ctx,
       const endpoints::EndpointDefinitionPtr& endpoint)
     {
+      LOG_DEBUG_FMT("Executed endpoint {} {}, returned status {}",
+         endpoint->dispatch.verb.c_str(),
+         endpoint->full_uri_path,
+         ctx->get_response_status());
       int cat = ctx->get_response_status() / 100;
       switch (cat)
       {

@@ -486,6 +486,11 @@ namespace ccf::endpoints
         "derived implementation to handle derived endpoint instances");
     }
 
+
+    LOG_DEBUG_FMT("Executing endpoint {} {}",
+         endpoint->dispatch.verb.c_str(),
+         endpoint->full_uri_path);
+
     endpoint->func(ctx);
   }
 
