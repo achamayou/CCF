@@ -9,6 +9,9 @@ parameters:
     Virtual:
       container: virtual
       pool: ado-virtual-release
+    SNPCC:
+      container: snp
+      pool: ado-virtual-release
 
   build:
     common:
@@ -81,9 +84,22 @@ jobs:
           depends_on: configure
           installExtendedTestingTools: true
 
+      - template: common.yml
+        parameters:
+          target: SNPCC
+          env: ${{ parameters.env.SNPCC }}
+          cmake_args: "${{ parameters.build.common.cmake_args }} ${{ parameters.build.release.cmake_args }} ${{ parameters.build.SNPCC.cmake_args }}"
+          cmake_env: "${{ parameters.build.SNPCC.cmake_env }}"
+          suffix: "Release"
+          artifact_name: "SNPCC_Release"
+          ctest_filter: "${{ parameters.test.release.ctest_args }}"
+          depends_on: configure
+          installExtendedTestingTools: true
+
       - template: release.yml
         parameters:
           env: ${{ parameters.env.Hosted }}
           depends_on:
             - Checks
             - Virtual_Release
+            - SNPCC_Release
