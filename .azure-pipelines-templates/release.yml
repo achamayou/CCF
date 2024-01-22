@@ -43,7 +43,7 @@ jobs:
           inlineOperation: |
             [
               {
-                "KeyCode" : "CP-450778-Pgp",
+                "KeyCode" : "CP-500207-Pgp",
                 "OperationCode" : "LinuxSign",
                 "Parameters" : {},
                 "ToolName" : "sign",
