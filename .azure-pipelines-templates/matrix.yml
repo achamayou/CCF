@@ -77,6 +77,17 @@ jobs:
 
       - template: common.yml
         parameters:
+          target: SGX
+          env: ${{ parameters.env.SGX }}
+          cmake_args: "${{ parameters.build.common.cmake_args }} ${{ parameters.build.release.cmake_args }} ${{ parameters.build.SGX.cmake_args }}"
+          suffix: "Release"
+          artifact_name: "SGX_Release"
+          ctest_filter: "${{ parameters.test.release.ctest_args }}"
+          depends_on: configure
+          installExtendedTestingTools: true
+
+      - template: common.yml
+        parameters:
           target: Virtual
           env: ${{ parameters.env.Virtual }}
           cmake_args: "${{ parameters.build.common.cmake_args }} ${{ parameters.build.release.cmake_args }} ${{ parameters.build.Virtual.cmake_args }}"
