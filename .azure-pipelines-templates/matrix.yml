@@ -1,5 +1,5 @@
 parameters:
-  target: ["Virtual"]
+  target: ["Virtual", "SGX"]
 
   env:
     Hosted:
@@ -12,6 +12,9 @@ parameters:
     SNPCC:
       container: snp
       pool: ado-virtual-release
+    SGX:
+      container: sgx
+      pool: ado-sgx-release
 
   build:
     common:
@@ -103,3 +106,4 @@ jobs:
             - Checks
             - Virtual_Release
             - SNPCC_Release
+            - SGX_Release
