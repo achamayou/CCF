@@ -559,6 +559,14 @@ namespace aft
         return false;
       }
 
+      if (state->membership_state != kv::MembershipState::Retired &&
+          retirement_phase >= kv::RetirementPhase::RetiredCommitted)
+      {
+        RAFT_DEBUG_FMT(
+          "Failed to replicate {} items: retired committed", entries.size());
+        return false;
+      }
+
       if (term != state->current_view)
       {
         RAFT_DEBUG_FMT(
@@ -577,16 +585,6 @@ namespace aft
 
         if (index != state->last_idx + 1)
           return false;
-
-        if (retirement_committable_idx.has_value())
-        {
-          CCF_ASSERT_FMT(
-            index > retirement_committable_idx.value(),
-            "Index {} unexpectedly lower than retirement_committable_idx {}",
-            index,
-            retirement_committable_idx.value());
-          return false;
-        }
 
         RAFT_DEBUG_FMT(
           "Replicated on leader {}: {}{} ({} hooks)",
@@ -878,7 +876,7 @@ namespace aft
     bool can_replicate_unsafe()
     {
       return state->leadership_state == kv::LeadershipState::Leader &&
-        !retirement_committable_idx.has_value();
+        retirement_phase < kv::RetirementPhase::RetiredCommitted;
     }
 
     Index get_commit_idx_unsafe()
@@ -1078,9 +1076,13 @@ namespace aft
       }
 
       // Then check if those append entries extend past our retirement
-      if (is_retired() && retirement_phase >= kv::RetirementPhase::Completed)
+      if (is_retired() && retirement_phase >= kv::RetirementPhase::RetiredCommitted)
       {
         assert(retirement_committable_idx.has_value());
+        // TODO: this needs to be the retired_committed_index, and we need to handle cases where
+        // the AE straddles it: if prev_idx < retired_committed_idx, we need to truncate the AE
+        // and ACK up to the retired_committed_idx. If prev_idx >= retired_committed_idx, we need
+        // to NACK.
         if (r.idx > retirement_committable_idx)
         {
           send_append_entries_response(from, AppendEntriesResponseType::FAIL);
@@ -1878,7 +1880,7 @@ namespace aft
 
     bool can_endorse_primary()
     {
-      return state->membership_state != kv::MembershipState::Retired;
+      return state->membership_state != kv::MembershipState::Retired || retirement_phase < kv::RetirementPhase::RetiredCommitted;
     }
 
   public:
@@ -1895,23 +1897,20 @@ namespace aft
       // receiving a conflicting AppendEntries
       rollback(last_committable_index());
 
-      if (can_endorse_primary())
-      {
-        state->leadership_state = kv::LeadershipState::Follower;
-        RAFT_INFO_FMT(
-          "Becoming follower {}: {}.{}",
-          state->node_id,
-          state->current_view,
-          state->commit_idx);
+      state->leadership_state = kv::LeadershipState::Follower;
+      RAFT_INFO_FMT(
+        "Becoming follower {}: {}.{}",
+        state->node_id,
+        state->current_view,
+        state->commit_idx);
 
 #ifdef CCF_RAFT_TRACING
-        nlohmann::json j = {};
-        j["function"] = "become_follower";
-        j["state"] = *state;
-        j["configurations"] = configurations;
-        RAFT_TRACE_JSON_OUT(j);
+      nlohmann::json j = {};
+      j["function"] = "become_follower";
+      j["state"] = *state;
+      j["configurations"] = configurations;
+      RAFT_TRACE_JSON_OUT(j);
 #endif
-      }
     }
 
     // Called when a replica becomes aware of the existence of a new term
