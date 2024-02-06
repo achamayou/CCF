@@ -282,6 +282,26 @@ logVars == <<log, commitIndex>>
 CommittableIndices(i) ==
     {idx \in DOMAIN log[i] : log[i][idx].contentType = TypeSignature}
 
+
+\* The configurations in the log of server i
+LogConfigurations(i) ==
+    LET cfg_idxs == {idx \in DOMAIN log[i] : log[i][idx].contentType = TypeReconfiguration}
+    IN [idx \in cfg_idxs |-> log[i][idx].configuration]
+
+\* Last committed configuration in a server's log
+LogCurrentConfigurationIndex(i) ==
+    Max({idx \in DOMAIN LogConfigurations(i) : idx <= commitIndex[i]})
+
+\* Configurations in a server's log that are not yet committed
+LogPendingConfigurations(i) ==
+    LET cfg_idxs == {idx \in DOMAIN log[i] : log[i][idx].contentType = TypeReconfiguration /\ idx > commitIndex[i]}
+    IN [idx \in cfg_idxs |-> log[i][idx].configuration]
+
+\* Current configuration plus any pending configurations
+LogActiveConfigurations(i) ==
+    LogPendingConfigurations(i) @@ Restrict(LogConfigurations(i), {LogCurrentConfigurationIndex(i)}) \* That gets empty if there are no committed configurations
+    
+
 LogVarsTypeInv ==
     /\ LogTypeInv
     /\ CommitIndexTypeInv
@@ -1372,9 +1392,12 @@ LogConfigurationConsistentInv ==
            /\ Cardinality(DOMAIN configurations[i]) = 0
         \/
             \* Configurations should have associated reconfiguration txs in the log
-            /\ \A idx \in DOMAIN (configurations[i]) : 
-                /\ log[i][idx].contentType = TypeReconfiguration            
-                /\ log[i][idx].configuration = configurations[i][idx]
+            /\ \A idx \in DOMAIN configurations[i] :
+                configurations[i][idx] = LogConfigurations(i)[idx]
+            \* Node configurations should match LogActiveConfigurations
+            /\ DOMAIN configurations[i] = DOMAIN LogActiveConfigurations(i)
+            \* /\ \A idx \in DOMAIN configurations[i] :
+            \*     configurations[i][idx] = LogActiveConfigurations(i)[idx]
             \* Pending configurations should not be committed yet
             /\ Cardinality(DOMAIN configurations[i]) > 1 
                 => commitIndex[i] < NextConfigurationIndex(i)
