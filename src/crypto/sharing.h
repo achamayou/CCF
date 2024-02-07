@@ -86,6 +86,10 @@ namespace crypto
     }
   };
 
+  // Exposed for testing only
+  using element = uint64_t;
+  element ct_reduce(element x);
+
   /** Sample a secret into @p raw_secret, and split it into @p shares.
    * Enforces 1 < @p threshold <= number of shares.
    *

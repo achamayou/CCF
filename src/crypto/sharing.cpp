@@ -20,24 +20,55 @@ namespace crypto
   using element = uint64_t;
   constexpr element prime = (1ul << 31) - 1ul; // a notorious Mersenne prime
 
-  static element reduce(uint64_t x)
+  /*
+  Constant time version of:
+    static element reduce(element x)
+    {
+      return (x % prime);
+    }
+  Instructions checked against list published by Intel at:
+  https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/resources/data-operand-independent-timing-instructions.html
+  Note that IA32_UARCH_MISC_CTL[DOITM] must be set for this to be guaranteed, as
+  per:
+  https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/best-practices/data-operand-independent-timing-isa-guidance.html
+  This is always the case in SGX, but may not be true elsewhere.
+  */
+  element ct_reduce(element x)
   {
-    return (x % prime);
+    element rv = 0;
+    asm volatile(
+      "movabsq $8589934597, %%rcx\n\t"
+      "movq    %[input], %%rax\n\t"
+      "mulq    %%rcx\n\t"
+      "movq    %[input], %%rax\n\t"
+      "subq    %%rdx, %%rax\n\t"
+      "shrq    %%rax\n\t"
+      "addq    %%rdx, %%rax\n\t"
+      "shrq    $30, %%rax\n\t"
+      "movq    %%rax, %%rcx\n\t"
+      "shlq    $31, %%rcx\n\t"
+      "subq    %%rcx, %%rax\n\t"
+      "addq    %[input], %%rax\n\t"
+      "movq    %%rax, %[output]\n\t"
+      : [output] "=r"(rv)
+      : [input] "r"(x)
+      : "rcx", "rax", "rdx", "cc");
+    return rv;
   }
 
   static element mul(element x, element y)
   {
-    return ((x * y) % prime);
+    return ct_reduce(x * y);
   }
 
   static element add(element x, element y)
   {
-    return ((x + y) % prime);
+    return ct_reduce(x + y);
   }
 
   static element sub(element x, element y)
   {
-    return ((prime + x - y)) % prime;
+    return ct_reduce(prime + x - y);
   }
 
   // naive algorithm, used only to compute coefficients, not for use on secrets!
@@ -157,9 +188,9 @@ namespace crypto
       {
         if (i != j)
         {
-          numerator = mul(numerator, reduce(shares[j].x));
-          denominator =
-            mul(denominator, sub(reduce(shares[j].x), reduce(shares[i].x)));
+          numerator = mul(numerator, ct_reduce(shares[j].x));
+          denominator = mul(
+            denominator, sub(ct_reduce(shares[j].x), ct_reduce(shares[i].x)));
         }
       }
       if (denominator == 0)
@@ -176,7 +207,7 @@ namespace crypto
       element y = 0;
       for (size_t i = 0; i <= degree; i++)
       {
-        y = add(y, mul(lagrange[i], reduce(shares[i].y[limb])));
+        y = add(y, mul(lagrange[i], ct_reduce(shares[i].y[limb])));
       }
       raw_secret.y[limb] = y;
     }

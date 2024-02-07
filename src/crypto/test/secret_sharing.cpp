@@ -130,3 +130,19 @@ TEST_CASE("Serialisation")
 
   REQUIRE(share == new_share);
 }
+
+constexpr element prime = (1ul << 31) - 1ul; // a notorious Mersenne prime
+static element reduce(element x)
+{
+  return (x % prime);
+}
+
+TEST_CASE("Check ct_reduce")
+{
+  std::vector<uint64_t> values = {
+    0, 1, prime, prime + 1, prime * 2, prime * 2 + 1, prime * 3, prime * 3 + 1};
+  for (auto i : values)
+  {
+    REQUIRE_MESSAGE(reduce(i) == ct_reduce(i), std::to_string(i));
+  }
+}
