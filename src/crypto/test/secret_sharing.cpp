@@ -134,15 +134,20 @@ TEST_CASE("Serialisation")
 constexpr element prime = (1ul << 31) - 1ul; // a notorious Mersenne prime
 static element reduce(element x)
 {
+  // Actually CT, as compiled by Clang 11+, but obviously not guaranteed to be so
   return (x % prime);
 }
 
 TEST_CASE("Check ct_reduce")
 {
-  std::vector<uint64_t> values = {
-    0, 1, prime, prime + 1, prime * 2, prime * 2 + 1, prime * 3, prime * 3 + 1};
-  for (auto i : values)
+  for (size_t i = 0; i < (1ul << 16); ++i)
   {
-    REQUIRE_MESSAGE(reduce(i) == ct_reduce(i), std::to_string(i));
+    size_t under = prime * i - 1;
+    size_t over = prime * i;
+    size_t mid = prime * i + (prime / 2);
+
+    REQUIRE_MESSAGE(reduce(under) == ct_reduce(under), std::to_string(under));
+    REQUIRE_MESSAGE(reduce(over) == ct_reduce(over), std::to_string(over));
+    REQUIRE_MESSAGE(reduce(mid) == ct_reduce(mid), std::to_string(mid));
   }
 }

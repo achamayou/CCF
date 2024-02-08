@@ -35,25 +35,19 @@ namespace crypto
   */
   element ct_reduce(element x)
   {
-    element rv = 0;
-    asm volatile(
-      "movabsq $8589934597, %%rcx\n\t"
-      "movq    %[input], %%rax\n\t"
-      "mulq    %%rcx\n\t"
-      "movq    %[input], %%rax\n\t"
-      "subq    %%rdx, %%rax\n\t"
-      "shrq    %%rax\n\t"
-      "addq    %%rdx, %%rax\n\t"
-      "shrq    $30, %%rax\n\t"
-      "movq    %%rax, %%rcx\n\t"
-      "shlq    $31, %%rcx\n\t"
-      "subq    %%rcx, %%rax\n\t"
-      "addq    %[input], %%rax\n\t"
-      "movq    %%rax, %[output]\n\t"
-      : [output] "=r"(rv)
-      : [input] "r"(x)
-      : "rcx", "rax", "rdx", "cc");
-    return rv;
+    // initially, x < 2^64
+    // we compute under-approximations  x/(2^31) of x/prime 
+    uint64_t d;
+    d = x >> 31;
+    x -= d * prime;
+    // after this first reduction, x <= 5*prime + 3  
+    d = x >> 31;
+    x -= d * prime;
+    // after this second reduction, x <= prime + 3
+    d = (x+1) >> 31;
+    x -= d * prime;
+    // d is correct for every x in this range
+    return x;
   }
 
   static element mul(element x, element y)
