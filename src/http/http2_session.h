@@ -506,6 +506,8 @@ namespace http
       return get_stream_responder(http2::DEFAULT_STREAM_ID)
         ->set_on_stream_close_callback(cb);
     }
+
+    void tick() override {} // Not supported on HTTP/2
   };
 
   class HTTP2ClientSession : public HTTP2Session,
@@ -572,5 +574,7 @@ namespace http
       LOG_TRACE_FMT("Closing connection, message handled");
       tls_io->close();
     }
+
+    void tick() override {} // Not supported on HTTP/2
   };
 }

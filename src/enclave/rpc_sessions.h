@@ -199,6 +199,15 @@ namespace ccf
       custom_protocol_subsystem = cpss;
     }
 
+    void tick()
+    {
+      std::lock_guard<ccf::pal::Mutex> guard(lock);
+      for (auto& [_, session_pair]: sessions)
+      {
+        std::get<1>(session_pair)->tick();
+      }
+    }
+
     void report_parsing_error(const ccf::ListenInterfaceID& id) override
     {
       std::lock_guard<ccf::pal::Mutex> guard(lock);

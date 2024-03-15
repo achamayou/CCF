@@ -290,6 +290,8 @@ namespace http
       return true;
     }
 
+    void tick() override {} // Not supported yet
+
     bool start_stream(
       http_status status, const http::HeaderMap& headers) override
     {
@@ -388,6 +390,8 @@ namespace http
       LOG_TRACE_FMT("Closing connection, message handled");
       close_session();
     }
+
+    void tick() override {}
   };
 
   class UnencryptedHTTPSession : public ccf::ThreadedSession
@@ -511,5 +515,7 @@ namespace http
       LOG_TRACE_FMT("Closing connection, message handled");
       close_session();
     }
+
+    void tick() override {}
   };
 }

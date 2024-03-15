@@ -447,5 +447,7 @@ namespace quic
       // ECHO SERVER
       echo();
     }
+
+    void tick() override {} // Not supported on QUIC
   };
 }

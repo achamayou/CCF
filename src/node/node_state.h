@@ -1516,6 +1516,8 @@ namespace ccf
       }
 
       n2n_channels->tick(elapsed);
+
+      rpcsessions->tick();
     }
 
     void tick_end()
