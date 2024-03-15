@@ -96,6 +96,8 @@ namespace http
     std::shared_ptr<ccf::SessionContext> session_ctx;
     ccf::ListenInterfaceID interface_id;
 
+    std::deque<std::pair<ccf::TxID, std::vector<uint8_t>>> pending_responses;
+
   public:
     HTTPServerSession(
       std::shared_ptr<ccf::RPCMap> rpc_map,
@@ -286,11 +288,20 @@ namespace http
       response.set_body(body.data(), body.size());
 
       auto data = response.build_response();
-      tls_io->send_raw(data.data(), data.size());
+      // tls_io->send_raw(data.data(), data.size());
+      pending_responses.emplace_back(ccf::TxID{0, 0}, std::move(data));
+
       return true;
     }
 
-    void tick() override {} // Not supported yet
+    void tick() override {
+      while (!pending_responses.empty())
+      {
+        auto& [tx_id, data] = pending_responses.front();
+        tls_io->send_raw(data.data(), data.size());
+        pending_responses.pop_front();
+      }
+    }
 
     bool start_stream(
       http_status status, const http::HeaderMap& headers) override
