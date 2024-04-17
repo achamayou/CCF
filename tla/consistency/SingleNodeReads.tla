@@ -3,6 +3,7 @@
 
 EXTENDS SingleNode
 
+
 \* Submit new read-only transaction
 RoTxRequestAction ==
     /\ history' = Append(
@@ -24,12 +25,13 @@ RoTxResponseAction ==
             /\ history[j].tx = history[i].tx} = {}
         /\ \E view \in DOMAIN ledgerBranches:
             /\ Len(ledgerBranches[view]) > 0
-            /\ history' = Append(
-                history,[
-                    type |-> RoTxResponse, 
-                    tx |-> history[i].tx, 
-                    observed |-> [seqnum \in DOMAIN ledgerBranches[view] |-> ledgerBranches[view][seqnum].tx],
-                    tx_id |-> <<ledgerBranches[view][Len(ledgerBranches[view])].view, Len(ledgerBranches[view])>>] )
+            /\ LET observableLedgerBranch == SelectSeq(ledgerBranches[view], LAMBDA e : "tx" \in DOMAIN e)
+               IN history' = Append(
+                  history,[
+                      type |-> RoTxResponse, 
+                      tx |-> history[i].tx, 
+                      observed |-> [seqnum \in DOMAIN observableLedgerBranch |-> observableLedgerBranch[seqnum].tx],
+                      tx_id |-> <<ledgerBranches[view][Len(ledgerBranches[view])].view, Len(ledgerBranches[view])>>] )
     /\ UNCHANGED ledgerBranches
 
 NextSingleNodeReadsAction ==

@@ -50,14 +50,17 @@ RwTxRequestAction ==
         )
     /\ UNCHANGED ledgerBranches
 
+
+
 \* Execute a read-write transaction
 RwTxExecuteAction ==
     /\ \E i \in DOMAIN history :
         /\ history[i].type = RwTxRequest
         \* Check transaction has not already been added to a ledger
         /\ \A view \in DOMAIN ledgerBranches: 
-            {seqnum \in DOMAIN ledgerBranches[view]: 
-                history[i].tx = ledgerBranches[view][seqnum].tx} = {}
+            {seqnum \in DOMAIN ledgerBranches[view]:
+                /\ "tx" \in DOMAIN ledgerBranches[view][seqnum] 
+                /\ history[i].tx = ledgerBranches[view][seqnum].tx} = {}
         \* Note that a transaction can be added to any ledger, simulating the fact
         \* that it can be picked up by the current leader or any former leader
         /\ \E view \in DOMAIN ledgerBranches:
@@ -75,14 +78,15 @@ RwTxResponseAction ==
             /\ history[j].type = RwTxResponse
             /\ history[j].tx = history[i].tx} = {}
         /\ \E view \in DOMAIN ledgerBranches:
-            /\ \E seqnum \in DOMAIN ledgerBranches[view]: 
-                /\ history[i].tx = ledgerBranches[view][seqnum].tx
-                /\ history' = Append(
-                    history,[
-                        type |-> RwTxResponse, 
-                        tx |-> history[i].tx, 
-                        observed |-> [x \in 1..seqnum |-> ledgerBranches[view][x].tx],
-                        tx_id |-> <<ledgerBranches[view][seqnum].view, seqnum>>] )
+            /\ LET ledgerBranchForView == SelectSeq(ledgerBranches[view], LAMBDA e : "tx" \in DOMAIN e)
+               IN  \E seqnum \in DOMAIN ledgerBranchForView: 
+                    /\ history[i].tx = ledgerBranchForView[seqnum].tx
+                    /\ history' = Append(
+                        history,[
+                            type |-> RwTxResponse, 
+                            tx |-> history[i].tx, 
+                            observed |-> [x \in 1..seqnum |-> ledgerBranchForView[x].tx],
+                            tx_id |-> <<ledgerBranchForView[seqnum].view, seqnum>>] )
     /\ UNCHANGED ledgerBranches
 
 \* Sending a committed status message
