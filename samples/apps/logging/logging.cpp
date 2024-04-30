@@ -17,6 +17,7 @@
 #include "ccf/indexing/strategy.h"
 #include "ccf/json_handler.h"
 #include "ccf/version.h"
+#include "ccf/endpoints/authentication/js.h"
 
 #include <charconv>
 #define FMT_HEADER_ONLY
@@ -27,6 +28,8 @@ using namespace nlohmann;
 
 namespace loggingapp
 {
+  struct CustomJSEndpoint : public ccf::endpoints::EndpointDefinition {};
+
   // SNIPPET: table_definition
   using RecordsMap = kv::Map<size_t, string>;
   static constexpr auto PUBLIC_RECORDS = "public:records";
@@ -1918,6 +1921,70 @@ namespace loggingapp
         .set_auto_schema<void, std::string>()
         .install();
     }
+
+    ccf::endpoints::EndpointDefinitionPtr find_endpoint(
+      kv::Tx& tx, ccf::RpcContext& rpc_ctx) override
+    {
+      // Look up the endpoint definition
+      // First in the user-defined endpoints, and then fall-back to built-ins
+      const auto method = rpc_ctx.get_method();
+      const auto verb = rpc_ctx.get_request_verb();
+
+      auto endpoints = tx.ro<ccf::endpoints::EndpointsMap>("logging.custom_endpoints");
+      const auto key = ccf::endpoints::EndpointKey{method, verb};
+
+      // Look for a direct match of the given path
+      const auto it = endpoints->get(key);
+      if (it.has_value())
+      {
+        auto endpoint_def = std::make_shared<CustomJSEndpoint>();
+        endpoint_def->dispatch = key;
+        endpoint_def->properties = it.value();
+        endpoint_def->full_uri_path =
+          fmt::format("/{}{}", method_prefix, endpoint_def->dispatch.uri_path);
+        ccf::instantiate_authn_policies(*endpoint_def);
+        return endpoint_def;
+      }
+
+      // TBD templated endpoints
+
+      return ccf::endpoints::EndpointRegistry::find_endpoint(tx, rpc_ctx);
+    }
+
+    void execute_endpoint(
+        ccf::endpoints::EndpointDefinitionPtr e,
+        ccf::endpoints::EndpointContext& endpoint_ctx) override
+    {
+      // Handle endpoint execution
+      // Necessary to create the historical adapter on endpoints declared as such
+      // in the app.json
+      ccf::endpoints::EndpointRegistry::execute_endpoint(e, endpoint_ctx);
+    }
+
+    void execute_request_locally_committed(
+      const CustomJSEndpoint* endpoint,
+      ccf::endpoints::CommandEndpointContext& endpoint_ctx,
+      const ccf::TxID& tx_id)
+    {
+      ccf::endpoints::default_locally_committed_func(endpoint_ctx, tx_id);
+    }
+
+    void execute_endpoint_locally_committed(
+      ccf::endpoints::EndpointDefinitionPtr e,
+      ccf::endpoints::CommandEndpointContext& endpoint_ctx,
+      const ccf::TxID& tx_id) override
+    {
+      auto endpoint = dynamic_cast<const CustomJSEndpoint*>(e.get());
+      if (endpoint != nullptr)
+      {
+        execute_request_locally_committed(endpoint, endpoint_ctx, tx_id);
+        return;
+      }
+
+      ccf::endpoints::EndpointRegistry::execute_endpoint_locally_committed(
+        e, endpoint_ctx, tx_id);
+    }    
+
   };
 }
 
