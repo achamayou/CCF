@@ -11,7 +11,7 @@ JSON=trace.ndjson JVM_OPTIONS=-Dtlc2.tool.queue.IStateQueue=StateDeque ./tlc.sh 
 # State 50: <BackfillLedgerBranches line 144, col 5 to line 155, col 24 of module TraceMultiNodeReads>
 # State 51: <BackfillLedgerBranch line 128, col 5 to line 141, col 24 of module TraceMultiNodeReads>
 # State 52: <IsRwTxExecuteAction line 58, col 5 to line 68, col 67 of module TraceMultiNodeReads>
-$ JSON=trace.ndjson ./tlc.sh consistency/TraceMultiNodeReads.tla | grep State | tail
+JSON=trace.ndjson ./tlc.sh consistency/TraceMultiNodeReads.tla | grep State | tail
 # State 45: <BackfillLedgerBranch line 128, col 5 to line 141, col 24 of module TraceMultiNodeReads>
 # State 46: <IsRwTxExecuteAction line 58, col 5 to line 68, col 67 of module TraceMultiNodeReads>
 # State 47: <IsRwTxResponseAction line 71, col 5 to line 77, col 43 of module TraceMultiNodeReads>
