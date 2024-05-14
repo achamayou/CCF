@@ -30,7 +30,6 @@ namespace ccf::endpoints
   };
 }
 
-
 namespace kv::serialisers
 {
   template <>
@@ -59,7 +58,6 @@ namespace kv::serialisers
     }
   };
 }
-
 
 namespace ccf::endpoints
 {

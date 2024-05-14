@@ -81,68 +81,69 @@ namespace ccf
     }
   }
 
-    static inline void instantiate_authn_policies(ccf::endpoints::EndpointDefinition& endpoint)
+  static inline void instantiate_authn_policies(
+    ccf::endpoints::EndpointDefinition& endpoint)
+  {
+    for (const auto& policy_desc : endpoint.properties.authn_policies)
     {
-      for (const auto& policy_desc : endpoint.properties.authn_policies)
+      if (policy_desc.is_string())
       {
-        if (policy_desc.is_string())
+        const auto policy_name = policy_desc.get<std::string>();
+        auto policy = get_policy_by_name(policy_name);
+        if (policy == nullptr)
         {
-          const auto policy_name = policy_desc.get<std::string>();
-          auto policy = get_policy_by_name(policy_name);
-          if (policy == nullptr)
-          {
-            throw std::logic_error(
-              fmt::format("Unknown auth policy: {}", policy_name));
-          }
-          endpoint.authn_policies.push_back(std::move(policy));
+          throw std::logic_error(
+            fmt::format("Unknown auth policy: {}", policy_name));
         }
-        else
+        endpoint.authn_policies.push_back(std::move(policy));
+      }
+      else
+      {
+        if (policy_desc.is_object())
         {
-          if (policy_desc.is_object())
+          const auto it = policy_desc.find("all_of");
+          if (it != policy_desc.end())
           {
-            const auto it = policy_desc.find("all_of");
-            if (it != policy_desc.end())
+            if (it.value().is_array())
             {
-              if (it.value().is_array())
+              std::vector<std::shared_ptr<ccf::AuthnPolicy>>
+                constituent_policies;
+              for (const auto& val : it.value())
               {
-                std::vector<std::shared_ptr<ccf::AuthnPolicy>>
-                  constituent_policies;
-                for (const auto& val : it.value())
+                if (!val.is_string())
                 {
-                  if (!val.is_string())
-                  {
-                    constituent_policies.clear();
-                    break;
-                  }
-
-                  const auto policy_name = val.get<std::string>();
-                  auto policy = get_policy_by_name(policy_name);
-                  if (policy == nullptr)
-                  {
-                    throw std::logic_error(
-                      fmt::format("Unknown auth policy: {}", policy_name));
-                  }
-                  constituent_policies.push_back(std::move(policy));
+                  constituent_policies.clear();
+                  break;
                 }
 
-                if (!constituent_policies.empty())
+                const auto policy_name = val.get<std::string>();
+                auto policy = get_policy_by_name(policy_name);
+                if (policy == nullptr)
                 {
-                  endpoint.authn_policies.push_back(
-                    std::make_shared<ccf::AllOfAuthnPolicy>(
-                      constituent_policies));
-                  continue;
+                  throw std::logic_error(
+                    fmt::format("Unknown auth policy: {}", policy_name));
                 }
+                constituent_policies.push_back(std::move(policy));
+              }
+
+              if (!constituent_policies.empty())
+              {
+                endpoint.authn_policies.push_back(
+                  std::make_shared<ccf::AllOfAuthnPolicy>(
+                    constituent_policies));
+                continue;
               }
             }
           }
-
-          // Any failure in above checks falls through to this detailed error.
-          throw std::logic_error(fmt::format(
-            "Unsupported auth policy. Policies must be either a string, or an "
-            "object containing an \"all_of\" key with list-of-strings value. "
-            "Unsupported value: {}",
-            policy_desc.dump()));
         }
+
+        // Any failure in above checks falls through to this detailed error.
+        throw std::logic_error(fmt::format(
+          "Unsupported auth policy. Policies must be either a string, or an "
+          "object containing an \"all_of\" key with list-of-strings value. "
+          "Unsupported value: {}",
+          policy_desc.dump()));
       }
     }
+  }
 }
