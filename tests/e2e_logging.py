@@ -670,6 +670,18 @@ def test_multi_auth(network, args):
     return network
 
 
+TESTJS = """
+export function content(request) {
+    return {
+        statusCode: 200,
+        body: {
+        error: "Test content",
+        },
+    };
+}
+"""
+
+
 @reqs.supports_methods("/app/log/custom_endpoints")
 def test_custom_endpoints(network, args):
     primary, _ = network.find_primary()
@@ -680,8 +692,27 @@ def test_custom_endpoints(network, args):
         primary, user.service_id, user_data={"isAdmin": True}
     )
 
+    bundle = {
+        "metadata": {
+            "endpoints": {
+                "/content": {
+                    "get": {
+                        "js_module": "test.js",
+                        "js_function": "content",
+                        "forwarding_required": "never",
+                        "redirection_strategy": "none",
+                        "authn_policies": ["no_auth"],
+                        "mode": "readonly",
+                        "openapi": {},
+                    }
+                },
+            }
+        },
+        "modules": {"test.js": TESTJS},
+    }
+
     with primary.client(None, None, user.local_id) as c:
-        r = c.put("/app/log/custom_endpoints", body={"msg": "Hello, world!"})
+        r = c.put("/app/log/custom_endpoints", body={"bundle": bundle})
         assert r.status_code == http.HTTPStatus.NO_CONTENT.value, r.status_code
 
     return network

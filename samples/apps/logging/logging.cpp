@@ -1962,6 +1962,12 @@ namespace loggingapp
         CCF_APP_INFO(
           "YYYYYYYYYYYYYYYYYY put_custom_endpoints YYYYYYYYYYYYYYYYYYYY");
 
+        // Parse the request body as a JSON object
+        const auto body = ctx.rpc_ctx->get_request_body();
+        const auto j = nlohmann::json::parse(body.begin(), body.end());
+        // TBD: JSON schema/manual validation
+        
+
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_NO_CONTENT);
       };
 
