@@ -6,6 +6,7 @@
 
 // CCF
 #include "ccf/app_interface.h"
+#include "ccf/bundle.h"
 #include "ccf/common_auth_policies.h"
 #include "ccf/crypto/verifier.h"
 #include "ccf/ds/hash.h"
@@ -17,6 +18,7 @@
 #include "ccf/indexing/strategies/seqnos_by_key_bucketed.h"
 #include "ccf/indexing/strategy.h"
 #include "ccf/json_handler.h"
+#include "ccf/service/tables/modules.h"
 #include "ccf/version.h"
 #include "js/interpreter_cache_interface.h"
 // TBD: leaks untyped_map
@@ -1962,11 +1964,31 @@ namespace loggingapp
         CCF_APP_INFO(
           "YYYYYYYYYYYYYYYYYY put_custom_endpoints YYYYYYYYYYYYYYYYYYYY");
 
-        // Parse the request body as a JSON object
-        const auto body = ctx.rpc_ctx->get_request_body();
-        const auto j = nlohmann::json::parse(body.begin(), body.end());
-        // TBD: JSON schema/manual validation
-        
+        const auto j = nlohmann::json::parse(
+          caller_identity.content.begin(), caller_identity.content.end());
+        const auto wrapper = j.get<ccf::js::BundleWrapper>();
+
+        auto endpoints = ctx.tx.template rw<ccf::endpoints::EndpointsMap>(
+          "logging.custom_endpoints.metadata");
+        // Similar to set_js_app
+        for (const auto& [url, methods] : wrapper.bundle.metadata.endpoints)
+        {
+          for (const auto& [method, metadata] : methods)
+          {
+            std::string method_upper = method;
+            nonstd::to_upper(method_upper);
+            const auto key = ccf::endpoints::EndpointKey{url, method_upper};
+            endpoints->put(key, metadata);
+          }
+        }
+
+        auto modules =
+          ctx.tx.template rw<ccf::Modules>("logging.custom_endpoints.modules");
+        for (const auto& [name, module] : wrapper.bundle.modules)
+        {
+          modules->put(name, module);
+        }
+        // TBD: Bytecode compilation support
 
         ctx.rpc_ctx->set_response_status(HTTP_STATUS_NO_CONTENT);
       };
@@ -1988,8 +2010,8 @@ namespace loggingapp
       const auto method = rpc_ctx.get_method();
       const auto verb = rpc_ctx.get_request_verb();
 
-      auto endpoints =
-        tx.ro<ccf::endpoints::EndpointsMap>("logging.custom_endpoints");
+      auto endpoints = tx.ro<ccf::endpoints::EndpointsMap>(
+        "logging.custom_endpoints.metadata");
       const auto key = ccf::endpoints::EndpointKey{method, verb};
 
       // Look for a direct match of the given path
