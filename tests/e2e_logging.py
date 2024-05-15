@@ -715,6 +715,10 @@ def test_custom_endpoints(network, args):
         r = c.put("/app/log/custom_endpoints", body={"bundle": bundle})
         assert r.status_code == http.HTTPStatus.NO_CONTENT.value, r.status_code
 
+    with primary.client() as c:
+        r = c.get("/app/content")
+        assert r.status_code == http.HTTPStatus.OK.value, r.status_code
+
     return network
 
 

@@ -2010,9 +2010,12 @@ namespace loggingapp
       const auto method = rpc_ctx.get_method();
       const auto verb = rpc_ctx.get_request_verb();
 
+
       auto endpoints = tx.ro<ccf::endpoints::EndpointsMap>(
         "logging.custom_endpoints.metadata");
       const auto key = ccf::endpoints::EndpointKey{method, verb};
+
+      CCF_APP_INFO("XXXXXXXXXXXXXXXXXXX find_endpoint with key {}", key.to_str());
 
       // Look for a direct match of the given path
       const auto it = endpoints->get(key);
@@ -2085,30 +2088,32 @@ namespace loggingapp
       ccf::endpoints::EndpointRegistry::execute_endpoint(e, endpoint_ctx);
     }
 
-    // // TBD: can we collapse this in a an intermediary base class below
-    // UserEndpointRegistry? void execute_request_locally_committed(
-    //   const CustomJSEndpoint* endpoint,
-    //   ccf::endpoints::CommandEndpointContext& endpoint_ctx,
-    //   const ccf::TxID& tx_id)
-    // {
-    //   ccf::endpoints::default_locally_committed_func(endpoint_ctx, tx_id);
-    // }
+    // TBD: can we collapse this in a an intermediary base class below
+    // UserEndpointRegistry? Or relax the check on the derived implementation having
+    // to handle custom endpoints.
+    void execute_request_locally_committed(
+      const CustomJSEndpoint* endpoint,
+      ccf::endpoints::CommandEndpointContext& endpoint_ctx,
+      const ccf::TxID& tx_id)
+    {
+      ccf::endpoints::default_locally_committed_func(endpoint_ctx, tx_id);
+    }
 
-    // void execute_endpoint_locally_committed(
-    //   ccf::endpoints::EndpointDefinitionPtr e,
-    //   ccf::endpoints::CommandEndpointContext& endpoint_ctx,
-    //   const ccf::TxID& tx_id) override
-    // {
-    //   auto endpoint = dynamic_cast<const CustomJSEndpoint*>(e.get());
-    //   if (endpoint != nullptr)
-    //   {
-    //     execute_request_locally_committed(endpoint, endpoint_ctx, tx_id);
-    //     return;
-    //   }
+    void execute_endpoint_locally_committed(
+      ccf::endpoints::EndpointDefinitionPtr e,
+      ccf::endpoints::CommandEndpointContext& endpoint_ctx,
+      const ccf::TxID& tx_id) override
+    {
+      auto endpoint = dynamic_cast<const CustomJSEndpoint*>(e.get());
+      if (endpoint != nullptr)
+      {
+        execute_request_locally_committed(endpoint, endpoint_ctx, tx_id);
+        return;
+      }
 
-    //   ccf::endpoints::EndpointRegistry::execute_endpoint_locally_committed(
-    //     e, endpoint_ctx, tx_id);
-    // }
+      ccf::endpoints::EndpointRegistry::execute_endpoint_locally_committed(
+        e, endpoint_ctx, tx_id);
+    }
   };
 }
 
