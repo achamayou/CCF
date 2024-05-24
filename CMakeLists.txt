@@ -337,8 +337,20 @@ set(CCF_JS_SOURCES
     ${CCF_DIR}/src/js/core/runtime.cpp
     ${CCF_DIR}/src/js/core/context.cpp
     ${CCF_DIR}/src/js/no_plugins.cpp
-    ${CCF_DIR}/src/js/globals/ccf.cpp
     ${CCF_DIR}/src/js/ffi_plugins.cpp
+    ${CCF_DIR}/src/js/extensions/console.cpp
+    ${CCF_DIR}/src/js/extensions/math/random.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/consensus.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/converters.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/crypto.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/gov_effects.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/historical.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/host.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/kv.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/network.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/node.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/rpc.cpp
+    ${CCF_DIR}/src/js/extensions/ccf/request.cpp
 )
 
 if(COMPILE_TARGET STREQUAL "sgx")
@@ -579,10 +591,9 @@ elseif(COMPILE_TARGET STREQUAL "virtual")
   set(JS_SNP_ATTESTATION_VIRTUAL js_snp_attestation.virtual)
 endif()
 
+set(JS_GENERIC_SOURCES ${CCF_DIR}/src/apps/js_generic/js_generic_base.cpp)
 if(COMPILE_TARGET STREQUAL "sgx")
-  add_enclave_library(
-    js_generic_base.enclave ${CCF_DIR}/src/apps/js_generic/js_generic_base.cpp
-  )
+  add_enclave_library(js_generic_base.enclave ${JS_GENERIC_SOURCES})
   target_link_libraries(js_generic_base.enclave PUBLIC ccf.enclave)
   add_lvi_mitigations(js_generic_base.enclave)
   install(
@@ -591,10 +602,7 @@ if(COMPILE_TARGET STREQUAL "sgx")
     DESTINATION lib
   )
 elseif(COMPILE_TARGET STREQUAL "snp")
-  add_library(
-    js_generic_base.snp STATIC
-    ${CCF_DIR}/src/apps/js_generic/js_generic_base.cpp
-  )
+  add_library(js_generic_base.snp STATIC ${JS_GENERIC_SOURCES})
   add_san(js_generic_base.snp)
   add_warning_checks(js_generic_base.snp)
   target_link_libraries(js_generic_base.snp PUBLIC ccf.snp)
@@ -610,10 +618,7 @@ elseif(COMPILE_TARGET STREQUAL "snp")
     DESTINATION lib
   )
 elseif(COMPILE_TARGET STREQUAL "virtual")
-  add_library(
-    js_generic_base.virtual STATIC
-    ${CCF_DIR}/src/apps/js_generic/js_generic_base.cpp
-  )
+  add_library(js_generic_base.virtual STATIC ${JS_GENERIC_SOURCES})
   add_san(js_generic_base.virtual)
   add_warning_checks(js_generic_base.virtual)
   target_link_libraries(js_generic_base.virtual PUBLIC ccf.virtual)
@@ -1416,6 +1421,11 @@ if(BUILD_TESTS)
       PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/e2e_logging.py
       ADDITIONAL_ARGS --js-app-bundle
                       ${CMAKE_SOURCE_DIR}/samples/apps/logging/js
+    )
+
+    add_e2e_test(
+      NAME programmability
+      PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/programmability.py
     )
 
     # This test uses large requests (so too slow for SAN)
