@@ -11,12 +11,18 @@ LEADERSHIP_STATUS = {
     "Leader": ":crown:",
     "Follower": ":guard:",
     "Candidate": ":person_raising_hand:",
+    "L_None": ":beginner:",
+    "L_Leader": ":crown:",
+    "L_Follower": ":guard:",
+    "L_Candidate": ":person_raising_hand:",
 }
 
 FUNCTIONS = {
     "SIMChangeConfigurationInt": "Cfg",
+    "MCChangeConfigurationInt": "Cfg",
     "ClientRequest": "Rpl",
     "AppendEntries": "SAe",
+    "AppendRetiredCommitted": "ARct",
     "RcvAppendEntriesRequest": "RAe",
     "execute_append_entries_sync": "EAe",
     "send_append_entries_response": "SAeR",
@@ -32,9 +38,12 @@ FUNCTIONS = {
     "bootstrap": "Boot",
     None: "",
     "SignCommittableMessages": "Rpl",
+    "MCSignCommittableMessages": "Rpl",
     "SIMTimeout": "Tmou",
+    "MCTimeout": "Tmou",
     "RcvUpdateTerm": "UTrm",
     "SIMCheckQuorum": "ChkQ",
+    "RcvProposeVoteRequest": "RPvR",
 }
 
 TAG = {"Y": ":white_check_mark:", "N": ":x:", " ": "  ", "S": ":pencil:"}
@@ -84,8 +93,11 @@ def extract_node_state(global_state, node_id):
 
 LOG = {
     "Reconfiguration": ":recycle:",
+    "T_Reconfiguration": ":recycle:",
     "Signature": ":pencil:",
+    "T_Signature": ":pencil:",
     "Entry": ":page_facing_up:",
+    "T_Retired": ":old_man:"
 }
 
 
@@ -139,7 +151,7 @@ def table(entries):
             tag = "Y" if last_recvd()["success"] else "N"
         if action["name"] == "RcvRequestVoteResponse":
             tag = "Y" if last_recvd()["voteGranted"] else "N"
-        if action["name"] == "SignCommittableMessages":
+        if action["name"] in ("SignCommittableMessages", "MCSignCommittableMessages"):
             tag = "S"
         states = [
             (
