@@ -51,6 +51,10 @@ def get_and_verify_historical_receipt(network, ref_msg):
         ref_msg["view"],
     )
     verify_receipt(r.json()["receipt"], network.cert)
+    with open("NETWORK_CERT", "w") as f:
+        f.write(network.cert_pem)
+    with open("HISTORICAL_RECEIPT", "w") as re:
+        re.write(json.dumps(r.json()["receipt"]))
     return ref_msg
 
 

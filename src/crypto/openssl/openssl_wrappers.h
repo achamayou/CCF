@@ -22,6 +22,8 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "ccf/ds/logger.h"
+
 #if defined(OPENSSL_VERSION_MAJOR) && OPENSSL_VERSION_MAJOR >= 3
 #  include <openssl/evp.h>
 #endif
@@ -268,13 +270,21 @@ namespace ccf::crypto
       std::vector<char> buf(pem_prefix_len);
       auto read = BIO_read(mem, buf.data(), pem_prefix_len);
       BIO_reset(mem);
+      // LOG_DEBUG_FMT("Read {} bytes from BIO ({})", read, pem_prefix_len);
+      auto val = std::memcmp(buf.data(), pem_prefix, read);
+      // LOG_DEBUG_FMT("memcmp: {}", val);
+      // LOG_DEBUG_FMT("prem_prefix: [{}]", pem_prefix);
+      // LOG_DEBUG_FMT("buf: [{}]", std::string(buf.data(), read));
+      // LOG_DEBUG_FMT("buf: [{:02x}]", fmt::join(buf.data(), buf.data() + read, ""));
       if (
         read != pem_prefix_len ||
         std::memcmp(buf.data(), pem_prefix, read) != 0)
       {
         return nullptr;
       }
-      return PEM_read_bio_X509(mem, NULL, NULL, NULL);
+      auto ptr = PEM_read_bio_X509(mem, NULL, NULL, NULL);
+      BIO_reset(mem);
+      return ptr;
     };
 
     struct Unique_X509 : public Unique_SSL_OBJECT<X509, X509_new, X509_free>

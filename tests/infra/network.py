@@ -1599,6 +1599,11 @@ class Network:
         return os.path.join(self.common_dir, "service_cert.pem")
 
     @functools.cached_property
+    def cert_pem(self):
+        with open(self.cert_path, encoding="utf-8") as c:
+            return c.read()
+
+    @functools.cached_property
     def cert(self):
         with open(self.cert_path, encoding="utf-8") as c:
             service_cert = load_pem_x509_certificate(

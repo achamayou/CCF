@@ -112,18 +112,22 @@ namespace ccf::crypto
     Unique_X509_STORE store;
     Unique_X509_STORE_CTX store_ctx;
 
+    LOG_DEBUG_FMT("Size of trusted_certs: {}", trusted_certs.size());
     for (auto& pem : trusted_certs)
     {
+      LOG_DEBUG_FMT("CHECK PEM: [{}]", pem->str());
       Unique_BIO tcbio(*pem);
       Unique_X509 tc(tcbio, true);
       if (tc == nullptr)
       {
-        LOG_DEBUG_FMT("Failed to load certificate from PEM: {}", pem->str());
+        LOG_DEBUG_FMT("1 Failed to load certificate from PEM: [{}]", pem->str());
         return false;
       }
 
       CHECK1(X509_STORE_add_cert(store, tc));
     }
+    LOG_DEBUG_FMT("Size of trusted_certs: {}", trusted_certs.size());
+
 
     Unique_STACK_OF_X509 chain_stack;
     for (auto& pem : chain)
@@ -132,7 +136,7 @@ namespace ccf::crypto
       Unique_X509 cert(certbio, true);
       if (cert == nullptr)
       {
-        LOG_DEBUG_FMT("Failed to load certificate from PEM: {}", pem->str());
+        LOG_DEBUG_FMT("2 Failed to load certificate from PEM: [{}]", pem->str());
         return false;
       }
 
@@ -148,7 +152,7 @@ namespace ccf::crypto
     if (ignore_time)
     {
       X509_VERIFY_PARAM* param = X509_VERIFY_PARAM_new();
-      X509_VERIFY_PARAM_set_flags(param, X509_V_FLAG_NO_CHECK_TIME);
+      CHECK1(X509_VERIFY_PARAM_set_flags(param, X509_V_FLAG_NO_CHECK_TIME));
       X509_VERIFY_PARAM_set_depth(param, 1);
       X509_STORE_CTX_set0_param(store_ctx, param);
     }
