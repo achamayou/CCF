@@ -51,10 +51,6 @@ def get_and_verify_historical_receipt(network, ref_msg):
         ref_msg["view"],
     )
     verify_receipt(r.json()["receipt"], network.cert)
-    with open("NETWORK_CERT", "w") as f:
-        f.write(network.cert_pem)
-    with open("HISTORICAL_RECEIPT", "w") as re:
-        re.write(json.dumps(r.json()["receipt"]))
     return ref_msg
 
 
@@ -382,6 +378,11 @@ def test_recover_service_with_wrong_identity(network, args):
 
     for tx in txids:
         receipt = primary.get_receipt(tx.view, tx.seqno).json()
+
+        with open("NETWORK_CERT", "w") as f:
+            f.write(network.cert_pem)
+        with open("HISTORICAL_RECEIPT", "w") as re:
+            re.write(json.dumps(receipt))
 
         try:
             verify_receipt(receipt, recovered_network.cert)

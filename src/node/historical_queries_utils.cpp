@@ -311,13 +311,27 @@ namespace ccf
             {
               auto ncv =
                 ccf::crypto::make_unique_verifier(network_identity->cert);
+
+              const auto& [start, end] = ncv->validity_period();
+
+              auto unexpected_ni = std::make_unique<ReplicatedNetworkIdentity>(
+                "CN=Unexpected Service",
+                ccf::crypto::CurveID::SECP384R1,
+                start,
+                90,
+                COSESignaturesConfig{});
+
+              std::ofstream file("UNEXPECTED_IDENTITY", std::ios::binary);              
+              file.write((const char*) unexpected_ni->cert.data(), unexpected_ni->cert.size());
+              file.close();
+              
               auto endorsement = create_endorsed_cert(
                 hpubkey,
                 ccf::crypto::get_subject_name(opt_psi->cert),
                 {},
                 ncv->validity_period(),
-                network_identity->priv_key,
-                network_identity->cert,
+                unexpected_ni->priv_key,
+                unexpected_ni->cert,
                 true /* CA */);
               service_endorsement_cache[hpubkey] = {endorsement};
               receipt.service_endorsements = {endorsement};
