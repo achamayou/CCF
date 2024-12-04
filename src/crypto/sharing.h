@@ -61,6 +61,8 @@ namespace ccf::crypto
         auto size = serialised_size;
         std::vector<uint8_t> serialised(size);
         auto data = serialised.data();
+        // TBD: note that we do serialise x, which lets us recognise owner
+        // shares from normal shares
         serialized::write(data, size, x);
         for (size_t i = 0; i < LIMBS; ++i)
         {

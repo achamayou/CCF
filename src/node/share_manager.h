@@ -168,6 +168,9 @@ namespace ccf
       size_t share_index = 0;
       for (auto const& [member_id, enc_pub_key] : active_recovery_members_info)
       {
+        // TBD: if the member is an "owner", which we look up in the member_info
+        // use the single-share reshare (ls_wrapping_key.secret),
+        // otherwise use the multi-share reshare (shares[share_index])
         auto member_enc_pubk = ccf::crypto::make_rsa_public_key(enc_pub_key);
         auto raw_share = std::vector<uint8_t>(
           shares[share_index].begin(), shares[share_index].end());
@@ -202,6 +205,8 @@ namespace ccf
           "shares are computed");
       }
 
+      // TDB: the recovery threshold should be equal to or less than the number of
+      // active members MINUS the number of owners
       if (recovery_threshold > active_recovery_members_info.size())
       {
         throw std::logic_error(fmt::format(
@@ -211,9 +216,13 @@ namespace ccf
           active_recovery_members_info.size()));
       }
 
+      // TBD: Change to num_share = max(1, active_members - owners)
       const auto num_shares = active_recovery_members_info.size();
       auto ls_wrapping_key =
         LedgerSecretWrappingKey(num_shares, recovery_threshold);
+      // TBD: In ls_wrapping_key, secret is 0-indexed share, to be distributed
+      // to members that are "owners", while the 1+ shares are for the rest of
+      // the active recovery members
 
       auto wrapped_latest_ls = ls_wrapping_key.wrap(latest_ledger_secret);
       auto recovery_shares = tx.rw<ccf::RecoveryShares>(Tables::SHARES);
@@ -333,6 +342,11 @@ namespace ccf
           {
             case ccf::crypto::sharing::Share::serialised_size:
             {
+              // TBD: for a new share, we can check the index and decide if it's
+              // a full share or just a partial share (compare to zero)
+              // if it is a full share, we can short-circuit and return a LedgerSecretWrappingKey
+              // directly, otherwise we follow the existing flow
+
               new_shares.emplace_back(decrypted_share);
               break;
             }

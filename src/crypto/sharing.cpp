@@ -142,6 +142,10 @@ namespace ccf::crypto
 
       size_t degree = threshold - 1;
 
+
+      // TBD: this will not change at all, this is just a pointer to where
+      // we tag the full secret with a zero index
+
       raw_secret.x = 0;
       for (size_t s = 0; s < shares.size(); s++)
       {

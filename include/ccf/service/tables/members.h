@@ -65,6 +65,11 @@ namespace ccf
         members for example. */
     nlohmann::json member_data = nullptr;
 
+    // TBD: add a boolean, optional field "supershare" indicating that the member
+    // is to receive a supershare allowing it to single-handledly recover the network.
+    // Naming requires some thinking, I am leaning towards calling the flag "owner"
+    // to make it very clear that the member has a very powerful role in the network.
+
     bool operator==(const MemberDetails& rhs) const
     {
       return status == rhs.status && member_data == rhs.member_data;
