@@ -29,6 +29,7 @@ import urllib.parse
 import random
 import re
 import infra.crypto
+import infra.commit
 from infra.runner import ConcurrentRunner
 from hashlib import sha256
 from infra.member import AckException
@@ -1308,6 +1309,100 @@ def test_historical_query_range(network, args):
     return network
 
 
+@reqs.description("Read paginated range of historical state across index buckets")
+@reqs.supports_methods("/app/log/public", "/app/log/public/historical/range")
+@reqs.at_least_n_nodes(1)
+def test_historical_query_range_pagination(network, args):
+    # Arbitrary distinct log IDs used to create sparse writes for one ID, with
+    # filler writes to extend the ledger between them.
+    SPARSE_ENTRY_ID = 1542
+    FILLER_ENTRY_ID = 1543
+
+    expected_entries = []
+    first_seqno = None
+    last_seqno = None
+    view = None
+
+    primary, _ = network.find_primary()
+    with primary.client("user0") as c:
+        # With the test app config's page and bucket sizes of 5, 50 writes
+        # reliably span multiple pages and indexing buckets.
+        ENTRY_COUNT = 50
+        target_write_positions = {0, ENTRY_COUNT - 1}
+        for i in range(ENTRY_COUNT):
+            idx = SPARSE_ENTRY_ID if i in target_write_positions else FILLER_ENTRY_ID
+            msg = f"Multi-bucket indexing message {i}"
+            r = c.post(
+                "/app/log/public",
+                {
+                    "id": idx,
+                    "msg": msg,
+                },
+                log_capture=[],
+            )
+            assert r.status_code == http.HTTPStatus.OK
+
+            if first_seqno is None:
+                first_seqno = r.seqno
+
+            if idx == SPARSE_ENTRY_ID:
+                expected_entries.append(
+                    {
+                        "id": idx,
+                        "msg": msg,
+                        "seqno": r.seqno,
+                    }
+                )
+
+            last_seqno = r.seqno
+            view = r.view
+
+        infra.commit.wait_for_commit(c, seqno=last_seqno, view=view, timeout=3)
+
+        path = (
+            f"/app/log/public/historical/range?from_seqno={first_seqno}"
+            f"&to_seqno={last_seqno}&id={SPARSE_ENTRY_ID}"
+        )
+        entries = []
+        page_count = 0
+        pages_with_next_link = 0
+        empty_page_count = 0
+        timeout = 30
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            r = c.get(path, log_capture=[])
+            if r.status_code == http.HTTPStatus.OK:
+                body = r.body.json()
+                page_count += 1
+
+                page_entries = body["entries"]
+                entries += page_entries
+                if not page_entries:
+                    empty_page_count += 1
+
+                next_link = body.get("@nextLink")
+                if next_link:
+                    pages_with_next_link += 1
+                    path = next_link
+                    continue
+
+                break
+            elif r.status_code == http.HTTPStatus.ACCEPTED:
+                time.sleep(0.1)
+                continue
+            else:
+                assert False, r
+        else:
+            assert False, f"Historical range did not complete within {timeout}s"
+
+    assert entries == expected_entries
+    assert page_count > 2
+    assert pages_with_next_link == page_count - 1
+    assert empty_page_count > 0
+
+    return network
+
+
 @reqs.description("Read state at multiple distinct historical points")
 @reqs.supports_methods("/app/log/private", "/app/log/private/historical/sparse")
 def test_historical_query_sparse(network, args):
@@ -1777,43 +1872,37 @@ def test_tx_statuses(network, args):
     return network
 
 
-@reqs.description("Running transactions against logging app")
-@reqs.supports_methods("/app/receipt", "/app/log/private")
-@reqs.at_least_n_nodes(2)
 @app.scoped_txs()
-def test_receipts(network, args):
+def issue_txs_for_receipt_check(network, args):
+    """
+    Issue a batch of fresh private-only transactions, and record their
+    seqnos (and expected, empty claims digest) so that test_random_receipts
+    can validate that their receipts become available promptly after commit,
+    alongside its regular random sampling of already-committed seqnos.
+    Waits for all transactions to be committed before returning, and returns a
+    mapping of seqno -> expected claims digest (None outside the COSE case).
+    """
     cose_only = args.package.endswith("_cose_only")
-    primary, _ = network.find_primary_and_any_backup()
     msg = "Hello world"
 
-    LOG.info("Write/Read on primary")
-    if cose_only:
-        service_key = get_service_key(network)
-        with primary.client("user0") as c:
-            for j in range(10):
-                idx = j + 10000
-                r = network.txs.issue(network, 1, idx=idx, send_public=False, msg=msg)
-                fetch_and_verify_cose_receipt(
-                    c, r.view, r.seqno, service_key, b"\0" * 32
-                )
-    else:
-        with primary.client("user0") as c:
-            for j in range(10):
-                idx = j + 10000
-                r = network.txs.issue(network, 1, idx=idx, send_public=False, msg=msg)
-                start_time = time.time()
-                while time.time() < (start_time + 3.0):
-                    rc = c.get(f"/app/receipt?transaction_id={r.view}.{r.seqno}")
-                    if rc.status_code == http.HTTPStatus.OK:
-                        receipt = rc.body.json()
-                        verify_receipt(receipt, network.cert)
-                        break
-                    elif rc.status_code == http.HTTPStatus.ACCEPTED:
-                        time.sleep(0.5)
-                    else:
-                        assert False, rc
+    LOG.info("Write on primary")
+    additional_seqnos = {}
+    last_view = None
+    last_seqno = None
+    for j in range(10):
+        idx = j + 10000
+        r = network.txs.issue(network, 1, idx=idx, send_public=False, msg=msg)
+        additional_seqnos[r.seqno] = b"\0" * 32 if cose_only else None
+        last_view = r.view
+        last_seqno = r.seqno
 
-    return network
+    # Wait for the last transaction to be committed (which guarantees all
+    # earlier transactions are also committed, since they commit in order)
+    primary, _ = network.find_primary()
+    with primary.client("user0") as c:
+        infra.commit.wait_for_commit(c, seqno=last_seqno, view=last_view, timeout=3)
+
+    return additional_seqnos
 
 
 @reqs.description("Validate random receipts")
@@ -1826,6 +1915,7 @@ def test_random_receipts(
     additional_seqnos=MappingProxyType({}),
     node=None,
     log_capture=None,
+    require_additional_receipts=False,
 ):
     cose_only = args.package.endswith("_cose_only")
 
@@ -1866,6 +1956,11 @@ def test_random_receipts(
         interesting_prefix = [genesis_seqno, likely_first_sig_seqno]
         seqnos = range(len(interesting_prefix) + 1, max_seqno)
         random_sample_count = 20 if lts else 50
+        # Track which of the known, already-committed additional_seqnos we
+        # successfully fetched and verified a receipt for, so that a receipt
+        # which never becomes available fails loudly rather than being
+        # silently skipped when the per-seqno poll loop times out.
+        verified_additional_seqnos = set()
         for s in (
             interesting_prefix
             + sorted(
@@ -1892,6 +1987,7 @@ def test_random_receipts(
                             assert (
                                 claim_digest == additional_seqnos[s]
                             ), f"Claim digest mismatch for seqno {s}"
+                            verified_additional_seqnos.add(s)
                         ccf.cose.verify_receipt(
                             receipt_bytes, service_key, claim_digest
                         )
@@ -1933,6 +2029,8 @@ def test_random_receipts(
                                 generic=True,
                                 skip_cert_chain_checks=lts,
                             )
+                            if s in additional_seqnos:
+                                verified_additional_seqnos.add(s)
                         break
                     elif rc.status_code == http.HTTPStatus.ACCEPTED:
                         time.sleep(0.1)
@@ -1940,6 +2038,13 @@ def test_random_receipts(
                         view += 1
                         if view > max_view:
                             assert False, rc
+
+        if require_additional_receipts:
+            missing = set(additional_seqnos) - verified_additional_seqnos
+            assert not missing, (
+                "Receipts for known-committed seqnos were never verified: "
+                f"{sorted(missing)}"
+            )
 
     return network
 
@@ -2341,6 +2446,35 @@ def run(args):
         do_main_tests(network, args)
 
 
+def run_multi_bucket_indexing(args):
+    os.makedirs(args.workspace, exist_ok=True)
+    node_data_json_file = os.path.join(
+        args.workspace, f"{args.label}_logging_node_data.json"
+    )
+    with open(node_data_json_file, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "logging": {
+                    "seqnos_per_indexing_bucket": 5,
+                    "indexing_buckets_per_key": 3,
+                    "max_historical_range_seqnos_per_page": 5,
+                }
+            },
+            f,
+        )
+
+    with infra.network.network(
+        args.nodes,
+        args.binary_dir,
+        args.debug_nodes,
+        pdb=args.pdb,
+        node_data_json_file=node_data_json_file,
+    ) as network:
+        network.start_and_open(args)
+
+        test_historical_query_range_pagination(network, args)
+
+
 def run_app_space_js(args):
     txs = app.LoggingTxs("user0")
     with infra.network.network(
@@ -2557,9 +2691,17 @@ def do_main_tests(network, args):
     test_liveness(network, args)
     test_rekey(network, args)
     test_liveness(network, args)
-    test_random_receipts(network, args, False)
+    additional_seqnos = {}
     if args.package.startswith("samples/apps/logging/logging"):
-        test_receipts(network, args)
+        additional_seqnos = issue_txs_for_receipt_check(network, args)
+    test_random_receipts(
+        network,
+        args,
+        False,
+        additional_seqnos=additional_seqnos,
+        require_additional_receipts=True,
+    )
+    if args.package.startswith("samples/apps/logging/logging"):
         test_historical_query_sparse(network, args)
     test_historical_receipts(network, args)
     test_historical_receipts_with_claims(network, args)
@@ -2621,6 +2763,18 @@ if __name__ == "__main__":
         nodes=infra.e2e_args.max_nodes(cr.args, f=0),
         initial_user_count=4,
         initial_member_count=2,
+    )
+
+    cr.add(
+        "cpp_multi_bucket_indexing",
+        run_multi_bucket_indexing,
+        package="samples/apps/logging/logging",
+        js_app_bundle=None,
+        nodes=infra.e2e_args.max_nodes(cr.args, f=0),
+        initial_user_count=1,
+        initial_member_count=1,
+        sig_tx_interval=5,
+        sig_ms_interval=100,
     )
 
     cr.add(
