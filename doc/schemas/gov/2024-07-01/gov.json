@@ -1737,7 +1737,7 @@
           "description": "Code measurements of acceptable enclaves.",
           "items": {
             "type": "string",
-            "format": "byte"
+            "format": "hex"
           }
         }
       },
@@ -1873,17 +1873,22 @@
       "type": "object",
       "description": "Describes a single JWK.",
       "properties": {
-        "certificate": {
+        "publicKey": {
           "$ref": "#/definitions/ServiceState.pem",
-          "description": "x509 cert used to validate claims made by this key."
+          "description": "Public key used to validate claims made by this key."
         },
         "issuer": {
           "type": "string",
           "description": "Issuer ID of entity who issued this key."
+        },
+        "constraint": {
+          "type": "string",
+          "description": "Issuer constraint associated with this key."
         }
       },
       "required": [
-        "certificate"
+        "publicKey",
+        "issuer"
       ]
     },
     "ServiceState.JwkInfo": {
@@ -1908,7 +1913,10 @@
           "type": "object",
           "description": "Collection of retrieved JWKs. Keyed by kid.",
           "additionalProperties": {
-            "$ref": "#/definitions/ServiceState.Jwk"
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServiceState.Jwk"
+            }
           }
         }
       },
@@ -2225,7 +2233,7 @@
           "description": "Code measurements of acceptable enclaves.",
           "items": {
             "type": "string",
-            "format": "byte"
+            "format": "hex"
           }
         },
         "hostData": {
@@ -2233,7 +2241,7 @@
           "description": "Collection of acceptable host data values.",
           "items": {
             "type": "string",
-            "format": "byte"
+            "format": "hex"
           }
         }
       },
@@ -2251,14 +2259,14 @@
           "description": "Code measurements of acceptable enclaves.",
           "items": {
             "type": "string",
-            "format": "byte"
+            "format": "hex"
           }
         },
         "hostData": {
           "type": "object",
           "description": "Collection of acceptable host data values.",
           "additionalProperties": {
-            "format": "byte",
+            "format": "hex",
             "type": "string"
           }
         },
