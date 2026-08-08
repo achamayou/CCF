@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "tla/**"
+      - "veil/**"
       - "src/consensus/**"
       - "tests/raft_scenarios/**"
       - ".github/workflows/ci-verification.yml"
@@ -58,6 +59,50 @@ jobs:
           path: |
             tla/consistency/*_TTrace_*.tla
             tla/*.json
+
+  model-checking-consistency-veil:
+    name: Model Checking - Consistency (Veil)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-15 lld-15 libc++-15-dev libc++abi-15-dev default-jre-headless wget
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/clang-15 100
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Build and model-check Veil consistency spec
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
+        with:
+          lake-package-directory: veil
+          build: true
+          test: false
+          lint: false
+          use-mathlib-cache: true
+
+      - name: Validate Veil consistency traces
+        working-directory: veil
+        run: |
+          python3 -m unittest
+          python3 trace_validation.py testdata/one_write_trace.ndjson \
+            --lean-output .generated/CCFConsistencyOneWriteTrace.lean \
+            --trace-name one_write_trace
+          python3 trace_validation.py testdata/valid_trace.ndjson \
+            --lean-output .generated/CCFConsistencyTrace.lean \
+            --trace-name representative_trace
+          lake lean .generated/CCFConsistencyOneWriteTrace.lean
+          lake lean .generated/CCFConsistencyTrace.lean
+
+      - name: Compare bounded TLC and Veil state graphs
+        run: |
+          python3 tla/install_deps.py
+          python3 veil/bounded_correspondence.py --workers "$(nproc)"
 
   counterexamples-consistency:
     name: Counterexamples - Consistency

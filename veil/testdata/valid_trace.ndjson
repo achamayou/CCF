@@ -1,0 +1,10 @@
+{"action":"RwTxRequestAction","type":"RwTxRequest","tx":0}
+{"action":"RwTxExecuteAction","type":"RwTxExecute","tx_id":[2,197],"tx":0}
+{"action":"RwTxResponseAction","type":"RwTxResponse","tx":0,"tx_id":[2,197]}
+{"action":"StatusCommittedResponseAction","type":"TxStatusReceived","tx_id":[2,197],"status":"CommittedStatus"}
+{"action":"RoTxRequestAction","type":"RoTxRequest","tx":1}
+{"action":"RoTxResponseAction","type":"RoTxResponse","tx":1,"tx_id":[2,198]}
+{"action":"RwTxRequestAction","type":"RwTxRequest","tx":2}
+{"action":"RwTxExecuteAction","type":"RwTxExecute","tx_id":[3,199],"tx":2}
+{"action":"RwTxResponseAction","type":"RwTxResponse","tx":2,"tx_id":[3,199]}
+{"action":"StatusCommittedResponseAction","type":"TxStatusReceived","tx_id":[3,199],"status":"CommittedStatus"}
