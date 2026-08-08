@@ -22,7 +22,7 @@ preview language is still changing.
 | `RwTxRequestAction`, execution, response, and status actions | Actions with the same names                                                                                                                          |
 | `AppendOtherTxnAction`                                       | `AppendOtherTxnAction`                                                                                                                               |
 | Empty/non-empty choices in `TruncateLedgerAction`            | Two Veil actions, as Veil models disjuncts as separate actions                                                                                       |
-| `ExternalHistoryInvars`                                      | Named Veil invariants and the two final `safety` clauses, except the unresolved invalid-observation clause below                                     |
+| `ExternalHistoryInvars`                                      | Named Veil invariants and the ordered real-time `safety` clause, excluding the unresolved and false clauses below                                   |
 | TLC finite bounds                                            | Concrete `Fin` instantiations in `#model_check`                                                                                                      |
 
 The order domains are abstract in the specification and finite only in the
@@ -47,13 +47,11 @@ Three definitions in `ExternalHistoryInvars.tla` need resolution:
 - `CommittedRwOrderedSerializableInv` assumes consecutive known-committed
   responses differ by exactly one observed write. A third write may execute
   between them without receiving a response or status, so the later response
-  also observes that write. This produces a counterexample with three
-  transactions, three ledger positions, seven history events, and ten
-  transitions. Existing TLC configurations check this property with a history
-  limit of six and therefore do not reach the counterexample. The Veil safety
-  clause is retained to match the stated TLA+ property, but larger checks and
-  an unbounded proof are expected to fail until the property or model is
-  reconciled.
+  also observes that write. The property is excluded from the normal TLA+ and
+  Veil safety sets. A dedicated expected-counterexample TLC configuration
+  checks the ten-action witness in continuous verification. See
+  [`CommittedRwOrderedSerializableCounterexample.md`](../tla/consistency/CommittedRwOrderedSerializableCounterexample.md)
+  for the complete trace, explanation, history, and TLC reproduction.
 
 ## Run the bounded check
 
@@ -128,9 +126,9 @@ source/target state pair.
    compare the actual projected graph rather than its layer and action totals.
    Add a bounded TLC counterpart of `AppendOtherTxnAction` to compare the full
    Veil action set without making the TLC ledger unbounded.
-2. Fix and re-run the TLA+ real-time invariant, and reproduce the known
-   three-transaction ordered-serialization counterexample before treating
-   larger TLA+ checks as an oracle.
+2. Fix and re-run the TLA+ real-time invariant. Keep the checked
+   three-transaction ordered-serialization counterexample as a regression
+   while defining any replacement property.
 3. Expand the Linux CI matrix. Increase `Fin` scopes and `maxDepth` independently
    so failures identify whether transactions, views, sequence numbers, or
    history length exposed the counterexample. Pin both the Veil revision and
@@ -140,10 +138,8 @@ source/target state pair.
    over-constrained model from passing vacuously.
 4. Move from bounded testing to proof. Run `#check_invariants`, inspect each
    counterexample to induction, and add only justified auxiliary invariants
-   until the complete declared set is jointly inductive. First resolve the
-   known false ordered-serialization clause; no inductive strengthening can
-   prove a false reachable-state property. Do not replace failed obligations
-   with `trusted invariant`.
+   until the complete declared set is jointly inductive. Do not replace failed
+   obligations with `trusted invariant`.
 5. Mutate one guard at a time, such as permitting truncation below the commit
    point or committing an entry from another view, and require Veil to find
    the expected violation. This checks that the properties and finite scopes

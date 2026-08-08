@@ -237,6 +237,11 @@ CommittedRwOrderedRealTimeInv ==
 
 \* Each transaction observes the previous transaction in the TxID order and its own write
 \* Note that this invariant is only considers committed read-write transactions.
+\* This property does not hold: filtering responses by explicitly received
+\* committed statuses can hide an intervening ledger write which is still
+\* observed by the later response. It is retained only as the target of
+\* MCSingleNodeOrderedSerializableCounterexample.cfg. See
+\* CommittedRwOrderedSerializableCounterexample.md for the minimal trace.
 CommittedRwOrderedSerializableInv ==
     \A i \in 1..Len(CommittedRwResponses)-1:
         CommittedRwResponses[i+1].observed = Append(CommittedRwResponses[i].observed, CommittedRwResponses[i+1].tx)

@@ -141,15 +141,6 @@ ghost relation txIdLt (left right : histEvent) :=
     (And (eventView left = eventView right)
       (seqLt (eventSeqno left) (eventSeqno right)))
 
-ghost relation consecutiveCommittedRwResponses
-    (left right : histEvent) :=
-  And (rwResponseCommitted left)
-    (And (rwResponseCommitted right)
-      (And (txIdLt left right)
-        (Not (∃ middle,
-          And (rwResponseCommitted middle)
-            (And (txIdLt left middle) (txIdLt middle right))))))
-
 ghost relation currentView (v : view) :=
   And (activeView v)
     (∀ later, viewLt v later -> Not (activeView later))
@@ -531,9 +522,6 @@ invariant [at_most_once_observed]
       (observedAt response rightSlot observed) ->
       leftSlot = rightSlot
 
--- Together, these final two properties are CCF's primary ordered speculative
--- linearizability guarantee for committed read-write transactions.
---
 -- This real-time clause follows the prose definition in the TLA+ source:
 -- both endpoints are committed read-write responses.
 safety [committed_rw_ordered_real_time]
@@ -545,17 +533,9 @@ safety [committed_rw_ordered_real_time]
             (eventLt earlier request)))) ->
       txIdLt earlier later
 
--- This is the TLA+ Append property verbatim in relational form. It has a
--- known three-transaction counterexample when an intervening executed write
--- is never responded to or status-checked; see README.md.
-safety [committed_rw_ordered_serializable]
-  ∀ earlier later,
-    consecutiveCommittedRwResponses earlier later ->
-      ∀ slot observed,
-        Iff (observedAt later slot observed)
-          (Or (observedAt earlier slot observed)
-            (And (slot = eventSeqno later)
-              (observed = eventTx later)))
+-- `CommittedRwOrderedSerializableInv` is deliberately not a safety property:
+-- it has a reachable three-write counterexample. See
+-- tla/consistency/CommittedRwOrderedSerializableCounterexample.md.
 
 #gen_spec
 
