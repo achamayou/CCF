@@ -406,6 +406,14 @@ class TraceValidationTests(unittest.TestCase):
         self.assertNotIn("sat trace", generated)
         self.assertNotIn("\naction RwTxRequestAction", generated)
         self.assertIn("\nprocedure RwTxRequestAction", generated)
+        self.assertNotIn("\ninvariant [", generated)
+        self.assertNotIn("\nsafety [", generated)
+        self.assertNotIn("BEGIN CCF VEIL PROPERTIES", generated)
+        self.assertNotIn("END CCF VEIL PROPERTIES", generated)
+        self.assertIn(
+            "Generated replay checks only concrete transition conformance.",
+            generated,
+        )
         self.assertNotIn("#check_invariants", generated)
         self.assertNotIn("Lean.collectAxioms", generated)
         self.assertNotIn("end CCFConsistency", generated)
@@ -431,6 +439,24 @@ class TraceValidationTests(unittest.TestCase):
             generated,
         )
         self.assertNotIn("\naction TruncateLedgerAction", generated)
+
+    def test_requires_property_block_markers(self):
+        plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
+        source = (
+            pathlib.Path(__file__)
+            .with_name("CCFConsistency.lean")
+            .read_text(encoding="utf-8")
+        )
+
+        for marker in (
+            "-- BEGIN CCF VEIL PROPERTIES",
+            "-- END CCF VEIL PROPERTIES",
+        ):
+            with self.subTest(marker=marker):
+                with self.assertRaisesRegex(
+                    TraceValidationError, "property-block markers"
+                ):
+                    render_trace_source(source.replace(marker, "", 1), plan)
 
     def test_accepts_complete_single_path_replay_result(self):
         plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
@@ -459,12 +485,12 @@ class TraceValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceValidationError, "single complete path"):
             validate_replay_result(payload, plan)
 
-    def test_rejects_veil_invariant_failure(self):
+    def test_rejects_veil_violation(self):
         plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
         payload = {
             "result": {
                 "result": "found_violation",
-                "violation": {"kind": "safety_failure"},
+                "violation": {"kind": "deadlock"},
             },
             "progress": {"distinctStates": 1, "statesFound": 1},
         }

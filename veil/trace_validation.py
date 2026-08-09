@@ -29,6 +29,8 @@ EXECUTE_ACTION = "RwTxExecuteAction"
 TRACE_TRUNCATE_ACTION = "TraceTruncateLedgerAction"
 MODEL_CHECK_BEGIN = "-- BEGIN CCF VEIL BOUNDED CHECK"
 MODEL_CHECK_END = "-- END CCF VEIL BOUNDED CHECK"
+PROPERTIES_BEGIN = "-- BEGIN CCF VEIL PROPERTIES"
+PROPERTIES_END = "-- END CCF VEIL PROPERTIES"
 TRACE_MAX_HEARTBEATS = 5_000_000
 TRACE_REPLAY_STEP = "traceReplayStep"
 TRACE_REPLAY_ACTION_PREFIX = "TraceReplayStep"
@@ -685,6 +687,23 @@ def _convert_actions_to_procedures(source: str) -> str:
     return source
 
 
+def _remove_replay_properties(source: str) -> str:
+    if source.count(PROPERTIES_BEGIN) != 1 or source.count(PROPERTIES_END) != 1:
+        raise TraceValidationError("Veil source is missing property-block markers")
+    before, marker, remainder = source.partition(PROPERTIES_BEGIN)
+    if not marker:
+        raise TraceValidationError("property-block start marker was not found")
+    _, marker, after = remainder.partition(PROPERTIES_END)
+    if not marker:
+        raise TraceValidationError("property-block end marker was not found")
+    return (
+        before
+        + "-- Invariants and safety are established by the checked-in proof.\n"
+        + "-- Generated replay checks only concrete transition conformance.\n"
+        + after.lstrip("\n")
+    )
+
+
 def render_trace_source(source: str, plan: TracePlan) -> str:
     """Create a finite, deterministic Veil replay of a planned trace."""
 
@@ -707,6 +726,7 @@ def render_trace_source(source: str, plan: TracePlan) -> str:
             "Veil source must contain exactly one CCFConsistency module"
         )
 
+    source = _remove_replay_properties(source)
     trace_functions = "\n".join(
         (
             _trace_function("tx", "Tx"),

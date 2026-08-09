@@ -369,6 +369,7 @@ action TruncateLedgerToEmptyAction (source : view) (newView : view) {
   activeView newView := true
 }
 
+-- BEGIN CCF VEIL PROPERTIES
 -- Structural counterparts of HistoryTypeOK, LedgerTypeOK, and the prefix
 -- properties.
 invariant [history_type_ok]
@@ -633,6 +634,7 @@ safety [committed_rw_ordered_real_time]
 -- append-by-one condition has a reachable counterexample when an intervening
 -- write executes without a response or status; see README.md.
 
+-- END CCF VEIL PROPERTIES
 #gen_spec
 
 -- This checked-in block is the deductive proof of every declared invariant and

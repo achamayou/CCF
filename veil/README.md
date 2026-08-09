@@ -313,18 +313,31 @@ trace's exhausted finite sequence domain, while avoiding a current Veil
 concrete-execution limitation on bulk relation updates. It also leaves metadata
 outside the copied prefix at the canonical initial values.
 
-Veil checks every declared invariant and safety property in the initial state
-and after every replayed step. If an action precondition is false, replay
-deadlocks before the designated final step and fails. The validator accepts
-only `no_violation_found` after complete exploration and requires exactly
-`number of planned steps + 1` generated and distinct states. This rejects
-partial replay and also guards against accidental branching.
+The scratch replay omits the declared invariants and safety property. It checks
+transition conformance only: each expected canonical procedure must be enabled
+and execute from the state produced by the preceding step. The finite
+truncation helper uses the canonical guards and performs the canonical copy
+assignment at every rank in the trace's exhausted sequence-number domain. If a
+precondition is false, replay deadlocks before the designated final step and
+fails.
 
-On the current 73-event implementation trace, planning inserts seven internal
-ledger/view operations. The resulting 80-step replay visits exactly 81 states
-on Linux. A clean validation took about 21 minutes and 4.3 GiB peak RSS; that
-cost is concrete evaluation of every declared property at every state, not
-exploration of alternative executions.
+Safety is supplied by the separate checked-in deductive proof. That proof
+establishes every declared property for the canonical initial state and after
+every canonical action. A successful conformance replay therefore describes a
+reachable path whose states satisfy all 35 invariants and the safety property,
+without reevaluating their quantified formulas after every concrete step. The
+canonical specification and proof retain all properties; only the ignored
+generated replay copy removes them.
+
+The validator accepts only `no_violation_found` after complete exploration and
+requires exactly `number of planned steps + 1` explored, generated, and
+distinct states. This rejects premature deadlock, partial replay, and accidental
+branching. On the current 73-event implementation trace, planning inserts seven
+internal ledger/view operations, so the 80-step replay must visit exactly 81
+states. With the pinned dependencies already built, an end-to-end Linux
+compile-and-replay run took 233.57 seconds and peaked at 4,321,988 KB RSS. The
+same trace took 1,251.69 seconds when every property was evaluated after every
+state, so transition-only replay is 5.4 times faster.
 
 CI does not use checked-in NDJSON fixtures. It builds the real `js_generic`
 application, runs `tests/consistency_trace_validation.py`, and forces a primary
