@@ -22,7 +22,7 @@ preview language is still changing.
 | `RwTxRequestAction`, execution, response, and status actions | Actions with the same names                                                                                                                          |
 | `AppendOtherTxnAction`                                       | `AppendOtherTxnAction`                                                                                                                               |
 | Empty/non-empty choices in `TruncateLedgerAction`            | Two Veil actions, as Veil models disjuncts as separate actions                                                                                       |
-| `ExternalHistoryInvars`                                      | Named Veil invariants and the two final `safety` clauses, except the unresolved invalid-observation clause below                                     |
+| `ExternalHistoryInvars`                                      | Named Veil invariants and safety properties, except the documented false or malformed clauses below                                                  |
 | TLC finite bounds                                            | Concrete `Fin` instantiations in `#model_check`                                                                                                      |
 
 The order domains are abstract in the specification and finite only in the
@@ -50,9 +50,9 @@ Three definitions in `ExternalHistoryInvars.tla` need resolution:
   also observes that write. This produces a counterexample with three
   transactions, three ledger positions, seven history events, and ten
   transitions. Existing TLC configurations check this property with a history
-  limit of six and therefore do not reach the counterexample. The Veil safety
-  clause is retained to match the stated TLA+ property, but larger checks and
-  an unbounded proof are expected to fail until the property or model is
+  limit of six and therefore do not reach the counterexample. The Veil model
+  documents but does not assert this false clause. It remains excluded from
+  bounded checks and deductive verification until the property or model is
   reconciled.
 
 ## Run the bounded check
@@ -128,9 +128,9 @@ source/target state pair.
    compare the actual projected graph rather than its layer and action totals.
    Add a bounded TLC counterpart of `AppendOtherTxnAction` to compare the full
    Veil action set without making the TLC ledger unbounded.
-2. Fix and re-run the TLA+ real-time invariant, and reproduce the known
-   three-transaction ordered-serialization counterexample before treating
-   larger TLA+ checks as an oracle.
+2. Correct the excluded TLA+ ordered-serialization clause so it permits
+   intervening ledger writes, then model-check the correction before adding it
+   back to the Veil proof set.
 3. Expand the Linux CI matrix. Increase `Fin` scopes and `maxDepth` independently
    so failures identify whether transactions, views, sequence numbers, or
    history length exposed the counterexample. Pin both the Veil revision and
@@ -138,12 +138,10 @@ source/target state pair.
    invalidation, multiple commits, and a view change, plus an expected
    counterexample for multi-node read-only linearizability. These prevent an
    over-constrained model from passing vacuously.
-4. Move from bounded testing to proof. Run `#check_invariants`, inspect each
-   counterexample to induction, and add only justified auxiliary invariants
-   until the complete declared set is jointly inductive. First resolve the
-   known false ordered-serialization clause; no inductive strengthening can
-   prove a false reachable-state property. Do not replace failed obligations
-   with `trusted invariant`.
+4. Keep the complete deductive proof below in CI. When the model or a declared
+   property changes, inspect any counterexample to induction and add only
+   justified reachability invariants; never replace a failed obligation with
+   `trusted invariant`.
 5. Mutate one guard at a time, such as permitting truncation below the commit
    point or committing an entry from another view, and require Veil to find
    the expected violation. This checks that the properties and finite scopes
@@ -153,6 +151,70 @@ source/target state pair.
    and add a second initial-state mode corresponding to
    `MCMultiNodeReadsAlt.tla`. The checked-in smoke run represents the final
    `MultiNodeReads` transition system, not these restricted configurations.
+
+## Deductive invariant proofs
+
+`invariant_proofs.py` generates an ignored proof driver from the canonical
+model. The driver sets `veil.smt.trust false`, so cvc5 results are reconstructed
+as Lean proofs rather than accepted as trusted solver answers. It then runs
+`#gen_theorems`, adding every successful verification condition to the
+environment so Lean's kernel checks each reconstructed proof term. Finally, it
+audits every theorem in the generated `CCFConsistency` namespace and fails if
+any transitively depends on `sorryAx`. The driver explicitly keeps
+`veil.violationIsError` enabled, so an incomplete matrix cannot succeed by
+materializing only its proven subset.
+
+The complete proof covers 36 jointly inductive clauses. Initialization and all
+ten actions establish or preserve every clause, and every action is also proved
+to terminate successfully. This is 396 reconstructed invariant goals plus 11
+successful-termination checks. The proof is independent of the finite `Fin`
+scopes used by the executable model checker.
+
+On 2026-08-09, the complete self-auditing proof finished with Lean exit code 0
+in 1,138.28 seconds using `-j 4`, with maximum resident memory of 8,112,224 KB.
+The final audit checked 864 theorems in the generated namespace without finding
+a transitive `sorryAx` dependency. The specification and proof driver contain
+no trusted invariants, trusted SMT answers, custom axiom declarations, or
+`sorry` declarations.
+
+Generate and check the complete initialization/action matrix with:
+
+```bash
+cd veil
+python3 invariant_proofs.py
+lake env lean -j 4 \
+  --load-dynlib=.lake/packages/cvc5/.lake/build/lib/libcvc5_cvc5.so \
+  .generated/CCFConsistencyInvariantProofs.lean
+```
+
+During proof development, one action can be checked independently:
+
+```bash
+python3 invariant_proofs.py --action TruncateLedgerAction
+lake env lean -j 4 \
+  --load-dynlib=.lake/packages/cvc5/.lake/build/lib/libcvc5_cvc5.so \
+  .generated/CCFConsistencyInvariantProofs.lean
+```
+
+The twelve auxiliary invariants between
+`ledger_entry_exists_in_origin_view` and
+`committed_response_matches_current_ledger` make explicit the reachable
+provenance and prefix relationships between ledger entries, requests,
+responses, and statuses. They strengthen the joint induction hypothesis and
+are proved across initialization and every action rather than assumed.
+
+This proves the declared properties of the Veil transition system. It does not
+prove unbounded equivalence with the TLA+ specification or validate the
+implementation. The known-false `CommittedRwOrderedSerializableInv` and
+malformed/false `InvalidNotObservedByCommittedInv` clauses are documented above
+but intentionally not part of the proof matrix.
+
+The proved external-history set establishes the three components of
+`CommittedRwLinearizableInv`: committed read-write serializability, observation
+of earlier committed writes, and at-most-once observation. It also proves the
+corrected read-write real-time ordering clause. It does not establish the
+stronger `CommittedRwOrderedSpecLinearizableInv` conjunction because its
+ordered-serialization component is the known-false clause excluded above.
 
 ## Implementation trace validation
 

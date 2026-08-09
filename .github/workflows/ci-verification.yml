@@ -99,6 +99,14 @@ jobs:
           lake lean .generated/CCFConsistencyOneWriteTrace.lean
           lake lean .generated/CCFConsistencyTrace.lean
 
+      - name: Prove Veil consistency invariants
+        working-directory: veil
+        run: |
+          python3 invariant_proofs.py
+          lake env lean -j 4 \
+            --load-dynlib=.lake/packages/cvc5/.lake/build/lib/libcvc5_cvc5.so \
+            .generated/CCFConsistencyInvariantProofs.lean
+
       - name: Compare bounded TLC and Veil state graphs
         run: |
           python3 tla/install_deps.py

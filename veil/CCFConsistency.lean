@@ -1,4 +1,9 @@
+-- Copyright (c) Microsoft Corporation. All rights reserved.
+-- Licensed under the Apache 2.0 License.
+
 import Veil
+
+set_option synthInstance.maxHeartbeats 200000
 
 /-!
 # CCF client consistency
@@ -140,15 +145,6 @@ ghost relation txIdLt (left right : histEvent) :=
   Or (viewLt (eventView left) (eventView right))
     (And (eventView left = eventView right)
       (seqLt (eventSeqno left) (eventSeqno right)))
-
-ghost relation consecutiveCommittedRwResponses
-    (left right : histEvent) :=
-  And (rwResponseCommitted left)
-    (And (rwResponseCommitted right)
-      (And (txIdLt left right)
-        (Not (∃ middle,
-          And (rwResponseCommitted middle)
-            (And (txIdLt left middle) (txIdLt middle right))))))
 
 ghost relation currentView (v : view) :=
   And (activeView v)
@@ -423,6 +419,93 @@ invariant [ledger_tx_ids_are_stable_across_copies]
       And (leftSlot = rightSlot)
         (entryView leftBranch leftSlot = entryView rightBranch rightSlot)
 
+invariant [ledger_entry_exists_in_origin_view]
+  ∀ branch slot,
+    ledgerEntry branch slot ->
+      ledgerEntry (entryView branch slot) slot
+
+invariant [response_frontier_is_ledger_entry]
+  ∀ response,
+    responseEvent response ->
+      ledgerEntry (eventBranch response) (eventSeqno response)
+
+-- Auxiliary reachability facts used to make the external-history properties
+-- inductive. Each follows directly from execution, response, and status actions.
+invariant [client_entry_has_request]
+  ∀ branch slot,
+    clientEntry branch slot ->
+      ∃ request,
+        And (rwRequestEvent request)
+          (eventTx request = entryTx branch slot)
+
+invariant [client_entry_matches_origin]
+  ∀ branch slot,
+    clientEntry branch slot ->
+      And (clientEntry (entryView branch slot) slot)
+        (And
+          (entryView (entryView branch slot) slot = entryView branch slot)
+          (entryTx (entryView branch slot) slot = entryTx branch slot))
+
+invariant [ledger_entry_views_are_monotonic]
+  ∀ branch earlier later,
+    And (ledgerEntry branch later) (seqOrder.le earlier later) ->
+      viewOrder.le (entryView branch earlier) (entryView branch later)
+
+invariant [ledger_prefix_matches_frontier_origin]
+  ∀ branch frontier slot,
+    And (ledgerEntry branch frontier) (seqOrder.le slot frontier) ->
+      And (ledgerEntry (entryView branch frontier) slot)
+        (And
+          (clientEntry branch slot =
+            clientEntry (entryView branch frontier) slot)
+          (And
+            (entryView branch slot =
+              entryView (entryView branch frontier) slot)
+            (clientEntry branch slot ->
+              entryTx branch slot =
+                entryTx (entryView branch frontier) slot)))
+
+invariant [response_branch_is_view]
+  ∀ response,
+    responseEvent response ->
+      eventBranch response = eventView response
+
+invariant [response_frontier_matches_origin]
+  ∀ response,
+    responseEvent response ->
+      entryView (eventBranch response) (eventSeqno response) =
+        eventView response
+
+invariant [rw_response_matches_ledger_entry]
+  ∀ response,
+    rwResponseEvent response ->
+      And (clientEntry (eventBranch response) (eventSeqno response))
+        (entryTx (eventBranch response) (eventSeqno response) =
+          eventTx response)
+
+invariant [status_has_rw_response]
+  ∀ status,
+    statusEvent status ->
+      ∃ response,
+        And (rwResponseEvent response)
+          (And (eventLt response status)
+            (And (eventView response = eventView status)
+              (eventSeqno response = eventSeqno status)))
+
+invariant [committed_id_is_in_current_ledger]
+  ∀ committedView committedSeq current,
+    And (committedTxId committedView committedSeq) (currentView current) ->
+      And (ledgerEntry current committedSeq)
+        (entryView current committedSeq = committedView)
+
+invariant [committed_response_matches_current_ledger]
+  ∀ response current,
+    And (rwResponseCommitted response) (currentView current) ->
+      And (clientEntry current (eventSeqno response))
+        (And
+          (entryView current (eventSeqno response) = eventView response)
+          (entryTx current (eventSeqno response) = eventTx response))
+
 -- ExternalHistoryInvars.tla properties checked for MultiNodeReads.
 invariant [all_received_after_sent]
   ∀ response,
@@ -531,9 +614,6 @@ invariant [at_most_once_observed]
       (observedAt response rightSlot observed) ->
       leftSlot = rightSlot
 
--- Together, these final two properties are CCF's primary ordered speculative
--- linearizability guarantee for committed read-write transactions.
---
 -- This real-time clause follows the prose definition in the TLA+ source:
 -- both endpoints are committed read-write responses.
 safety [committed_rw_ordered_real_time]
@@ -545,17 +625,9 @@ safety [committed_rw_ordered_real_time]
             (eventLt earlier request)))) ->
       txIdLt earlier later
 
--- This is the TLA+ Append property verbatim in relational form. It has a
--- known three-transaction counterexample when an intervening executed write
--- is never responded to or status-checked; see README.md.
-safety [committed_rw_ordered_serializable]
-  ∀ earlier later,
-    consecutiveCommittedRwResponses earlier later ->
-      ∀ slot observed,
-        Iff (observedAt later slot observed)
-          (Or (observedAt earlier slot observed)
-            (And (slot = eventSeqno later)
-              (observed = eventTx later)))
+-- CommittedRwOrderedSerializableInv is intentionally excluded. Its exact
+-- append-by-one condition has a reachable counterexample when an intervening
+-- write executes without a response or status; see README.md.
 
 #gen_spec
 
