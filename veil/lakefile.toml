@@ -9,3 +9,8 @@ rev = "2ccca695fe62d2e488da8725a747972c2f115a61"
 
 [[lean_lib]]
 name = "CCFConsistency"
+moreLeanArgs = [
+    "-j",
+    "4",
+]
+dynlibs = ["@cvc5/cvc5:shared"]

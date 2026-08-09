@@ -4,6 +4,10 @@
 import Veil
 
 set_option synthInstance.maxHeartbeats 200000
+set_option veil.violationIsError true
+set_option veil.smt.trust false
+set_option veil.printCounterexamples false
+set_option veil.smt.timeout 120
 
 /-!
 # CCF client consistency
@@ -631,15 +635,28 @@ safety [committed_rw_ordered_real_time]
 
 #gen_spec
 
--- A small executable smoke check. Larger scope/depth matrices belong in CI;
--- see README.md for the proposed progression.
+-- This checked-in block is the deductive proof of every declared invariant and
+-- safety property. Correspondence and trace tooling replace the marked block
+-- with their own finite checks in ignored scratch copies of this source.
 -- BEGIN CCF VEIL BOUNDED CHECK
-#model_check compiled {
-  tx := Fin 2,
-  view := Fin 2,
-  seqno := Fin 2,
-  histEvent := Fin 6
-} { } (maxDepth := 14)
+#check_invariants
+#gen_theorems
+
+run_cmd do
+  let env <- Lean.getEnv
+  let mut checked := 0
+  for (name, info) in env.constants.toList do
+    if `CCFConsistency |>.isPrefixOf name then
+      match info with
+      | .thmInfo _ =>
+          checked := checked + 1
+          let axioms <- Lean.collectAxioms name
+          if axioms.contains ``sorryAx then
+            throwError "theorem {name} depends on sorryAx"
+      | _ => pure ()
+  if checked = 0 then
+    throwError "no CCFConsistency theorems were audited"
+  Lean.logInfo m!"Audited {checked} CCFConsistency theorems for sorryAx."
 -- END CCF VEIL BOUNDED CHECK
 
 end CCFConsistency

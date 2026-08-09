@@ -392,6 +392,8 @@ class TraceValidationTests(unittest.TestCase):
         self.assertIn("\n  TraceStep1\n", generated)
         self.assertIn("assert (", generated)
         self.assertNotIn("action TraceTruncateLedgerAction", generated)
+        self.assertNotIn("#check_invariants", generated)
+        self.assertNotIn("Lean.collectAxioms", generated)
         self.assertNotIn("#model_check compiled", generated)
         self.assertEqual(generated.count("end CCFConsistency"), 1)
 

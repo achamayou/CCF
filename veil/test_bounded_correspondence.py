@@ -34,6 +34,8 @@ class BoundedCorrespondenceTests(unittest.TestCase):
         self.assertIn("view := Fin 3", generated)
         self.assertIn("histEvent := Fin 4", generated)
         self.assertIn("(maxDepth := 12)", generated)
+        self.assertNotIn("#check_invariants", generated)
+        self.assertNotIn("Lean.collectAxioms", generated)
         self.assertNotIn("end CCFConsistency", generated)
 
     def test_renders_bounded_tlc_config_from_canonical_config(self):

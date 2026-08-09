@@ -140,7 +140,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Build and model-check Veil consistency spec
+      - name: Build and prove Veil consistency spec
         uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
         with:
           lake-package-directory: veil
@@ -153,14 +153,6 @@ jobs:
         working-directory: veil
         run: |
           python3 -m unittest
-
-      - name: Prove Veil consistency invariants
-        working-directory: veil
-        run: |
-          python3 invariant_proofs.py
-          lake env lean -j 4 \
-            --load-dynlib=.lake/packages/cvc5/.lake/build/lib/libcvc5_cvc5.so \
-            .generated/CCFConsistencyInvariantProofs.lean
 
       - name: Compare bounded TLC and Veil state graphs
         run: |
