@@ -27,8 +27,9 @@ EXECUTE_ACTION = "RwTxExecuteAction"
 TRACE_TRUNCATE_ACTION = "TraceTruncateLedgerAction"
 MODEL_CHECK_BEGIN = "-- BEGIN CCF VEIL BOUNDED CHECK"
 MODEL_CHECK_END = "-- END CCF VEIL BOUNDED CHECK"
-TRACE_BMC_MAX_STEPS = 1_000_000
+TRACE_BMC_MAX_STEPS = 10_000_000
 TRACE_MAX_HEARTBEATS = 5_000_000
+TRACE_MAX_RECURSION_DEPTH = 100_000
 EXISTS = chr(0x2203)
 FOR_ALL = chr(0x2200)
 LEFT_ARROW = chr(0x2190)
@@ -286,17 +287,24 @@ class _Planner:
             )
         )
 
-    def _ensure_view(self, target: int, source_line: int) -> None:
+    def _ensure_view(self, target: int, copy_length: int, source_line: int) -> None:
         while len(self.branches) <= target:
+            minimum_length = max((seqno + 1 for _, seqno in self.committed), default=0)
+            if copy_length < minimum_length:
+                raise TraceValidationError(
+                    f"line {source_line}: new view would truncate below committed "
+                    f"sequence rank {minimum_length - 1}"
+                )
             source = len(self.branches) - 1
             new_view = len(self.branches)
             source_branch = self.branches[source]
-            if source_branch:
+            copied_branch = source_branch[:copy_length]
+            if copied_branch:
                 self._add_filler(
                     "TruncateLedgerAction",
                     source_line,
                     source_view=source,
-                    cut_seqno=len(source_branch) - 1,
+                    cut_seqno=len(copied_branch) - 1,
                     new_view=new_view,
                 )
             else:
@@ -310,7 +318,7 @@ class _Planner:
                     source_view=source,
                     new_view=new_view,
                 )
-            self.branches.append(list(source_branch))
+            self.branches.append(list(copied_branch))
 
     def _ensure_length(self, view: int, target_length: int, source_line: int) -> None:
         branch = self.branches[view]
@@ -361,7 +369,7 @@ class _Planner:
                 f"line {event.line_number}: transaction was already executed"
             )
         view, seqno = self._normalised_tx_id(event)
-        self._ensure_view(view, event.line_number)
+        self._ensure_view(view, seqno, event.line_number)
         self._ensure_length(view, seqno, event.line_number)
         if any(entry.client_tx == tx for branch in self.branches for entry in branch):
             raise TraceValidationError(
@@ -406,7 +414,7 @@ class _Planner:
                 f"line {event.line_number}: transaction already has a response"
             )
         view, seqno = self._normalised_tx_id(event)
-        self._ensure_view(view, event.line_number)
+        self._ensure_view(view, seqno, event.line_number)
         self._ensure_length(view, seqno + 1, event.line_number)
         if self.branches[view][seqno].entry_view != view:
             raise TraceValidationError(
@@ -510,15 +518,6 @@ def _conjoin(parts: list[str]) -> str:
     return result
 
 
-def _disjoin(parts: list[str]) -> str:
-    if not parts:
-        raise ValueError("a disjunction must contain at least one term")
-    result = parts[-1]
-    for part in reversed(parts[:-1]):
-        result = f"Or ({part}) ({result})"
-    return result
-
-
 def _rank(prefix: str, rank: int, value: str) -> str:
     return f"trace{prefix}Rank{rank} {value}"
 
@@ -569,186 +568,137 @@ def _assert_line(formula: str) -> str:
     return f"  assert ({formula})"
 
 
-def _event_assertion(history_rank: int, relation: str, fields: dict[str, Any]) -> str:
-    terms = [_rank("Event", history_rank, "e"), f"{relation} e"]
-    if "tx" in fields:
-        terms.append(_rank("Tx", fields["tx"], "(eventTx e)"))
-    if "view" in fields:
-        terms.append(_rank("View", fields["view"], "(eventView e)"))
-    if "seqno" in fields:
-        terms.append(_rank("Seqno", fields["seqno"], "(eventSeqno e)"))
-    return _exists("e", _conjoin(terms))
+def _trace_step_name(step_index: int) -> str:
+    return f"TraceStep{step_index}"
 
 
-def _append_other_lines(step: PlanStep) -> list[str]:
-    view = step.fields["view"]
-    seqno = step.fields["seqno"]
-    identity = [
-        _rank("View", view, "branch"),
-        _rank("Seqno", seqno, "slot"),
-    ]
-    return [
-        _assert_line(
-            _exists(
-                "branch slot",
-                _conjoin(identity + ["Not (ledgerEntry branch slot)"]),
-            )
-        ),
-        f"  {step.action}",
-        _assert_line(
-            _exists(
-                "branch slot",
-                _conjoin(
-                    identity
-                    + [
-                        "ledgerEntry branch slot",
-                        "Not (clientEntry branch slot)",
-                        "entryView branch slot = branch",
-                    ]
-                ),
-            )
-        ),
-    ]
+def _trace_step_action(
+    step: PlanStep, step_index: int, history_rank: int | None
+) -> str:
+    name = _trace_step_name(step_index)
+    fields = step.fields
 
-
-def _truncate_lines(step: PlanStep) -> list[str]:
-    source_view = step.fields["source_view"]
-    new_view = step.fields["new_view"]
-    source_terms = [
-        _rank("View", source_view, "source"),
-        _rank("View", new_view, "newView"),
-        "currentView source",
-        "Not (activeView newView)",
-    ]
-    if step.action == "TruncateLedgerAction":
-        cut_seqno = step.fields["cut_seqno"]
-        before = _exists(
-            "source newView cut",
-            _conjoin(
-                source_terms
-                + [
-                    _rank("Seqno", cut_seqno, "cut"),
-                    "lastLedgerSlot source cut",
-                ]
-            ),
-        )
-        rows_match = _for_all(
-            "slot",
-            _conjoin(
-                [
-                    "ledgerEntry newView slot = ledgerEntry source slot",
-                    "clientEntry newView slot = clientEntry source slot",
-                    (
-                        "ledgerEntry newView slot -> "
-                        + _conjoin(
-                            [
-                                "entryView newView slot = entryView source slot",
-                                "entryTx newView slot = entryTx source slot",
-                            ]
-                        )
-                    ),
-                ]
-            ),
-        )
-        after_terms = [
-            _rank("View", source_view, "source"),
-            _rank("View", new_view, "newView"),
-            "activeView newView",
-            rows_match,
+    if step.action in REQUEST_ACTIONS:
+        assert history_rank is not None
+        lines = [f"action {name} (t : tx) (e : histEvent) {{"]
+        lines.append(f"  require {_rank('Tx', fields['tx'], 't')}")
+        lines.append(f"  require {_rank('Event', history_rank, 'e')}")
+        call = f"{step.action} t e"
+    elif step.action == EXECUTE_ACTION:
+        lines = [
+            f"action {name} (request : histEvent) (branch : view) " "(slot : seqno) {"
         ]
+        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
+        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
+        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
+        call = f"{step.action} request branch slot"
+    elif step.action == "RwTxResponseAction":
+        assert history_rank is not None
+        lines = [
+            f"action {name} (request response : histEvent) (branch : view) "
+            "(slot : seqno) {"
+        ]
+        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
+        lines.append(
+            "  require "
+            + _rank(
+                "View",
+                fields["view"],
+                "(entryView branch slot)",
+            )
+        )
+        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
+        lines.append(f"  require {_rank('Event', history_rank, 'response')}")
+        call = f"{step.action} request branch slot response"
+    elif step.action == "RoTxResponseAction":
+        assert history_rank is not None
+        lines = [
+            f"action {name} (request response : histEvent) (branch : view) "
+            "(last : seqno) {"
+        ]
+        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
+        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
+        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'last')}")
+        lines.append(f"  require {_rank('Event', history_rank, 'response')}")
+        call = f"{step.action} request branch last response"
+    elif step.action == "StatusCommittedResponseAction":
+        assert history_rank is not None
+        lines = [f"action {name} (response status : histEvent) (current : view) {{"]
+        lines.append(
+            f"  require {_rank('View', fields['view'], '(eventView response)')}"
+        )
+        lines.append(
+            f"  require {_rank('Seqno', fields['seqno'], '(eventSeqno response)')}"
+        )
+        lines.append(f"  require {_rank('Event', history_rank, 'status')}")
+        call = f"{step.action} response status current"
+    elif step.action == "StatusInvalidResponseAction":
+        assert history_rank is not None
+        lines = [f"action {name} (response status : histEvent) {{"]
+        lines.append(
+            f"  require {_rank('View', fields['view'], '(eventView response)')}"
+        )
+        lines.append(
+            f"  require {_rank('Seqno', fields['seqno'], '(eventSeqno response)')}"
+        )
+        lines.append(f"  require {_rank('Event', history_rank, 'status')}")
+        call = f"{step.action} response status"
+    elif step.action == "AppendOtherTxnAction":
+        lines = [f"action {name} (branch : view) (slot : seqno) {{"]
+        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
+        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
+        call = f"{step.action} branch slot"
+    elif step.action == "TruncateLedgerAction":
+        cut_rank = fields["cut_seqno"]
+        slots = [f"slot{rank}" for rank in range(cut_rank + 1)]
+        slot_params = " ".join(f"({slot} : seqno)" for slot in slots)
+        lines = [
+            f"action {name} (source : view) (cut : seqno) (newView : view) "
+            f"{slot_params} {{"
+        ]
+        lines.append(f"  require {_rank('View', fields['source_view'], 'source')}")
+        lines.append(f"  require {_rank('View', fields['new_view'], 'newView')}")
+        lines.append("  require currentView source")
+        call_args = " ".join(["source", "cut", "newView"] + slots)
+        call = f"{TRACE_TRUNCATE_ACTION}Rank{cut_rank} {call_args}"
+    elif step.action == "TruncateLedgerToEmptyAction":
+        lines = [f"action {name} (source newView : view) {{"]
+        lines.append(f"  require {_rank('View', fields['source_view'], 'source')}")
+        lines.append(f"  require {_rank('View', fields['new_view'], 'newView')}")
+        lines.append("  require currentView source")
+        call = f"{step.action} source newView"
     else:
-        before = _exists("source newView", _conjoin(source_terms))
-        empty = _for_all("slot", "Not (ledgerEntry newView slot)")
-        after_terms = [
-            _rank("View", new_view, "newView"),
-            "activeView newView",
-            empty,
-        ]
+        raise AssertionError(f"unhandled planned action {step.action}")
 
-    return [
-        _assert_line(before),
-        (
-            f"  {TRACE_TRUNCATE_ACTION}"
-            if step.action == "TruncateLedgerAction"
-            else f"  {step.action}"
-        ),
-        _assert_line(_exists("source newView", _conjoin(after_terms))),
-    ]
+    lines.append(f"  {call}")
+    lines.append("}")
+    return "\n".join(lines)
 
 
-def _execute_lines(step: PlanStep) -> list[str]:
-    tx = step.fields["tx"]
-    view = step.fields["view"]
-    seqno = step.fields["seqno"]
-    before = _exists(
-        "t branch slot",
-        _conjoin(
-            [
-                _rank("Tx", tx, "t"),
-                _rank("View", view, "branch"),
-                _rank("Seqno", seqno, "slot"),
-                "activeView branch",
-                "nextLedgerSlot branch slot",
-                "Not (txInLedger t)",
-            ]
-        ),
-    )
-    after = _exists("t", _conjoin([_rank("Tx", tx, "t"), "txInLedger t"]))
-    return [_assert_line(before), f"  {step.action}", _assert_line(after)]
-
-
-def _ro_response_precondition(step: PlanStep) -> str:
-    return _exists(
-        "branch slot",
-        _conjoin(
-            [
-                _rank("View", step.fields["view"], "branch"),
-                _rank("Seqno", step.fields["seqno"], "slot"),
-                "lastLedgerSlot branch slot",
-            ]
-        ),
-    )
+def _trace_step_actions(plan: TracePlan) -> list[str]:
+    declarations = []
+    history_rank = 0
+    for step_index, step in enumerate(plan.steps):
+        uses_history = step.kind == "trace" and step.action != EXECUTE_ACTION
+        declarations.append(
+            _trace_step_action(
+                step,
+                step_index,
+                history_rank if uses_history else None,
+            )
+        )
+        if uses_history:
+            history_rank += 1
+    if history_rank != plan.history_event_count:
+        raise AssertionError("planned history event count is inconsistent")
+    return declarations
 
 
 def _render_trace_query(plan: TracePlan, trace_name: str) -> str:
-    relation_by_action = {
-        "RwTxRequestAction": "rwRequestEvent",
-        "RoTxRequestAction": "roRequestEvent",
-        "RwTxResponseAction": "rwResponseEvent",
-        "RoTxResponseAction": "roResponseEvent",
-        "StatusCommittedResponseAction": "committedStatusEvent",
-        "StatusInvalidResponseAction": "invalidStatusEvent",
-    }
     lines = [f"sat trace [{trace_name}] {{"]
-    history_rank = 0
-    for step in plan.steps:
-        if step.kind == "filler":
-            if step.action == "AppendOtherTxnAction":
-                lines.extend(_append_other_lines(step))
-            else:
-                lines.extend(_truncate_lines(step))
-            continue
-
-        if step.action == EXECUTE_ACTION:
-            lines.extend(_execute_lines(step))
-            continue
-
-        if step.action == "RoTxResponseAction":
-            lines.append(_assert_line(_ro_response_precondition(step)))
-        lines.append(f"  {step.action}")
-        lines.append(
-            _assert_line(
-                _event_assertion(
-                    history_rank,
-                    relation_by_action[step.action],
-                    step.fields,
-                )
-            )
-        )
-        history_rank += 1
-
-    if history_rank != plan.history_event_count:
-        raise AssertionError("planned history event count is inconsistent")
+    lines.extend(
+        f"  {_trace_step_name(step_index)}" for step_index, _ in enumerate(plan.steps)
+    )
     lines.append(_assert_line(_for_all("e", "eventUsed e")))
     lines.append("}")
     return "\n".join(lines)
@@ -791,26 +741,24 @@ def elabCcfTraceBmc : Tactic := fun stx => do
   result.runByOption stx"""
 
 
-def _trace_truncate_action(seqno_count: int) -> str:
-    slots = [f"slot{rank}" for rank in range(seqno_count)]
+def _trace_truncate_action(cut_rank: int) -> str:
+    slots = [f"slot{rank}" for rank in range(cut_rank + 1)]
     parameters = " ".join(f"({slot} : seqno)" for slot in slots)
-    exhaustive = _disjoin([f"slot = {slot}" for slot in slots])
     lines = [
-        f"action {TRACE_TRUNCATE_ACTION}",
+        f"action {TRACE_TRUNCATE_ACTION}Rank{cut_rank}",
         "    (source : view) (cut : seqno) (newView : view)",
         f"    {parameters} {{",
         "  require activeView source",
         "  require ledgerEntry source cut",
         "  require validTruncationSource source cut",
         "  require nextView newView",
+        f"  require traceSeqnoRank{cut_rank} cut",
     ]
     lines.extend(
         f"  require traceSeqnoRank{rank} {slot}" for rank, slot in enumerate(slots)
     )
     lines.extend(
         [
-            f"  require {FOR_ALL} slot, {exhaustive}",
-            "",
             "  activeView newView := true",
         ]
     )
@@ -818,16 +766,10 @@ def _trace_truncate_action(seqno_count: int) -> str:
         lines.extend(
             [
                 "",
-                f"  if (seqOrder.le {slot} cut) then",
-                f"    ledgerEntry newView {slot} := ledgerEntry source {slot}",
-                f"    clientEntry newView {slot} := clientEntry source {slot}",
-                f"    entryView newView {slot} := entryView source {slot}",
-                f"    entryTx newView {slot} := entryTx source {slot}",
-                "  else",
-                f"    ledgerEntry newView {slot} := false",
-                f"    clientEntry newView {slot} := false",
-                f"    entryView newView {slot} := viewOrder.zero",
-                f"    entryTx newView {slot} := txOrder.zero",
+                f"  ledgerEntry newView {slot} := ledgerEntry source {slot}",
+                f"  clientEntry newView {slot} := clientEntry source {slot}",
+                f"  entryView newView {slot} := entryView source {slot}",
+                f"  entryTx newView {slot} := entryTx source {slot}",
             ]
         )
     lines.append("}")
@@ -873,20 +815,32 @@ def render_trace_source(
         declaration for group in helper_groups for declaration in group
     )
     declarations = [helpers]
-    if any(step.action == "TruncateLedgerAction" for step in plan.steps):
-        declarations.append(_trace_truncate_action(plan.seqno_count))
+    truncation_ranks = sorted(
+        {
+            step.fields["cut_seqno"]
+            for step in plan.steps
+            if step.action == "TruncateLedgerAction"
+        }
+    )
+    declarations.extend(_trace_truncate_action(rank) for rank in truncation_ranks)
+    declarations.extend(_trace_step_actions(plan))
     generated_declarations = "\n\n".join(declarations)
     source = source.replace(
         "#gen_spec",
         (
             f"set_option maxHeartbeats {TRACE_MAX_HEARTBEATS}\n\n"
+            f"set_option maxRecDepth {TRACE_MAX_RECURSION_DEPTH}\n\n"
             f"{generated_declarations}\n\n#gen_spec"
         ),
         1,
     )
     source = source.replace(
         import_marker,
-        f"{import_marker}\n{_trace_bmc_override()}\n\n",
+        (
+            f"{import_marker}\n"
+            "set_option veil.unfoldGhostRel false\n\n"
+            f"{_trace_bmc_override()}\n\n"
+        ),
         1,
     )
 
@@ -902,6 +856,7 @@ def render_trace_source(
         + "-- Generated implementation trace query.\n"
         + "set_option veil.smt.trust true\n"
         + f"set_option maxHeartbeats {TRACE_MAX_HEARTBEATS}\n\n"
+        + f"set_option maxRecDepth {TRACE_MAX_RECURSION_DEPTH}\n\n"
         + query
         + "\n"
         + after.lstrip("\n")

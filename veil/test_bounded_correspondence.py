@@ -10,9 +10,10 @@ import unittest
 from bounded_correspondence import (
     CorrespondenceError,
     compare_graphs,
-    parse_tlc_dot,
+    parse_tlc_output,
     parse_veil_output,
     render_runner_source,
+    render_tlc_config,
     render_veil_source,
 )
 
@@ -29,28 +30,50 @@ class BoundedCorrespondenceTests(unittest.TestCase):
 
         self.assertNotIn("action AppendOtherTxnAction", generated)
         self.assertIn("set_option veil.__modelCheckCompileMode true", generated)
-        self.assertIn("tx := Fin 3", generated)
-        self.assertIn("view := Fin 2", generated)
-        self.assertIn("histEvent := Fin 3", generated)
-        self.assertIn("(maxDepth := 8)", generated)
+        self.assertIn("tx := Fin 4", generated)
+        self.assertIn("view := Fin 3", generated)
+        self.assertIn("histEvent := Fin 4", generated)
+        self.assertIn("(maxDepth := 12)", generated)
         self.assertNotIn("end CCFConsistency", generated)
+
+    def test_renders_bounded_tlc_config_from_canonical_config(self):
+        source = (
+            pathlib.Path(__file__).parent.parent
+            / "tla"
+            / "consistency"
+            / "MCMultiNodeReads.cfg"
+        ).read_text(encoding="utf-8")
+
+        generated = render_tlc_config(source)
+
+        self.assertIn("HistoryLimit = 4", generated)
+        self.assertIn("ViewLimit = 3", generated)
+        self.assertNotIn("HistoryLimit = 6", generated)
+        self.assertNotIn("ViewLimit = 2", generated)
+        self.assertIn("CommittedRwSerializableInv", generated)
 
     def test_renders_parallel_runner(self):
         generated = render_runner_source("Generated.CCFConsistencyCorrespondence", 12)
 
         self.assertIn("numSubTasks := 12", generated)
+        self.assertIn("IO.asTask (prio := .dedicated)", generated)
+        self.assertIn("let finished <- IO.hasFinished checkerTask", generated)
+        self.assertIn("Veil progress:", generated)
         self.assertIn("getProgress instanceId", generated)
         self.assertIn("IO.println output.compress", generated)
 
     def test_compares_matching_graph_summaries(self):
-        dot = """strict digraph DiskGraph {
-1 [label="init",style = filled]
-1 -> 2 [label="MCRwTxRequestAction"];
-2 [label="request"];
-2 -> 3 [label="MCTruncateLedgerAction"];
-3 [label="view"];
-}
+        tlc = """Model checking completed. No error has been found.
+3 states generated, 3 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 3.
+<MCRwTxRequestAction line 1, col 1 to line 1, col 1 of module Test>: 1:1
+<MCTruncateLedgerAction line 2, col 1 to line 2, col 1 of module Test>: 1:1
 """
+        depths = {
+            1: "1 states generated, 1 distinct states found.\n",
+            2: "2 states generated, 2 distinct states found.\n",
+            3: "3 states generated, 3 distinct states found.\n",
+        }
         veil = {
             "result": {
                 "result": "no_violation_found",
@@ -81,20 +104,19 @@ class BoundedCorrespondenceTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            dot_path = root / "graph.dot"
             veil_path = root / "veil.json"
-            dot_path.write_text(dot, encoding="utf-8")
             veil_path.write_text(json.dumps(veil), encoding="utf-8")
 
-            tlc_stats = parse_tlc_dot(dot_path)
+            tlc_stats = parse_tlc_output(tlc, depths)
             veil_stats = parse_veil_output(veil_path)
             compare_graphs(tlc_stats, veil_stats)
 
     def test_reports_graph_difference(self):
-        dot = """strict digraph DiskGraph {
-1 [label="init",style = filled]
-}
+        tlc = """Model checking completed. No error has been found.
+1 states generated, 1 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 1.
 """
+        depths = {1: "1 states generated, 1 distinct states found.\n"}
         veil = {
             "result": {
                 "result": "no_violation_found",
@@ -109,13 +131,14 @@ class BoundedCorrespondenceTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            dot_path = root / "graph.dot"
             veil_path = root / "veil.json"
-            dot_path.write_text(dot, encoding="utf-8")
             veil_path.write_text(json.dumps(veil), encoding="utf-8")
 
             with self.assertRaisesRegex(CorrespondenceError, "generated states"):
-                compare_graphs(parse_tlc_dot(dot_path), parse_veil_output(veil_path))
+                compare_graphs(
+                    parse_tlc_output(tlc, depths),
+                    parse_veil_output(veil_path),
+                )
 
 
 if __name__ == "__main__":

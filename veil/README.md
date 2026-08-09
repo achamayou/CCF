@@ -84,12 +84,17 @@ python3 tla/install_deps.py
 python3 veil/bounded_correspondence.py
 ```
 
-The comparison uses `HistoryLimit = 3` and `ViewLimit = 2` in TLC, and
-`tx := Fin 3`, `view := Fin 2`, `seqno := Fin 3`, and
-`histEvent := Fin 3` in Veil. The TLC model-checking wrappers omit
-`AppendOtherTxnAction`, so the script generates an ignored scratch copy of the
-single Veil specification with only that action removed. Empty and non-empty
-Veil truncation actions are combined under TLC's single truncation label.
+The generated Veil runner reports its completed depth, generated and distinct
+state counts, frontier size, elapsed time, and average throughput every 30
+seconds while the check is running.
+
+The comparison derives `HistoryLimit = 4` and `ViewLimit = 3` from the canonical
+TLC configuration, and uses `tx := Fin 4`, `view := Fin 3`,
+`seqno := Fin 4`, and `histEvent := Fin 4` in Veil. The TLC model-checking
+wrappers omit `AppendOtherTxnAction`, so the script generates an ignored scratch
+copy of the single Veil specification with only that action removed. Empty and
+non-empty Veil truncation actions are combined under TLC's single truncation
+label.
 
 Veil canonicalises fields that are not represented in TLA+: copied ledger
 positions beyond the truncation point are reset, non-client entries have no
@@ -99,35 +104,39 @@ correspond to one TLC `history`/`ledgerBranches` state.
 
 The complete fixed-point comparison is:
 
-| Measure                                 |                               TLC |                              Veil |
-| --------------------------------------- | --------------------------------: | --------------------------------: |
-| Generated states                        |                               580 |                               580 |
-| Distinct states                         |                               341 |                               341 |
-| Cumulative states at depths 0 through 7 | `1, 4, 11, 31, 78, 172, 281, 341` | `1, 4, 11, 31, 78, 172, 281, 341` |
+| Measure                                  |                                                      TLC |                                                     Veil |
+| ---------------------------------------- | -------------------------------------------------------: | -------------------------------------------------------: |
+| Generated states                         |                                                   36,569 |                                                   36,569 |
+| Distinct states                          |                                                   15,789 |                                                   15,789 |
+| Cumulative states at depths 0 through 10 | `1, 4, 12, 34, 108, 356, 1077, 2996, 7145, 12429, 15789` | `1, 4, 12, 34, 108, 356, 1077, 2996, 7145, 12429, 15789` |
 
 | Action              | Transitions in each model |
 | ------------------- | ------------------------: |
-| Read-only request   |                        52 |
-| Read-only response  |                        10 |
-| Read-write request  |                        52 |
-| Read-write execute  |                       248 |
-| Read-write response |                        61 |
-| Committed status    |                         3 |
-| Invalid status      |                         2 |
-| Ledger truncation   |                       151 |
+| Read-only request   |                     1,419 |
+| Read-only response  |                       697 |
+| Read-write request  |                     1,419 |
+| Read-write execute  |                    14,954 |
+| Read-write response |                     4,206 |
+| Committed status    |                       156 |
+| Invalid status      |                        58 |
+| Ledger truncation   |                    13,659 |
 
 This is exact bounded graph-statistics correspondence at this scope, including
 every BFS layer and action total. It is strong evidence for the translation,
 but it is not an unbounded equivalence proof or a direct comparison of every
 source/target state pair.
 
+See [BOUNDED_CORRESPONDENCE.md](BOUNDED_CORRESPONDENCE.md) for the complete
+scope, runtimes, prior and attempted larger runs, methodology, and precise
+limits of this result.
+
 ## Proposed model-checking progression
 
-1. Extend the bounded comparison to history four, then to three views. Export
-   canonical state and labelled-edge digests from both checkers so later runs
-   compare the actual projected graph rather than its layer and action totals.
-   Add a bounded TLC counterpart of `AppendOtherTxnAction` to compare the full
-   Veil action set without making the TLC ledger unbounded.
+1. Export canonical state and labelled-edge digests from both checkers so later
+   runs compare the actual projected graph rather than its layer and action
+   totals. Then extend the bounded comparison to a third view or fifth history
+   event. Add a bounded TLC counterpart of `AppendOtherTxnAction` to compare the
+   full Veil action set without making the TLC ledger unbounded.
 2. Correct the excluded TLA+ ordered-serialization clause so it permits
    intervening ledger writes, then model-check the correction before adding it
    back to the Veil proof set.
@@ -239,23 +248,34 @@ metadata outside the copied prefix, matching the canonical base state. The
 scratch module raises the trace discharger's simplification and heartbeat
 budgets; these changes do not affect the checked-in protocol model.
 
-Run the unit tests and the two end-to-end fixtures with:
+CI does not use checked-in NDJSON fixtures. It builds the real `js_generic`
+application, runs `tests/consistency_trace_validation.py`, and forces a primary
+election while `tests/tvc.py` issues a mix of reads and writes. TLC validates
+the resulting `build/consistency/trace.ndjson` in that same job.
+
+Generate the same trace locally with:
 
 ```bash
-cd veil
-python3 -m unittest
-python3 trace_validation.py testdata/one_write_trace.ndjson \
-  --lean-output .generated/CCFConsistencyOneWriteTrace.lean \
-  --trace-name one_write_trace
-python3 trace_validation.py testdata/valid_trace.ndjson \
-  --lean-output .generated/CCFConsistencyTrace.lean \
-  --trace-name representative_trace
-lake lean .generated/CCFConsistencyOneWriteTrace.lean
-lake lean .generated/CCFConsistencyTrace.lean
+cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DLONG_TESTS=ON
+cmake --build build --target js_generic
+(cd build && ./tests.sh -VV --timeout 180 \
+  -R '^consistency_trace_validation$')
 ```
 
-The fixtures cover a committed write and a longer trace with a read,
-non-client ledger backfill, a view change, and another commit. Continuous
-verification runs both. TLC should remain the production trace-validation
-oracle until the Veil adapter also accepts the historical implementation
-corpus and rejects deliberately corrupted traces.
+Validate it with TLC and generate the corresponding Veil query with:
+
+```bash
+(cd tla && JSON=../build/consistency/trace.ndjson \
+  ./tlc.py --workers 1 tv --disable-dfs \
+  consistency/TraceMultiNodeReads.tla)
+python3 veil/trace_validation.py build/consistency/trace.ndjson \
+  --lean-output veil/.generated/CCFConsistencyImplementationTrace.lean \
+  --trace-name implementation_trace
+```
+
+Synthetic adapter behavior remains covered by Python unit tests, but every
+continuous-verification run validates a fresh implementation trace rather than
+a committed sample. Veil's current `sat trace` implementation encodes the
+complete replay as one symbolic query, which is not yet practical for the full
+implementation-generated trace. The generated Veil query is therefore
+development tooling rather than a CI gate.

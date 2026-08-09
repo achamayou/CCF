@@ -19,6 +19,69 @@ concurrency:
 permissions: read-all
 
 jobs:
+  trace-validation-consistency:
+    name: Trace Validation - Consistency
+    runs-on:
+      [
+        self-hosted,
+        1ES.Pool=gha-vmss-d16av6-ci,
+        "JobId=civ_tv_consistency-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}",
+      ]
+    container:
+      image: mcr.microsoft.com/azurelinux/base/core:3.0
+      options: --user root --publish-all --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_PTRACE
+
+    steps:
+      - name: "Checkout dependencies"
+        shell: bash
+        run: |
+          set -ex
+          gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
+          tdnf -y update
+          tdnf -y install ca-certificates git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -ex
+          ./scripts/setup-ci.sh
+
+      - name: Build consistency test application
+        shell: bash
+        run: |
+          set -ex
+          git config --global --add safe.directory /__w/CCF/CCF
+          mkdir build
+          cd build
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Debug -DLONG_TESTS=ON ..
+          ninja js_generic
+
+      - name: Generate consistency trace
+        shell: bash
+        run: |
+          set -ex
+          cd build
+          rm -rf /github/home/.cache
+          mkdir -p /github/home/.cache
+          ./tests.sh -VV --timeout 180 -R '^consistency_trace_validation$'
+          test -s consistency/trace.ndjson
+          wc -l consistency/trace.ndjson
+
+      - name: Install TLC dependencies
+        run: |
+          tdnf install -y jre wget
+          python3 tla/install_deps.py
+
+      - name: Validate implementation trace with TLC
+        working-directory: tla
+        run: |
+          JSON=../build/consistency/trace.ndjson \
+            ./tlc.py --workers 1 tv --disable-dfs consistency/TraceMultiNodeReads.tla
+
   model-checking-consistency:
     name: Model Checking - Consistency
     runs-on:
@@ -86,18 +149,10 @@ jobs:
           lint: false
           use-mathlib-cache: true
 
-      - name: Validate Veil consistency traces
+      - name: Test Veil consistency tooling
         working-directory: veil
         run: |
           python3 -m unittest
-          python3 trace_validation.py testdata/one_write_trace.ndjson \
-            --lean-output .generated/CCFConsistencyOneWriteTrace.lean \
-            --trace-name one_write_trace
-          python3 trace_validation.py testdata/valid_trace.ndjson \
-            --lean-output .generated/CCFConsistencyTrace.lean \
-            --trace-name representative_trace
-          lake lean .generated/CCFConsistencyOneWriteTrace.lean
-          lake lean .generated/CCFConsistencyTrace.lean
 
       - name: Prove Veil consistency invariants
         working-directory: veil

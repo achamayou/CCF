@@ -2,12 +2,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the Apache 2.0 License.
 
-"""Compare a small TLC state graph with an action-aligned Veil graph."""
+"""Compare the checked-in TLC bounds with an action-aligned Veil graph."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict, deque
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 import os
@@ -15,21 +16,32 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
-HISTORY_LIMIT = 3
-VIEW_LIMIT = 2
-MAX_DEPTH = 8
+HISTORY_LIMIT = 4
+VIEW_LIMIT = 3
+MAX_DEPTH = 12
 
 APPEND_OTHER_BEGIN = "-- BEGIN CCF VEIL APPEND OTHER ACTION"
 APPEND_OTHER_END = "-- END CCF VEIL APPEND OTHER ACTION"
 MODEL_CHECK_BEGIN = "-- BEGIN CCF VEIL BOUNDED CHECK"
 MODEL_CHECK_END = "-- END CCF VEIL BOUNDED CHECK"
 
-DOT_EDGE = re.compile(r'^(-?\d+) -> (-?\d+) \[label="([^"]+)"')
-DOT_NODE = re.compile(r'^(-?\d+) \[label="')
-DOT_INITIAL = re.compile(r"^(-?\d+) \[.*style = filled")
+TLC_SUMMARY = re.compile(
+    r"^([\d,]+) states generated, ([\d,]+) distinct states found,"
+    r" \d+ states left on queue\.$"
+)
+TLC_DFID_SUMMARY = re.compile(
+    r"^([\d,]+) states generated, ([\d,]+) distinct states found\.$"
+)
+TLC_GRAPH_DEPTH = re.compile(
+    r"^The depth of the complete state graph search is ([\d,]+)\.$"
+)
+TLC_ACTION_COVERAGE = re.compile(r"^<([A-Za-z0-9_]+) line [^>]+>: [\d,]+:([\d,]+)$")
 LEAN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LEAN_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+TLC_HISTORY_LIMIT = re.compile(r"^(\s*HistoryLimit\s*=\s*)\d+(\s*)$", re.MULTILINE)
+TLC_VIEW_LIMIT = re.compile(r"^(\s*ViewLimit\s*=\s*)\d+(\s*)$", re.MULTILINE)
 
 TLC_ACTION_NAMES = {
     "MCRoTxRequestAction": "RoTxRequestAction",
@@ -107,11 +119,37 @@ def render_veil_source(
     return source[: -len(module_end)] + "\n"
 
 
-def render_runner_source(module_name: str, workers: int) -> str:
+def render_tlc_config(
+    source: str,
+    history_limit: int = HISTORY_LIMIT,
+    view_limit: int = VIEW_LIMIT,
+) -> str:
+    """Apply correspondence bounds to the canonical TLC configuration."""
+
+    if history_limit < 1 or view_limit < 1:
+        raise CorrespondenceError("all correspondence bounds must be positive")
+
+    for name, pattern, value in (
+        ("HistoryLimit", TLC_HISTORY_LIMIT, history_limit),
+        ("ViewLimit", TLC_VIEW_LIMIT, view_limit),
+    ):
+        source, count = pattern.subn(
+            lambda match: f"{match.group(1)}{value}{match.group(2)}", source
+        )
+        if count != 1:
+            raise CorrespondenceError(f"expected exactly one {name} assignment")
+    return source
+
+
+def render_runner_source(
+    module_name: str, workers: int, progress_interval_ms: int = 30_000
+) -> str:
     if LEAN_MODULE.fullmatch(module_name) is None:
         raise CorrespondenceError(f"{module_name!r} is not a valid Lean module name")
     if workers < 1:
         raise CorrespondenceError("worker count must be positive")
+    if progress_interval_ms < 1:
+        raise CorrespondenceError("progress interval must be positive")
     return f"""import {module_name}
 
 def main : IO Unit := do
@@ -122,8 +160,28 @@ def main : IO Unit := do
     thresholdToParallel := 1,
     numSubSteps := 1
   }}
-  let result <-
+  let checkerTask <- IO.asTask (prio := .dedicated) do
     modelCheckerResult (some parallelConfig) instanceId cancelToken
+  let startTime <- IO.monoMsNow
+  let mut nextReport := startTime + {progress_interval_ms}
+  while true do
+    let finished <- IO.hasFinished checkerTask
+    if finished then break
+    IO.sleep 1000
+    let now <- IO.monoMsNow
+    if nextReport <= now then
+      let progress <-
+        Veil.ModelChecker.Concrete.getProgress instanceId
+      let elapsedMs := now - progress.startTimeMs
+      let statesPerSecond :=
+        if elapsedMs = 0 then 0
+        else progress.statesFound * 1000 / elapsedMs
+      IO.eprintln s!"Veil progress: elapsed={{elapsedMs / 1000}}s, depth={{progress.diameter}}, generated={{progress.statesFound}}, distinct={{progress.distinctStates}}, queue={{progress.queue}}, average={{statesPerSecond}} states/s"
+      let stderr <- IO.getStderr
+      stderr.flush
+      nextReport := now + {progress_interval_ms}
+  let resultExcept <- IO.wait checkerTask
+  let result <- IO.ofExcept resultExcept
   let progress <-
     Veil.ModelChecker.Concrete.getProgress instanceId
   let output := Lean.Json.mkObj [
@@ -134,55 +192,80 @@ def main : IO Unit := do
 """
 
 
-def parse_tlc_dot(path: Path) -> GraphStats:
-    adjacency: dict[str, list[str]] = defaultdict(list)
-    nodes: set[str] = set()
-    initial_states: set[str] = set()
-    actions: Counter[str] = Counter()
+def _count(value: str) -> int:
+    return int(value.replace(",", ""))
 
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if match := DOT_EDGE.match(line):
-            source, target, action = match.groups()
-            nodes.update((source, target))
-            adjacency[source].append(target)
-            try:
-                action = TLC_ACTION_NAMES[action]
-            except KeyError as exc:
-                raise CorrespondenceError(f"unexpected TLC action {action!r}") from exc
-            actions[action] += 1
-        elif match := DOT_NODE.match(line):
-            nodes.add(match.group(1))
-        if match := DOT_INITIAL.match(line):
-            initial_states.add(match.group(1))
 
-    if len(initial_states) != 1:
+def _parse_tlc_summary(output: str) -> tuple[int, int]:
+    matches = []
+    for line in output.splitlines():
+        line = line.strip()
+        matches.append(TLC_SUMMARY.match(line) or TLC_DFID_SUMMARY.match(line))
+    summaries = [match for match in matches if match is not None]
+    if len(summaries) != 1:
         raise CorrespondenceError(
-            f"expected one TLC initial state, found {len(initial_states)}"
+            f"expected one TLC state summary, found {len(summaries)}"
         )
-    initial = next(iter(initial_states))
-    distances = {initial: 0}
-    queue = deque([initial])
-    while queue:
-        source = queue.popleft()
-        for target in adjacency[source]:
-            if target not in distances:
-                distances[target] = distances[source] + 1
-                queue.append(target)
-    if distances.keys() != nodes:
+    return _count(summaries[0].group(1)), _count(summaries[0].group(2))
+
+
+def _parse_tlc_graph_depth(output: str) -> int:
+    matches = [
+        match
+        for line in output.splitlines()
+        if (match := TLC_GRAPH_DEPTH.match(line.strip())) is not None
+    ]
+    if len(matches) != 1:
+        raise CorrespondenceError(f"expected one TLC graph depth, found {len(matches)}")
+    return _count(matches[0].group(1))
+
+
+def parse_tlc_output(
+    breadth_first_output: str, depth_outputs: dict[int, str]
+) -> GraphStats:
+    """Parse an exhaustive TLC run and one depth-limited run per BFS layer."""
+
+    if "Model checking completed. No error has been found." not in breadth_first_output:
+        raise CorrespondenceError("TLC breadth-first run did not complete successfully")
+
+    generated_states, distinct_states = _parse_tlc_summary(breadth_first_output)
+    graph_depth = _parse_tlc_graph_depth(breadth_first_output)
+    expected_depths = set(range(1, graph_depth + 1))
+    if depth_outputs.keys() != expected_depths:
         raise CorrespondenceError(
-            f"TLC DOT contains {len(nodes - distances.keys())} unreachable states"
+            "TLC depth runs do not cover the complete graph: "
+            f"expected {sorted(expected_depths)}, got {sorted(depth_outputs)}"
         )
 
-    layers = Counter(distances.values())
     cumulative: dict[int, int] = {}
-    total = 0
-    for depth in sorted(layers):
-        total += layers[depth]
-        cumulative[depth] = total
+    for depth, output in sorted(depth_outputs.items()):
+        if any(line.startswith("Error:") for line in output.splitlines()):
+            raise CorrespondenceError(
+                f"TLC depth-limited run {depth} did not complete successfully"
+            )
+        _, depth_distinct = _parse_tlc_summary(output)
+        cumulative[depth - 1] = depth_distinct
+    if cumulative[graph_depth - 1] != distinct_states:
+        raise CorrespondenceError(
+            "TLC depth-limited and breadth-first runs disagree: "
+            f"depth {graph_depth - 1} has {cumulative[graph_depth - 1]} states, "
+            f"breadth-first run has {distinct_states}"
+        )
+
+    actions: Counter[str] = Counter()
+    for raw_line in breadth_first_output.splitlines():
+        match = TLC_ACTION_COVERAGE.match(raw_line.strip())
+        if match is None or match.group(1) not in TLC_ACTION_NAMES:
+            continue
+        actions[TLC_ACTION_NAMES[match.group(1)]] += _count(match.group(2))
+    if sum(actions.values()) + 1 != generated_states:
+        raise CorrespondenceError(
+            "TLC action coverage does not account for all generated states: "
+            f"actions={sum(actions.values())}, generated={generated_states}"
+        )
     return GraphStats(
-        generated_states=sum(actions.values()) + 1,
-        distinct_states=len(nodes),
+        generated_states=generated_states,
+        distinct_states=distinct_states,
         cumulative_by_depth=cumulative,
         actions=dict(actions),
     )
@@ -275,20 +358,103 @@ def format_report(tlc: GraphStats) -> str:
     return "\n".join(lines)
 
 
-def _run_command(command: list[str], cwd: Path) -> str:
+def _run_command(
+    command: list[str],
+    cwd: Path,
+    accepted_returncodes: frozenset[int] = frozenset({0}),
+    stream_stderr: bool = False,
+) -> str:
     result = subprocess.run(
-        command, cwd=cwd, text=True, capture_output=True, check=False
+        command,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=None if stream_stderr else subprocess.PIPE,
+        check=False,
     )
-    if result.returncode != 0:
-        output = result.stdout + result.stderr
+    if result.returncode not in accepted_returncodes:
+        output = result.stdout + (result.stderr or "")
         raise CorrespondenceError(
             f"command failed ({result.returncode}): " f"{' '.join(command)}\n{output}"
         )
     return result.stdout
 
 
+def _tlc_command(
+    java: str,
+    tla_dir: Path,
+    workers: int,
+    arguments: list[str],
+    max_heap_mb: int | None = None,
+) -> list[str]:
+    classpath = os.pathsep.join(
+        str(tla_dir / jar) for jar in ("tla2tools.jar", "CommunityModules-deps.jar")
+    )
+    command = [java]
+    if max_heap_mb is not None:
+        command.append(f"-Xmx{max_heap_mb}m")
+    command.extend(
+        [
+            "-XX:+UseParallelGC",
+            "-Dtlc2.tool.impl.Tool.cdot=true",
+            "-cp",
+            classpath,
+            "tlc2.TLC",
+            "-workers",
+            str(workers),
+            "-checkpoint",
+            "0",
+            "-lncheck",
+            "final",
+            *arguments,
+        ]
+    )
+    return command
+
+
+def _run_tlc_depth(
+    java: str, tla_dir: Path, config: Path, depth: int
+) -> tuple[int, str]:
+    with tempfile.TemporaryDirectory(prefix=f"ccf-tlc-depth-{depth}-") as metadir:
+        output = _run_command(
+            _tlc_command(
+                java,
+                tla_dir,
+                1,
+                [
+                    "-metadir",
+                    metadir,
+                    "-dfid",
+                    str(depth),
+                    "-config",
+                    str(config),
+                    "consistency/MCMultiNodeReads.tla",
+                ],
+                max_heap_mb=768,
+            ),
+            tla_dir,
+            accepted_returncodes=frozenset({0, 255}),
+        )
+    return depth, output
+
+
+def _run_tlc_depths(
+    java: str, tla_dir: Path, config: Path, graph_depth: int, workers: int
+) -> dict[int, str]:
+    outputs: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, graph_depth)) as executor:
+        futures = [
+            executor.submit(_run_tlc_depth, java, tla_dir, config, depth)
+            for depth in range(1, graph_depth + 1)
+        ]
+        for future in as_completed(futures):
+            depth, output = future.result()
+            outputs[depth] = output
+    return outputs
+
+
 def run_correspondence(
-    workers: int, output_dir: Path, lake: str = "lake"
+    workers: int, output_dir: Path, lake: str = "lake", java: str = "java"
 ) -> GraphStats:
     veil_dir = Path(__file__).resolve().parent
     repo_root = veil_dir.parent
@@ -326,26 +492,43 @@ def run_correspondence(
         newline="\n",
     )
 
-    dot_stem = generated_dir / "tlc-h3-v2"
-    config = tla_dir / "consistency" / "MCMultiNodeReadsSmall.cfg"
+    scope_name = f"h{HISTORY_LIMIT}-v{VIEW_LIMIT}"
+    canonical_config = tla_dir / "consistency" / "MCMultiNodeReads.cfg"
+    config = generated_dir / "MCMultiNodeReadsCorrespondence.cfg"
+    config.write_text(
+        render_tlc_config(canonical_config.read_text(encoding="utf-8")),
+        encoding="utf-8",
+        newline="\n",
+    )
     tlc_output = _run_command(
-        [
-            sys.executable,
-            "tlc.py",
-            "--workers",
-            str(workers),
-            "--dot",
-            "--trace-name",
-            str(dot_stem),
-            "--config",
-            str(config),
-            "mc",
-            "consistency/MCMultiNodeReads.tla",
-        ],
+        _tlc_command(
+            java,
+            tla_dir,
+            workers,
+            [
+                "-coverage",
+                "9999",
+                "-config",
+                str(config),
+                "consistency/MCMultiNodeReads.tla",
+            ],
+        ),
         tla_dir,
     )
-    (generated_dir / "tlc-h3-v2.log").write_text(
+    (generated_dir / f"tlc-{scope_name}.log").write_text(
         tlc_output, encoding="utf-8", newline="\n"
+    )
+    depth_outputs = _run_tlc_depths(
+        java, tla_dir, config, _parse_tlc_graph_depth(tlc_output), workers
+    )
+    (generated_dir / f"tlc-{scope_name}-depths.log").write_text(
+        "\n".join(
+            f"===== depth {depth} =====\n{output.rstrip()}"
+            for depth, output in sorted(depth_outputs.items())
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
 
     model_relative = model_path.relative_to(veil_dir)
@@ -373,13 +556,14 @@ def run_correspondence(
     veil_output = _run_command(
         [lake, "env", "lean", "--run", runner_relative.as_posix()],
         veil_dir,
+        stream_stderr=True,
     )
-    veil_output_path = generated_dir / "veil-h3-v2.json"
+    veil_output_path = generated_dir / f"veil-{scope_name}.json"
     veil_output_path.write_text(
         veil_output.strip() + "\n", encoding="utf-8", newline="\n"
     )
 
-    tlc_stats = parse_tlc_dot(dot_stem.with_suffix(".dot"))
+    tlc_stats = parse_tlc_output(tlc_output, depth_outputs)
     veil_stats = parse_veil_output(veil_output_path)
     compare_graphs(tlc_stats, veil_stats)
     return tlc_stats
@@ -399,6 +583,7 @@ def main() -> int:
         default=Path(__file__).with_name("Generated"),
     )
     parser.add_argument("--lake", default="lake")
+    parser.add_argument("--java", default="java")
     args = parser.parse_args()
 
     try:
@@ -406,6 +591,7 @@ def main() -> int:
             workers=args.workers,
             output_dir=args.output_dir,
             lake=args.lake,
+            java=args.java,
         )
     except (
         CorrespondenceError,

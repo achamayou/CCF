@@ -21,6 +21,43 @@ def _plan(*events):
     return plan_trace(parse_trace(events))
 
 
+def _view_change_plan():
+    return _plan(
+        _event(action="RwTxRequestAction", type="RwTxRequest", tx=0),
+        _event(
+            action="RwTxExecuteAction",
+            type="RwTxExecute",
+            tx=0,
+            tx_id=[2, 10],
+        ),
+        _event(
+            action="RwTxResponseAction",
+            type="RwTxResponse",
+            tx=0,
+            tx_id=[2, 10],
+        ),
+        _event(
+            action="StatusCommittedResponseAction",
+            type="TxStatusReceived",
+            tx_id=[2, 10],
+            status="CommittedStatus",
+        ),
+        _event(action="RwTxRequestAction", type="RwTxRequest", tx=1),
+        _event(
+            action="RwTxExecuteAction",
+            type="RwTxExecute",
+            tx=1,
+            tx_id=[3, 11],
+        ),
+        _event(
+            action="RwTxResponseAction",
+            type="RwTxResponse",
+            tx=1,
+            tx_id=[3, 11],
+        ),
+    )
+
+
 class TraceValidationTests(unittest.TestCase):
     def test_rank_normalises_sparse_write_transaction_ids(self):
         plan = _plan(
@@ -111,6 +148,90 @@ class TraceValidationTests(unittest.TestCase):
         self.assertEqual(fillers[0].fields, {"view": 0, "seqno": 1})
 
     def test_copies_current_branch_for_new_view(self):
+        plan = _view_change_plan()
+
+        fillers = [step for step in plan.steps if step.kind == "filler"]
+        self.assertEqual(len(fillers), 1)
+        self.assertEqual(fillers[0].action, "TruncateLedgerAction")
+        self.assertEqual(
+            fillers[0].fields,
+            {"source_view": 0, "cut_seqno": 0, "new_view": 1},
+        )
+
+    def test_truncates_rolled_back_suffix_before_reusing_seqno(self):
+        plan = _plan(
+            _event(action="RwTxRequestAction", type="RwTxRequest", tx=0),
+            _event(
+                action="RwTxExecuteAction",
+                type="RwTxExecute",
+                tx=0,
+                tx_id=[2, 10],
+            ),
+            _event(
+                action="RwTxResponseAction",
+                type="RwTxResponse",
+                tx=0,
+                tx_id=[2, 10],
+            ),
+            _event(
+                action="StatusCommittedResponseAction",
+                type="TxStatusReceived",
+                tx_id=[2, 10],
+                status="CommittedStatus",
+            ),
+            _event(action="RwTxRequestAction", type="RwTxRequest", tx=1),
+            _event(
+                action="RwTxExecuteAction",
+                type="RwTxExecute",
+                tx=1,
+                tx_id=[2, 11],
+            ),
+            _event(
+                action="RwTxResponseAction",
+                type="RwTxResponse",
+                tx=1,
+                tx_id=[2, 11],
+            ),
+            _event(
+                action="StatusInvalidResponseAction",
+                type="TxStatusReceived",
+                tx_id=[2, 11],
+                status="InvalidStatus",
+            ),
+            _event(action="RwTxRequestAction", type="RwTxRequest", tx=2),
+            _event(
+                action="RwTxExecuteAction",
+                type="RwTxExecute",
+                tx=2,
+                tx_id=[3, 11],
+            ),
+            _event(
+                action="RwTxResponseAction",
+                type="RwTxResponse",
+                tx=2,
+                tx_id=[3, 11],
+            ),
+        )
+
+        truncations = [
+            step for step in plan.steps if step.action == "TruncateLedgerAction"
+        ]
+        self.assertEqual(len(truncations), 1)
+        self.assertEqual(
+            truncations[0].fields,
+            {"source_view": 0, "cut_seqno": 0, "new_view": 1},
+        )
+        new_view_execution = [
+            step
+            for step in plan.steps
+            if step.action == "RwTxExecuteAction" and step.fields["tx"] == 2
+        ]
+        self.assertEqual(
+            new_view_execution[0].fields,
+            {"tx": 2, "view": 1, "seqno": 1},
+        )
+
+    def test_allows_execution_on_existing_older_view_after_later_commit(self):
         plan = _plan(
             _event(action="RwTxRequestAction", type="RwTxRequest", tx=0),
             _event(
@@ -144,14 +265,29 @@ class TraceValidationTests(unittest.TestCase):
                 tx=1,
                 tx_id=[3, 11],
             ),
+            _event(
+                action="StatusCommittedResponseAction",
+                type="TxStatusReceived",
+                tx_id=[3, 11],
+                status="CommittedStatus",
+            ),
+            _event(action="RwTxRequestAction", type="RwTxRequest", tx=2),
+            _event(
+                action="RwTxExecuteAction",
+                type="RwTxExecute",
+                tx=2,
+                tx_id=[2, 11],
+            ),
         )
 
-        fillers = [step for step in plan.steps if step.kind == "filler"]
-        self.assertEqual(len(fillers), 1)
-        self.assertEqual(fillers[0].action, "TruncateLedgerAction")
+        old_view_execution = [
+            step
+            for step in plan.steps
+            if step.action == "RwTxExecuteAction" and step.fields["tx"] == 2
+        ]
         self.assertEqual(
-            fillers[0].fields,
-            {"source_view": 0, "cut_seqno": 0, "new_view": 1},
+            old_view_execution[0].fields,
+            {"tx": 2, "view": 0, "seqno": 1},
         )
 
     def test_rejects_invalid_status_without_enabling_condition(self):
@@ -242,20 +378,25 @@ class TraceValidationTests(unittest.TestCase):
 
         generated = render_trace_source(source, plan, "sample_trace")
 
+        self.assertIn("set_option veil.unfoldGhostRel false", generated)
         self.assertIn("theory ghost relation traceEventRank2", generated)
         self.assertIn("def elabCcfTraceBmc", generated)
         self.assertIn("set_option maxHeartbeats 5000000", generated)
+        self.assertIn("set_option maxRecDepth 100000", generated)
         self.assertIn("sat trace [sample_trace] {", generated)
-        self.assertIn("  RwTxExecuteAction", generated)
+        self.assertIn(
+            "action TraceStep1 (request : histEvent) (branch : view) " "(slot : seqno)",
+            generated,
+        )
+        self.assertIn("  RwTxExecuteAction request branch slot", generated)
+        self.assertIn("\n  TraceStep1\n", generated)
         self.assertIn("assert (", generated)
         self.assertNotIn("action TraceTruncateLedgerAction", generated)
         self.assertNotIn("#model_check compiled", generated)
         self.assertEqual(generated.count("end CCFConsistency"), 1)
 
     def test_renders_finite_view_copy_for_trace_validation(self):
-        testdata = pathlib.Path(__file__).with_name("testdata")
-        with (testdata / "valid_trace.ndjson").open(encoding="utf-8") as trace:
-            plan = plan_trace(parse_trace(trace))
+        plan = _view_change_plan()
         source = (
             pathlib.Path(__file__)
             .with_name("CCFConsistency.lean")
@@ -264,12 +405,16 @@ class TraceValidationTests(unittest.TestCase):
 
         generated = render_trace_source(source, plan, "view_copy_trace")
 
-        self.assertIn("action TraceTruncateLedgerAction", generated)
-        self.assertIn("require traceSeqnoRank2 slot2", generated)
-        self.assertIn("if (seqOrder.le slot2 cut) then", generated)
-        self.assertIn("entryView newView slot2 := viewOrder.zero", generated)
-        self.assertIn("entryTx newView slot2 := txOrder.zero", generated)
-        self.assertIn("\n  TraceTruncateLedgerAction\n", generated)
+        self.assertIn("action TraceTruncateLedgerActionRank0", generated)
+        self.assertIn("require traceSeqnoRank0 cut", generated)
+        self.assertIn("require traceSeqnoRank0 slot0", generated)
+        self.assertIn(
+            "ledgerEntry newView slot0 := ledgerEntry source slot0", generated
+        )
+        self.assertNotIn("(slot1 : seqno)", generated)
+        self.assertIn(
+            "TraceTruncateLedgerActionRank0 source cut newView slot0", generated
+        )
         self.assertNotIn("\n  TruncateLedgerAction\n", generated)
 
 
