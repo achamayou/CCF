@@ -23,15 +23,16 @@ preview language is still changing.
 | `AppendOtherTxnAction`                                       | `AppendOtherTxnAction`                                                                                                                               |
 | Empty/non-empty choices in `TruncateLedgerAction`            | Two Veil actions, as Veil models disjuncts as separate actions                                                                                       |
 | `ExternalHistoryInvars`                                      | Named Veil invariants and safety properties, except the documented false or malformed clauses below                                                  |
-| TLC finite bounds                                            | Concrete `Fin` instantiations in `#model_check`                                                                                                      |
+| TLC finite bounds                                            | Concrete `Fin` instantiations in a generated scratch `#model_check`                                                                                  |
 
-The order domains are abstract in the specification and finite only in the
-embedded model-check command. Their first elements have rank zero. A concrete
-trace validator should rank-normalise transaction IDs, views, sequence
-numbers, and external events rather than assume that CCF's numeric IDs begin
-at the same value.
+The order domains remain abstract in the checked-in specification and are made
+finite only in generated bounded-check or trace-replay copies. Their first
+elements have rank zero. A concrete trace validator should rank-normalise
+transaction IDs, views, sequence numbers, and external events rather than
+assume that CCF's numeric IDs begin at the same value.
 
-Three definitions in `ExternalHistoryInvars.tla` need resolution:
+Three definitions in `ExternalHistoryInvars.tla` require correction or
+exclusion in Veil:
 
 - `CommittedRwOrderedRealTimeInv` describes two committed read-write
   transactions, but its innermost quantifier ranges over read-only responses.
@@ -57,8 +58,10 @@ Three definitions in `ExternalHistoryInvars.tla` need resolution:
 
 ## Build and prove the specification
 
-Veil currently supports Linux and macOS; use WSL2 on Windows. Install Node.js
-24 and `elan`, then run:
+The checked-in CI job uses Ubuntu 24.04, Node.js 24, Clang/LLD/libc++ 15, and
+the Lean version pinned by `lean-toolchain`. Use the same Linux environment or
+WSL2 on Windows. After installing the native dependencies, Node.js 24, and
+`elan`, run:
 
 ```bash
 cd veil
@@ -84,13 +87,13 @@ The generated Veil runner reports its completed depth, generated and distinct
 state counts, frontier size, elapsed time, and average throughput every 30
 seconds while the check is running.
 
-The comparison derives `HistoryLimit = 4` and `ViewLimit = 3` from the canonical
-TLC configuration, and uses `tx := Fin 4`, `view := Fin 3`,
-`seqno := Fin 4`, and `histEvent := Fin 4` in Veil. The TLC model-checking
-wrappers omit `AppendOtherTxnAction`, so the script generates an ignored scratch
-copy of the single Veil specification with only that action removed. Empty and
-non-empty Veil truncation actions are combined under TLC's single truncation
-label.
+The comparison derives a temporary TLC configuration from the canonical one,
+setting `HistoryLimit = 4` and `ViewLimit = 3`, and uses `tx := Fin 4`,
+`view := Fin 3`, `seqno := Fin 4`, and `histEvent := Fin 4` in Veil. The TLC
+model-checking wrappers omit `AppendOtherTxnAction`, so the script generates an
+ignored scratch copy of the single Veil specification with only that action
+removed. Empty and non-empty Veil truncation actions are combined under TLC's
+single truncation label.
 
 Veil canonicalises fields that are not represented in TLA+: copied ledger
 positions beyond the truncation point are reset, non-client entries have no
@@ -126,32 +129,28 @@ See [BOUNDED_CORRESPONDENCE.md](BOUNDED_CORRESPONDENCE.md) for the complete
 scope, runtimes, prior and attempted larger runs, methodology, and precise
 limits of this result.
 
-## Proposed model-checking progression
+## Remaining validation work
 
 1. Export canonical state and labelled-edge digests from both checkers so later
    runs compare the actual projected graph rather than its layer and action
-   totals. Then extend the bounded comparison to a third view or fifth history
+   totals. Then extend the bounded comparison to a fourth view or fifth history
    event. Add a bounded TLC counterpart of `AppendOtherTxnAction` to compare the
    full Veil action set without making the TLC ledger unbounded.
 2. Correct the excluded TLA+ ordered-serialization clause so it permits
    intervening ledger writes, then model-check the correction before adding it
    back to the Veil proof set.
-3. Expand the Linux CI matrix. Increase `Fin` scopes and `maxDepth` independently
-   so failures identify whether transactions, views, sequence numbers, or
-   history length exposed the counterexample. Pin both the Veil revision and
-   Lean toolchain in CI. Add satisfiable reachability queries for a commit, an
-   invalidation, multiple commits, and a view change, plus an expected
-   counterexample for multi-node read-only linearizability. These prevent an
-   over-constrained model from passing vacuously.
-4. Keep the complete deductive proof below in CI. When the model or a declared
-   property changes, inspect any counterexample to induction and add only
-   justified reachability invariants; never replace a failed obligation with
-   `trusted invariant`.
-5. Mutate one guard at a time, such as permitting truncation below the commit
+3. Expand the bounded Veil CI matrix. Increase `Fin` scopes and `maxDepth`
+   independently so failures identify whether transactions, views, sequence
+   numbers, or history length exposed the counterexample. Add Veil reachability
+   queries corresponding to the existing TLC commit, invalidation,
+   multiple-commit, and non-linearizable read checks, plus an explicit
+   view-change query. These guard against an over-constrained model passing
+   vacuously.
+4. Mutate one guard at a time, such as permitting truncation below the commit
    point or committing an entry from another view, and require Veil to find
    the expected violation. This checks that the properties and finite scopes
    are not vacuous.
-6. Exercise the stronger restricted models from the same source file. Disable
+5. Exercise the stronger restricted models from the same source file. Disable
    view-change/invalidation actions to check the single-node-only invariants,
    and add a second initial-state mode corresponding to
    `MCMultiNodeReadsAlt.tla`. The current bounded correspondence run represents
@@ -161,20 +160,104 @@ limits of this result.
 ## Deductive invariant proofs
 
 The proof is checked in directly at the end of `CCFConsistency.lean`; it is not
-generated by a script. The file sets `veil.smt.trust false`, so cvc5 results are
-reconstructed as Lean proofs rather than accepted as trusted solver answers.
-It then runs `#gen_theorems`, adding every successful verification condition to
-the environment so Lean's kernel checks each reconstructed proof term. Finally,
-it audits every theorem in the `CCFConsistency` namespace and fails if any
-transitively depends on `sorryAx`. The file explicitly keeps
-`veil.violationIsError` enabled, so an incomplete matrix cannot succeed by
-materializing only its proven subset.
+generated by a script. It is an unbounded, joint inductive proof over the
+abstract ordered domains, independent of the finite `Fin` scopes used by the
+bounded correspondence and trace tools.
 
-The complete proof covers 36 jointly inductive clauses. Initialization and all
-ten actions establish or preserve every clause, and every action is also proved
-to terminate successfully. This is 396 reconstructed invariant goals plus 11
-successful-termination checks. The proof is independent of the finite `Fin`
-scopes used by the executable model checker.
+### How the proof works
+
+1. `#gen_spec` finalises the state, initializer, actions, and declared
+   properties as one transition system.
+2. `#check_invariants` constructs the complete joint-induction matrix. Each
+   step may use all 36 clauses as its induction hypothesis, including the
+   auxiliary reachability facts, but must re-establish every clause.
+3. `veil.violationIsError true` makes any open or failed condition fail the
+   build rather than allowing a proven subset to be materialized.
+4. `veil.smt.trust false` makes Veil reconstruct each cvc5 result as a Lean
+   proof term rather than accepting a trusted solver answer.
+5. `#gen_theorems` adds the reconstructed verification conditions to the Lean
+   environment, where the kernel checks their proof terms.
+6. A final `Lean.collectAxioms` pass audits every theorem in the
+   `CCFConsistency` namespace and fails if any theorem transitively depends on
+   `sorryAx`. It also fails if no theorem was found, preventing an empty audit
+   from succeeding.
+
+The file declares 35 invariants and one safety property. The initializer and
+all ten actions must establish or preserve every clause:
+
+- `RwTxRequestAction` and `RoTxRequestAction` add ordered client requests.
+- `RwTxExecuteAction` and `AppendOtherTxnAction` append client and non-client
+  ledger entries.
+- `RwTxResponseAction` and `RoTxResponseAction` return observations.
+- `StatusCommittedResponseAction` and `StatusInvalidResponseAction` classify
+  read-write responses.
+- `TruncateLedgerAction` and `TruncateLedgerToEmptyAction` create a new view
+  from a retained or empty ledger prefix.
+
+This produces `36 * (1 initializer + 10 actions) = 396` reconstructed
+preservation goals. Veil also checks successful termination for the initializer
+and each action, adding 11 conditions, for 407 conditions in total. No declared
+property or action is omitted from this matrix, including
+`AppendOtherTxnAction` and both truncation actions.
+
+### What is proved
+
+The jointly proved clauses cover:
+
+- History event typing, exclusive event kinds, request/response ordering, and
+  history-prefix structure.
+- Active-view and ledger-prefix structure, ledger-entry typing, stable
+  transaction identities across branch copies, and client-entry provenance.
+- Response frontier/origin consistency and the provenance of commit and
+  invalid status events.
+- Unique requests and transaction-ID assignments, consistent transactions and
+  observations for responses sharing an ID, and a unique transaction at each
+  committed sequence number.
+- Mutual exclusion and monotonicity of committed and invalid statuses.
+- The three components of `CommittedRwLinearizableInv`: committed read-write
+  serializability, observation of earlier committed writes, and at-most-once
+  observation.
+- The corrected read-write real-time ordering property
+  `committed_rw_ordered_real_time`.
+
+The twelve auxiliary invariants from `ledger_entry_exists_in_origin_view`
+through `committed_response_matches_current_ledger` make the reachable
+provenance and prefix relationships between ledger entries, requests,
+responses, and statuses explicit. They strengthen the joint induction
+hypothesis, but are proved across initialization and every action rather than
+assumed.
+
+Types, state fields, ghost relations, and action bodies define the transition
+system rather than separate claims. They are expanded and exercised by the
+verification conditions, but the deductive proof does not independently prove
+that these definitions are a faithful translation of TLA+ or the CCF
+implementation.
+
+### What is not proved
+
+- `CommittedRwOrderedSerializableInv` is intentionally not declared. Its exact
+  append-by-one condition has a reachable counterexample when an intervening
+  write executes without receiving a response or status.
+- `InvalidNotObservedByCommittedInv` is malformed as written in TLA+, and its
+  apparent intended correction is also false for the current transition
+  system.
+- Consequently, the stronger
+  `CommittedRwOrderedSpecLinearizableInv` conjunction is not established,
+  although its corrected real-time component is proved.
+- The proof establishes safety, not liveness or fairness. It does not prove
+  that every action guard is satisfiable or that every modeled scenario is
+  reachable; bounded checks and implementation traces provide separate
+  non-vacuity evidence.
+- It does not prove unbounded equivalence with the TLA+ specification, a
+  refinement from the CCF implementation, or implementation trace conformance.
+  The bounded correspondence and TLC trace validator provide separate evidence
+  for those relationships.
+- It does not cover CCF consensus, which is deliberately outside this
+  consistency-only model.
+
+The precise theorem-level claim is therefore: every declared invariant and
+safety property holds in every reachable state for every instantiation of the
+abstract ordered domains used by the `CCFConsistency` Veil transition system.
 
 On 2026-08-09, `lake build CCFConsistency` completed the direct self-auditing
 proof with exit code 0. Lean built the proof module in 1,130 seconds; the
@@ -184,32 +267,26 @@ without finding a transitive `sorryAx` dependency. The proof source contains no
 trusted invariants, trusted SMT answers, custom axiom declarations, or `sorry`
 declarations.
 
-Check the complete initialization/action matrix directly with:
+The 864 audited declarations include generated helper and verification
+theorems; they are not 864 user-facing properties. The audit specifically rules
+out transitive `sorryAx` dependencies rather than claiming that Lean's
+foundational axioms or imported libraries are outside the trusted computing
+base. A replayed warning about an imported SMT bit-blasting declaration using
+`sorry` does not affect these results: no `CCFConsistency` theorem depends on
+that declaration.
+
+Reproduce the complete initialization/action matrix directly with:
 
 ```bash
 cd veil
 lake build CCFConsistency
 ```
 
-The twelve auxiliary invariants between
-`ledger_entry_exists_in_origin_view` and
-`committed_response_matches_current_ledger` make explicit the reachable
-provenance and prefix relationships between ledger entries, requests,
-responses, and statuses. They strengthen the joint induction hypothesis and
-are proved across initialization and every action rather than assumed.
-
-This proves the declared properties of the Veil transition system. It does not
-prove unbounded equivalence with the TLA+ specification or validate the
-implementation. The known-false `CommittedRwOrderedSerializableInv` and
-malformed/false `InvalidNotObservedByCommittedInv` clauses are documented above
-but intentionally not part of the proof matrix.
-
-The proved external-history set establishes the three components of
-`CommittedRwLinearizableInv`: committed read-write serializability, observation
-of earlier committed writes, and at-most-once observation. It also proves the
-corrected read-write real-time ordering clause. It does not establish the
-stronger `CommittedRwOrderedSpecLinearizableInv` conjunction because its
-ordered-serialization component is the known-false clause excluded above.
+The `Build and prove Veil consistency spec` CI step runs the same Lake build.
+`test_invariant_proofs.py` is a fast structural guard rather than a second proof
+driver: it checks that the direct invariant check, untrusted SMT setting,
+theorem generation, cvc5 loading, and `sorryAx` audit cannot be removed while
+leaving a superficially successful build.
 
 ## Implementation trace validation
 
@@ -221,9 +298,10 @@ sequence numbers, and plans the unlogged ledger and view backfill performed by
 The generator creates an ignored scratch copy of `CCFConsistency.lean` and
 injects a constrained `sat trace` query inside the defining Veil module. A
 separate module cannot import and extend a specification after `#gen_spec`.
-Each logged action is followed by assertions fixing its event and transaction
-ID. The final assertion requires every finite history event to be used, which
-prevents a shorter prefix from satisfying the query.
+Generated wrapper actions constrain the relevant event, transaction, view, and
+sequence-number ranks for each logged or backfilled step. The final assertion
+requires every finite history event to be used, which prevents a shorter prefix
+from satisfying the query.
 
 Missing ledger entries use `AppendOtherTxnAction`. View changes use a generated
 finite-domain `TraceTruncateLedgerAction` that copies every ranked sequence
