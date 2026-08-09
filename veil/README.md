@@ -295,27 +295,43 @@ schema-checks each line, rank-normalises sparse transaction IDs, views, and
 sequence numbers, and plans the unlogged ledger and view backfill performed by
 `TraceMultiNodeReads.tla`.
 
-The generator creates an ignored scratch copy of `CCFConsistency.lean` and
-injects a constrained `sat trace` query inside the defining Veil module. A
-separate module cannot import and extend a specification after `#gen_spec`.
-Generated wrapper actions constrain the relevant event, transaction, view, and
-sequence-number ranks for each logged or backfilled step. The final assertion
-requires every finite history event to be used, which prevents a shorter prefix
-from satisfying the query.
+Validation replays that one concrete plan; it does not explore the protocol's
+state space looking for a matching trace. The generated, ignored scratch copy
+of `CCFConsistency.lean` turns the ten environment actions into internal
+procedures and installs one zero-argument action for each concrete replay step.
+A `traceReplayStep` program counter enables only the next recorded or
+backfilled operation, and four immutable theory functions supply its concrete
+finite-domain arguments by rank. Consequently, Veil has exactly one enabled
+transition at each non-final replay state. The scratch module raises Lean's
+elaboration heartbeat budget for the generated finite model; it does not raise
+a search bound or permit additional transitions.
 
 Missing ledger entries use `AppendOtherTxnAction`. View changes use a generated
-finite-domain `TraceTruncateLedgerAction` that copies every ranked sequence
+finite-domain `TraceTruncateLedgerAction` procedure that copies every ranked sequence
 position explicitly. This is equivalent to the base truncation action over the
 trace's exhausted finite sequence domain, while avoiding a current Veil
-symbolic-simplification failure on bulk relation updates. It also resets
-metadata outside the copied prefix, matching the canonical base state. The
-scratch module raises the trace discharger's simplification and heartbeat
-budgets; these changes do not affect the checked-in protocol model.
+concrete-execution limitation on bulk relation updates. It also leaves metadata
+outside the copied prefix at the canonical initial values.
+
+Veil checks every declared invariant and safety property in the initial state
+and after every replayed step. If an action precondition is false, replay
+deadlocks before the designated final step and fails. The validator accepts
+only `no_violation_found` after complete exploration and requires exactly
+`number of planned steps + 1` generated and distinct states. This rejects
+partial replay and also guards against accidental branching.
+
+On the current 73-event implementation trace, planning inserts seven internal
+ledger/view operations. The resulting 80-step replay visits exactly 81 states
+on Linux. A clean validation took about 21 minutes and 4.3 GiB peak RSS; that
+cost is concrete evaluation of every declared property at every state, not
+exploration of alternative executions.
 
 CI does not use checked-in NDJSON fixtures. It builds the real `js_generic`
 application, runs `tests/consistency_trace_validation.py`, and forces a primary
-election while `tests/tvc.py` issues a mix of reads and writes. TLC validates
-the resulting `build/consistency/trace.ndjson` in that same job.
+election while `tests/tvc.py` issues a mix of reads and writes. The trace job
+uploads the resulting `build/consistency/trace.ndjson`; the Veil job downloads
+and deterministically replays that same fresh trace. The existing TLC replay
+remains in the trace-generation job.
 
 Generate the same trace locally with:
 
@@ -326,20 +342,16 @@ cmake --build build --target js_generic
   -R '^consistency_trace_validation$')
 ```
 
-Validate it with TLC and generate the corresponding Veil query with:
+Validate it with TLC and Veil with:
 
 ```bash
 (cd tla && JSON=../build/consistency/trace.ndjson \
   ./tlc.py --workers 1 tv --disable-dfs \
   consistency/TraceMultiNodeReads.tla)
 python3 veil/trace_validation.py build/consistency/trace.ndjson \
-  --lean-output veil/.generated/CCFConsistencyImplementationTrace.lean \
-  --trace-name implementation_trace
+  --validate
 ```
 
 Synthetic adapter behavior remains covered by Python unit tests, but every
 continuous-verification run validates a fresh implementation trace rather than
-a committed sample. Veil's current `sat trace` implementation encodes the
-complete replay as one symbolic query, which is not yet practical for the full
-implementation-generated trace. The generated Veil query is therefore
-development tooling rather than a CI gate.
+a committed sample.

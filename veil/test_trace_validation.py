@@ -10,6 +10,7 @@ from trace_validation import (
     parse_trace,
     plan_trace,
     render_trace_source,
+    validate_replay_result,
 )
 
 
@@ -376,26 +377,38 @@ class TraceValidationTests(unittest.TestCase):
             .read_text(encoding="utf-8")
         )
 
-        generated = render_trace_source(source, plan, "sample_trace")
+        generated = render_trace_source(source, plan)
 
-        self.assertIn("set_option veil.unfoldGhostRel false", generated)
-        self.assertIn("theory ghost relation traceEventRank2", generated)
-        self.assertIn("def elabCcfTraceBmc", generated)
+        self.assertIn("set_option veil.__modelCheckCompileMode true", generated)
         self.assertIn("set_option maxHeartbeats 5000000", generated)
-        self.assertIn("set_option maxRecDepth 100000", generated)
-        self.assertIn("sat trace [sample_trace] {", generated)
+        self.assertIn("immutable function traceEvent : Nat -> histEvent", generated)
+        self.assertIn("individual traceReplayStep : Nat", generated)
+        self.assertIn("traceReplayStep := 0", generated)
+        self.assertIn("action TraceReplayStep0", generated)
         self.assertIn(
-            "action TraceStep1 (request : histEvent) (branch : view) " "(slot : seqno)",
+            "require traceReplayStep = 0",
             generated,
         )
-        self.assertIn("  RwTxExecuteAction request branch slot", generated)
-        self.assertIn("\n  TraceStep1\n", generated)
-        self.assertIn("assert (", generated)
-        self.assertNotIn("action TraceTruncateLedgerAction", generated)
+        self.assertIn(
+            "RwTxExecuteAction (traceEvent 0) (traceView 0) (traceSeqno 0)",
+            generated,
+        )
+        self.assertIn("traceReplayStep := 4", generated)
+        self.assertIn(
+            "termination [trace_replay_complete] traceReplayStep = 4",
+            generated,
+        )
+        self.assertIn(
+            "traceEvent := fun rank => Fin.ofNat 3 rank",
+            generated,
+        )
+        self.assertIn("#model_check compiled", generated)
+        self.assertNotIn("sat trace", generated)
+        self.assertNotIn("\naction RwTxRequestAction", generated)
+        self.assertIn("\nprocedure RwTxRequestAction", generated)
         self.assertNotIn("#check_invariants", generated)
         self.assertNotIn("Lean.collectAxioms", generated)
-        self.assertNotIn("#model_check compiled", generated)
-        self.assertEqual(generated.count("end CCFConsistency"), 1)
+        self.assertNotIn("end CCFConsistency", generated)
 
     def test_renders_finite_view_copy_for_trace_validation(self):
         plan = _view_change_plan()
@@ -405,19 +418,59 @@ class TraceValidationTests(unittest.TestCase):
             .read_text(encoding="utf-8")
         )
 
-        generated = render_trace_source(source, plan, "view_copy_trace")
+        generated = render_trace_source(source, plan)
 
-        self.assertIn("action TraceTruncateLedgerActionRank0", generated)
-        self.assertIn("require traceSeqnoRank0 cut", generated)
-        self.assertIn("require traceSeqnoRank0 slot0", generated)
+        self.assertIn("procedure TraceTruncateLedgerActionRank0", generated)
         self.assertIn(
             "ledgerEntry newView slot0 := ledgerEntry source slot0", generated
         )
         self.assertNotIn("(slot1 : seqno)", generated)
         self.assertIn(
-            "TraceTruncateLedgerActionRank0 source cut newView slot0", generated
+            "TraceTruncateLedgerActionRank0 "
+            "(traceView 0) (traceSeqno 0) (traceView 1) (traceSeqno 0)",
+            generated,
         )
-        self.assertNotIn("\n  TruncateLedgerAction\n", generated)
+        self.assertNotIn("\naction TruncateLedgerAction", generated)
+
+    def test_accepts_complete_single_path_replay_result(self):
+        plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
+        payload = {
+            "result": {
+                "result": "no_violation_found",
+                "explored_states": 2,
+                "termination_reason": {"kind": "explored_all_reachable_states"},
+            },
+            "progress": {"distinctStates": 2, "statesFound": 2},
+        }
+
+        validate_replay_result(payload, plan)
+
+    def test_rejects_partial_or_branching_replay_result(self):
+        plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
+        payload = {
+            "result": {
+                "result": "no_violation_found",
+                "explored_states": 3,
+                "termination_reason": {"kind": "explored_all_reachable_states"},
+            },
+            "progress": {"distinctStates": 3, "statesFound": 3},
+        }
+
+        with self.assertRaisesRegex(TraceValidationError, "single complete path"):
+            validate_replay_result(payload, plan)
+
+    def test_rejects_veil_invariant_failure(self):
+        plan = _plan(_event(action="RwTxRequestAction", type="RwTxRequest", tx=0))
+        payload = {
+            "result": {
+                "result": "found_violation",
+                "violation": {"kind": "safety_failure"},
+            },
+            "progress": {"distinctStates": 1, "statesFound": 1},
+        }
+
+        with self.assertRaisesRegex(TraceValidationError, "rejected"):
+            validate_replay_result(payload, plan)
 
 
 if __name__ == "__main__":

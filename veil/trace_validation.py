@@ -3,13 +3,15 @@
 
 import argparse
 import dataclasses
-import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
 from collections.abc import Iterable
 from typing import Any, TextIO
+
+from bounded_correspondence import render_runner_source
 
 REQUEST_ACTIONS = {
     "RwTxRequestAction": ("RwTxRequest", "rw"),
@@ -27,13 +29,22 @@ EXECUTE_ACTION = "RwTxExecuteAction"
 TRACE_TRUNCATE_ACTION = "TraceTruncateLedgerAction"
 MODEL_CHECK_BEGIN = "-- BEGIN CCF VEIL BOUNDED CHECK"
 MODEL_CHECK_END = "-- END CCF VEIL BOUNDED CHECK"
-TRACE_BMC_MAX_STEPS = 10_000_000
 TRACE_MAX_HEARTBEATS = 5_000_000
-TRACE_MAX_RECURSION_DEPTH = 100_000
-EXISTS = chr(0x2203)
-FOR_ALL = chr(0x2200)
-LEFT_ARROW = chr(0x2190)
-SIMPROC = chr(0x2193)
+TRACE_REPLAY_STEP = "traceReplayStep"
+TRACE_REPLAY_ACTION_PREFIX = "TraceReplayStep"
+BASE_ACTIONS = (
+    "RwTxRequestAction",
+    "RoTxRequestAction",
+    "RwTxExecuteAction",
+    "AppendOtherTxnAction",
+    "RwTxResponseAction",
+    "RoTxResponseAction",
+    "StatusCommittedResponseAction",
+    "StatusInvalidResponseAction",
+    "TruncateLedgerAction",
+    "TruncateLedgerToEmptyAction",
+)
+LEAN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class TraceValidationError(ValueError):
@@ -509,259 +520,27 @@ def plan_trace(events: tuple[TraceEvent, ...]) -> TracePlan:
     )
 
 
-def _conjoin(parts: list[str]) -> str:
-    if not parts:
-        raise ValueError("a conjunction must contain at least one term")
-    result = parts[-1]
-    for part in reversed(parts[:-1]):
-        result = f"And ({part}) ({result})"
-    return result
+def _trace_constant(prefix: str, rank: int) -> str:
+    return f"(trace{prefix} {rank})"
 
 
-def _rank(prefix: str, rank: int, value: str) -> str:
-    return f"trace{prefix}Rank{rank} {value}"
-
-
-def _rank_helpers(
-    type_name: str,
-    prefix: str,
-    order_name: str,
-    less_than_name: str,
-    count: int,
-) -> list[str]:
-    helpers = [
-        (
-            f"theory ghost relation trace{prefix}Rank0 "
-            f"(value : {type_name}) :=\n"
-            f"  value = {order_name}.zero"
-        )
-    ]
-    for rank in range(1, count):
-        body = f"{EXISTS} previous, " + _conjoin(
-            [
-                _rank(prefix, rank - 1, "previous"),
-                f"{less_than_name} previous value",
-                (
-                    f"{FOR_ALL} candidate, "
-                    f"{less_than_name} previous candidate -> "
-                    f"{order_name}.le value candidate"
-                ),
-            ]
-        )
-        helpers.append(
-            f"theory ghost relation trace{prefix}Rank{rank} "
-            f"(value : {type_name}) :=\n"
-            f"  {body}"
-        )
-    return helpers
-
-
-def _exists(bindings: str, body: str) -> str:
-    return f"{EXISTS} {bindings}, {body}"
-
-
-def _for_all(bindings: str, body: str) -> str:
-    return f"{FOR_ALL} {bindings}, {body}"
-
-
-def _assert_line(formula: str) -> str:
-    return f"  assert ({formula})"
-
-
-def _trace_step_name(step_index: int) -> str:
-    return f"TraceStep{step_index}"
-
-
-def _trace_step_action(
-    step: PlanStep, step_index: int, history_rank: int | None
-) -> str:
-    name = _trace_step_name(step_index)
-    fields = step.fields
-
-    if step.action in REQUEST_ACTIONS:
-        assert history_rank is not None
-        lines = [f"action {name} (t : tx) (e : histEvent) {{"]
-        lines.append(f"  require {_rank('Tx', fields['tx'], 't')}")
-        lines.append(f"  require {_rank('Event', history_rank, 'e')}")
-        call = f"{step.action} t e"
-    elif step.action == EXECUTE_ACTION:
-        lines = [
-            f"action {name} (request : histEvent) (branch : view) " "(slot : seqno) {"
-        ]
-        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
-        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
-        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
-        call = f"{step.action} request branch slot"
-    elif step.action == "RwTxResponseAction":
-        assert history_rank is not None
-        lines = [
-            f"action {name} (request response : histEvent) (branch : view) "
-            "(slot : seqno) {"
-        ]
-        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
-        lines.append(
-            "  require "
-            + _rank(
-                "View",
-                fields["view"],
-                "(entryView branch slot)",
-            )
-        )
-        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
-        lines.append(f"  require {_rank('Event', history_rank, 'response')}")
-        call = f"{step.action} request branch slot response"
-    elif step.action == "RoTxResponseAction":
-        assert history_rank is not None
-        lines = [
-            f"action {name} (request response : histEvent) (branch : view) "
-            "(last : seqno) {"
-        ]
-        lines.append(f"  require {_rank('Tx', fields['tx'], '(eventTx request)')}")
-        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
-        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'last')}")
-        lines.append(f"  require {_rank('Event', history_rank, 'response')}")
-        call = f"{step.action} request branch last response"
-    elif step.action == "StatusCommittedResponseAction":
-        assert history_rank is not None
-        lines = [f"action {name} (response status : histEvent) (current : view) {{"]
-        lines.append(
-            f"  require {_rank('View', fields['view'], '(eventView response)')}"
-        )
-        lines.append(
-            f"  require {_rank('Seqno', fields['seqno'], '(eventSeqno response)')}"
-        )
-        lines.append(f"  require {_rank('Event', history_rank, 'status')}")
-        call = f"{step.action} response status current"
-    elif step.action == "StatusInvalidResponseAction":
-        assert history_rank is not None
-        lines = [f"action {name} (response status : histEvent) {{"]
-        lines.append(
-            f"  require {_rank('View', fields['view'], '(eventView response)')}"
-        )
-        lines.append(
-            f"  require {_rank('Seqno', fields['seqno'], '(eventSeqno response)')}"
-        )
-        lines.append(f"  require {_rank('Event', history_rank, 'status')}")
-        call = f"{step.action} response status"
-    elif step.action == "AppendOtherTxnAction":
-        lines = [f"action {name} (branch : view) (slot : seqno) {{"]
-        lines.append(f"  require {_rank('View', fields['view'], 'branch')}")
-        lines.append(f"  require {_rank('Seqno', fields['seqno'], 'slot')}")
-        call = f"{step.action} branch slot"
-    elif step.action == "TruncateLedgerAction":
-        cut_rank = fields["cut_seqno"]
-        slots = [f"slot{rank}" for rank in range(cut_rank + 1)]
-        slot_params = " ".join(f"({slot} : seqno)" for slot in slots)
-        lines = [
-            f"action {name} (source : view) (cut : seqno) (newView : view) "
-            f"{slot_params} {{"
-        ]
-        lines.append(f"  require {_rank('View', fields['source_view'], 'source')}")
-        lines.append(f"  require {_rank('View', fields['new_view'], 'newView')}")
-        lines.append("  require currentView source")
-        call_args = " ".join(["source", "cut", "newView"] + slots)
-        call = f"{TRACE_TRUNCATE_ACTION}Rank{cut_rank} {call_args}"
-    elif step.action == "TruncateLedgerToEmptyAction":
-        lines = [f"action {name} (source newView : view) {{"]
-        lines.append(f"  require {_rank('View', fields['source_view'], 'source')}")
-        lines.append(f"  require {_rank('View', fields['new_view'], 'newView')}")
-        lines.append("  require currentView source")
-        call = f"{step.action} source newView"
-    else:
-        raise AssertionError(f"unhandled planned action {step.action}")
-
-    lines.append(f"  {call}")
-    lines.append("}")
-    return "\n".join(lines)
-
-
-def _trace_step_actions(plan: TracePlan) -> list[str]:
-    declarations = []
-    history_rank = 0
-    for step_index, step in enumerate(plan.steps):
-        uses_history = step.kind == "trace" and step.action != EXECUTE_ACTION
-        declarations.append(
-            _trace_step_action(
-                step,
-                step_index,
-                history_rank if uses_history else None,
-            )
-        )
-        if uses_history:
-            history_rank += 1
-    if history_rank != plan.history_event_count:
-        raise AssertionError("planned history event count is inconsistent")
-    return declarations
-
-
-def _render_trace_query(plan: TracePlan, trace_name: str) -> str:
-    lines = [f"sat trace [{trace_name}] {{"]
-    lines.extend(
-        f"  {_trace_step_name(step_index)}" for step_index, _ in enumerate(plan.steps)
-    )
-    lines.append(_assert_line(_for_all("e", "eventUsed e")))
-    lines.append("}")
-    return "\n".join(lines)
-
-
-def _trace_bmc_override() -> str:
-    return f"""open Lean Elab Tactic
-
-@[tactic Veil.veil_bmc]
-def elabCcfTraceBmc : Tactic := fun stx => do
-  let result : Veil.DesugarTacticM Unit := Veil.veilWithMainContext do
-    let dsimpLemmas := #[
-      mkIdent ``Inhabited.default,
-      Veil.fieldAbstractDispatcher,
-      Veil.fieldLabelToDomain Veil.stateName,
-      Veil.fieldLabelToCodomain Veil.stateName]
-    let dsimpTac {LEFT_ARROW} `(tactic| try dsimp [$[$dsimpLemmas:ident],*])
-    let nextSimp := mkIdent `nextSimp
-    let existsQuantifierSimpGuarded :=
-      mkIdent ``Veil.existsQuantifierSimpGuarded
-    let smtSimp := mkIdent `smtSimp
-    let tac {LEFT_ARROW} `(tacticSeq|
-      skip
-      veil_simp
-        (config := {{ maxSteps := {TRACE_BMC_MAX_STEPS}, failIfUnchanged := false }})
-        only [$nextSimp:ident]
-      veil_simp
-        (config := {{ maxSteps := {TRACE_BMC_MAX_STEPS}, failIfUnchanged := false }})
-        only [{SIMPROC} $existsQuantifierSimpGuarded:ident]
-      veil_intros
-      skip
-      veil_destruct
-      $dsimpTac:tactic
-      veil_simp
-        (config := {{ maxSteps := {TRACE_BMC_MAX_STEPS}, failIfUnchanged := false }})
-        only [$smtSimp:ident]
-      $dsimpTac:tactic
-      veil_smt)
-    Veil.veilEvalTactic tac
-  result.runByOption stx"""
+def _trace_function(type_name: str, prefix: str) -> str:
+    return f"immutable function trace{prefix} : Nat -> {type_name}"
 
 
 def _trace_truncate_action(cut_rank: int) -> str:
     slots = [f"slot{rank}" for rank in range(cut_rank + 1)]
     parameters = " ".join(f"({slot} : seqno)" for slot in slots)
     lines = [
-        f"action {TRACE_TRUNCATE_ACTION}Rank{cut_rank}",
+        f"procedure {TRACE_TRUNCATE_ACTION}Rank{cut_rank}",
         "    (source : view) (cut : seqno) (newView : view)",
         f"    {parameters} {{",
         "  require activeView source",
         "  require ledgerEntry source cut",
         "  require validTruncationSource source cut",
         "  require nextView newView",
-        f"  require traceSeqnoRank{cut_rank} cut",
+        "  activeView newView := true",
     ]
-    lines.extend(
-        f"  require traceSeqnoRank{rank} {slot}" for rank, slot in enumerate(slots)
-    )
-    lines.extend(
-        [
-            "  activeView newView := true",
-        ]
-    )
     for slot in slots:
         lines.extend(
             [
@@ -776,45 +555,172 @@ def _trace_truncate_action(cut_rank: int) -> str:
     return "\n".join(lines)
 
 
-def render_trace_source(
-    source: str, plan: TracePlan, trace_name: str | None = None
-) -> str:
-    """Inject a planned `sat trace` query into a scratch copy of the Veil spec."""
+def _replay_step_body(
+    step: PlanStep,
+    history_rank: int | None,
+    request_event_ranks: dict[int, int],
+    response_event_ranks: dict[tuple[int, int], int],
+    current_view: int,
+) -> list[str]:
+    fields = step.fields
+
+    if step.action in REQUEST_ACTIONS:
+        assert history_rank is not None
+        return [
+            f"{step.action} "
+            f"{_trace_constant('Tx', fields['tx'])} "
+            f"{_trace_constant('Event', history_rank)}"
+        ]
+    if step.action == EXECUTE_ACTION:
+        return [
+            f"{step.action} "
+            f"{_trace_constant('Event', request_event_ranks[fields['tx']])} "
+            f"{_trace_constant('View', fields['view'])} "
+            f"{_trace_constant('Seqno', fields['seqno'])}"
+        ]
+    if step.action in ("RwTxResponseAction", "RoTxResponseAction"):
+        assert history_rank is not None
+        return [
+            f"{step.action} "
+            f"{_trace_constant('Event', request_event_ranks[fields['tx']])} "
+            f"{_trace_constant('View', fields['view'])} "
+            f"{_trace_constant('Seqno', fields['seqno'])} "
+            f"{_trace_constant('Event', history_rank)}"
+        ]
+    if step.action in (
+        "StatusCommittedResponseAction",
+        "StatusInvalidResponseAction",
+    ):
+        assert history_rank is not None
+        tx_id = (fields["view"], fields["seqno"])
+        response = _trace_constant("Event", response_event_ranks[tx_id])
+        status = _trace_constant("Event", history_rank)
+        if step.action == "StatusCommittedResponseAction":
+            return [
+                f"{step.action} {response} {status} "
+                f"{_trace_constant('View', current_view)}"
+            ]
+        return [f"{step.action} {response} {status}"]
+    if step.action == "AppendOtherTxnAction":
+        return [
+            f"{step.action} "
+            f"{_trace_constant('View', fields['view'])} "
+            f"{_trace_constant('Seqno', fields['seqno'])}"
+        ]
+    if step.action == "TruncateLedgerAction":
+        cut_rank = fields["cut_seqno"]
+        arguments = [
+            _trace_constant("View", fields["source_view"]),
+            _trace_constant("Seqno", cut_rank),
+            _trace_constant("View", fields["new_view"]),
+        ]
+        arguments.extend(_trace_constant("Seqno", rank) for rank in range(cut_rank + 1))
+        return [f"{TRACE_TRUNCATE_ACTION}Rank{cut_rank} {' '.join(arguments)}"]
+    if step.action == "TruncateLedgerToEmptyAction":
+        return [
+            f"{step.action} "
+            f"{_trace_constant('View', fields['source_view'])} "
+            f"{_trace_constant('View', fields['new_view'])}"
+        ]
+    raise AssertionError(f"unhandled planned action {step.action}")
+
+
+def _trace_replay_actions(plan: TracePlan) -> list[str]:
+    declarations = []
+    request_event_ranks: dict[int, int] = {}
+    response_event_ranks: dict[tuple[int, int], int] = {}
+    history_rank = 0
+    current_view = 0
+
+    for step_index, step in enumerate(plan.steps):
+        uses_history = step.kind == "trace" and step.action != EXECUTE_ACTION
+        step_history_rank = history_rank if uses_history else None
+        lines = [
+            f"action {TRACE_REPLAY_ACTION_PREFIX}{step_index} {{",
+            f"  require {TRACE_REPLAY_STEP} = {step_index}",
+        ]
+        if step.source_line is None:
+            lines.append(f"  -- Generated {step.action}.")
+        else:
+            lines.append(f"  -- NDJSON line {step.source_line}: {step.action}.")
+        lines.extend(
+            f"  {line}"
+            for line in _replay_step_body(
+                step,
+                step_history_rank,
+                request_event_ranks,
+                response_event_ranks,
+                current_view,
+            )
+        )
+        lines.extend([f"  {TRACE_REPLAY_STEP} := {step_index + 1}", "}"])
+        declarations.append("\n".join(lines))
+
+        if step.action in REQUEST_ACTIONS:
+            assert step_history_rank is not None
+            request_event_ranks[step.fields["tx"]] = step_history_rank
+        elif step.action == "RwTxResponseAction":
+            assert step_history_rank is not None
+            response_event_ranks[
+                (step.fields["view"], step.fields["seqno"])
+            ] = step_history_rank
+        if uses_history:
+            history_rank += 1
+        if step.action in ("TruncateLedgerAction", "TruncateLedgerToEmptyAction"):
+            current_view = step.fields["new_view"]
+
+    if history_rank != plan.history_event_count:
+        raise AssertionError("planned history event count is inconsistent")
+    return declarations
+
+
+def _convert_actions_to_procedures(source: str) -> str:
+    for action in BASE_ACTIONS:
+        pattern = re.compile(rf"^action {re.escape(action)}(?=[\s(])", re.MULTILINE)
+        source, count = pattern.subn(f"procedure {action}", source)
+        if count != 1:
+            raise TraceValidationError(
+                f"Veil source must contain exactly one {action} action"
+            )
+    return source
+
+
+def render_trace_source(source: str, plan: TracePlan) -> str:
+    """Create a finite, deterministic Veil replay of a planned trace."""
 
     if source.count("#gen_spec") != 1:
         raise TraceValidationError("Veil source must contain exactly one #gen_spec")
+    if source.count("#gen_state") != 1:
+        raise TraceValidationError("Veil source must contain exactly one #gen_state")
+    if source.count("after_init {\n") != 1:
+        raise TraceValidationError(
+            "Veil source must contain exactly one after_init block"
+        )
     if source.count(MODEL_CHECK_BEGIN) != 1 or source.count(MODEL_CHECK_END) != 1:
         raise TraceValidationError("Veil source is missing bounded-check markers")
     import_marker = "import Veil\n"
     if source.count(import_marker) != 1:
         raise TraceValidationError("Veil source must contain exactly one Veil import")
-
-    if trace_name is None:
-        encoded_plan = json.dumps(
-            plan.to_json(), sort_keys=True, separators=(",", ":")
-        ).encode()
-        trace_name = f"ndjson_{hashlib.sha256(encoded_plan).hexdigest()[:12]}"
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", trace_name) is None:
+    module_marker = "veil module CCFConsistency\n"
+    if source.count(module_marker) != 1:
         raise TraceValidationError(
-            f"trace name {trace_name!r} is not a valid Lean identifier"
+            "Veil source must contain exactly one CCFConsistency module"
         )
 
-    helper_groups = [
-        _rank_helpers("tx", "Tx", "txOrder", "txLt", plan.tx_count),
-        _rank_helpers("view", "View", "viewOrder", "viewLt", plan.view_count),
-        _rank_helpers("seqno", "Seqno", "seqOrder", "seqLt", plan.seqno_count),
-        _rank_helpers(
-            "histEvent",
-            "Event",
-            "eventOrder",
-            "eventLt",
-            plan.history_event_count,
-        ),
-    ]
-    helpers = "\n\n".join(
-        declaration for group in helper_groups for declaration in group
+    trace_functions = "\n".join(
+        (
+            _trace_function("tx", "Tx"),
+            _trace_function("view", "View"),
+            _trace_function("seqno", "Seqno"),
+            _trace_function("histEvent", "Event"),
+        )
     )
-    declarations = [helpers]
+    source = source.replace(
+        "#gen_state",
+        f"{trace_functions}\nindividual {TRACE_REPLAY_STEP} : Nat\n\n#gen_state",
+        1,
+    )
+    declarations = []
     truncation_ranks = sorted(
         {
             step.fields["cut_seqno"]
@@ -823,24 +729,31 @@ def render_trace_source(
         }
     )
     declarations.extend(_trace_truncate_action(rank) for rank in truncation_ranks)
-    declarations.extend(_trace_step_actions(plan))
+    declarations.extend(_trace_replay_actions(plan))
+    declarations.append(
+        f"termination [trace_replay_complete] "
+        f"{TRACE_REPLAY_STEP} = {len(plan.steps)}"
+    )
     generated_declarations = "\n\n".join(declarations)
+    source = _convert_actions_to_procedures(source)
+    source = source.replace(
+        "after_init {\n",
+        f"after_init {{\n  {TRACE_REPLAY_STEP} := 0\n",
+        1,
+    )
     source = source.replace(
         "#gen_spec",
-        (
-            f"set_option maxHeartbeats {TRACE_MAX_HEARTBEATS}\n\n"
-            f"set_option maxRecDepth {TRACE_MAX_RECURSION_DEPTH}\n\n"
-            f"{generated_declarations}\n\n#gen_spec"
-        ),
+        f"{generated_declarations}\n\n#gen_spec",
         1,
     )
     source = source.replace(
         import_marker,
-        (
-            f"{import_marker}\n"
-            "set_option veil.unfoldGhostRel false\n\n"
-            f"{_trace_bmc_override()}\n\n"
-        ),
+        f"{import_marker}\nset_option veil.__modelCheckCompileMode true\n",
+        1,
+    )
+    source = source.replace(
+        module_marker,
+        f"{module_marker}\nset_option maxHeartbeats {TRACE_MAX_HEARTBEATS}\n",
         1,
     )
 
@@ -850,17 +763,163 @@ def render_trace_source(
     _, marker, after = remainder.partition(MODEL_CHECK_END)
     if not marker:
         raise TraceValidationError("bounded-check end marker was not found")
-    query = _render_trace_query(plan, trace_name)
-    return (
-        before
-        + "-- Generated implementation trace query.\n"
-        + "set_option veil.smt.trust true\n"
-        + f"set_option maxHeartbeats {TRACE_MAX_HEARTBEATS}\n\n"
-        + f"set_option maxRecDepth {TRACE_MAX_RECURSION_DEPTH}\n\n"
-        + query
-        + "\n"
-        + after.lstrip("\n")
+    theory_assignments = ",\n".join(
+        f"  trace{prefix} := fun rank => Fin.ofNat {count} rank"
+        for prefix, count in (
+            ("Tx", plan.tx_count),
+            ("View", plan.view_count),
+            ("Seqno", plan.seqno_count),
+            ("Event", plan.history_event_count),
+        )
     )
+    model_check = f"""-- Generated deterministic implementation trace replay.
+#model_check compiled {{
+  tx := Fin {plan.tx_count},
+  view := Fin {plan.view_count},
+  seqno := Fin {plan.seqno_count},
+  histEvent := Fin {plan.history_event_count}
+}} {{
+{theory_assignments}
+}}
+"""
+    source = before + model_check + after.lstrip("\n")
+    module_end = "\nend CCFConsistency\n"
+    if not source.endswith(module_end):
+        raise TraceValidationError("expected CCFConsistency module end")
+    return source[: -len(module_end)] + "\n"
+
+
+def _run_command(
+    command: list[str], cwd: pathlib.Path, *, stream_stderr: bool = False
+) -> str:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=None if stream_stderr else subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        output = result.stdout + (result.stderr or "")
+        raise TraceValidationError(
+            f"command failed ({result.returncode}): {' '.join(command)}\n{output}"
+        )
+    return result.stdout
+
+
+def validate_replay_result(payload: object, plan: TracePlan) -> None:
+    """Require a complete, single-path replay with no Veil violation."""
+
+    if not isinstance(payload, dict):
+        raise TraceValidationError("Veil replay output is not a JSON object")
+    result = payload.get("result")
+    if not isinstance(result, dict) or result.get("result") != "no_violation_found":
+        raise TraceValidationError(
+            f"Veil rejected the implementation trace: {result!r}"
+        )
+    termination = result.get("termination_reason")
+    if not isinstance(termination, dict) or termination.get("kind") != (
+        "explored_all_reachable_states"
+    ):
+        raise TraceValidationError(f"Veil replay did not finish: {termination!r}")
+
+    expected_states = len(plan.steps) + 1
+    if result.get("explored_states") != expected_states:
+        raise TraceValidationError(
+            "Veil replay was not a single complete path: "
+            f"expected {expected_states} states, got {result.get('explored_states')!r}"
+        )
+    progress = payload.get("progress")
+    if not isinstance(progress, dict):
+        raise TraceValidationError("Veil replay output has no progress summary")
+    if progress.get("distinctStates") != expected_states:
+        raise TraceValidationError(
+            "Veil replay reported an unexpected number of distinct states: "
+            f"expected {expected_states}, got {progress.get('distinctStates')!r}"
+        )
+    if progress.get("statesFound") != expected_states:
+        raise TraceValidationError(
+            "Veil replay generated more than one successor for a trace step: "
+            f"expected {expected_states} states, got {progress.get('statesFound')!r}"
+        )
+
+
+def validate_trace(
+    source: str,
+    plan: TracePlan,
+    generated_dir: pathlib.Path,
+    *,
+    lake: str = "lake",
+) -> dict[str, object]:
+    """Compile and execute a deterministic Veil replay."""
+
+    veil_dir = pathlib.Path(__file__).resolve().parent
+    generated_dir = generated_dir.resolve()
+    try:
+        generated_relative = generated_dir.relative_to(veil_dir)
+    except ValueError as exc:
+        raise TraceValidationError(
+            "generated directory must be inside the veil directory"
+        ) from exc
+    if not generated_relative.parts or any(
+        LEAN_IDENTIFIER.fullmatch(part) is None for part in generated_relative.parts
+    ):
+        raise TraceValidationError(
+            "generated directory components must be valid Lean identifiers"
+        )
+
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    model_stem = "CCFConsistencyImplementationTrace"
+    runner_stem = "RunCCFConsistencyImplementationTrace"
+    model_path = generated_dir / f"{model_stem}.lean"
+    runner_path = generated_dir / f"{runner_stem}.lean"
+    module_prefix = ".".join(generated_relative.parts)
+    module_name = f"{module_prefix}.{model_stem}"
+    model_path.write_text(
+        render_trace_source(source, plan), encoding="utf-8", newline="\n"
+    )
+    runner_path.write_text(
+        render_runner_source(module_name, 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    model_relative = model_path.relative_to(veil_dir)
+    runner_relative = runner_path.relative_to(veil_dir)
+    olean_path = (
+        veil_dir
+        / ".lake"
+        / "build"
+        / "lib"
+        / "lean"
+        / model_relative.with_suffix(".olean")
+    )
+    olean_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_command(
+        [
+            lake,
+            "env",
+            "lean",
+            model_relative.as_posix(),
+            "-o",
+            str(olean_path),
+        ],
+        veil_dir,
+    )
+    output = _run_command(
+        [lake, "env", "lean", "--run", runner_relative.as_posix()],
+        veil_dir,
+        stream_stderr=True,
+    )
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise TraceValidationError(
+            f"Veil replay returned invalid JSON: {exc.msg}"
+        ) from exc
+    validate_replay_result(payload, plan)
+    return payload
 
 
 def _write_plan(plan: TracePlan, output: TextIO) -> None:
@@ -882,29 +941,50 @@ def main() -> int:
     parser.add_argument(
         "--lean-output",
         type=pathlib.Path,
-        help="write a scratch Veil source containing a build-gated sat trace",
+        help="write a scratch Veil source containing deterministic trace replay",
     )
     parser.add_argument(
         "--spec",
         type=pathlib.Path,
         default=pathlib.Path(__file__).with_name("CCFConsistency.lean"),
-        help="source Veil specification to copy when using --lean-output",
+        help="source Veil specification to use for generated replay validation",
     )
     parser.add_argument(
-        "--trace-name",
-        help="Lean identifier for the generated trace query (default: plan hash)",
+        "--validate",
+        action="store_true",
+        help="compile and execute the deterministic replay with Veil",
+    )
+    parser.add_argument(
+        "--generated-dir",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).with_name("Generated"),
+        help="scratch Lean module directory used by --validate",
+    )
+    parser.add_argument(
+        "--lake",
+        default="lake",
+        help="Lake executable used by --validate (default: lake)",
     )
     args = parser.parse_args()
 
     try:
         with args.trace.open(encoding="utf-8") as trace_file:
             plan = plan_trace(parse_trace(trace_file))
+        source = None
         if args.lean_output is not None:
             source = args.spec.read_text(encoding="utf-8")
-            generated = render_trace_source(source, plan, args.trace_name)
+            generated = render_trace_source(source, plan)
             args.lean_output.parent.mkdir(parents=True, exist_ok=True)
             args.lean_output.write_text(generated, encoding="utf-8", newline="\n")
-        if args.output is None and args.lean_output is None:
+        if args.validate:
+            if source is None:
+                source = args.spec.read_text(encoding="utf-8")
+            validate_trace(source, plan, args.generated_dir, lake=args.lake)
+            print(
+                f"Veil validated {len(plan.steps)} replay steps "
+                f"across {len(plan.steps) + 1} states."
+            )
+        if args.output is None and args.lean_output is None and not args.validate:
             _write_plan(plan, sys.stdout)
         elif args.output is not None:
             with args.output.open("w", encoding="utf-8", newline="\n") as output:
