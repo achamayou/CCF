@@ -3778,6 +3778,944 @@ theorem reachableProvenance
 omit
   [LinearOrder Tx] [OrderBot Tx]
   [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+/-- An existing response cannot reach the slot that `nextLedgerSlot` is about
+to fill: its own frontier is a ledger entry, and the ledger is a prefix. -/
+theorem responseCannotReachNextSlot
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    {response : Event}
+    (properties : StructuralBundle state)
+    (nextSlot : state.nextLedgerSlot branch slot)
+    (responseIsResponse : state.responseEvent response)
+    (branchEq : state.eventBranch response = branch)
+    (slotLe : slot <= state.eventSeqno response) :
+    False := by
+  have frontier :=
+    properties.responseFrontierIsLedgerEntry response responseIsResponse
+  rw [branchEq] at frontier
+  by_cases slotEq : slot = state.eventSeqno response
+  · refine nextSlot.1 ?_
+    rw [slotEq]
+    exact frontier
+  · exact nextSlot.1
+      (properties.ledgerIsPrefix
+        branch
+        (state.eventSeqno response)
+        slot
+        ⟨frontier, ⟨slotLe, slotEq⟩⟩)
+
+theorem initialResponses :
+    ResponseBundle (initialState : State Tx View Seqno Event) where
+  toProvenanceBundle := initialProvenance
+  onlyObserveSentRequests := initialProperties.onlyObserveSentRequests
+  uniqueResponseTxs := by
+    simp [UniqueResponseTxs, State.responseEvent, initialState]
+
+omit
+  [OrderBot Tx] [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxRequestPreservesResponses
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ResponseBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ResponseBundle (rwTxRequestNext state tx event) := by
+  have classifiedNe :
+      forall candidate,
+        state.historyEvent candidate -> Not (candidate = event) :=
+    fun candidate candidateHasKind =>
+      classifiedEventNeNext properties.historyTypeOk nextEvent candidateHasKind
+  have responseNeEvent :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = event) := by
+    intro candidate candidateIsResponse
+    refine classifiedNe candidate ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        rwTxRequestPreservesProvenance
+          properties.toProvenanceBundle nextTx nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro response slot observed observations
+    rcases observations with ⟨responseIsResponse, observation⟩
+    have oldResponse : state.responseEvent response := by
+      simpa [State.responseEvent, rwTxRequestNext] using responseIsResponse
+    have oldObservation : state.observedAt response slot observed := by
+      simpa [
+        State.observedAt,
+        State.responseEvent,
+        rwTxRequestNext
+      ] using observation
+    rcases
+        properties.onlyObserveSentRequests response slot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    have oldRequestNe := classifiedNe oldRequest (Or.inl oldRequestIsRw)
+    exact
+      ⟨oldRequest, by simpa [rwTxRequestNext, oldRequestNe] using oldRequestIsRw,
+        by simpa [rwTxRequestNext, oldRequestNe] using oldRequestTx,
+        oldRequestLt⟩
+  · rw [UniqueResponseTxs]
+    intro left right responses
+    rcases responses with ⟨leftIsResponse, rightIsResponse, sameTx⟩
+    have leftOld : state.responseEvent left := by
+      simpa [State.responseEvent, rwTxRequestNext] using leftIsResponse
+    have rightOld : state.responseEvent right := by
+      simpa [State.responseEvent, rwTxRequestNext] using rightIsResponse
+    have leftNe := responseNeEvent left leftOld
+    have rightNe := responseNeEvent right rightOld
+    have oldSameTx : state.eventTx left = state.eventTx right := by
+      simpa [rwTxRequestNext, leftNe, rightNe] using sameTx
+    exact properties.uniqueResponseTxs left right
+      ⟨leftOld, rightOld, oldSameTx⟩
+
+omit
+  [OrderBot Tx] [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxRequestPreservesResponses
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ResponseBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ResponseBundle (roTxRequestNext state tx event) := by
+  have classifiedNe :
+      forall candidate,
+        state.historyEvent candidate -> Not (candidate = event) :=
+    fun candidate candidateHasKind =>
+      classifiedEventNeNext properties.historyTypeOk nextEvent candidateHasKind
+  have responseNeEvent :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = event) := by
+    intro candidate candidateIsResponse
+    refine classifiedNe candidate ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        roTxRequestPreservesProvenance
+          properties.toProvenanceBundle nextTx nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro response slot observed observations
+    rcases observations with ⟨responseIsResponse, observation⟩
+    have oldResponse : state.responseEvent response := by
+      simpa [State.responseEvent, roTxRequestNext] using responseIsResponse
+    have oldObservation : state.observedAt response slot observed := by
+      simpa [
+        State.observedAt,
+        State.responseEvent,
+        roTxRequestNext
+      ] using observation
+    rcases
+        properties.onlyObserveSentRequests response slot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    have oldRequestNe := classifiedNe oldRequest (Or.inl oldRequestIsRw)
+    exact
+      ⟨oldRequest, by simpa [roTxRequestNext, oldRequestNe] using oldRequestIsRw,
+        by simpa [roTxRequestNext, oldRequestNe] using oldRequestTx,
+        oldRequestLt⟩
+  · rw [UniqueResponseTxs]
+    intro left right responses
+    rcases responses with ⟨leftIsResponse, rightIsResponse, sameTx⟩
+    have leftOld : state.responseEvent left := by
+      simpa [State.responseEvent, roTxRequestNext] using leftIsResponse
+    have rightOld : state.responseEvent right := by
+      simpa [State.responseEvent, roTxRequestNext] using rightIsResponse
+    have leftNe := responseNeEvent left leftOld
+    have rightNe := responseNeEvent right rightOld
+    have oldSameTx : state.eventTx left = state.eventTx right := by
+      simpa [roTxRequestNext, leftNe, rightNe] using sameTx
+    exact properties.uniqueResponseTxs left right
+      ⟨leftOld, rightOld, oldSameTx⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxExecutePreservesResponses
+    {state : State Tx View Seqno Event}
+    {request : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ResponseBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ResponseBundle (rwTxExecuteNext state request branch slot) := by
+  refine
+    { toProvenanceBundle :=
+        rwTxExecutePreservesProvenance
+          properties.toProvenanceBundle
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro response candidateSlot observed observations
+    rcases observations with ⟨responseIsResponse, observation⟩
+    have oldResponse : state.responseEvent response := by
+      simpa [State.responseEvent, rwTxExecuteNext] using responseIsResponse
+    have slotLe : candidateSlot <= state.eventSeqno response := by
+      simpa [rwTxExecuteNext] using observation.2.1
+    -- The freshly written point cannot be inside an existing response prefix.
+    have offPoint :
+        Not (state.eventBranch response = branch) \/
+          Not (candidateSlot = slot) := by
+      by_cases branchEq : state.eventBranch response = branch
+      · refine Or.inr ?_
+        intro slotEq
+        subst candidateSlot
+        exact
+          responseCannotReachNextSlot
+            properties.toStructuralBundle
+            nextSlot
+            oldResponse
+            branchEq
+            slotLe
+      · exact Or.inl branchEq
+    have oldObservation :
+        state.observedAt response candidateSlot observed := by
+      refine ⟨oldResponse, slotLe, ?_, ?_⟩
+      · rcases offPoint with branchNe | slotNe
+        · simpa [rwTxExecuteNext, branchNe] using observation.2.2.1
+        · simpa [rwTxExecuteNext, slotNe] using observation.2.2.1
+      · rcases offPoint with branchNe | slotNe
+        · simpa [rwTxExecuteNext, branchNe] using observation.2.2.2
+        · simpa [rwTxExecuteNext, slotNe] using observation.2.2.2
+    rcases
+        properties.onlyObserveSentRequests response candidateSlot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    exact
+      ⟨oldRequest, by simpa [rwTxExecuteNext] using oldRequestIsRw,
+        by simpa [rwTxExecuteNext] using oldRequestTx,
+        oldRequestLt⟩
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      rwTxExecuteNext
+    ] using properties.uniqueResponseTxs
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem appendOtherTxnPreservesResponses
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ResponseBundle state)
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ResponseBundle (appendOtherTxnNext state branch slot) := by
+  refine
+    { toProvenanceBundle :=
+        appendOtherTxnPreservesProvenance
+          properties.toProvenanceBundle
+          branchIsActive
+          nextSlot
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro response candidateSlot observed observations
+    rcases observations with ⟨responseIsResponse, observation⟩
+    have oldResponse : state.responseEvent response := by
+      simpa [State.responseEvent, appendOtherTxnNext] using responseIsResponse
+    have slotLe : candidateSlot <= state.eventSeqno response := by
+      simpa [appendOtherTxnNext] using observation.2.1
+    have offPoint :
+        Not (state.eventBranch response = branch) \/
+          Not (candidateSlot = slot) := by
+      by_cases branchEq : state.eventBranch response = branch
+      · refine Or.inr ?_
+        intro slotEq
+        subst candidateSlot
+        exact
+          responseCannotReachNextSlot
+            properties.toStructuralBundle
+            nextSlot
+            oldResponse
+            branchEq
+            slotLe
+      · exact Or.inl branchEq
+    have oldObservation :
+        state.observedAt response candidateSlot observed := by
+      refine ⟨oldResponse, slotLe, ?_, ?_⟩
+      · rcases offPoint with branchNe | slotNe
+        · simpa [appendOtherTxnNext, branchNe] using observation.2.2.1
+        · simpa [appendOtherTxnNext, slotNe] using observation.2.2.1
+      · simpa [appendOtherTxnNext] using observation.2.2.2
+    rcases
+        properties.onlyObserveSentRequests response candidateSlot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    exact
+      ⟨oldRequest, by simpa [appendOtherTxnNext] using oldRequestIsRw,
+        by simpa [appendOtherTxnNext] using oldRequestTx,
+        oldRequestLt⟩
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      appendOtherTxnNext
+    ] using properties.uniqueResponseTxs
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem rwTxResponsePreservesResponses
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ResponseBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (entryIsClient : state.clientEntry branch slot)
+    (entryMatches : state.entryTx branch slot = state.eventTx request)
+    (nextEvent : state.nextHistoryEvent response) :
+    ResponseBundle (rwTxResponseNext state request branch slot response) := by
+  have classifiedNe :
+      forall candidate,
+        state.historyEvent candidate -> Not (candidate = response) :=
+    fun candidate candidateHasKind =>
+      classifiedEventNeNext properties.historyTypeOk nextEvent candidateHasKind
+  have responseNeNew :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = response) := by
+    intro candidate candidateIsResponse
+    refine classifiedNe candidate ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        rwTxResponsePreservesProvenance
+          properties.toProvenanceBundle
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro candidate candidateSlot observed observations
+    rcases observations with ⟨candidateIsResponse, observation⟩
+    by_cases candidateEq : candidate = response
+    · subst candidate
+      -- The new response reads the origin view of its own frontier entry.
+      have newClient :
+          state.clientEntry (state.entryView branch slot) candidateSlot := by
+        simpa [rwTxResponseNext] using observation.2.2.1
+      have newTx :
+          state.entryTx (state.entryView branch slot) candidateSlot =
+            observed := by
+        simpa [rwTxResponseNext] using observation.2.2.2
+      rcases
+          properties.clientEntryHasRequest
+            (state.entryView branch slot) candidateSlot newClient with
+        ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+      have oldRequestUsed : state.eventUsed oldRequest :=
+        (properties.historyTypeOk oldRequest).2 (Or.inl oldRequestIsRw)
+      have oldRequestLt :=
+        usedEventLtNext properties.historyIsPrefix oldRequestUsed nextEvent
+      exact
+        ⟨oldRequest, by simpa [rwTxResponseNext] using oldRequestIsRw,
+          by
+            simpa [rwTxResponseNext, oldRequestLt.2] using
+              oldRequestTx.trans newTx,
+          oldRequestLt⟩
+    · have oldResponse : state.responseEvent candidate := by
+        simpa [
+          State.responseEvent,
+          rwTxResponseNext,
+          candidateEq
+        ] using candidateIsResponse
+      have oldObservation :
+          state.observedAt candidate candidateSlot observed := by
+        simpa [
+          State.observedAt,
+          State.responseEvent,
+          rwTxResponseNext,
+          candidateEq
+        ] using observation
+      rcases
+          properties.onlyObserveSentRequests candidate candidateSlot observed
+            ⟨oldResponse, oldObservation⟩ with
+        ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+      have oldRequestNe := classifiedNe oldRequest (Or.inl oldRequestIsRw)
+      exact
+        ⟨oldRequest, by simpa [rwTxResponseNext] using oldRequestIsRw,
+          by simpa [rwTxResponseNext, oldRequestNe] using oldRequestTx,
+          oldRequestLt⟩
+  · rw [UniqueResponseTxs]
+    intro left right responses
+    rcases responses with ⟨leftIsResponse, rightIsResponse, sameTx⟩
+    by_cases leftEq : left = response
+    · subst left
+      by_cases rightEq : right = response
+      · exact rightEq.symm
+      · have rightOld : state.responseEvent right := by
+          simpa [
+            State.responseEvent,
+            rwTxResponseNext,
+            rightEq
+          ] using rightIsResponse
+        have rightNe := responseNeNew right rightOld
+        have rightTx :
+            state.eventTx right = state.eventTx request := by
+          simpa [rwTxResponseNext, rightNe] using sameTx.symm
+        exact False.elim (notResponded ⟨right, rightOld, rightTx⟩)
+    · have leftOld : state.responseEvent left := by
+        simpa [
+          State.responseEvent,
+          rwTxResponseNext,
+          leftEq
+        ] using leftIsResponse
+      have leftNe := responseNeNew left leftOld
+      by_cases rightEq : right = response
+      · subst right
+        have leftTx :
+            state.eventTx left = state.eventTx request := by
+          simpa [rwTxResponseNext, leftNe] using sameTx
+        exact False.elim (notResponded ⟨left, leftOld, leftTx⟩)
+      · have rightOld : state.responseEvent right := by
+          simpa [
+            State.responseEvent,
+            rwTxResponseNext,
+            rightEq
+          ] using rightIsResponse
+        have rightNe := responseNeNew right rightOld
+        have oldSameTx : state.eventTx left = state.eventTx right := by
+          simpa [rwTxResponseNext, leftNe, rightNe] using sameTx
+        exact properties.uniqueResponseTxs left right
+          ⟨leftOld, rightOld, oldSameTx⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem roTxResponsePreservesResponses
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {last : Seqno}
+    (properties : ResponseBundle state)
+    (requestIsRo : state.roRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (lastSlot : state.lastLedgerSlot branch last)
+    (nextEvent : state.nextHistoryEvent response) :
+    ResponseBundle (roTxResponseNext state request branch last response) := by
+  have classifiedNe :
+      forall candidate,
+        state.historyEvent candidate -> Not (candidate = response) :=
+    fun candidate candidateHasKind =>
+      classifiedEventNeNext properties.historyTypeOk nextEvent candidateHasKind
+  have responseNeNew :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = response) := by
+    intro candidate candidateIsResponse
+    refine classifiedNe candidate ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        roTxResponsePreservesProvenance
+          properties.toProvenanceBundle
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro candidate candidateSlot observed observations
+    rcases observations with ⟨candidateIsResponse, observation⟩
+    by_cases candidateEq : candidate = response
+    · subst candidate
+      have newClient :
+          state.clientEntry (state.entryView branch last) candidateSlot := by
+        simpa [roTxResponseNext] using observation.2.2.1
+      have newTx :
+          state.entryTx (state.entryView branch last) candidateSlot =
+            observed := by
+        simpa [roTxResponseNext] using observation.2.2.2
+      rcases
+          properties.clientEntryHasRequest
+            (state.entryView branch last) candidateSlot newClient with
+        ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+      have oldRequestUsed : state.eventUsed oldRequest :=
+        (properties.historyTypeOk oldRequest).2 (Or.inl oldRequestIsRw)
+      have oldRequestLt :=
+        usedEventLtNext properties.historyIsPrefix oldRequestUsed nextEvent
+      exact
+        ⟨oldRequest, by simpa [roTxResponseNext] using oldRequestIsRw,
+          by
+            simpa [roTxResponseNext, oldRequestLt.2] using
+              oldRequestTx.trans newTx,
+          oldRequestLt⟩
+    · have oldResponse : state.responseEvent candidate := by
+        simpa [
+          State.responseEvent,
+          roTxResponseNext,
+          candidateEq
+        ] using candidateIsResponse
+      have oldObservation :
+          state.observedAt candidate candidateSlot observed := by
+        simpa [
+          State.observedAt,
+          State.responseEvent,
+          roTxResponseNext,
+          candidateEq
+        ] using observation
+      rcases
+          properties.onlyObserveSentRequests candidate candidateSlot observed
+            ⟨oldResponse, oldObservation⟩ with
+        ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+      have oldRequestNe := classifiedNe oldRequest (Or.inl oldRequestIsRw)
+      exact
+        ⟨oldRequest, by simpa [roTxResponseNext] using oldRequestIsRw,
+          by simpa [roTxResponseNext, oldRequestNe] using oldRequestTx,
+          oldRequestLt⟩
+  · rw [UniqueResponseTxs]
+    intro left right responses
+    rcases responses with ⟨leftIsResponse, rightIsResponse, sameTx⟩
+    by_cases leftEq : left = response
+    · subst left
+      by_cases rightEq : right = response
+      · exact rightEq.symm
+      · have rightOld : state.responseEvent right := by
+          simpa [
+            State.responseEvent,
+            roTxResponseNext,
+            rightEq
+          ] using rightIsResponse
+        have rightNe := responseNeNew right rightOld
+        have rightTx :
+            state.eventTx right = state.eventTx request := by
+          simpa [roTxResponseNext, rightNe] using sameTx.symm
+        exact False.elim (notResponded ⟨right, rightOld, rightTx⟩)
+    · have leftOld : state.responseEvent left := by
+        simpa [
+          State.responseEvent,
+          roTxResponseNext,
+          leftEq
+        ] using leftIsResponse
+      have leftNe := responseNeNew left leftOld
+      by_cases rightEq : right = response
+      · subst right
+        have leftTx :
+            state.eventTx left = state.eventTx request := by
+          simpa [roTxResponseNext, leftNe] using sameTx
+        exact False.elim (notResponded ⟨left, leftOld, leftTx⟩)
+      · have rightOld : state.responseEvent right := by
+          simpa [
+            State.responseEvent,
+            roTxResponseNext,
+            rightEq
+          ] using rightIsResponse
+        have rightNe := responseNeNew right rightOld
+        have oldSameTx : state.eventTx left = state.eventTx right := by
+          simpa [roTxResponseNext, leftNe, rightNe] using sameTx
+        exact properties.uniqueResponseTxs left right
+          ⟨leftOld, rightOld, oldSameTx⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem statusCommittedResponsePreservesResponses
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    {current : View}
+    (properties : ResponseBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (viewIsCurrent : state.currentView current)
+    (responseSlotExists :
+      state.ledgerEntry current (state.eventSeqno response))
+    (responseEntryMatches :
+      state.entryView current (state.eventSeqno response) =
+        state.eventView response)
+    (notInvalid :
+      Not (Exists fun invalid =>
+        state.invalidStatusEvent invalid /\
+          state.eventView invalid = state.eventView response /\
+            state.eventSeqno invalid <= state.eventSeqno response))
+    (nextEvent : state.nextHistoryEvent status) :
+    ResponseBundle (statusCommittedResponseNext state response status) := by
+  have responseNeStatus :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = status) := by
+    intro candidate candidateIsResponse
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        statusCommittedResponsePreservesProvenance
+          properties.toProvenanceBundle
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro candidate candidateSlot observed observations
+    rcases observations with ⟨candidateIsResponse, observation⟩
+    have oldResponse : state.responseEvent candidate := by
+      simpa [
+        State.responseEvent,
+        statusCommittedResponseNext
+      ] using candidateIsResponse
+    have candidateNe := responseNeStatus candidate oldResponse
+    have oldObservation :
+        state.observedAt candidate candidateSlot observed := by
+      simpa [
+        State.observedAt,
+        State.responseEvent,
+        statusCommittedResponseNext,
+        candidateNe
+      ] using observation
+    rcases
+        properties.onlyObserveSentRequests candidate candidateSlot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    exact
+      ⟨oldRequest,
+        by simpa [statusCommittedResponseNext] using oldRequestIsRw,
+        by simpa [statusCommittedResponseNext] using oldRequestTx,
+        oldRequestLt⟩
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      statusCommittedResponseNext
+    ] using properties.uniqueResponseTxs
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem statusInvalidResponsePreservesResponses
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    (properties : ResponseBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (nextEvent : state.nextHistoryEvent status) :
+    ResponseBundle (statusInvalidResponseNext state response status) := by
+  have responseNeStatus :
+      forall candidate,
+        state.responseEvent candidate -> Not (candidate = status) := by
+    intro candidate candidateIsResponse
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsResponse with candidateIsRw | candidateIsRo
+    · exact Or.inr (Or.inl candidateIsRw)
+    · exact Or.inr (Or.inr (Or.inr (Or.inl candidateIsRo)))
+  refine
+    { toProvenanceBundle :=
+        statusInvalidResponsePreservesProvenance
+          properties.toProvenanceBundle
+          responseIsRw
+          statusAllowed
+          nextEvent
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro candidate candidateSlot observed observations
+    rcases observations with ⟨candidateIsResponse, observation⟩
+    have oldResponse : state.responseEvent candidate := by
+      simpa [
+        State.responseEvent,
+        statusInvalidResponseNext
+      ] using candidateIsResponse
+    have candidateNe := responseNeStatus candidate oldResponse
+    have oldObservation :
+        state.observedAt candidate candidateSlot observed := by
+      simpa [
+        State.observedAt,
+        State.responseEvent,
+        statusInvalidResponseNext,
+        candidateNe
+      ] using observation
+    rcases
+        properties.onlyObserveSentRequests candidate candidateSlot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    exact
+      ⟨oldRequest,
+        by simpa [statusInvalidResponseNext] using oldRequestIsRw,
+        by simpa [statusInvalidResponseNext] using oldRequestTx,
+        oldRequestLt⟩
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      statusInvalidResponseNext
+    ] using properties.uniqueResponseTxs
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerPreservesResponses
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    {cut : Seqno}
+    (properties : ResponseBundle state)
+    (sourceIsActive : state.activeView source)
+    (cutExists : state.ledgerEntry source cut)
+    (sourceIsValid : state.validTruncationSource source cut)
+    (viewIsNext : state.nextView newView) :
+    ResponseBundle (truncateLedgerNext state source cut newView) := by
+  -- Existing responses read an active branch, and the fresh view is not active.
+  have responseBranchNeNew :
+      forall candidate,
+        state.responseEvent candidate ->
+          Not (state.eventBranch candidate = newView) := by
+    intro candidate candidateIsResponse branchEq
+    have frontier :=
+      properties.responseFrontierIsLedgerEntry candidate candidateIsResponse
+    rw [branchEq] at frontier
+    exact viewIsNext.1
+      (properties.ledgerTypeOk newView (state.eventSeqno candidate) frontier).1
+  refine
+    { toProvenanceBundle :=
+        truncateLedgerPreservesProvenance
+          properties.toProvenanceBundle
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · rw [OnlyObserveSentRequests]
+    intro candidate candidateSlot observed observations
+    rcases observations with ⟨candidateIsResponse, observation⟩
+    have oldResponse : state.responseEvent candidate := by
+      simpa [State.responseEvent, truncateLedgerNext] using candidateIsResponse
+    have branchNe := responseBranchNeNew candidate oldResponse
+    have oldObservation :
+        state.observedAt candidate candidateSlot observed := by
+      simpa [
+        State.observedAt,
+        State.responseEvent,
+        truncateLedgerNext,
+        updateUnary,
+        branchNe
+      ] using observation
+    rcases
+        properties.onlyObserveSentRequests candidate candidateSlot observed
+          ⟨oldResponse, oldObservation⟩ with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx, oldRequestLt⟩
+    exact
+      ⟨oldRequest, by simpa [truncateLedgerNext] using oldRequestIsRw,
+        by simpa [truncateLedgerNext] using oldRequestTx,
+        oldRequestLt⟩
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      truncateLedgerNext
+    ] using properties.uniqueResponseTxs
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerToEmptyPreservesResponses
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    (properties : ResponseBundle state)
+    (sourceIsActive : state.activeView source)
+    (noCommitted : state.noCommittedTxId)
+    (viewIsNext : state.nextView newView) :
+    ResponseBundle (truncateLedgerToEmptyNext state newView) := by
+  refine
+    { toProvenanceBundle :=
+        truncateLedgerToEmptyPreservesProvenance
+          properties.toProvenanceBundle
+          sourceIsActive
+          noCommitted
+          viewIsNext
+      onlyObserveSentRequests := ?_
+      uniqueResponseTxs := ?_ }
+  · simpa [
+      OnlyObserveSentRequests,
+      State.observedAt,
+      State.responseEvent,
+      truncateLedgerToEmptyNext
+    ] using properties.onlyObserveSentRequests
+  · simpa [
+      UniqueResponseTxs,
+      State.responseEvent,
+      truncateLedgerToEmptyNext
+    ] using properties.uniqueResponseTxs
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem stepPreservesResponses
+    {state next : State Tx View Seqno Event}
+    (properties : ResponseBundle state)
+    (transition : Step state next) :
+    ResponseBundle next := by
+  cases transition with
+  | rwTxRequest tx event nextTx nextEvent =>
+      exact rwTxRequestPreservesResponses properties nextTx nextEvent
+  | roTxRequest tx event nextTx nextEvent =>
+      exact roTxRequestPreservesResponses properties nextTx nextEvent
+  | rwTxExecute
+      request
+      branch
+      slot
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot =>
+      exact
+        rwTxExecutePreservesResponses
+          properties
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+  | appendOtherTxn branch slot branchIsActive nextSlot =>
+      exact
+        appendOtherTxnPreservesResponses
+          properties
+          branchIsActive
+          nextSlot
+  | rwTxResponse
+      request
+      branch
+      slot
+      response
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent =>
+      exact
+        rwTxResponsePreservesResponses
+          properties
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+  | roTxResponse
+      request
+      branch
+      last
+      response
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent =>
+      exact
+        roTxResponsePreservesResponses
+          properties
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+  | statusCommittedResponse
+      response
+      status
+      current
+      responseIsRw
+      viewIsCurrent
+      responseSlotExists
+      responseEntryMatches
+      notInvalid
+      nextEvent =>
+      exact
+        statusCommittedResponsePreservesResponses
+          properties
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+  | statusInvalidResponse
+      response
+      status
+      responseIsRw
+      statusAllowed
+      nextEvent =>
+      exact
+        statusInvalidResponsePreservesResponses
+          properties
+          responseIsRw
+          statusAllowed
+          nextEvent
+  | truncateLedger
+      source
+      cut
+      newView
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext =>
+      exact
+        truncateLedgerPreservesResponses
+          properties
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+  | truncateLedgerToEmpty
+      source
+      newView
+      sourceIsActive
+      noCommitted
+      viewIsNext =>
+      exact
+        truncateLedgerToEmptyPreservesResponses
+          properties
+          sourceIsActive
+          noCommitted
+          viewIsNext
+
+theorem reachableResponses
+    {state : State Tx View Seqno Event}
+    (reachable : Reachable state) :
+    ResponseBundle state := by
+  induction reachable with
+  | initial => exact initialResponses
+  | step _ transition properties =>
+      exact stepPreservesResponses properties transition
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+/-- At most one response per transaction, so two responses carrying the same
+transaction are the same event and trivially share a transaction id. -/
+theorem responsesUniqueTxIds
+    {state : State Tx View Seqno Event}
+    (properties : ResponseBundle state) :
+    UniqueTxIds state := by
+  rw [UniqueTxIds]
+  intro left right responses
+  have sameEvent := properties.uniqueResponseTxs left right responses
+  subst sameEvent
+  exact ⟨rfl, rfl⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
 theorem coreUniqueRwTxs
     {state : State Tx View Seqno Event}
     (properties : CoreBundle state) :
@@ -3863,11 +4801,13 @@ theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
     ProvedBundle state := by
-  have provenance := reachableProvenance reachable
+  have responses := reachableResponses reachable
   exact
-    { provenance
-      uniqueRwTxs := coreUniqueRwTxs provenance.toCoreBundle
-      sameObservations := coreSameObservations provenance.toCoreBundle
-      atMostOnceObserved := provenanceAtMostOnceObserved provenance }
+    { responses
+      uniqueRwTxs := coreUniqueRwTxs responses.toCoreBundle
+      sameObservations := coreSameObservations responses.toCoreBundle
+      atMostOnceObserved :=
+        provenanceAtMostOnceObserved responses.toProvenanceBundle
+      uniqueTxIds := responsesUniqueTxIds responses }
 
 end CCFConsistency

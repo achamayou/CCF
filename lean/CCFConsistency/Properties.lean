@@ -254,6 +254,16 @@ def UniqueTxIds (state : State Tx View Seqno Event) : Prop :=
       state.eventView left = state.eventView right /\
         state.eventSeqno left = state.eventSeqno right
 
+/-- Auxiliary strengthening of `UniqueTxIds`: a transaction receives at most
+one response. This is what the `notResponded` guard of the two response
+actions actually maintains. -/
+def UniqueResponseTxs (state : State Tx View Seqno Event) : Prop :=
+  forall left right,
+    state.responseEvent left /\
+      state.responseEvent right /\
+        state.eventTx left = state.eventTx right ->
+      left = right
+
 def UniqueCommittedSeqnos (state : State Tx View Seqno Event) : Prop :=
   forall left right,
     state.rwResponseCommitted left /\
@@ -353,11 +363,17 @@ structure ProvenanceBundle (state : State Tx View Seqno Event) : Prop
   clientEntryHasRequest : ClientEntryHasRequest state
   uniqueTxRequests : UniqueTxRequests state
 
+structure ResponseBundle (state : State Tx View Seqno Event) : Prop
+    extends ProvenanceBundle state where
+  onlyObserveSentRequests : OnlyObserveSentRequests state
+  uniqueResponseTxs : UniqueResponseTxs state
+
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  provenance : ProvenanceBundle state
+  responses : ResponseBundle state
   uniqueRwTxs : UniqueRwTxs state
   sameObservations : SameObservations state
   atMostOnceObserved : AtMostOnceObserved state
+  uniqueTxIds : UniqueTxIds state
 
 structure PropertyBundle (state : State Tx View Seqno Event) : Prop where
   historyTypeOk : HistoryTypeOk state
