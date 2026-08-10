@@ -379,12 +379,19 @@ structure StatusBundle (state : State Tx View Seqno Event) : Prop
   statusHasRwResponse : StatusHasRwResponse state
   hasCurrentView : HasCurrentView state
 
+structure CommitBundle (state : State Tx View Seqno Event) : Prop
+    extends StatusBundle state where
+  committedIdIsInCurrentLedger : CommittedIdIsInCurrentLedger state
+
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  statuses : StatusBundle state
+  commits : CommitBundle state
   uniqueRwTxs : UniqueRwTxs state
   sameObservations : SameObservations state
   atMostOnceObserved : AtMostOnceObserved state
   uniqueTxIds : UniqueTxIds state
+  committedResponseMatchesCurrentLedger :
+    CommittedResponseMatchesCurrentLedger state
+  uniqueCommittedSeqnos : UniqueCommittedSeqnos state
 
 structure PropertyBundle (state : State Tx View Seqno Event) : Prop where
   historyTypeOk : HistoryTypeOk state

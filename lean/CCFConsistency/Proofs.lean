@@ -4756,13 +4756,81 @@ theorem nextViewIsCurrent
     (activeOther :
       forall view,
         Not (view = newView) -> next.activeView view = state.activeView view) :
-    HasCurrentView next := by
-  refine ⟨newView, activeNew, ?_⟩
+    next.currentView newView := by
+  refine ⟨activeNew, ?_⟩
   intro later laterGt activeLater
   have laterNe : Not (later = newView) := fun laterEq => laterGt.2 laterEq.symm
   rw [activeOther later laterNe] at activeLater
   exact viewIsNext.1
     (properties.activeViewsArePrefix later newView ⟨activeLater, laterGt⟩)
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View]
+  [LinearOrder Seqno] [OrderBot Seqno]
+  [LinearOrder Event] [OrderBot Event] in
+/-- The current view is unique: two greatest active views coincide. -/
+theorem currentViewUnique
+    {state : State Tx View Seqno Event}
+    {left right : View}
+    (leftIsCurrent : state.currentView left)
+    (rightIsCurrent : state.currentView right) :
+    left = right := by
+  by_contra leftNe
+  rcases lt_or_gt_of_ne leftNe with leftLt | rightLt
+  · exact leftIsCurrent.2 right ⟨le_of_lt leftLt, leftNe⟩ rightIsCurrent.1
+  · exact rightIsCurrent.2 left
+      ⟨le_of_lt rightLt, fun rightEq => leftNe rightEq.symm⟩
+      leftIsCurrent.1
+
+omit [LinearOrder Tx] [OrderBot Tx]
+  [LinearOrder View] [OrderBot View] [OrderBot Seqno]
+  [LinearOrder Event] [OrderBot Event] in
+/-- The ledger is a prefix, stated with a non-strict bound. -/
+theorem ledgerEntryOfLe
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {earlier later : Seqno}
+    (ledgerIsPrefix : LedgerIsPrefix state)
+    (frontier : state.ledgerEntry branch later)
+    (earlierLe : earlier <= later) :
+    state.ledgerEntry branch earlier := by
+  by_cases earlierEq : earlier = later
+  · rw [earlierEq]
+    exact frontier
+  · exact ledgerIsPrefix branch later earlier ⟨frontier, ⟨earlierLe, earlierEq⟩⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Transfer a committed transaction identifier back across any action that
+only classifies a fresh history event. -/
+theorem committedTxIdOfFreshEvent
+    {state next : State Tx View Seqno Event}
+    {fresh : Event}
+    {view : View}
+    {seqno : Seqno}
+    (properties : StructuralBundle state)
+    (nextEvent : state.nextHistoryEvent fresh)
+    (committed : next.committedTxId view seqno)
+    (committedEq :
+      forall candidate,
+        next.committedStatusEvent candidate =
+          state.committedStatusEvent candidate)
+    (viewEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventView candidate = state.eventView candidate)
+    (seqnoEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventSeqno candidate = state.eventSeqno candidate) :
+    state.committedTxId view seqno := by
+  rcases committed with ⟨candidate, candidateCommitted, candidateView, candidateSeqno⟩
+  rw [committedEq] at candidateCommitted
+  have candidateNe : Not (candidate = fresh) :=
+    classifiedEventNeNext properties.historyTypeOk nextEvent
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl candidateCommitted)))))
+  rw [viewEq candidate candidateNe] at candidateView
+  rw [seqnoEq candidate candidateNe] at candidateSeqno
+  exact ⟨candidate, candidateCommitted, candidateView, candidateSeqno⟩
 
 theorem initialStatuses :
     StatusBundle (initialState : State Tx View Seqno Event) where
@@ -5136,11 +5204,12 @@ theorem truncateLedgerPreservesStatuses
       truncateLedgerNext
     ] using properties.statusHasRwResponse
   · refine
-      nextViewIsCurrent
-        properties.toStructuralBundle
-        viewIsNext
-        (by simp [truncateLedgerNext, updateUnary])
-        ?_
+      ⟨newView,
+        nextViewIsCurrent
+          properties.toStructuralBundle
+          viewIsNext
+          (by simp [truncateLedgerNext, updateUnary])
+          ?_⟩
     intro view viewNe
     simp [truncateLedgerNext, updateUnary, viewNe]
 
@@ -5169,11 +5238,12 @@ theorem truncateLedgerToEmptyPreservesStatuses
       truncateLedgerToEmptyNext
     ] using properties.statusHasRwResponse
   · refine
-      nextViewIsCurrent
-        properties.toStructuralBundle
-        viewIsNext
-        (by simp [truncateLedgerToEmptyNext, updateUnary])
-        ?_
+      ⟨newView,
+        nextViewIsCurrent
+          properties.toStructuralBundle
+          viewIsNext
+          (by simp [truncateLedgerToEmptyNext, updateUnary])
+          ?_⟩
     intro view viewNe
     simp [truncateLedgerToEmptyNext, updateUnary, viewNe]
 
@@ -5395,17 +5465,660 @@ theorem provenanceAtMostOnceObserved
       (state.eventBranch response) rightSlot
       ⟨leftClient, rightClient, sameTx⟩).1
 
+theorem initialCommits :
+    CommitBundle (initialState : State Tx View Seqno Event) where
+  toStatusBundle := initialStatuses
+  committedIdIsInCurrentLedger := initialProperties.committedIdIsInCurrentLedger
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxRequestPreservesCommits
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : CommitBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    CommitBundle (rwTxRequestNext state tx event) := by
+  refine
+    { toStatusBundle :=
+        rwTxRequestPreservesStatuses
+          properties.toStatusBundle nextTx nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  simpa [
+    CommittedIdIsInCurrentLedger,
+    State.committedTxId,
+    State.currentView,
+    rwTxRequestNext
+  ] using properties.committedIdIsInCurrentLedger
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxRequestPreservesCommits
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : CommitBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    CommitBundle (roTxRequestNext state tx event) := by
+  refine
+    { toStatusBundle :=
+        roTxRequestPreservesStatuses
+          properties.toStatusBundle nextTx nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  simpa [
+    CommittedIdIsInCurrentLedger,
+    State.committedTxId,
+    State.currentView,
+    roTxRequestNext
+  ] using properties.committedIdIsInCurrentLedger
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxExecutePreservesCommits
+    {state : State Tx View Seqno Event}
+    {request : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : CommitBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    CommitBundle (rwTxExecuteNext state request branch slot) := by
+  refine
+    { toStatusBundle :=
+        rwTxExecutePreservesStatuses
+          properties.toStatusBundle
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCommitted : state.committedTxId committedView committedSeq := by
+    simpa [State.committedTxId, rwTxExecuteNext] using committed
+  have oldCurrent : state.currentView current := by
+    simpa [State.currentView, rwTxExecuteNext] using currentIsCurrent
+  have oldResult :=
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq current ⟨oldCommitted, oldCurrent⟩
+  -- The committed entry already exists, so it is not the slot being written.
+  have offPoint :
+      Not (current = branch) \/ Not (committedSeq = slot) := by
+    by_cases branchEq : current = branch
+    · refine Or.inr ?_
+      intro slotEq
+      subst current
+      subst committedSeq
+      exact nextSlot.1 oldResult.1
+    · exact Or.inl branchEq
+  refine ⟨?_, ?_⟩
+  · rcases offPoint with branchNe | slotNe
+    · simpa [rwTxExecuteNext, branchNe] using oldResult.1
+    · simpa [rwTxExecuteNext, slotNe] using oldResult.1
+  · rcases offPoint with branchNe | slotNe
+    · simpa [rwTxExecuteNext, branchNe] using oldResult.2
+    · simpa [rwTxExecuteNext, slotNe] using oldResult.2
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem appendOtherTxnPreservesCommits
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : CommitBundle state)
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    CommitBundle (appendOtherTxnNext state branch slot) := by
+  refine
+    { toStatusBundle :=
+        appendOtherTxnPreservesStatuses
+          properties.toStatusBundle
+          branchIsActive
+          nextSlot
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCommitted : state.committedTxId committedView committedSeq := by
+    simpa [State.committedTxId, appendOtherTxnNext] using committed
+  have oldCurrent : state.currentView current := by
+    simpa [State.currentView, appendOtherTxnNext] using currentIsCurrent
+  have oldResult :=
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq current ⟨oldCommitted, oldCurrent⟩
+  have offPoint :
+      Not (current = branch) \/ Not (committedSeq = slot) := by
+    by_cases branchEq : current = branch
+    · refine Or.inr ?_
+      intro slotEq
+      subst current
+      subst committedSeq
+      exact nextSlot.1 oldResult.1
+    · exact Or.inl branchEq
+  refine ⟨?_, ?_⟩
+  · rcases offPoint with branchNe | slotNe
+    · simpa [appendOtherTxnNext, branchNe] using oldResult.1
+    · simpa [appendOtherTxnNext, slotNe] using oldResult.1
+  · rcases offPoint with branchNe | slotNe
+    · simpa [appendOtherTxnNext, branchNe] using oldResult.2
+    · simpa [appendOtherTxnNext, slotNe] using oldResult.2
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem rwTxResponsePreservesCommits
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : CommitBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (entryIsClient : state.clientEntry branch slot)
+    (entryMatches : state.entryTx branch slot = state.eventTx request)
+    (nextEvent : state.nextHistoryEvent response) :
+    CommitBundle (rwTxResponseNext state request branch slot response) := by
+  refine
+    { toStatusBundle :=
+        rwTxResponsePreservesStatuses
+          properties.toStatusBundle
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCommitted :=
+    committedTxIdOfFreshEvent
+      properties.toStructuralBundle
+      nextEvent
+      committed
+      (fun _ => rfl)
+      (fun candidate candidateNe => by
+        simp [rwTxResponseNext, candidateNe])
+      (fun candidate candidateNe => by
+        simp [rwTxResponseNext, candidateNe])
+  have oldCurrent : state.currentView current := by
+    simpa [State.currentView, rwTxResponseNext] using currentIsCurrent
+  simpa [rwTxResponseNext] using
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq current ⟨oldCommitted, oldCurrent⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem roTxResponsePreservesCommits
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {last : Seqno}
+    (properties : CommitBundle state)
+    (requestIsRo : state.roRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (lastSlot : state.lastLedgerSlot branch last)
+    (nextEvent : state.nextHistoryEvent response) :
+    CommitBundle (roTxResponseNext state request branch last response) := by
+  refine
+    { toStatusBundle :=
+        roTxResponsePreservesStatuses
+          properties.toStatusBundle
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCommitted :=
+    committedTxIdOfFreshEvent
+      properties.toStructuralBundle
+      nextEvent
+      committed
+      (fun _ => rfl)
+      (fun candidate candidateNe => by
+        simp [roTxResponseNext, candidateNe])
+      (fun candidate candidateNe => by
+        simp [roTxResponseNext, candidateNe])
+  have oldCurrent : state.currentView current := by
+    simpa [State.currentView, roTxResponseNext] using currentIsCurrent
+  simpa [roTxResponseNext] using
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq current ⟨oldCommitted, oldCurrent⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusCommittedResponsePreservesCommits
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    {current : View}
+    (properties : CommitBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (viewIsCurrent : state.currentView current)
+    (responseSlotExists :
+      state.ledgerEntry current (state.eventSeqno response))
+    (responseEntryMatches :
+      state.entryView current (state.eventSeqno response) =
+        state.eventView response)
+    (notInvalid :
+      Not (Exists fun invalid =>
+        state.invalidStatusEvent invalid /\
+          state.eventView invalid = state.eventView response /\
+            state.eventSeqno invalid <= state.eventSeqno response))
+    (nextEvent : state.nextHistoryEvent status) :
+    CommitBundle (statusCommittedResponseNext state response status) := by
+  refine
+    { toStatusBundle :=
+        statusCommittedResponsePreservesStatuses
+          properties.toStatusBundle
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq candidateCurrent committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCurrent : state.currentView candidateCurrent := by
+    simpa [State.currentView, statusCommittedResponseNext] using currentIsCurrent
+  have currentEq : candidateCurrent = current :=
+    currentViewUnique oldCurrent viewIsCurrent
+  subst candidateCurrent
+  rcases committed with ⟨witness, witnessCommitted, witnessView, witnessSeqno⟩
+  by_cases witnessEq : witness = status
+  · -- The new status is the committed identifier, and its guards are exactly
+    -- the two facts required.
+    subst witness
+    have viewEq : state.eventView response = committedView := by
+      simpa [statusCommittedResponseNext] using witnessView
+    have seqnoEq : state.eventSeqno response = committedSeq := by
+      simpa [statusCommittedResponseNext] using witnessSeqno
+    subst committedView
+    subst committedSeq
+    exact
+      ⟨by simpa [statusCommittedResponseNext] using responseSlotExists,
+        by simpa [statusCommittedResponseNext] using responseEntryMatches⟩
+  · have oldCommittedEvent : state.committedStatusEvent witness := by
+      simpa [statusCommittedResponseNext, witnessEq] using witnessCommitted
+    have oldCommitted : state.committedTxId committedView committedSeq :=
+      ⟨witness, oldCommittedEvent,
+        by simpa [statusCommittedResponseNext, witnessEq] using witnessView,
+        by simpa [statusCommittedResponseNext, witnessEq] using witnessSeqno⟩
+    simpa [statusCommittedResponseNext] using
+      properties.committedIdIsInCurrentLedger
+        committedView committedSeq current ⟨oldCommitted, viewIsCurrent⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusInvalidResponsePreservesCommits
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    (properties : CommitBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (nextEvent : state.nextHistoryEvent status) :
+    CommitBundle (statusInvalidResponseNext state response status) := by
+  refine
+    { toStatusBundle :=
+        statusInvalidResponsePreservesStatuses
+          properties.toStatusBundle
+          responseIsRw
+          statusAllowed
+          nextEvent
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  have oldCommitted :=
+    committedTxIdOfFreshEvent
+      properties.toStructuralBundle
+      nextEvent
+      committed
+      (fun _ => rfl)
+      (fun candidate candidateNe => by
+        simp [statusInvalidResponseNext, candidateNe])
+      (fun candidate candidateNe => by
+        simp [statusInvalidResponseNext, candidateNe])
+  have oldCurrent : state.currentView current := by
+    simpa [State.currentView, statusInvalidResponseNext] using currentIsCurrent
+  simpa [statusInvalidResponseNext] using
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq current ⟨oldCommitted, oldCurrent⟩
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerPreservesCommits
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    {cut : Seqno}
+    (properties : CommitBundle state)
+    (sourceIsActive : state.activeView source)
+    (cutExists : state.ledgerEntry source cut)
+    (sourceIsValid : state.validTruncationSource source cut)
+    (viewIsNext : state.nextView newView) :
+    CommitBundle (truncateLedgerNext state source cut newView) := by
+  refine
+    { toStatusBundle :=
+        truncateLedgerPreservesStatuses
+          properties.toStatusBundle
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq candidateCurrent committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, currentIsCurrent⟩
+  -- The fresh view is the current view of the truncated state.
+  have newIsCurrent :
+      (truncateLedgerNext state source cut newView).currentView newView := by
+    refine
+      nextViewIsCurrent
+        properties.toStructuralBundle
+        viewIsNext
+        (by simp [truncateLedgerNext, updateUnary])
+        ?_
+    intro view viewNe
+    simp [truncateLedgerNext, updateUnary, viewNe]
+  have currentEq : candidateCurrent = newView :=
+    currentViewUnique currentIsCurrent newIsCurrent
+  subst candidateCurrent
+  have oldCommitted : state.committedTxId committedView committedSeq := by
+    simpa [State.committedTxId, truncateLedgerNext] using committed
+  rcases sourceIsValid with noCommitted | validSource
+  · exact False.elim (noCommitted committedView committedSeq oldCommitted)
+  rcases validSource with
+    ⟨commitSeq, maxCommitted, sourceHasCommit, commitInSource, commitLeCut⟩
+  rcases properties.hasCurrentView with ⟨oldCurrent, oldCurrentIsCurrent⟩
+  have committedSeqLeCommit : committedSeq <= commitSeq :=
+    maxCommitted.2 committedView committedSeq oldCommitted
+  have committedSeqLeCut : committedSeq <= cut :=
+    le_trans committedSeqLeCommit commitLeCut
+  have sourceHasCommittedSeq : state.ledgerEntry source committedSeq :=
+    ledgerEntryOfLe
+      properties.ledgerIsPrefix sourceHasCommit committedSeqLeCommit
+  -- The outgoing current view and the truncation source agree on the origin
+  -- view of every committed slot, because both agree at the maximum committed
+  -- slot and the ledger prefix carries origin views down from there.
+  have currentAtCommit :=
+    properties.committedIdIsInCurrentLedger
+      (state.entryView source commitSeq) commitSeq oldCurrent
+      ⟨commitInSource, oldCurrentIsCurrent⟩
+  have currentAtCommitted :=
+    properties.committedIdIsInCurrentLedger
+      committedView committedSeq oldCurrent
+      ⟨oldCommitted, oldCurrentIsCurrent⟩
+  have sourcePrefix :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      source commitSeq committedSeq ⟨sourceHasCommit, committedSeqLeCommit⟩
+  have currentPrefix :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      oldCurrent commitSeq committedSeq
+      ⟨currentAtCommit.1, committedSeqLeCommit⟩
+  have sourceViewEq :
+      state.entryView source committedSeq = committedView := by
+    rw [sourcePrefix.2.2.1, <- currentAtCommit.2, <- currentPrefix.2.2.1]
+    exact currentAtCommitted.2
+  refine ⟨?_, ?_⟩
+  · simp [
+      truncateLedgerNext,
+      updateUnary,
+      committedSeqLeCut,
+      sourceHasCommittedSeq
+    ]
+  · simp [
+      truncateLedgerNext,
+      updateUnary,
+      committedSeqLeCut,
+      sourceViewEq
+    ]
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem truncateLedgerToEmptyPreservesCommits
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    (properties : CommitBundle state)
+    (sourceIsActive : state.activeView source)
+    (noCommitted : state.noCommittedTxId)
+    (viewIsNext : state.nextView newView) :
+    CommitBundle (truncateLedgerToEmptyNext state newView) := by
+  refine
+    { toStatusBundle :=
+        truncateLedgerToEmptyPreservesStatuses
+          properties.toStatusBundle
+          sourceIsActive
+          noCommitted
+          viewIsNext
+      committedIdIsInCurrentLedger := ?_ }
+  rw [CommittedIdIsInCurrentLedger]
+  intro committedView committedSeq current committedAndCurrent
+  rcases committedAndCurrent with ⟨committed, _⟩
+  have oldCommitted : state.committedTxId committedView committedSeq := by
+    simpa [State.committedTxId, truncateLedgerToEmptyNext] using committed
+  exact False.elim (noCommitted committedView committedSeq oldCommitted)
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem stepPreservesCommits
+    {state next : State Tx View Seqno Event}
+    (properties : CommitBundle state)
+    (transition : Step state next) :
+    CommitBundle next := by
+  cases transition with
+  | rwTxRequest tx event nextTx nextEvent =>
+      exact rwTxRequestPreservesCommits properties nextTx nextEvent
+  | roTxRequest tx event nextTx nextEvent =>
+      exact roTxRequestPreservesCommits properties nextTx nextEvent
+  | rwTxExecute
+      request
+      branch
+      slot
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot =>
+      exact
+        rwTxExecutePreservesCommits
+          properties
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+  | appendOtherTxn branch slot branchIsActive nextSlot =>
+      exact appendOtherTxnPreservesCommits properties branchIsActive nextSlot
+  | rwTxResponse
+      request
+      branch
+      slot
+      response
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent =>
+      exact
+        rwTxResponsePreservesCommits
+          properties
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+  | roTxResponse
+      request
+      branch
+      last
+      response
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent =>
+      exact
+        roTxResponsePreservesCommits
+          properties
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+  | statusCommittedResponse
+      response
+      status
+      current
+      responseIsRw
+      viewIsCurrent
+      responseSlotExists
+      responseEntryMatches
+      notInvalid
+      nextEvent =>
+      exact
+        statusCommittedResponsePreservesCommits
+          properties
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+  | statusInvalidResponse
+      response
+      status
+      responseIsRw
+      statusAllowed
+      nextEvent =>
+      exact
+        statusInvalidResponsePreservesCommits
+          properties
+          responseIsRw
+          statusAllowed
+          nextEvent
+  | truncateLedger
+      source
+      cut
+      newView
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext =>
+      exact
+        truncateLedgerPreservesCommits
+          properties
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+  | truncateLedgerToEmpty
+      source
+      newView
+      sourceIsActive
+      noCommitted
+      viewIsNext =>
+      exact
+        truncateLedgerToEmptyPreservesCommits
+          properties
+          sourceIsActive
+          noCommitted
+          viewIsNext
+
+theorem reachableCommits
+    {state : State Tx View Seqno Event}
+    (reachable : Reachable state) :
+    CommitBundle state := by
+  induction reachable with
+  | initial => exact initialCommits
+  | step _ transition properties =>
+      exact stepPreservesCommits properties transition
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- A committed read-write response is present, as a client entry with the same
+transaction, in the current view. -/
+theorem commitsCommittedResponseMatchesCurrentLedger
+    {state : State Tx View Seqno Event}
+    (properties : CommitBundle state) :
+    CommittedResponseMatchesCurrentLedger state := by
+  rw [CommittedResponseMatchesCurrentLedger]
+  intro response current committedAndCurrent
+  rcases committedAndCurrent with ⟨responseCommitted, currentIsCurrent⟩
+  have inCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView response) (state.eventSeqno response) current
+      ⟨responseCommitted.2, currentIsCurrent⟩
+  have branchIsView :=
+    properties.responseBranchIsView response (Or.inl responseCommitted.1)
+  have entryMatch :=
+    properties.rwResponseMatchesLedgerEntry response responseCommitted.1
+  rw [branchIsView] at entryMatch
+  have prefixAtResponse :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      current (state.eventSeqno response) (state.eventSeqno response)
+      ⟨inCurrent.1, le_rfl⟩
+  rw [inCurrent.2] at prefixAtResponse
+  have currentIsClient :
+      state.clientEntry current (state.eventSeqno response) :=
+    prefixAtResponse.2.1.2 entryMatch.1
+  refine ⟨currentIsClient, inCurrent.2, ?_⟩
+  rw [prefixAtResponse.2.2.2 currentIsClient]
+  exact entryMatch.2
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Two committed responses at the same sequence number sit at the same slot of
+the current view, hence carry the same transaction. -/
+theorem commitsUniqueCommittedSeqnos
+    {state : State Tx View Seqno Event}
+    (properties : CommitBundle state) :
+    UniqueCommittedSeqnos state := by
+  rw [UniqueCommittedSeqnos]
+  intro left right committedAndSeqno
+  rcases committedAndSeqno with ⟨leftCommitted, rightCommitted, sameSeqno⟩
+  rcases properties.hasCurrentView with ⟨current, currentIsCurrent⟩
+  have leftInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView left) (state.eventSeqno left) current
+      ⟨leftCommitted.2, currentIsCurrent⟩
+  have rightInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView right) (state.eventSeqno right) current
+      ⟨rightCommitted.2, currentIsCurrent⟩
+  have sameView : state.eventView left = state.eventView right := by
+    rw [<- leftInCurrent.2, <- rightInCurrent.2, sameSeqno]
+  exact
+    coreUniqueRwTxs properties.toCoreBundle left right
+      ⟨leftCommitted.1, rightCommitted.1, sameView, sameSeqno⟩
+
 theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
     ProvedBundle state := by
-  have statuses := reachableStatuses reachable
+  have commits := reachableCommits reachable
   exact
-    { statuses
-      uniqueRwTxs := coreUniqueRwTxs statuses.toCoreBundle
-      sameObservations := coreSameObservations statuses.toCoreBundle
+    { commits
+      uniqueRwTxs := coreUniqueRwTxs commits.toCoreBundle
+      sameObservations := coreSameObservations commits.toCoreBundle
       atMostOnceObserved :=
-        provenanceAtMostOnceObserved statuses.toProvenanceBundle
-      uniqueTxIds := responsesUniqueTxIds statuses.toResponseBundle }
+        provenanceAtMostOnceObserved commits.toProvenanceBundle
+      uniqueTxIds := responsesUniqueTxIds commits.toResponseBundle
+      committedResponseMatchesCurrentLedger :=
+        commitsCommittedResponseMatchesCurrentLedger commits
+      uniqueCommittedSeqnos := commitsUniqueCommittedSeqnos commits }
 
 end CCFConsistency

@@ -98,15 +98,19 @@ client-entry request provenance, and unique request transactions.
 which adds request-before-observation ordering and an auxiliary
 "one response per transaction" clause. `stepPreservesStatuses` extends it once
 more to the 24-clause `StatusBundle`, which adds status provenance and an
-auxiliary "a current view exists" clause. `reachableCore`,
-`reachableProvenance`, `reachableResponses`, and `reachableStatuses` lift those
-results to every reachable state. Four further full-spec properties are logical
-consequences of that inductive core:
+auxiliary "a current view exists" clause. `stepPreservesCommits` finally
+extends it to the 25-clause `CommitBundle`, which adds the keystone commit
+clause. `reachableCore`, `reachableProvenance`, `reachableResponses`,
+`reachableStatuses`, and `reachableCommits` lift those results to every
+reachable state. Six further full-spec properties are logical consequences of
+that inductive core:
 
 - `coreUniqueRwTxs`
 - `coreSameObservations`
 - `provenanceAtMostOnceObserved`
 - `responsesUniqueTxIds`
+- `commitsCommittedResponseMatchesCurrentLedger`
+- `commitsUniqueCommittedSeqnos`
 
 The exported fixed-point theorem is:
 
@@ -116,12 +120,12 @@ theorem reachableProved
     ProvedBundle state
 ```
 
-It establishes 26 of the 36 translated properties for all reachable states,
-over abstract and potentially infinite domains. `StatusBundle` also carries two
+It establishes 29 of the 36 translated properties for all reachable states,
+over abstract and potentially infinite domains. `CommitBundle` also carries two
 auxiliary strengthenings that are not themselves among the 36 translated
 clauses: `UniqueResponseTxs` and `HasCurrentView`.
 
-| Action                    | Preserves all 24 status clauses |
+| Action                    | Preserves all 25 commit clauses |
 | ------------------------- | ------------------------------- |
 | `rwTxRequest`             | Proved                          |
 | `roTxRequest`             | Proved                          |
@@ -138,7 +142,7 @@ clauses: `UniqueResponseTxs` and `HasCurrentView`.
 
 All rows have a proved initializer. "Proved" means preservation by all ten
 actions and an exported reachable-state theorem, either directly through
-`StatusBundle` or as a consequence of it. "Open" means all ten preservation
+`CommitBundle` or as a consequence of it. "Open" means all ten preservation
 cases remain outside the exported theorem; no assumption is used in their
 place.
 
@@ -162,8 +166,8 @@ place.
 | `ResponseFrontierMatchesOrigin`         | Proved                     |
 | `RwResponseMatchesLedgerEntry`          | Proved                     |
 | `StatusHasRwResponse`                   | Proved                     |
-| `CommittedIdIsInCurrentLedger`          | Open                       |
-| `CommittedResponseMatchesCurrentLedger` | Open                       |
+| `CommittedIdIsInCurrentLedger`          | Proved                     |
+| `CommittedResponseMatchesCurrentLedger` | Proved from the commits    |
 | `AllReceivedAfterSent`                  | Proved                     |
 | `UniqueTxRequests`                      | Proved                     |
 | `OnlyObserveSentRequests`               | Proved                     |
@@ -171,7 +175,7 @@ place.
 | `UniqueRwTxs`                           | Proved from the core       |
 | `SameObservations`                      | Proved from the core       |
 | `UniqueTxIds`                           | Proved from the responses  |
-| `UniqueCommittedSeqnos`                 | Open                       |
+| `UniqueCommittedSeqnos`                 | Proved from the commits    |
 | `CommittedOrInvalid`                    | Open                       |
 | `OnceCommittedPreviousIsCommitted`      | Open                       |
 | `OnceCommittedOlderViewSuffixIsInvalid` | Open                       |
@@ -244,28 +248,58 @@ It is preserved because a view change makes the fresh view active while
 (`nextViewIsCurrent`); all other actions leave `activeView` untouched
 (`hasCurrentViewOfActiveEq`).
 
+## How the commit layer closes
+
+`CommittedIdIsInCurrentLedger` is the keystone: the current view contains every
+committed entry, with a matching origin view. Its hard case is `truncateLedger`,
+where the current view moves to a freshly copied one. The argument is:
+
+1. The fresh view is the new current view (`nextViewIsCurrent`), and the current
+   view is unique (`currentViewUnique`), so the goal is about the fresh view.
+2. The `validTruncationSource` guard supplies a maximum committed sequence
+   number `commitSeq` that lies at or below the cut and is present in `source`,
+   together with `committedTxId (entryView source commitSeq) commitSeq`. So
+   every committed slot is at or below the cut and survives the copy.
+3. The remaining question is whether `source` and the outgoing current view
+   agree on the origin view of a committed slot. They do, but not because
+   active branches agree in general - they do not. Both agree at `commitSeq`
+   itself: the source by the guard above, the outgoing current view by the
+   induction hypothesis applied at `commitSeq`. `LedgerPrefixMatchesFrontierOrigin`
+   then carries that agreement down from `commitSeq` to every committed slot on
+   both sides, so the two origin views coincide.
+
+Two more clauses then follow without any induction of their own:
+
+- `CommittedResponseMatchesCurrentLedger` combines the keystone with
+  `RwResponseMatchesLedgerEntry`, `ResponseBranchIsView`, and
+  `LedgerPrefixMatchesFrontierOrigin` at the response's own frontier.
+- `UniqueCommittedSeqnos` combines the keystone with the already proved
+  `UniqueRwTxs`: two committed responses at the same sequence number read the
+  same slot of the current view, so they have the same view, so they carry the
+  same transaction. This is where `HasCurrentView` earns its place.
+
 ## Fixed-point boundary
 
-The 10 remaining clauses form a single mutually dependent cluster around commit
-status. The keystone is `CommittedIdIsInCurrentLedger`: once the current view is
-known to contain every committed entry with a matching origin view, most of the
-rest follow. For example `UniqueCommittedSeqnos` reduces to it plus the already
-proved `UniqueRwTxs`, and the `invalidStatusAllowed` disjunct that compares
-`entryView current` against `eventView response` becomes usable, which is what
-`CommittedOrInvalid` needs.
+The 7 remaining clauses are the commit/invalid closure group and the three
+client-facing consequences that rest on it.
 
-`CommittedIdIsInCurrentLedger` itself is hard for one specific reason. Its
-`truncateLedger` case must show that the fresh view still carries the committed
-prefix with the same origin views. The `validTruncationSource` guard does place
-the maximum committed sequence number inside the retained prefix, so the entry
-survives the copy. What is missing is that the truncation `source` and the
-outgoing current view agree on `entryView` at every committed slot: `source` is
-only required to be active, not current, and active views genuinely diverge
-below the current one after an earlier truncation. Closing this needs a new
-inductive clause relating each active branch to the committed prefix it shares,
-which is the natural next piece of work.
+`CommittedOrInvalid` is now within reach: the third disjunct of
+`invalidStatusAllowed` bounds every committed sequence number below the
+response, the second bounds the maximum committed sequence number below it, and
+the first is contradicted by the keystone clause, since a commit at the
+response's transaction id forces `entryView current` to equal
+`eventView response`. The three `Once...` clauses need the same reasoning
+applied in the other direction, plus a clause tracking that a status event's
+view and sequence number stay consistent with the current ledger as views
+change.
 
-No theorem in this project claims those 10 open properties.
+`AllCommittedObserved`, `CommittedRwSerializable`, and
+`CommittedRwOrderedRealTime` are the client-facing statements. They need the
+commit/invalid closure first, and then a further fact that the model does not
+yet record inductively: that the ledger position of a committed response is
+monotonic in the real-time order of the requests that produced them.
+
+No theorem in this project claims those 7 open properties.
 
 ## Trust and correspondence
 
@@ -285,19 +319,13 @@ No theorem in this project claims those 10 open properties.
 
 ## Next proof layers
 
-1. Add a clause relating every active branch to the committed prefix, strong
-   enough to show that the truncation `source` and the outgoing current view
-   agree on `entryView` at every committed slot.
-2. With that in hand, prove `CommittedIdIsInCurrentLedger` and
-   `CommittedResponseMatchesCurrentLedger`. The `validTruncationSource` guard
-   supplies the fact that the maximum committed sequence number lies inside the
-   retained prefix.
-3. Derive `UniqueCommittedSeqnos` from `CommittedIdIsInCurrentLedger` and the
-   already proved `UniqueRwTxs`.
-4. Prove commit/invalid closure (`CommittedOrInvalid` and the three `Once...`
-   clauses) as one bundle, using the `notInvalid` guard on
-   `statusCommittedResponse` and `invalidStatusAllowed` on
-   `statusInvalidResponse`.
-5. Derive `AllCommittedObserved`, `CommittedRwSerializable`, and
+1. Prove `CommittedOrInvalid` using the three `invalidStatusAllowed` disjuncts
+   and the keystone commit clause.
+2. Add a clause tracking that a status event's view and sequence number stay
+   consistent with the current ledger across view changes, then prove the three
+   `Once...` clauses as one bundle.
+3. Record ledger-position monotonicity for committed responses relative to the
+   real-time order of their requests.
+4. Derive `AllCommittedObserved`, `CommittedRwSerializable`, and
    `CommittedRwOrderedRealTime`, then replace `ProvedBundle` with the complete
    `PropertyBundle` in the reachable theorem.
