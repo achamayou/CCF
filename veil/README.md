@@ -65,11 +65,11 @@ WSL2 on Windows. After installing the native dependencies, Node.js 24, and
 
 ```bash
 cd veil
-lake exe cache get
-lake build
+./run_proof.sh
 ```
 
-`lake build` runs the checked-in deductive proof described below. Finite model
+The script downloads the available Lake build cache and runs `lake build
+CCFConsistency`, which checks the deductive proof described below. Finite model
 checking is performed separately by the bounded correspondence harness.
 
 ## Bounded TLC correspondence
