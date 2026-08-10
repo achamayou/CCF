@@ -3,6 +3,7 @@
 
 import CCFConsistency.Proofs
 import CCFConsistency.Examples
+import CCFConsistency.Trace
 
 /-!
 # CCF consistency in pure Lean

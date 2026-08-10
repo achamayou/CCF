@@ -16,8 +16,12 @@ state reachable through the ordinary Lean `Step` relation.
   one Veil safety property.
 - `CCFConsistency/Proofs.lean` proves initialization, action preservation, and
   the reachable-state result described below.
+- `CCFConsistency/Trace.lean` defines executable finite-state transitions and
+  proves that each successful executable step is a canonical `Step`.
 - `CCFConsistency/Examples.lean` constructs a concrete request, execute, and
   response path over `Nat` to rule out vacuous guards.
+- `trace_validation.py` reuses the Veil trace planner to generate and check a
+  proof for a fresh implementation trace.
 - `PLAN.md` records the translation strategy and the proof-engineering fixed
   point.
 
@@ -39,6 +43,41 @@ Mathlib, and its transitive dependencies.
 The library prints the axioms of `CCFConsistency.reachableProved` and audits
 every theorem under the `CCFConsistency` namespace. The build fails if any
 theorem transitively depends on `sorryAx`.
+
+## Implementation trace validation
+
+From the repository root, validate a generated consistency trace with:
+
+```bash
+python3 lean/trace_validation.py \
+  build/consistency/trace.ndjson --validate
+```
+
+The validator imports `parse_trace` and `plan_trace` from
+`veil/trace_validation.py`. Consequently, Veil and pure Lean use the same
+strict NDJSON schema checks, rank normalization, unlogged ledger backfill, and
+view-change reconstruction. The resulting plan is rendered as one typed list
+of the ten pure Lean `TraceAction` constructors over finite `Fin` domains.
+
+`ConcreteState` stores relations as `Bool` functions so replay is executable.
+Its Boolean guards have proved soundness lemmas, and every concrete next-state
+function has a theorem equating its projection with the corresponding
+canonical transition. The generated module then:
+
+1. reduces the complete deterministic replay with `decide +kernel`;
+2. uses `replay_from_initial` to prove that the final canonical state is
+   `Reachable`; and
+3. applies `reachableProved` to establish the current 19-property
+   `ProvedBundle` for that state.
+
+The generated proof does not use `native_decide`; Lean's kernel checks the
+reduction. It also audits the final theorem for transitive `sorryAx`
+dependencies. Generated modules are written below `lean/Generated/` and are
+not checked in.
+
+Continuous verification downloads the same fresh implementation trace artifact
+used by TLC and Veil, builds the pure Lean library, tests the generator, and
+compiles this generated replay proof.
 
 ## What is proved
 
@@ -157,6 +196,8 @@ No theorem in this project claims those 17 open properties.
 - Classical reasoning used by functional updates may expose Lean's standard
   `Classical.choice`, `propext`, or quotient axioms in `#print axioms`; the
   build separately rejects `sorryAx`.
+- Trace replay success is reduced by the Lean kernel. The generated proof does
+  not rely on the native compiler evaluation axiom.
 - The definitions were translated directly from the Veil model, including
   action guards and simultaneous old-state reads.
 - There is not yet a machine-checked equivalence theorem between the Veil DSL

@@ -7,6 +7,7 @@ on:
     paths:
       - "tla/**"
       - "veil/**"
+      - "lean/**"
       - "src/consensus/**"
       - "tests/raft_scenarios/**"
       - ".github/workflows/ci-verification.yml"
@@ -178,6 +179,38 @@ jobs:
         run: |
           python3 tla/install_deps.py
           python3 veil/bounded_correspondence.py --workers "$(nproc)"
+
+  proof-and-trace-validation-consistency-lean:
+    name: Proof and Trace Validation - Consistency (Pure Lean)
+    needs: trace-validation-consistency
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download consistency implementation trace
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: consistency-implementation-trace
+          path: build/consistency
+
+      - name: Build and prove pure Lean consistency spec
+        uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9 # v1
+        with:
+          lake-package-directory: lean
+          build: true
+          test: false
+          lint: false
+          use-mathlib-cache: true
+
+      - name: Test pure Lean consistency tooling
+        run: |
+          python3 -m unittest discover -s lean -p "test_*.py"
+
+      - name: Validate implementation trace with pure Lean
+        run: |
+          python3 lean/trace_validation.py \
+            build/consistency/trace.ndjson --validate
 
   counterexamples-consistency:
     name: Counterexamples - Consistency

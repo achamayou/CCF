@@ -386,8 +386,10 @@ CI does not use checked-in NDJSON fixtures. It builds the real `js_generic`
 application, runs `tests/consistency_trace_validation.py`, and forces a primary
 election while `tests/tvc.py` issues a mix of reads and writes. The trace job
 uploads the resulting `build/consistency/trace.ndjson`; the Veil job downloads
-and deterministically replays that same fresh trace. The existing TLC replay
-remains in the trace-generation job.
+and deterministically replays that same fresh trace. A separate pure Lean job
+reuses this module's parser and reconstruction plan, then checks the resulting
+path against `lean/CCFConsistency/Trace.lean`. The existing TLC replay remains
+in the trace-generation job.
 
 Generate the same trace locally with:
 
@@ -398,13 +400,15 @@ cmake --build build --target js_generic
   -R '^consistency_trace_validation$')
 ```
 
-Validate it with TLC and Veil with:
+Validate it with TLC, Veil, and pure Lean with:
 
 ```bash
 (cd tla && JSON=../build/consistency/trace.ndjson \
   ./tlc.py --workers 1 tv --disable-dfs \
   consistency/TraceMultiNodeReads.tla)
 python3 veil/trace_validation.py build/consistency/trace.ndjson \
+  --validate
+python3 lean/trace_validation.py build/consistency/trace.ndjson \
   --validate
 ```
 

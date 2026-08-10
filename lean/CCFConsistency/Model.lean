@@ -16,6 +16,7 @@ namespace CCFConsistency
 
 universe u v uTx uView uSeqno uEvent
 
+@[ext]
 structure State
     (Tx : Type uTx)
     (View : Type uView)

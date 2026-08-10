@@ -29,3 +29,5 @@ env/
 SECURITY.md
 doc/schemas/
 .venv_ccf_sandbox
+lean/lake-manifest.json
+veil/lake-manifest.json
