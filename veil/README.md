@@ -291,53 +291,96 @@ leaving a superficially successful build.
 ## Implementation trace validation
 
 `trace_validation.py` accepts the existing `tests/tvc.py` NDJSON format. It
-schema-checks each line, rank-normalises sparse transaction IDs, views, and
-sequence numbers, and plans the unlogged ledger and view backfill performed by
-`TraceMultiNodeReads.tla`.
+schema-checks each line and then performs the following steps.
 
-Validation replays that one concrete plan; it does not explore the protocol's
-state space looking for a matching trace. The generated, ignored scratch copy
-of `CCFConsistency.lean` turns the ten environment actions into internal
-procedures and installs one zero-argument action for each concrete replay step.
-A `traceReplayStep` program counter enables only the next recorded or
-backfilled operation, and four immutable theory functions supply its concrete
-finite-domain arguments by rank. Consequently, Veil has exactly one enabled
-transition at each non-final replay state. The scratch module raises Lean's
-elaboration heartbeat budget for the generated finite model; it does not raise
-a search bound or permit additional transitions.
+### How replay works
 
-Missing ledger entries use `AppendOtherTxnAction`. View changes use a generated
-finite-domain `TraceTruncateLedgerAction` procedure that copies every ranked sequence
-position explicitly. This is equivalent to the base truncation action over the
-trace's exhausted finite sequence domain, while avoiding a current Veil
-concrete-execution limitation on bulk relation updates. It also leaves metadata
-outside the copied prefix at the canonical initial values.
+1. **Parse and normalise the trace.** The parser accepts only the consistency
+   action names and fields expected from `tests/tvc.py`. It checks references
+   between requests, executions, responses, and status events, and rejects
+   duplicate or out-of-order operations. Sparse implementation transaction IDs,
+   views, and sequence numbers are replaced by order-preserving ranks. Those
+   ranks determine the exact finite sizes of Veil's `tx`, `view`, `seqno`, and
+   `histEvent` domains.
 
-The scratch replay omits the declared invariants and safety property. It checks
-transition conformance only: each expected canonical procedure must be enabled
-and execute from the state produced by the preceding step. The finite
-truncation helper uses the canonical guards and performs the canonical copy
-assignment at every rank in the trace's exhausted sequence-number domain. If a
-precondition is false, replay deadlocks before the designated final step and
-fails.
+2. **Reconstruct model-visible operations that are not logged.** The
+   implementation trace records client-visible consistency events, not every
+   ledger mutation. The planner maintains an abstract ledger for each view and
+   inserts `AppendOtherTxnAction` steps for intervening non-client transactions.
+   When a later event refers to a new view, it inserts
+   `TruncateLedgerAction` or `TruncateLedgerToEmptyAction` with the required
+   retained prefix. Planning fails immediately if this reconstruction would
+   overwrite an existing entry, truncate below a committed transaction, or
+   violate the request/response/status lifecycle.
 
-Safety is supplied by the separate checked-in deductive proof. That proof
-establishes every declared property for the canonical initial state and after
-every canonical action. A successful conformance replay therefore describes a
-reachable path whose states satisfy all 35 invariants and the safety property,
-without reevaluating their quantified formulas after every concrete step. The
-canonical specification and proof retain all properties; only the ignored
-generated replay copy removes them.
+3. **Generate a deterministic Veil module.** The validator writes ignored
+   scratch modules under `veil/Generated/`. It copies the state, initializer,
+   definitions, and ten canonical actions from `CCFConsistency.lean`, turning
+   the top-level actions into internal procedures so Veil cannot choose them
+   independently. It then emits one zero-argument wrapper action for each
+   recorded or reconstructed step. A generated wrapper has this shape:
 
-The validator accepts only `no_violation_found` after complete exploration and
-requires exactly `number of planned steps + 1` explored, generated, and
-distinct states. This rejects premature deadlock, partial replay, and accidental
-branching. On the current 73-event implementation trace, planning inserts seven
-internal ledger/view operations, so the 80-step replay must visit exactly 81
-states. With the pinned dependencies already built, an end-to-end Linux
-compile-and-replay run took 233.57 seconds and peaked at 4,321,988 KB RSS. The
-same trace took 1,251.69 seconds when every property was evaluated after every
-state, so transition-only replay is 5.4 times faster.
+   ```text
+   action TraceReplayStep17 {
+     require traceReplayStep = 17
+     RwTxResponseAction (traceEvent 4) (traceView 1)
+       (traceSeqno 6) (traceEvent 12)
+     traceReplayStep := 18
+   }
+   ```
+
+   Four immutable theory functions map the numeric ranks in these wrappers to
+   concrete inhabitants of the finite Veil domains. The
+   `traceReplayStep` program counter is initialized to zero, so only the wrapper
+   for the next expected operation can be enabled. A final termination clause
+   requires the counter to equal the number of planned steps.
+
+4. **Preserve canonical action checks.** Every wrapper calls the corresponding
+   canonical procedure with its original `require` guards and assignments. If
+   an expected action is not enabled in the state produced by the preceding
+   steps, no successor is generated and replay fails before completion. View
+   changes use a generated finite-domain truncation procedure with the same
+   guards as `TruncateLedgerAction`; it explicitly copies every rank through the
+   cut because Veil's concrete executor cannot currently evaluate the bulk
+   relation assignment. Since the plan exhausts the finite sequence-number
+   domain, this is the same state update over that trace.
+
+5. **Compile, execute, and check the exact path.** `lake env lean` compiles the
+   generated model, and a generated runner executes `#model_check compiled`.
+   This is not a search for the implementation trace among all protocol
+   executions: at each non-final state the program counter permits only the
+   single expected wrapper. For a plan with `N` steps, the validator accepts
+   only `no_violation_found`, complete fixed-point exploration, and exactly
+   `N + 1` explored, generated, and distinct states. Fewer states indicate
+   premature deadlock or incomplete replay; more generated states indicate
+   accidental branching; fewer distinct states indicate an unexpected repeated
+   state.
+
+### Why replay does not recheck every property
+
+The scratch replay omits the 35 invariants and safety property to avoid
+reevaluating their quantified formulas at every concrete state. It checks
+transition conformance instead. The canonical specification and its properties
+remain unchanged, and the separate checked-in deductive proof establishes the
+properties for the initializer and preserves them across every canonical
+action. By induction, a trace that starts in the canonical initial state and
+successfully executes only those actions is a reachable path whose states
+satisfy all proved properties.
+
+This split keeps the two checks separate and focused: `lake build
+CCFConsistency` kernel-checks the general safety proof, while
+`trace_validation.py --validate` checks that this particular implementation
+trace follows the proved transition system. The adapter validates the logged
+projection and its required ledger/view reconstruction; it does not claim that
+the trace contains all implementation state or prove a general refinement from
+CCF to Veil.
+
+On the current 73-event implementation trace, planning inserts seven internal
+ledger/view operations, so the 80-step replay must visit exactly 81 states. With
+the pinned dependencies already built, an end-to-end Linux compile-and-replay
+run took 233.57 seconds and peaked at 4,321,988 KB RSS. The same trace took
+1,251.69 seconds when every property was evaluated after every state, so
+transition-only replay is 5.4 times faster.
 
 CI does not use checked-in NDJSON fixtures. It builds the real `js_generic`
 application, runs `tests/consistency_trace_validation.py`, and forces a primary
