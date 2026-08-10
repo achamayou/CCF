@@ -9,7 +9,10 @@ set_option autoImplicit false
 # Pure Lean CCF consistency model
 
 This file directly represents the mutable relations and functions from the
-Veil consistency model. The domain parameters remain abstract and ordered.
+Veil consistency model. Relations are Boolean so the canonical state and all
+ten canonical transitions are executable, while Lean coerces their values to
+propositions in guards and proofs. The domain parameters remain abstract and
+ordered.
 -/
 
 namespace CCFConsistency
@@ -22,18 +25,18 @@ structure State
     (View : Type uView)
     (Seqno : Type uSeqno)
     (Event : Type uEvent) where
-  activeView : View -> Prop
-  ledgerEntry : View -> Seqno -> Prop
-  clientEntry : View -> Seqno -> Prop
+  activeView : View -> Bool
+  ledgerEntry : View -> Seqno -> Bool
+  clientEntry : View -> Seqno -> Bool
   entryView : View -> Seqno -> View
   entryTx : View -> Seqno -> Tx
-  eventUsed : Event -> Prop
-  rwRequestEvent : Event -> Prop
-  rwResponseEvent : Event -> Prop
-  roRequestEvent : Event -> Prop
-  roResponseEvent : Event -> Prop
-  committedStatusEvent : Event -> Prop
-  invalidStatusEvent : Event -> Prop
+  eventUsed : Event -> Bool
+  rwRequestEvent : Event -> Bool
+  rwResponseEvent : Event -> Bool
+  roRequestEvent : Event -> Bool
+  roResponseEvent : Event -> Bool
+  committedStatusEvent : Event -> Bool
+  invalidStatusEvent : Event -> Bool
   eventTx : Event -> Tx
   eventView : Event -> View
   eventSeqno : Event -> Seqno
@@ -52,18 +55,18 @@ variable
   [LinearOrder Event] [OrderBot Event]
 
 def initialState : State Tx View Seqno Event where
-  activeView v := v = Bot.bot
-  ledgerEntry _ _ := False
-  clientEntry _ _ := False
+  activeView v := decide (v = Bot.bot)
+  ledgerEntry _ _ := false
+  clientEntry _ _ := false
   entryView _ _ := Bot.bot
   entryTx _ _ := Bot.bot
-  eventUsed _ := False
-  rwRequestEvent _ := False
-  rwResponseEvent _ := False
-  roRequestEvent _ := False
-  roResponseEvent _ := False
-  committedStatusEvent _ := False
-  invalidStatusEvent _ := False
+  eventUsed _ := false
+  rwRequestEvent _ := false
+  rwResponseEvent _ := false
+  roRequestEvent _ := false
+  roResponseEvent _ := false
+  committedStatusEvent _ := false
+  invalidStatusEvent _ := false
   eventTx _ := Bot.bot
   eventView _ := Bot.bot
   eventSeqno _ := Bot.bot
@@ -75,20 +78,22 @@ def orderedLt
     (left right : Alpha) : Prop :=
   left <= right /\ Not (left = right)
 
-noncomputable def updateUnary
+def updateUnary
     {Alpha : Type u}
     {Beta : Sort v}
+    [DecidableEq Alpha]
     (old : Alpha -> Beta)
     (key : Alpha)
-    (value : Beta) : Alpha -> Beta := by
-  classical
-  exact fun candidate =>
+    (value : Beta) : Alpha -> Beta :=
+  fun candidate =>
     if candidate = key then value else old candidate
 
-noncomputable def updateBinary
+def updateBinary
     {Alpha : Type u}
     {Beta : Type v}
     {Gamma : Sort uTx}
+    [DecidableEq Alpha]
+    [DecidableEq Beta]
     (old : Alpha -> Beta -> Gamma)
     (first : Alpha)
     (second : Beta)
@@ -99,6 +104,7 @@ noncomputable def updateBinary
 theorem updateUnary_same
     {Alpha : Type u}
     {Beta : Sort v}
+    [DecidableEq Alpha]
     (old : Alpha -> Beta)
     (key : Alpha)
     (value : Beta) :
@@ -109,6 +115,7 @@ theorem updateUnary_same
 theorem updateUnary_of_ne
     {Alpha : Type u}
     {Beta : Sort v}
+    [DecidableEq Alpha]
     (old : Alpha -> Beta)
     (key candidate : Alpha)
     (value : Beta)
@@ -121,6 +128,8 @@ theorem updateBinary_same
     {Alpha : Type u}
     {Beta : Type v}
     {Gamma : Sort uTx}
+    [DecidableEq Alpha]
+    [DecidableEq Beta]
     (old : Alpha -> Beta -> Gamma)
     (first : Alpha)
     (second : Beta)
@@ -133,6 +142,8 @@ theorem updateBinary_of_first_ne
     {Alpha : Type u}
     {Beta : Type v}
     {Gamma : Sort uTx}
+    [DecidableEq Alpha]
+    [DecidableEq Beta]
     (old : Alpha -> Beta -> Gamma)
     (first candidateFirst : Alpha)
     (second candidateSecond : Beta)
@@ -147,6 +158,8 @@ theorem updateBinary_of_second_ne
     {Alpha : Type u}
     {Beta : Type v}
     {Gamma : Sort uTx}
+    [DecidableEq Alpha]
+    [DecidableEq Beta]
     (old : Alpha -> Beta -> Gamma)
     (first candidateFirst : Alpha)
     (second candidateSecond : Beta)
@@ -359,168 +372,148 @@ def invalidStatusAllowed
 
 end State
 
-noncomputable def rwTxRequestNext
+def rwTxRequestNext
     (state : State Tx View Seqno Event)
     (tx : Tx)
-    (event : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed event True
-      rwRequestEvent := updateUnary state.rwRequestEvent event True
-      eventTx := updateUnary state.eventTx event tx }
+    (event : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed event true
+    rwRequestEvent := updateUnary state.rwRequestEvent event true
+    eventTx := updateUnary state.eventTx event tx }
 
-noncomputable def roTxRequestNext
+def roTxRequestNext
     (state : State Tx View Seqno Event)
     (tx : Tx)
-    (event : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed event True
-      roRequestEvent := updateUnary state.roRequestEvent event True
-      eventTx := updateUnary state.eventTx event tx }
+    (event : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed event true
+    roRequestEvent := updateUnary state.roRequestEvent event true
+    eventTx := updateUnary state.eventTx event tx }
 
-noncomputable def rwTxExecuteNext
+def rwTxExecuteNext
     (state : State Tx View Seqno Event)
     (request : Event)
     (branch : View)
-    (slot : Seqno) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      ledgerEntry :=
-        updateBinary state.ledgerEntry branch slot True
-      clientEntry :=
-        updateBinary state.clientEntry branch slot True
-      entryView :=
-        updateBinary state.entryView branch slot branch
-      entryTx :=
-        updateBinary
-          state.entryTx
-          branch
-          slot
-          (state.eventTx request) }
+    (slot : Seqno) : State Tx View Seqno Event :=
+  { state with
+    ledgerEntry :=
+      updateBinary state.ledgerEntry branch slot true
+    clientEntry :=
+      updateBinary state.clientEntry branch slot true
+    entryView :=
+      updateBinary state.entryView branch slot branch
+    entryTx :=
+      updateBinary
+        state.entryTx
+        branch
+        slot
+        (state.eventTx request) }
 
-noncomputable def appendOtherTxnNext
+def appendOtherTxnNext
     (state : State Tx View Seqno Event)
     (branch : View)
-    (slot : Seqno) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      ledgerEntry :=
-        updateBinary state.ledgerEntry branch slot True
-      clientEntry :=
-        updateBinary state.clientEntry branch slot False
-      entryView :=
-        updateBinary state.entryView branch slot branch }
+    (slot : Seqno) : State Tx View Seqno Event :=
+  { state with
+    ledgerEntry :=
+      updateBinary state.ledgerEntry branch slot true
+    clientEntry :=
+      updateBinary state.clientEntry branch slot false
+    entryView :=
+      updateBinary state.entryView branch slot branch }
 
-noncomputable def rwTxResponseNext
+def rwTxResponseNext
     (state : State Tx View Seqno Event)
     (request : Event)
     (branch : View)
     (slot : Seqno)
-    (response : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed response True
-      rwResponseEvent := updateUnary state.rwResponseEvent response True
-      eventTx :=
-        updateUnary state.eventTx response (state.eventTx request)
-      eventView :=
-        updateUnary state.eventView response (state.entryView branch slot)
-      eventSeqno := updateUnary state.eventSeqno response slot
-      eventBranch :=
-        updateUnary state.eventBranch response (state.entryView branch slot) }
+    (response : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed response true
+    rwResponseEvent := updateUnary state.rwResponseEvent response true
+    eventTx :=
+      updateUnary state.eventTx response (state.eventTx request)
+    eventView :=
+      updateUnary state.eventView response (state.entryView branch slot)
+    eventSeqno := updateUnary state.eventSeqno response slot
+    eventBranch :=
+      updateUnary state.eventBranch response (state.entryView branch slot) }
 
-noncomputable def roTxResponseNext
+def roTxResponseNext
     (state : State Tx View Seqno Event)
     (request : Event)
     (branch : View)
     (last : Seqno)
-    (response : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed response True
-      roResponseEvent := updateUnary state.roResponseEvent response True
-      eventTx :=
-        updateUnary state.eventTx response (state.eventTx request)
-      eventView :=
-        updateUnary state.eventView response (state.entryView branch last)
-      eventSeqno := updateUnary state.eventSeqno response last
-      eventBranch :=
-        updateUnary state.eventBranch response (state.entryView branch last) }
+    (response : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed response true
+    roResponseEvent := updateUnary state.roResponseEvent response true
+    eventTx :=
+      updateUnary state.eventTx response (state.eventTx request)
+    eventView :=
+      updateUnary state.eventView response (state.entryView branch last)
+    eventSeqno := updateUnary state.eventSeqno response last
+    eventBranch :=
+      updateUnary state.eventBranch response (state.entryView branch last) }
 
-noncomputable def statusCommittedResponseNext
+def statusCommittedResponseNext
     (state : State Tx View Seqno Event)
     (response : Event)
-    (status : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed status True
-      committedStatusEvent :=
-        updateUnary state.committedStatusEvent status True
-      eventView :=
-        updateUnary state.eventView status (state.eventView response)
-      eventSeqno :=
-        updateUnary state.eventSeqno status (state.eventSeqno response) }
+    (status : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed status true
+    committedStatusEvent :=
+      updateUnary state.committedStatusEvent status true
+    eventView :=
+      updateUnary state.eventView status (state.eventView response)
+    eventSeqno :=
+      updateUnary state.eventSeqno status (state.eventSeqno response) }
 
-noncomputable def statusInvalidResponseNext
+def statusInvalidResponseNext
     (state : State Tx View Seqno Event)
     (response : Event)
-    (status : Event) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      eventUsed := updateUnary state.eventUsed status True
-      invalidStatusEvent :=
-        updateUnary state.invalidStatusEvent status True
-      eventView :=
-        updateUnary state.eventView status (state.eventView response)
-      eventSeqno :=
-        updateUnary state.eventSeqno status (state.eventSeqno response) }
+    (status : Event) : State Tx View Seqno Event :=
+  { state with
+    eventUsed := updateUnary state.eventUsed status true
+    invalidStatusEvent :=
+      updateUnary state.invalidStatusEvent status true
+    eventView :=
+      updateUnary state.eventView status (state.eventView response)
+    eventSeqno :=
+      updateUnary state.eventSeqno status (state.eventSeqno response) }
 
-noncomputable def truncateLedgerNext
+def truncateLedgerNext
     (state : State Tx View Seqno Event)
     (source : View)
     (cut : Seqno)
-    (newView : View) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      activeView := updateUnary state.activeView newView True
-      ledgerEntry :=
-        updateUnary state.ledgerEntry newView
-          (fun slot => slot <= cut /\ state.ledgerEntry source slot)
-      clientEntry :=
-        updateUnary state.clientEntry newView
-          (fun slot => slot <= cut /\ state.clientEntry source slot)
-      entryView :=
-        updateUnary state.entryView newView
-          (fun slot =>
-            if slot <= cut then
-              state.entryView source slot
-            else
-              Bot.bot)
-      entryTx :=
-        updateUnary state.entryTx newView
-          (fun slot =>
-            if slot <= cut /\ state.clientEntry source slot then
-              state.entryTx source slot
-            else
-              Bot.bot) }
+    (newView : View) : State Tx View Seqno Event :=
+  { state with
+    activeView := updateUnary state.activeView newView true
+    ledgerEntry :=
+      updateUnary state.ledgerEntry newView
+        (fun slot => decide (slot <= cut) && state.ledgerEntry source slot)
+    clientEntry :=
+      updateUnary state.clientEntry newView
+        (fun slot => decide (slot <= cut) && state.clientEntry source slot)
+    entryView :=
+      updateUnary state.entryView newView
+        (fun slot =>
+          if slot <= cut then
+            state.entryView source slot
+          else
+            Bot.bot)
+    entryTx :=
+      updateUnary state.entryTx newView
+        (fun slot =>
+          if decide (slot <= cut) && state.clientEntry source slot then
+            state.entryTx source slot
+          else
+            Bot.bot) }
 
-noncomputable def truncateLedgerToEmptyNext
+def truncateLedgerToEmptyNext
     (state : State Tx View Seqno Event)
-    (newView : View) : State Tx View Seqno Event := by
-  classical
-  exact
-    { state with
-      activeView := updateUnary state.activeView newView True }
+    (newView : View) : State Tx View Seqno Event :=
+  { state with
+    activeView := updateUnary state.activeView newView true }
 
 inductive Step :
     State Tx View Seqno Event ->

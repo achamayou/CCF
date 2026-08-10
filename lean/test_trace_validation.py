@@ -18,7 +18,7 @@ def _plan(*events):
 
 
 class PureLeanTraceValidationTests(unittest.TestCase):
-    def test_renders_replay_and_reachable_property_proof(self):
+    def test_renders_replay_and_reachability_proof(self):
         plan = _plan(
             _event(action="RwTxRequestAction", type="RwTxRequest", tx=0),
             _event(
@@ -67,8 +67,16 @@ class PureLeanTraceValidationTests(unittest.TestCase):
         self.assertIn("  decide +kernel", source)
         self.assertNotIn("native_decide", source)
         self.assertIn("replay_from_initial replaySucceeded", source)
-        self.assertIn("reachableProved result.2", source)
+        self.assertIn(
+            "abbrev initial : State Tx View Seqno Event := initialState",
+            source,
+        )
+        self.assertNotIn("ConcreteState", source)
+        self.assertNotIn("ProvedBundle", source)
+        self.assertNotIn("reachableProved", source)
+        self.assertNotIn("CCFConsistency.Proofs", source)
         self.assertIn("Lean.collectAxioms", source)
+        self.assertIn("``implementationTraceReachable", source)
         self.assertIn("Lean.ofReduceBool", source)
 
     def test_renders_generated_backfill_and_truncation(self):

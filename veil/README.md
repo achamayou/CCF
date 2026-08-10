@@ -388,8 +388,10 @@ election while `tests/tvc.py` issues a mix of reads and writes. The trace job
 uploads the resulting `build/consistency/trace.ndjson`; the Veil job downloads
 and deterministically replays that same fresh trace. A separate pure Lean job
 reuses this module's parser and reconstruction plan, then checks the resulting
-path against `lean/CCFConsistency/Trace.lean`. The existing TLC replay remains
-in the trace-generation job.
+path against `lean/CCFConsistency/Trace.lean`. Pure Lean replay uses the exact
+same canonical state and transition functions as its unbounded model proof and
+establishes reachability only; the generic property theorem is checked
+separately. The existing TLC replay remains in the trace-generation job.
 
 Generate the same trace locally with:
 

@@ -16,8 +16,9 @@ state reachable through the ordinary Lean `Step` relation.
   one Veil safety property.
 - `CCFConsistency/Proofs.lean` proves initialization, action preservation, and
   the reachable-state result described below.
-- `CCFConsistency/Trace.lean` defines executable finite-state transitions and
-  proves that each successful executable step is a canonical `Step`.
+- `CCFConsistency/Trace.lean` evaluates finite action guards, calls the
+  canonical transitions from `Model.lean`, and proves that each successful
+  replay step is a canonical `Step`.
 - `CCFConsistency/Examples.lean` constructs a concrete request, execute, and
   response path over `Nat` to rule out vacuous guards.
 - `trace_validation.py` reuses the Veil trace planner to generate and check a
@@ -59,21 +60,27 @@ strict NDJSON schema checks, rank normalization, unlogged ledger backfill, and
 view-change reconstruction. The resulting plan is rendered as one typed list
 of the ten pure Lean `TraceAction` constructors over finite `Fin` domains.
 
-`ConcreteState` stores relations as `Bool` functions so replay is executable.
-Its Boolean guards have proved soundness lemmas, and every concrete next-state
-function has a theorem equating its projection with the corresponding
-canonical transition. The generated module then:
+`Model.State` itself stores relations as `Bool` functions. The ten transition
+functions used by the unbounded proofs are therefore executable, and
+`TraceAction.next` calls those exact functions directly. There is no second
+trace state, mirrored transition implementation, projection, or transition
+equivalence layer. `Trace.lean` adds only finite Boolean evaluations of the
+canonical guards and proves that an accepted guard constructs the corresponding
+canonical `Step`. The generated module then:
 
 1. reduces the complete deterministic replay with `decide +kernel`;
 2. uses `replay_from_initial` to prove that the final canonical state is
-   `Reachable`; and
-3. applies `reachableProved` to establish the current 19-property
-   `ProvedBundle` for that state.
+   `Reachable`.
+
+Trace validation deliberately stops at reachability. It does not import
+`Proofs.lean` or reevaluate properties for the concrete path. The separate
+library build checks the generic `reachableProved` theorem once; that theorem
+then applies to every state produced by any successful replay.
 
 The generated proof does not use `native_decide`; Lean's kernel checks the
-reduction. It also audits the final theorem for transitive `sorryAx`
-dependencies. Generated modules are written below `lean/Generated/` and are
-not checked in.
+reduction. It also audits the final reachability theorem for transitive
+`sorryAx` dependencies. Generated modules are written below `lean/Generated/`
+and are not checked in.
 
 Continuous verification downloads the same fresh implementation trace artifact
 used by TLC and Veil, builds the pure Lean library, tests the generator, and
@@ -193,9 +200,8 @@ No theorem in this project claims those 17 open properties.
   producers, not trusted solvers.
 - No `sorry`, custom axiom, trusted invariant, heartbeat override, or external
   solver answer is present.
-- Classical reasoning used by functional updates may expose Lean's standard
-  `Classical.choice`, `propext`, or quotient axioms in `#print axioms`; the
-  build separately rejects `sorryAx`.
+- Proofs may expose Lean's standard `Classical.choice`, `propext`, or quotient
+  axioms in `#print axioms`; the build separately rejects `sorryAx`.
 - Trace replay success is reduced by the Lean kernel. The generated proof does
   not rely on the native compiler evaluation axiom.
 - The definitions were translated directly from the Veil model, including
