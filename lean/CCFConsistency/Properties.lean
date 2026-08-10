@@ -383,8 +383,12 @@ structure CommitBundle (state : State Tx View Seqno Event) : Prop
     extends StatusBundle state where
   committedIdIsInCurrentLedger : CommittedIdIsInCurrentLedger state
 
+structure ClosureBundle (state : State Tx View Seqno Event) : Prop
+    extends CommitBundle state where
+  committedOrInvalid : CommittedOrInvalid state
+
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  commits : CommitBundle state
+  closure : ClosureBundle state
   uniqueRwTxs : UniqueRwTxs state
   sameObservations : SameObservations state
   atMostOnceObserved : AtMostOnceObserved state

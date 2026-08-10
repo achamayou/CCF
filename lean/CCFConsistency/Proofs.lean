@@ -5465,6 +5465,141 @@ theorem provenanceAtMostOnceObserved
       (state.eventBranch response) rightSlot
       ⟨leftClient, rightClient, sameTx⟩).1
 
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Transfer an invalid transaction identifier back across any action that only
+classifies a fresh history event. -/
+theorem invalidTxIdOfFreshEvent
+    {state next : State Tx View Seqno Event}
+    {fresh : Event}
+    {view : View}
+    {seqno : Seqno}
+    (properties : StructuralBundle state)
+    (nextEvent : state.nextHistoryEvent fresh)
+    (invalid : next.invalidTxId view seqno)
+    (invalidEq :
+      forall candidate,
+        next.invalidStatusEvent candidate =
+          state.invalidStatusEvent candidate)
+    (viewEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventView candidate = state.eventView candidate)
+    (seqnoEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventSeqno candidate = state.eventSeqno candidate) :
+    state.invalidTxId view seqno := by
+  rcases invalid with ⟨candidate, candidateInvalid, candidateView, candidateSeqno⟩
+  rw [invalidEq] at candidateInvalid
+  have candidateNe : Not (candidate = fresh) :=
+    classifiedEventNeNext properties.historyTypeOk nextEvent
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr candidateInvalid)))))
+  rw [viewEq candidate candidateNe] at candidateView
+  rw [seqnoEq candidate candidateNe] at candidateSeqno
+  exact ⟨candidate, candidateInvalid, candidateView, candidateSeqno⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- A status event is already classified, so it differs from a fresh event. -/
+theorem statusEventNeFresh
+    {state : State Tx View Seqno Event}
+    {candidate fresh : Event}
+    (properties : StructuralBundle state)
+    (nextEvent : state.nextHistoryEvent fresh)
+    (candidateIsStatus : state.statusEvent candidate) :
+    Not (candidate = fresh) := by
+  refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+  rcases candidateIsStatus with candidateCommitted | candidateInvalid
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl candidateCommitted))))
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr candidateInvalid))))
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- A response's own frontier entry carries the response's view as its origin
+view. -/
+theorem responseOriginViewEq
+    {state : State Tx View Seqno Event}
+    {response : Event}
+    (properties : StructuralBundle state)
+    (responseIsResponse : state.responseEvent response) :
+    state.entryView (state.eventView response) (state.eventSeqno response) =
+      state.eventView response := by
+  have branchEq := properties.responseBranchIsView response responseIsResponse
+  have originEq :=
+    properties.responseFrontierMatchesOrigin response responseIsResponse
+  rw [branchEq] at originEq
+  exact originEq
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Origin views increase along a branch, stated through two known entry
+views. -/
+theorem entryViewMonotoneAt
+    {state : State Tx View Seqno Event}
+    {current : View}
+    {leftSeq rightSeq : Seqno}
+    {leftValue rightValue : View}
+    (properties : CoreBundle state)
+    (leftEntryView : state.entryView current leftSeq = leftValue)
+    (rightEntry : state.ledgerEntry current rightSeq)
+    (rightEntryView : state.entryView current rightSeq = rightValue)
+    (seqLe : leftSeq <= rightSeq) :
+    leftValue <= rightValue := by
+  have monotone :=
+    properties.ledgerEntryViewsAreMonotonic
+      current leftSeq rightSeq ⟨rightEntry, seqLe⟩
+  rw [leftEntryView, rightEntryView] at monotone
+  exact monotone
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- The guard of `statusInvalidResponse` rules out a commit at the response's
+view for its own sequence number and every later one. This is the single fact
+behind the commit and invalid closure clauses. -/
+theorem noCommitAtOrAboveInvalidResponse
+    {state : State Tx View Seqno Event}
+    {response : Event}
+    {seqno : Seqno}
+    (properties : CommitBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (seqnoGe : state.eventSeqno response <= seqno) :
+    Not (state.committedTxId (state.eventView response) seqno) := by
+  intro committed
+  rcases statusAllowed with ⟨current, currentIsCurrent, disjuncts⟩
+  rcases disjuncts with divergentEntry | staleView | belowCommit
+  · -- The current ledger disagrees with the response at its own slot.
+    rcases divergentEntry with
+      ⟨_commitSeq, _maxCommitted, _seqLe, _currentEntry, viewNe⟩
+    have inCurrent :=
+      properties.committedIdIsInCurrentLedger
+        (state.eventView response) seqno current ⟨committed, currentIsCurrent⟩
+    have prefixDown :=
+      properties.ledgerPrefixMatchesFrontierOrigin
+        current seqno (state.eventSeqno response) ⟨inCurrent.1, seqnoGe⟩
+    rw [inCurrent.2] at prefixDown
+    refine viewNe ?_
+    rw [prefixDown.2.2.1]
+    exact
+      responseOriginViewEq
+        properties.toStructuralBundle (Or.inl responseIsRw)
+  · -- Everything committed is at or below a slot strictly below the response.
+    rcases staleView with
+      ⟨commitSeq, maxCommitted, commitLtResponse, _currentEntry, _viewLt⟩
+    have seqnoLeCommit : seqno <= commitSeq :=
+      maxCommitted.2 (state.eventView response) seqno committed
+    have commitLtSeqno : commitSeq < seqno :=
+      lt_of_lt_of_le
+        (lt_of_le_of_ne commitLtResponse.1 commitLtResponse.2)
+        seqnoGe
+    exact absurd seqnoLeCommit (not_le_of_gt commitLtSeqno)
+  · -- Everything committed is strictly below the response.
+    rcases belowCommit with ⟨_viewEq, allBelow⟩
+    have seqnoLtResponse :=
+      allBelow (state.eventView response) seqno committed
+    exact seqnoLtResponse.2 (le_antisymm seqnoLtResponse.1 seqnoGe)
+
 theorem initialCommits :
     CommitBundle (initialState : State Tx View Seqno Event) where
   toStatusBundle := initialStatuses
@@ -6105,20 +6240,567 @@ theorem commitsUniqueCommittedSeqnos
     coreUniqueRwTxs properties.toCoreBundle left right
       ⟨leftCommitted.1, rightCommitted.1, sameView, sameSeqno⟩
 
+omit [LinearOrder Tx] [OrderBot Tx]
+  [LinearOrder View] [OrderBot View]
+  [LinearOrder Seqno] [OrderBot Seqno]
+  [LinearOrder Event] [OrderBot Event] in
+/-- `CommittedOrInvalid` only inspects the status events and their transaction
+identifiers, so it transfers across any action that leaves the status relations
+alone and rewrites `eventView` and `eventSeqno` only at unclassified events. -/
+theorem committedOrInvalidTransfer
+    {state next : State Tx View Seqno Event}
+    (committedOrInvalid : CommittedOrInvalid state)
+    (committedEq :
+      forall candidate,
+        next.committedStatusEvent candidate =
+          state.committedStatusEvent candidate)
+    (invalidEq :
+      forall candidate,
+        next.invalidStatusEvent candidate =
+          state.invalidStatusEvent candidate)
+    (viewEq :
+      forall candidate,
+        state.statusEvent candidate ->
+          next.eventView candidate = state.eventView candidate)
+    (seqnoEq :
+      forall candidate,
+        state.statusEvent candidate ->
+          next.eventSeqno candidate = state.eventSeqno candidate) :
+    CommittedOrInvalid next := by
+  intro view seqno committed invalid
+  rcases committed with
+    ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
+  rcases invalid with
+    ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+  rw [committedEq] at eventIsCommitted
+  rw [invalidEq] at eventIsInvalid
+  rw [viewEq committedEvent (Or.inl eventIsCommitted)] at committedView
+  rw [seqnoEq committedEvent (Or.inl eventIsCommitted)] at committedSeqno
+  rw [viewEq invalidEvent (Or.inr eventIsInvalid)] at invalidView
+  rw [seqnoEq invalidEvent (Or.inr eventIsInvalid)] at invalidSeqno
+  exact
+    committedOrInvalid view seqno
+      ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
+      ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- The specialisation of `committedOrInvalidTransfer` used by every action
+whose only event change classifies a fresh history event. -/
+theorem committedOrInvalidOfFreshEvent
+    {state next : State Tx View Seqno Event}
+    {fresh : Event}
+    (properties : StructuralBundle state)
+    (committedOrInvalid : CommittedOrInvalid state)
+    (nextEvent : state.nextHistoryEvent fresh)
+    (committedEq :
+      forall candidate,
+        next.committedStatusEvent candidate =
+          state.committedStatusEvent candidate)
+    (invalidEq :
+      forall candidate,
+        next.invalidStatusEvent candidate =
+          state.invalidStatusEvent candidate)
+    (viewEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventView candidate = state.eventView candidate)
+    (seqnoEq :
+      forall candidate,
+        Not (candidate = fresh) ->
+          next.eventSeqno candidate = state.eventSeqno candidate) :
+    CommittedOrInvalid next :=
+  committedOrInvalidTransfer
+    committedOrInvalid
+    committedEq
+    invalidEq
+    (fun candidate candidateIsStatus =>
+      viewEq candidate
+        (statusEventNeFresh properties nextEvent candidateIsStatus))
+    (fun candidate candidateIsStatus =>
+      seqnoEq candidate
+        (statusEventNeFresh properties nextEvent candidateIsStatus))
+
+theorem initialClosure :
+    ClosureBundle (initialState : State Tx View Seqno Event) where
+  toCommitBundle := initialCommits
+  committedOrInvalid := initialProperties.committedOrInvalid
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxRequestPreservesClosure
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ClosureBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ClosureBundle (rwTxRequestNext state tx event) :=
+  { toCommitBundle :=
+      rwTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxRequestPreservesClosure
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ClosureBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ClosureBundle (roTxRequestNext state tx event) :=
+  { toCommitBundle :=
+      roTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxExecutePreservesClosure
+    {state : State Tx View Seqno Event}
+    {request : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ClosureBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ClosureBundle (rwTxExecuteNext state request branch slot) :=
+  { toCommitBundle :=
+      rwTxExecutePreservesCommits
+        properties.toCommitBundle
+        requestIsRw
+        txNotInLedger
+        branchIsActive
+        nextSlot
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem appendOtherTxnPreservesClosure
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ClosureBundle state)
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ClosureBundle (appendOtherTxnNext state branch slot) :=
+  { toCommitBundle :=
+      appendOtherTxnPreservesCommits
+        properties.toCommitBundle branchIsActive nextSlot
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem rwTxResponsePreservesClosure
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ClosureBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (entryIsClient : state.clientEntry branch slot)
+    (entryMatches : state.entryTx branch slot = state.eventTx request)
+    (nextEvent : state.nextHistoryEvent response) :
+    ClosureBundle (rwTxResponseNext state request branch slot response) :=
+  { toCommitBundle :=
+      rwTxResponsePreservesCommits
+        properties.toCommitBundle
+        requestIsRw
+        notResponded
+        branchIsActive
+        entryIsClient
+        entryMatches
+        nextEvent
+    committedOrInvalid :=
+      committedOrInvalidOfFreshEvent
+        properties.toStructuralBundle
+        properties.committedOrInvalid
+        nextEvent
+        (fun _ => rfl)
+        (fun _ => rfl)
+        (fun candidate candidateNe => by
+          simp [rwTxResponseNext, candidateNe])
+        (fun candidate candidateNe => by
+          simp [rwTxResponseNext, candidateNe]) }
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem roTxResponsePreservesClosure
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {last : Seqno}
+    (properties : ClosureBundle state)
+    (requestIsRo : state.roRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (lastSlot : state.lastLedgerSlot branch last)
+    (nextEvent : state.nextHistoryEvent response) :
+    ClosureBundle (roTxResponseNext state request branch last response) :=
+  { toCommitBundle :=
+      roTxResponsePreservesCommits
+        properties.toCommitBundle
+        requestIsRo
+        notResponded
+        branchIsActive
+        lastSlot
+        nextEvent
+    committedOrInvalid :=
+      committedOrInvalidOfFreshEvent
+        properties.toStructuralBundle
+        properties.committedOrInvalid
+        nextEvent
+        (fun _ => rfl)
+        (fun _ => rfl)
+        (fun candidate candidateNe => by
+          simp [roTxResponseNext, candidateNe])
+        (fun candidate candidateNe => by
+          simp [roTxResponseNext, candidateNe]) }
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusCommittedResponsePreservesClosure
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    {current : View}
+    (properties : ClosureBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (viewIsCurrent : state.currentView current)
+    (responseSlotExists :
+      state.ledgerEntry current (state.eventSeqno response))
+    (responseEntryMatches :
+      state.entryView current (state.eventSeqno response) =
+        state.eventView response)
+    (notInvalid :
+      Not (Exists fun invalid =>
+        state.invalidStatusEvent invalid /\
+          state.eventView invalid = state.eventView response /\
+            state.eventSeqno invalid <= state.eventSeqno response))
+    (nextEvent : state.nextHistoryEvent status) :
+    ClosureBundle (statusCommittedResponseNext state response status) := by
+  refine
+    { toCommitBundle :=
+        statusCommittedResponsePreservesCommits
+          properties.toCommitBundle
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+      committedOrInvalid := ?_ }
+  intro view seqno committed invalid
+  -- The action adds no invalid status event, so the invalid side is old.
+  have invalidOld :=
+    invalidTxIdOfFreshEvent
+      properties.toStructuralBundle
+      nextEvent
+      invalid
+      (fun _ => rfl)
+      (fun candidate candidateNe => by
+        simp [statusCommittedResponseNext, candidateNe])
+      (fun candidate candidateNe => by
+        simp [statusCommittedResponseNext, candidateNe])
+  rcases committed with
+    ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
+  by_cases committedEq : committedEvent = status
+  · -- The freshly committed identifier is exactly the one the guard protects.
+    subst committedEvent
+    have viewEq : state.eventView response = view := by
+      simpa [statusCommittedResponseNext] using committedView
+    have seqnoEq : state.eventSeqno response = seqno := by
+      simpa [statusCommittedResponseNext] using committedSeqno
+    rcases invalidOld with
+      ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+    exact
+      notInvalid
+        ⟨invalidEvent, eventIsInvalid, invalidView.trans viewEq.symm,
+          le_of_eq (invalidSeqno.trans seqnoEq.symm)⟩
+  · have eventIsCommittedOld : state.committedStatusEvent committedEvent := by
+      simpa [statusCommittedResponseNext, committedEq] using eventIsCommitted
+    exact
+      properties.committedOrInvalid view seqno
+        ⟨committedEvent, eventIsCommittedOld,
+          by
+            simpa [statusCommittedResponseNext, committedEq] using
+              committedView,
+          by
+            simpa [statusCommittedResponseNext, committedEq] using
+              committedSeqno⟩
+        invalidOld
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusInvalidResponsePreservesClosure
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    (properties : ClosureBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (nextEvent : state.nextHistoryEvent status) :
+    ClosureBundle (statusInvalidResponseNext state response status) := by
+  refine
+    { toCommitBundle :=
+        statusInvalidResponsePreservesCommits
+          properties.toCommitBundle
+          responseIsRw
+          statusAllowed
+          nextEvent
+      committedOrInvalid := ?_ }
+  intro view seqno committed invalid
+  -- The action adds no committed status event, so the committed side is old.
+  have committedOld :=
+    committedTxIdOfFreshEvent
+      properties.toStructuralBundle
+      nextEvent
+      committed
+      (fun _ => rfl)
+      (fun candidate candidateNe => by
+        simp [statusInvalidResponseNext, candidateNe])
+      (fun candidate candidateNe => by
+        simp [statusInvalidResponseNext, candidateNe])
+  rcases invalid with
+    ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+  by_cases invalidEq : invalidEvent = status
+  · -- The freshly invalidated identifier cannot already be committed.
+    subst invalidEvent
+    have viewEq : state.eventView response = view := by
+      simpa [statusInvalidResponseNext] using invalidView
+    have seqnoEq : state.eventSeqno response = seqno := by
+      simpa [statusInvalidResponseNext] using invalidSeqno
+    have committedAtResponse :
+        state.committedTxId (state.eventView response) seqno := by
+      rw [viewEq]
+      exact committedOld
+    exact
+      noCommitAtOrAboveInvalidResponse
+        properties.toCommitBundle
+        responseIsRw
+        statusAllowed
+        (le_of_eq seqnoEq)
+        committedAtResponse
+  · have eventIsInvalidOld : state.invalidStatusEvent invalidEvent := by
+      simpa [statusInvalidResponseNext, invalidEq] using eventIsInvalid
+    exact
+      properties.committedOrInvalid view seqno
+        committedOld
+        ⟨invalidEvent, eventIsInvalidOld,
+          by simpa [statusInvalidResponseNext, invalidEq] using invalidView,
+          by simpa [statusInvalidResponseNext, invalidEq] using invalidSeqno⟩
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerPreservesClosure
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    {cut : Seqno}
+    (properties : ClosureBundle state)
+    (sourceIsActive : state.activeView source)
+    (cutExists : state.ledgerEntry source cut)
+    (sourceIsValid : state.validTruncationSource source cut)
+    (viewIsNext : state.nextView newView) :
+    ClosureBundle (truncateLedgerNext state source cut newView) :=
+  { toCommitBundle :=
+      truncateLedgerPreservesCommits
+        properties.toCommitBundle
+        sourceIsActive
+        cutExists
+        sourceIsValid
+        viewIsNext
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem truncateLedgerToEmptyPreservesClosure
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    (properties : ClosureBundle state)
+    (sourceIsActive : state.activeView source)
+    (noCommitted : state.noCommittedTxId)
+    (viewIsNext : state.nextView newView) :
+    ClosureBundle (truncateLedgerToEmptyNext state newView) :=
+  { toCommitBundle :=
+      truncateLedgerToEmptyPreservesCommits
+        properties.toCommitBundle
+        sourceIsActive
+        noCommitted
+        viewIsNext
+    committedOrInvalid :=
+      committedOrInvalidTransfer
+        properties.committedOrInvalid
+        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem stepPreservesClosure
+    {state next : State Tx View Seqno Event}
+    (properties : ClosureBundle state)
+    (transition : Step state next) :
+    ClosureBundle next := by
+  cases transition with
+  | rwTxRequest tx event nextTx nextEvent =>
+      exact rwTxRequestPreservesClosure properties nextTx nextEvent
+  | roTxRequest tx event nextTx nextEvent =>
+      exact roTxRequestPreservesClosure properties nextTx nextEvent
+  | rwTxExecute
+      request
+      branch
+      slot
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot =>
+      exact
+        rwTxExecutePreservesClosure
+          properties
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+  | appendOtherTxn branch slot branchIsActive nextSlot =>
+      exact appendOtherTxnPreservesClosure properties branchIsActive nextSlot
+  | rwTxResponse
+      request
+      branch
+      slot
+      response
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent =>
+      exact
+        rwTxResponsePreservesClosure
+          properties
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+  | roTxResponse
+      request
+      branch
+      last
+      response
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent =>
+      exact
+        roTxResponsePreservesClosure
+          properties
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+  | statusCommittedResponse
+      response
+      status
+      current
+      responseIsRw
+      viewIsCurrent
+      responseSlotExists
+      responseEntryMatches
+      notInvalid
+      nextEvent =>
+      exact
+        statusCommittedResponsePreservesClosure
+          properties
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+  | statusInvalidResponse
+      response
+      status
+      responseIsRw
+      statusAllowed
+      nextEvent =>
+      exact
+        statusInvalidResponsePreservesClosure
+          properties
+          responseIsRw
+          statusAllowed
+          nextEvent
+  | truncateLedger
+      source
+      cut
+      newView
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext =>
+      exact
+        truncateLedgerPreservesClosure
+          properties
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+  | truncateLedgerToEmpty
+      source
+      newView
+      sourceIsActive
+      noCommitted
+      viewIsNext =>
+      exact
+        truncateLedgerToEmptyPreservesClosure
+          properties
+          sourceIsActive
+          noCommitted
+          viewIsNext
+
+theorem reachableClosure
+    {state : State Tx View Seqno Event}
+    (reachable : Reachable state) :
+    ClosureBundle state := by
+  induction reachable with
+  | initial => exact initialClosure
+  | step _ transition properties =>
+      exact stepPreservesClosure properties transition
+
 theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
     ProvedBundle state := by
-  have commits := reachableCommits reachable
+  have closure := reachableClosure reachable
   exact
-    { commits
-      uniqueRwTxs := coreUniqueRwTxs commits.toCoreBundle
-      sameObservations := coreSameObservations commits.toCoreBundle
+    { closure
+      uniqueRwTxs := coreUniqueRwTxs closure.toCoreBundle
+      sameObservations := coreSameObservations closure.toCoreBundle
       atMostOnceObserved :=
-        provenanceAtMostOnceObserved commits.toProvenanceBundle
-      uniqueTxIds := responsesUniqueTxIds commits.toResponseBundle
+        provenanceAtMostOnceObserved closure.toProvenanceBundle
+      uniqueTxIds := responsesUniqueTxIds closure.toResponseBundle
       committedResponseMatchesCurrentLedger :=
-        commitsCommittedResponseMatchesCurrentLedger commits
-      uniqueCommittedSeqnos := commitsUniqueCommittedSeqnos commits }
+        commitsCommittedResponseMatchesCurrentLedger closure.toCommitBundle
+      uniqueCommittedSeqnos :=
+        commitsUniqueCommittedSeqnos closure.toCommitBundle }
 
 end CCFConsistency
