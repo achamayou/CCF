@@ -2759,6 +2759,746 @@ theorem truncateLedgerToEmptyPreservesCore
   · simpa [LedgerPrefixMatchesFrontierOrigin, truncateLedgerToEmptyNext] using
       properties.ledgerPrefixMatchesFrontierOrigin
 
+theorem initialProvenance :
+    ProvenanceBundle (initialState : State Tx View Seqno Event) :=
+  initialProperties.provenance
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [LinearOrder View] [OrderBot View]
+  [LinearOrder Seqno] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- A fresh history event is distinct from every event that already has a
+kind, so the old event functions are unchanged at every classified event. -/
+theorem classifiedEventNeNext
+    {state : State Tx View Seqno Event}
+    {candidate event : Event}
+    (historyTypeOk : HistoryTypeOk state)
+    (nextEvent : state.nextHistoryEvent event)
+    (candidateHasKind : state.historyEvent candidate) :
+    Not (candidate = event) := by
+  intro candidateEq
+  subst candidate
+  exact nextEvent.1 ((historyTypeOk event).2 candidateHasKind)
+
+omit
+  [OrderBot Tx] [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxRequestPreservesProvenance
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ProvenanceBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ProvenanceBundle (rwTxRequestNext state tx event) := by
+  have requestNeEvent :
+      forall candidate,
+        state.requestEvent candidate -> Not (candidate = event) := by
+    intro candidate candidateIsRequest
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsRequest with candidateIsRw | candidateIsRo
+    · exact Or.inl candidateIsRw
+    · exact Or.inr (Or.inr (Or.inl candidateIsRo))
+  refine
+    { toCoreBundle :=
+        rwTxRequestPreservesCore properties.toCoreBundle nextTx nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [LedgerTxIdsAreStableAcrossCopies, rwTxRequestNext] using
+      properties.ledgerTxIdsAreStableAcrossCopies
+  · rw [ClientEntryHasRequest]
+    intro branch slot isClient
+    have oldClient : state.clientEntry branch slot := by
+      simpa [rwTxRequestNext] using isClient
+    rcases properties.clientEntryHasRequest branch slot oldClient with
+      ⟨request, requestIsRw, requestTx⟩
+    have requestNe := requestNeEvent request (Or.inl requestIsRw)
+    exact
+      ⟨request, by simpa [rwTxRequestNext, requestNe] using requestIsRw,
+        by simpa [rwTxRequestNext, requestNe] using requestTx⟩
+  · rw [UniqueTxRequests]
+    intro left right requests
+    rcases requests with ⟨leftIsRequest, rightIsRequest, leftNeRight⟩
+    by_cases leftEq : left = event
+    · subst left
+      have rightIsOld : state.requestEvent right := by
+        simpa [
+          State.requestEvent,
+          rwTxRequestNext,
+          Ne.symm leftNeRight
+        ] using rightIsRequest
+      have rightNe := requestNeEvent right rightIsOld
+      simp only [rwTxRequestNext, updateUnary_same, updateUnary_of_ne _ _ _ _ rightNe]
+      intro txEq
+      exact nextTx.1 (rightIsOld.imp
+        (fun rightIsRw => ⟨right, rightIsRw, txEq.symm⟩)
+        (fun rightIsRo => ⟨right, rightIsRo, txEq.symm⟩))
+    · by_cases rightEq : right = event
+      · subst right
+        have leftIsOld : state.requestEvent left := by
+          simpa [State.requestEvent, rwTxRequestNext, leftEq] using leftIsRequest
+        have leftNe := requestNeEvent left leftIsOld
+        simp only [rwTxRequestNext, updateUnary_same, updateUnary_of_ne _ _ _ _ leftNe]
+        intro txEq
+        exact nextTx.1 (leftIsOld.imp
+          (fun leftIsRw => ⟨left, leftIsRw, txEq⟩)
+          (fun leftIsRo => ⟨left, leftIsRo, txEq⟩))
+      · have leftIsOld : state.requestEvent left := by
+          simpa [State.requestEvent, rwTxRequestNext, leftEq] using leftIsRequest
+        have rightIsOld : state.requestEvent right := by
+          simpa [State.requestEvent, rwTxRequestNext, rightEq] using rightIsRequest
+        simpa [rwTxRequestNext, leftEq, rightEq] using
+          properties.uniqueTxRequests left right
+            ⟨leftIsOld, rightIsOld, leftNeRight⟩
+
+omit
+  [OrderBot Tx] [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxRequestPreservesProvenance
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : ProvenanceBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    ProvenanceBundle (roTxRequestNext state tx event) := by
+  have requestNeEvent :
+      forall candidate,
+        state.requestEvent candidate -> Not (candidate = event) := by
+    intro candidate candidateIsRequest
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsRequest with candidateIsRw | candidateIsRo
+    · exact Or.inl candidateIsRw
+    · exact Or.inr (Or.inr (Or.inl candidateIsRo))
+  refine
+    { toCoreBundle :=
+        roTxRequestPreservesCore properties.toCoreBundle nextTx nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [LedgerTxIdsAreStableAcrossCopies, roTxRequestNext] using
+      properties.ledgerTxIdsAreStableAcrossCopies
+  · rw [ClientEntryHasRequest]
+    intro branch slot isClient
+    have oldClient : state.clientEntry branch slot := by
+      simpa [roTxRequestNext] using isClient
+    rcases properties.clientEntryHasRequest branch slot oldClient with
+      ⟨request, requestIsRw, requestTx⟩
+    have requestNe := requestNeEvent request (Or.inl requestIsRw)
+    exact
+      ⟨request, by simpa [roTxRequestNext, requestNe] using requestIsRw,
+        by simpa [roTxRequestNext, requestNe] using requestTx⟩
+  · rw [UniqueTxRequests]
+    intro left right requests
+    rcases requests with ⟨leftIsRequest, rightIsRequest, leftNeRight⟩
+    by_cases leftEq : left = event
+    · subst left
+      have rightIsOld : state.requestEvent right := by
+        simpa [
+          State.requestEvent,
+          roTxRequestNext,
+          Ne.symm leftNeRight
+        ] using rightIsRequest
+      have rightNe := requestNeEvent right rightIsOld
+      simp only [roTxRequestNext, updateUnary_same, updateUnary_of_ne _ _ _ _ rightNe]
+      intro txEq
+      exact nextTx.1 (rightIsOld.imp
+        (fun rightIsRw => ⟨right, rightIsRw, txEq.symm⟩)
+        (fun rightIsRo => ⟨right, rightIsRo, txEq.symm⟩))
+    · by_cases rightEq : right = event
+      · subst right
+        have leftIsOld : state.requestEvent left := by
+          simpa [State.requestEvent, roTxRequestNext, leftEq] using leftIsRequest
+        have leftNe := requestNeEvent left leftIsOld
+        simp only [roTxRequestNext, updateUnary_same, updateUnary_of_ne _ _ _ _ leftNe]
+        intro txEq
+        exact nextTx.1 (leftIsOld.imp
+          (fun leftIsRw => ⟨left, leftIsRw, txEq⟩)
+          (fun leftIsRo => ⟨left, leftIsRo, txEq⟩))
+      · have leftIsOld : state.requestEvent left := by
+          simpa [State.requestEvent, roTxRequestNext, leftEq] using leftIsRequest
+        have rightIsOld : state.requestEvent right := by
+          simpa [State.requestEvent, roTxRequestNext, rightEq] using rightIsRequest
+        simpa [roTxRequestNext, leftEq, rightEq] using
+          properties.uniqueTxRequests left right
+            ⟨leftIsOld, rightIsOld, leftNeRight⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxExecutePreservesProvenance
+    {state : State Tx View Seqno Event}
+    {request : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ProvenanceBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ProvenanceBundle (rwTxExecuteNext state request branch slot) := by
+  have offPointClient :
+      forall candidateBranch candidateSlot,
+        Not (candidateBranch = branch) \/ Not (candidateSlot = slot) ->
+          ((rwTxExecuteNext state request branch slot).clientEntry
+              candidateBranch candidateSlot =
+            state.clientEntry candidateBranch candidateSlot) := by
+    intro candidateBranch candidateSlot offPoint
+    rcases offPoint with branchNe | slotNe
+    · simp [rwTxExecuteNext, branchNe]
+    · simp [rwTxExecuteNext, slotNe]
+  have offPointTx :
+      forall candidateBranch candidateSlot,
+        Not (candidateBranch = branch) \/ Not (candidateSlot = slot) ->
+          ((rwTxExecuteNext state request branch slot).entryTx
+              candidateBranch candidateSlot =
+            state.entryTx candidateBranch candidateSlot) := by
+    intro candidateBranch candidateSlot offPoint
+    rcases offPoint with branchNe | slotNe
+    · simp [rwTxExecuteNext, branchNe]
+    · simp [rwTxExecuteNext, slotNe]
+  have offPointView :
+      forall candidateBranch candidateSlot,
+        Not (candidateBranch = branch) \/ Not (candidateSlot = slot) ->
+          ((rwTxExecuteNext state request branch slot).entryView
+              candidateBranch candidateSlot =
+            state.entryView candidateBranch candidateSlot) := by
+    intro candidateBranch candidateSlot offPoint
+    rcases offPoint with branchNe | slotNe
+    · simp [rwTxExecuteNext, branchNe]
+    · simp [rwTxExecuteNext, slotNe]
+  have newPointTx :
+      (rwTxExecuteNext state request branch slot).entryTx branch slot =
+        state.eventTx request := by
+    simp [rwTxExecuteNext]
+  refine
+    { toCoreBundle :=
+        rwTxExecutePreservesCore
+          properties.toCoreBundle
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · rw [LedgerTxIdsAreStableAcrossCopies]
+    intro leftBranch leftSlot rightBranch rightSlot entries
+    rcases entries with ⟨leftIsClient, rightIsClient, sameTx⟩
+    by_cases leftIsNew : leftBranch = branch /\ leftSlot = slot
+    · rcases leftIsNew with ⟨leftBranchEq, leftSlotEq⟩
+      subst leftBranch
+      subst leftSlot
+      by_cases rightIsNew : rightBranch = branch /\ rightSlot = slot
+      · rcases rightIsNew with ⟨rightBranchEq, rightSlotEq⟩
+        subst rightBranch
+        subst rightSlot
+        exact ⟨rfl, rfl⟩
+      · have rightOff :
+            Not (rightBranch = branch) \/ Not (rightSlot = slot) := by
+          by_cases rightBranchEq : rightBranch = branch
+          · exact Or.inr (fun rightSlotEq =>
+              rightIsNew ⟨rightBranchEq, rightSlotEq⟩)
+          · exact Or.inl rightBranchEq
+        have rightOldClient : state.clientEntry rightBranch rightSlot := by
+          rw [offPointClient rightBranch rightSlot rightOff] at rightIsClient
+          exact rightIsClient
+        have rightOldTx :
+            state.entryTx rightBranch rightSlot = state.eventTx request := by
+          rw [<- offPointTx rightBranch rightSlot rightOff, <- sameTx,
+            newPointTx]
+        exact False.elim
+          (txNotInLedger
+            ⟨rightBranch, rightSlot, rightOldClient, rightOldTx⟩)
+    · have leftOff :
+          Not (leftBranch = branch) \/ Not (leftSlot = slot) := by
+        by_cases leftBranchEq : leftBranch = branch
+        · exact Or.inr (fun leftSlotEq =>
+            leftIsNew ⟨leftBranchEq, leftSlotEq⟩)
+        · exact Or.inl leftBranchEq
+      have leftOldClient : state.clientEntry leftBranch leftSlot := by
+        rw [offPointClient leftBranch leftSlot leftOff] at leftIsClient
+        exact leftIsClient
+      by_cases rightIsNew : rightBranch = branch /\ rightSlot = slot
+      · rcases rightIsNew with ⟨rightBranchEq, rightSlotEq⟩
+        subst rightBranch
+        subst rightSlot
+        have leftOldTx :
+            state.entryTx leftBranch leftSlot = state.eventTx request := by
+          rw [<- offPointTx leftBranch leftSlot leftOff, sameTx, newPointTx]
+        exact False.elim
+          (txNotInLedger ⟨leftBranch, leftSlot, leftOldClient, leftOldTx⟩)
+      · have rightOff :
+            Not (rightBranch = branch) \/ Not (rightSlot = slot) := by
+          by_cases rightBranchEq : rightBranch = branch
+          · exact Or.inr (fun rightSlotEq =>
+              rightIsNew ⟨rightBranchEq, rightSlotEq⟩)
+          · exact Or.inl rightBranchEq
+        have rightOldClient : state.clientEntry rightBranch rightSlot := by
+          rw [offPointClient rightBranch rightSlot rightOff] at rightIsClient
+          exact rightIsClient
+        have oldSameTx :
+            state.entryTx leftBranch leftSlot =
+              state.entryTx rightBranch rightSlot := by
+          rw [<- offPointTx leftBranch leftSlot leftOff,
+            <- offPointTx rightBranch rightSlot rightOff]
+          exact sameTx
+        have oldResult :=
+          properties.ledgerTxIdsAreStableAcrossCopies
+            leftBranch leftSlot rightBranch rightSlot
+            ⟨leftOldClient, rightOldClient, oldSameTx⟩
+        refine ⟨oldResult.1, ?_⟩
+        rw [offPointView leftBranch leftSlot leftOff,
+          offPointView rightBranch rightSlot rightOff]
+        exact oldResult.2
+  · rw [ClientEntryHasRequest]
+    intro candidateBranch candidateSlot isClient
+    by_cases isNew : candidateBranch = branch /\ candidateSlot = slot
+    · rcases isNew with ⟨branchEq, slotEq⟩
+      subst candidateBranch
+      subst candidateSlot
+      exact
+        ⟨request, by simpa [rwTxExecuteNext] using requestIsRw,
+          by simp [rwTxExecuteNext]⟩
+    · have offPoint :
+          Not (candidateBranch = branch) \/ Not (candidateSlot = slot) := by
+        by_cases branchEq : candidateBranch = branch
+        · exact Or.inr (fun slotEq => isNew ⟨branchEq, slotEq⟩)
+        · exact Or.inl branchEq
+      have oldClient :
+          state.clientEntry candidateBranch candidateSlot := by
+        rw [offPointClient candidateBranch candidateSlot offPoint] at isClient
+        exact isClient
+      rcases
+          properties.clientEntryHasRequest
+            candidateBranch candidateSlot oldClient with
+        ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+      refine ⟨oldRequest, by simpa [rwTxExecuteNext] using oldRequestIsRw, ?_⟩
+      rw [offPointTx candidateBranch candidateSlot offPoint]
+      simpa [rwTxExecuteNext] using oldRequestTx
+  · simpa [UniqueTxRequests, rwTxExecuteNext] using properties.uniqueTxRequests
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem appendOtherTxnPreservesProvenance
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ProvenanceBundle state)
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    ProvenanceBundle (appendOtherTxnNext state branch slot) := by
+  have newPointNotClient :
+      Not ((appendOtherTxnNext state branch slot).clientEntry branch slot) := by
+    simp [appendOtherTxnNext]
+  have offPointClient :
+      forall candidateBranch candidateSlot,
+        Not (candidateBranch = branch) \/ Not (candidateSlot = slot) ->
+          ((appendOtherTxnNext state branch slot).clientEntry
+              candidateBranch candidateSlot =
+            state.clientEntry candidateBranch candidateSlot) := by
+    intro candidateBranch candidateSlot offPoint
+    rcases offPoint with branchNe | slotNe
+    · simp [appendOtherTxnNext, branchNe]
+    · simp [appendOtherTxnNext, slotNe]
+  have offPointView :
+      forall candidateBranch candidateSlot,
+        Not (candidateBranch = branch) \/ Not (candidateSlot = slot) ->
+          ((appendOtherTxnNext state branch slot).entryView
+              candidateBranch candidateSlot =
+            state.entryView candidateBranch candidateSlot) := by
+    intro candidateBranch candidateSlot offPoint
+    rcases offPoint with branchNe | slotNe
+    · simp [appendOtherTxnNext, branchNe]
+    · simp [appendOtherTxnNext, slotNe]
+  have offPointOfClient :
+      forall candidateBranch candidateSlot,
+        (appendOtherTxnNext state branch slot).clientEntry
+            candidateBranch candidateSlot ->
+          Not (candidateBranch = branch) \/ Not (candidateSlot = slot) := by
+    intro candidateBranch candidateSlot isClient
+    by_cases branchEq : candidateBranch = branch
+    · refine Or.inr ?_
+      intro slotEq
+      subst candidateBranch
+      subst candidateSlot
+      exact newPointNotClient isClient
+    · exact Or.inl branchEq
+  refine
+    { toCoreBundle :=
+        appendOtherTxnPreservesCore
+          properties.toCoreBundle
+          branchIsActive
+          nextSlot
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · rw [LedgerTxIdsAreStableAcrossCopies]
+    intro leftBranch leftSlot rightBranch rightSlot entries
+    rcases entries with ⟨leftIsClient, rightIsClient, sameTx⟩
+    have leftOff := offPointOfClient leftBranch leftSlot leftIsClient
+    have rightOff := offPointOfClient rightBranch rightSlot rightIsClient
+    have leftOldClient : state.clientEntry leftBranch leftSlot := by
+      rw [offPointClient leftBranch leftSlot leftOff] at leftIsClient
+      exact leftIsClient
+    have rightOldClient : state.clientEntry rightBranch rightSlot := by
+      rw [offPointClient rightBranch rightSlot rightOff] at rightIsClient
+      exact rightIsClient
+    have oldSameTx :
+        state.entryTx leftBranch leftSlot =
+          state.entryTx rightBranch rightSlot := by
+      simpa [appendOtherTxnNext] using sameTx
+    have oldResult :=
+      properties.ledgerTxIdsAreStableAcrossCopies
+        leftBranch leftSlot rightBranch rightSlot
+        ⟨leftOldClient, rightOldClient, oldSameTx⟩
+    refine ⟨oldResult.1, ?_⟩
+    rw [offPointView leftBranch leftSlot leftOff,
+      offPointView rightBranch rightSlot rightOff]
+    exact oldResult.2
+  · rw [ClientEntryHasRequest]
+    intro candidateBranch candidateSlot isClient
+    have offPoint := offPointOfClient candidateBranch candidateSlot isClient
+    have oldClient : state.clientEntry candidateBranch candidateSlot := by
+      rw [offPointClient candidateBranch candidateSlot offPoint] at isClient
+      exact isClient
+    rcases
+        properties.clientEntryHasRequest
+          candidateBranch candidateSlot oldClient with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+    exact
+      ⟨oldRequest, by simpa [appendOtherTxnNext] using oldRequestIsRw,
+        by simpa [appendOtherTxnNext] using oldRequestTx⟩
+  · simpa [UniqueTxRequests, appendOtherTxnNext] using
+      properties.uniqueTxRequests
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxResponsePreservesProvenance
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : ProvenanceBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (entryIsClient : state.clientEntry branch slot)
+    (entryMatches : state.entryTx branch slot = state.eventTx request)
+    (nextEvent : state.nextHistoryEvent response) :
+    ProvenanceBundle (rwTxResponseNext state request branch slot response) := by
+  have requestNeResponse :
+      forall candidate,
+        state.requestEvent candidate -> Not (candidate = response) := by
+    intro candidate candidateIsRequest
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsRequest with candidateIsRw | candidateIsRo
+    · exact Or.inl candidateIsRw
+    · exact Or.inr (Or.inr (Or.inl candidateIsRo))
+  refine
+    { toCoreBundle :=
+        rwTxResponsePreservesCore
+          properties.toCoreBundle
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [LedgerTxIdsAreStableAcrossCopies, rwTxResponseNext] using
+      properties.ledgerTxIdsAreStableAcrossCopies
+  · rw [ClientEntryHasRequest]
+    intro candidateBranch candidateSlot isClient
+    have oldClient : state.clientEntry candidateBranch candidateSlot := by
+      simpa [rwTxResponseNext] using isClient
+    rcases
+        properties.clientEntryHasRequest
+          candidateBranch candidateSlot oldClient with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+    have oldRequestNe := requestNeResponse oldRequest (Or.inl oldRequestIsRw)
+    exact
+      ⟨oldRequest, by simpa [rwTxResponseNext] using oldRequestIsRw,
+        by simpa [rwTxResponseNext, oldRequestNe] using oldRequestTx⟩
+  · rw [UniqueTxRequests]
+    intro left right requests
+    rcases requests with ⟨leftIsRequest, rightIsRequest, leftNeRight⟩
+    have leftIsOld : state.requestEvent left := by
+      simpa [State.requestEvent, rwTxResponseNext] using leftIsRequest
+    have rightIsOld : state.requestEvent right := by
+      simpa [State.requestEvent, rwTxResponseNext] using rightIsRequest
+    have leftNe := requestNeResponse left leftIsOld
+    have rightNe := requestNeResponse right rightIsOld
+    simpa [rwTxResponseNext, leftNe, rightNe] using
+      properties.uniqueTxRequests left right
+        ⟨leftIsOld, rightIsOld, leftNeRight⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxResponsePreservesProvenance
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {last : Seqno}
+    (properties : ProvenanceBundle state)
+    (requestIsRo : state.roRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (lastSlot : state.lastLedgerSlot branch last)
+    (nextEvent : state.nextHistoryEvent response) :
+    ProvenanceBundle (roTxResponseNext state request branch last response) := by
+  have requestNeResponse :
+      forall candidate,
+        state.requestEvent candidate -> Not (candidate = response) := by
+    intro candidate candidateIsRequest
+    refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+    rcases candidateIsRequest with candidateIsRw | candidateIsRo
+    · exact Or.inl candidateIsRw
+    · exact Or.inr (Or.inr (Or.inl candidateIsRo))
+  refine
+    { toCoreBundle :=
+        roTxResponsePreservesCore
+          properties.toCoreBundle
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [LedgerTxIdsAreStableAcrossCopies, roTxResponseNext] using
+      properties.ledgerTxIdsAreStableAcrossCopies
+  · rw [ClientEntryHasRequest]
+    intro candidateBranch candidateSlot isClient
+    have oldClient : state.clientEntry candidateBranch candidateSlot := by
+      simpa [roTxResponseNext] using isClient
+    rcases
+        properties.clientEntryHasRequest
+          candidateBranch candidateSlot oldClient with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+    have oldRequestNe := requestNeResponse oldRequest (Or.inl oldRequestIsRw)
+    exact
+      ⟨oldRequest, by simpa [roTxResponseNext] using oldRequestIsRw,
+        by simpa [roTxResponseNext, oldRequestNe] using oldRequestTx⟩
+  · rw [UniqueTxRequests]
+    intro left right requests
+    rcases requests with ⟨leftIsRequest, rightIsRequest, leftNeRight⟩
+    have leftIsOld : state.requestEvent left := by
+      simpa [State.requestEvent, roTxResponseNext] using leftIsRequest
+    have rightIsOld : state.requestEvent right := by
+      simpa [State.requestEvent, roTxResponseNext] using rightIsRequest
+    have leftNe := requestNeResponse left leftIsOld
+    have rightNe := requestNeResponse right rightIsOld
+    simpa [roTxResponseNext, leftNe, rightNe] using
+      properties.uniqueTxRequests left right
+        ⟨leftIsOld, rightIsOld, leftNeRight⟩
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem statusCommittedResponsePreservesProvenance
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    {current : View}
+    (properties : ProvenanceBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (viewIsCurrent : state.currentView current)
+    (responseSlotExists :
+      state.ledgerEntry current (state.eventSeqno response))
+    (responseEntryMatches :
+      state.entryView current (state.eventSeqno response) =
+        state.eventView response)
+    (notInvalid :
+      Not (Exists fun invalid =>
+        state.invalidStatusEvent invalid /\
+          state.eventView invalid = state.eventView response /\
+            state.eventSeqno invalid <= state.eventSeqno response))
+    (nextEvent : state.nextHistoryEvent status) :
+    ProvenanceBundle (statusCommittedResponseNext state response status) := by
+  refine
+    { toCoreBundle :=
+        statusCommittedResponsePreservesCore
+          properties.toCoreBundle
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [
+      LedgerTxIdsAreStableAcrossCopies,
+      statusCommittedResponseNext
+    ] using properties.ledgerTxIdsAreStableAcrossCopies
+  · simpa [ClientEntryHasRequest, statusCommittedResponseNext] using
+      properties.clientEntryHasRequest
+  · simpa [
+      UniqueTxRequests,
+      State.requestEvent,
+      statusCommittedResponseNext
+    ] using properties.uniqueTxRequests
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem statusInvalidResponsePreservesProvenance
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    (properties : ProvenanceBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (nextEvent : state.nextHistoryEvent status) :
+    ProvenanceBundle (statusInvalidResponseNext state response status) := by
+  refine
+    { toCoreBundle :=
+        statusInvalidResponsePreservesCore
+          properties.toCoreBundle
+          responseIsRw
+          statusAllowed
+          nextEvent
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [
+      LedgerTxIdsAreStableAcrossCopies,
+      statusInvalidResponseNext
+    ] using properties.ledgerTxIdsAreStableAcrossCopies
+  · simpa [ClientEntryHasRequest, statusInvalidResponseNext] using
+      properties.clientEntryHasRequest
+  · simpa [
+      UniqueTxRequests,
+      State.requestEvent,
+      statusInvalidResponseNext
+    ] using properties.uniqueTxRequests
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerPreservesProvenance
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    {cut : Seqno}
+    (properties : ProvenanceBundle state)
+    (sourceIsActive : state.activeView source)
+    (cutExists : state.ledgerEntry source cut)
+    (sourceIsValid : state.validTruncationSource source cut)
+    (viewIsNext : state.nextView newView) :
+    ProvenanceBundle (truncateLedgerNext state source cut newView) := by
+  -- Every client entry of the truncated state is a slot-preserving copy of a
+  -- client entry of the old state, with the same transaction and origin view.
+  have resolveCopy :
+      forall candidateBranch candidateSlot,
+        (truncateLedgerNext state source cut newView).clientEntry
+            candidateBranch candidateSlot ->
+          Exists fun originalBranch =>
+            state.clientEntry originalBranch candidateSlot /\
+              state.entryTx originalBranch candidateSlot =
+                (truncateLedgerNext state source cut newView).entryTx
+                  candidateBranch candidateSlot /\
+              state.entryView originalBranch candidateSlot =
+                (truncateLedgerNext state source cut newView).entryView
+                  candidateBranch candidateSlot := by
+    intro candidateBranch candidateSlot isClient
+    by_cases branchEq : candidateBranch = newView
+    · subst candidateBranch
+      have copiedClient :
+          candidateSlot <= cut /\ state.clientEntry source candidateSlot := by
+        simpa [truncateLedgerNext, updateUnary] using isClient
+      refine ⟨source, copiedClient.2, ?_, ?_⟩
+      · simp [
+          truncateLedgerNext,
+          updateUnary,
+          copiedClient.1,
+          copiedClient.2
+        ]
+      · simp [truncateLedgerNext, updateUnary, copiedClient.1]
+    · refine ⟨candidateBranch, ?_, ?_, ?_⟩
+      · simpa [truncateLedgerNext, updateUnary, branchEq] using isClient
+      · simp [truncateLedgerNext, updateUnary, branchEq]
+      · simp [truncateLedgerNext, updateUnary, branchEq]
+  refine
+    { toCoreBundle :=
+        truncateLedgerPreservesCore
+          properties.toCoreBundle
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · rw [LedgerTxIdsAreStableAcrossCopies]
+    intro leftBranch leftSlot rightBranch rightSlot entries
+    rcases entries with ⟨leftIsClient, rightIsClient, sameTx⟩
+    rcases resolveCopy leftBranch leftSlot leftIsClient with
+      ⟨leftOriginal, leftOldClient, leftOldTx, leftOldView⟩
+    rcases resolveCopy rightBranch rightSlot rightIsClient with
+      ⟨rightOriginal, rightOldClient, rightOldTx, rightOldView⟩
+    have oldSameTx :
+        state.entryTx leftOriginal leftSlot =
+          state.entryTx rightOriginal rightSlot := by
+      rw [leftOldTx, rightOldTx]
+      exact sameTx
+    have oldResult :=
+      properties.ledgerTxIdsAreStableAcrossCopies
+        leftOriginal leftSlot rightOriginal rightSlot
+        ⟨leftOldClient, rightOldClient, oldSameTx⟩
+    refine ⟨oldResult.1, ?_⟩
+    rw [<- leftOldView, <- rightOldView]
+    exact oldResult.2
+  · rw [ClientEntryHasRequest]
+    intro candidateBranch candidateSlot isClient
+    rcases resolveCopy candidateBranch candidateSlot isClient with
+      ⟨originalBranch, oldClient, oldTx, _⟩
+    rcases
+        properties.clientEntryHasRequest
+          originalBranch candidateSlot oldClient with
+      ⟨oldRequest, oldRequestIsRw, oldRequestTx⟩
+    refine ⟨oldRequest, by simpa [truncateLedgerNext] using oldRequestIsRw, ?_⟩
+    rw [<- oldTx]
+    simpa [truncateLedgerNext] using oldRequestTx
+  · simpa [UniqueTxRequests, State.requestEvent, truncateLedgerNext] using
+      properties.uniqueTxRequests
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerToEmptyPreservesProvenance
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    (properties : ProvenanceBundle state)
+    (sourceIsActive : state.activeView source)
+    (noCommitted : state.noCommittedTxId)
+    (viewIsNext : state.nextView newView) :
+    ProvenanceBundle (truncateLedgerToEmptyNext state newView) := by
+  refine
+    { toCoreBundle :=
+        truncateLedgerToEmptyPreservesCore
+          properties.toCoreBundle
+          sourceIsActive
+          noCommitted
+          viewIsNext
+      ledgerTxIdsAreStableAcrossCopies := ?_
+      clientEntryHasRequest := ?_
+      uniqueTxRequests := ?_ }
+  · simpa [
+      LedgerTxIdsAreStableAcrossCopies,
+      truncateLedgerToEmptyNext
+    ] using properties.ledgerTxIdsAreStableAcrossCopies
+  · simpa [ClientEntryHasRequest, truncateLedgerToEmptyNext] using
+      properties.clientEntryHasRequest
+  · simpa [
+      UniqueTxRequests,
+      State.requestEvent,
+      truncateLedgerToEmptyNext
+    ] using properties.uniqueTxRequests
+
 omit [OrderBot Seqno] [OrderBot Event] in
 theorem stepPreservesCore
     {state next : State Tx View Seqno Event}
@@ -2897,6 +3637,144 @@ theorem reachableCore
   | step _ transition properties =>
       exact stepPreservesCore properties transition
 
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem stepPreservesProvenance
+    {state next : State Tx View Seqno Event}
+    (properties : ProvenanceBundle state)
+    (transition : Step state next) :
+    ProvenanceBundle next := by
+  cases transition with
+  | rwTxRequest tx event nextTx nextEvent =>
+      exact rwTxRequestPreservesProvenance properties nextTx nextEvent
+  | roTxRequest tx event nextTx nextEvent =>
+      exact roTxRequestPreservesProvenance properties nextTx nextEvent
+  | rwTxExecute
+      request
+      branch
+      slot
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot =>
+      exact
+        rwTxExecutePreservesProvenance
+          properties
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+  | appendOtherTxn branch slot branchIsActive nextSlot =>
+      exact
+        appendOtherTxnPreservesProvenance
+          properties
+          branchIsActive
+          nextSlot
+  | rwTxResponse
+      request
+      branch
+      slot
+      response
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent =>
+      exact
+        rwTxResponsePreservesProvenance
+          properties
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+  | roTxResponse
+      request
+      branch
+      last
+      response
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent =>
+      exact
+        roTxResponsePreservesProvenance
+          properties
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+  | statusCommittedResponse
+      response
+      status
+      current
+      responseIsRw
+      viewIsCurrent
+      responseSlotExists
+      responseEntryMatches
+      notInvalid
+      nextEvent =>
+      exact
+        statusCommittedResponsePreservesProvenance
+          properties
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+  | statusInvalidResponse
+      response
+      status
+      responseIsRw
+      statusAllowed
+      nextEvent =>
+      exact
+        statusInvalidResponsePreservesProvenance
+          properties
+          responseIsRw
+          statusAllowed
+          nextEvent
+  | truncateLedger
+      source
+      cut
+      newView
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext =>
+      exact
+        truncateLedgerPreservesProvenance
+          properties
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+  | truncateLedgerToEmpty
+      source
+      newView
+      sourceIsActive
+      noCommitted
+      viewIsNext =>
+      exact
+        truncateLedgerToEmptyPreservesProvenance
+          properties
+          sourceIsActive
+          noCommitted
+          viewIsNext
+
+theorem reachableProvenance
+    {state : State Tx View Seqno Event}
+    (reachable : Reachable state) :
+    ProvenanceBundle state := by
+  induction reachable with
+  | initial => exact initialProvenance
+  | step _ transition properties =>
+      exact stepPreservesProvenance properties transition
+
 omit
   [LinearOrder Tx] [OrderBot Tx]
   [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
@@ -2953,14 +3831,43 @@ theorem coreSameObservations
   · rintro ⟨_, observation⟩
     exact ⟨leftIsResponse, observation⟩
 
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+/-- Two observations of the same transaction by one response sit in the same
+branch, so stable copied transaction identifiers force the same slot. -/
+theorem provenanceAtMostOnceObserved
+    {state : State Tx View Seqno Event}
+    (properties : ProvenanceBundle state) :
+    AtMostOnceObserved state := by
+  rw [AtMostOnceObserved]
+  intro response leftSlot rightSlot observed observations
+  rcases observations with ⟨leftObservation, rightObservation⟩
+  have leftClient :
+      state.clientEntry (state.eventBranch response) leftSlot :=
+    leftObservation.2.2.1
+  have rightClient :
+      state.clientEntry (state.eventBranch response) rightSlot :=
+    rightObservation.2.2.1
+  have sameTx :
+      state.entryTx (state.eventBranch response) leftSlot =
+        state.entryTx (state.eventBranch response) rightSlot :=
+    leftObservation.2.2.2.trans rightObservation.2.2.2.symm
+  exact
+    (properties.ledgerTxIdsAreStableAcrossCopies
+      (state.eventBranch response) leftSlot
+      (state.eventBranch response) rightSlot
+      ⟨leftClient, rightClient, sameTx⟩).1
+
 theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
     ProvedBundle state := by
-  have core := reachableCore reachable
+  have provenance := reachableProvenance reachable
   exact
-    { core
-      uniqueRwTxs := coreUniqueRwTxs core
-      sameObservations := coreSameObservations core }
+    { provenance
+      uniqueRwTxs := coreUniqueRwTxs provenance.toCoreBundle
+      sameObservations := coreSameObservations provenance.toCoreBundle
+      atMostOnceObserved := provenanceAtMostOnceObserved provenance }
 
 end CCFConsistency

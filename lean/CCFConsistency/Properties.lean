@@ -347,10 +347,17 @@ structure CoreBundle (state : State Tx View Seqno Event) : Prop
   ledgerEntryViewsAreMonotonic : LedgerEntryViewsAreMonotonic state
   ledgerPrefixMatchesFrontierOrigin : LedgerPrefixMatchesFrontierOrigin state
 
+structure ProvenanceBundle (state : State Tx View Seqno Event) : Prop
+    extends CoreBundle state where
+  ledgerTxIdsAreStableAcrossCopies : LedgerTxIdsAreStableAcrossCopies state
+  clientEntryHasRequest : ClientEntryHasRequest state
+  uniqueTxRequests : UniqueTxRequests state
+
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  core : CoreBundle state
+  provenance : ProvenanceBundle state
   uniqueRwTxs : UniqueRwTxs state
   sameObservations : SameObservations state
+  atMostOnceObserved : AtMostOnceObserved state
 
 structure PropertyBundle (state : State Tx View Seqno Event) : Prop where
   historyTypeOk : HistoryTypeOk state
@@ -421,5 +428,14 @@ def PropertyBundle.core
   ledgerEntryViewsAreMonotonic := properties.ledgerEntryViewsAreMonotonic
   ledgerPrefixMatchesFrontierOrigin :=
     properties.ledgerPrefixMatchesFrontierOrigin
+
+def PropertyBundle.provenance
+    {state : State Tx View Seqno Event}
+    (properties : PropertyBundle state) : ProvenanceBundle state where
+  toCoreBundle := properties.core
+  ledgerTxIdsAreStableAcrossCopies :=
+    properties.ledgerTxIdsAreStableAcrossCopies
+  clientEntryHasRequest := properties.clientEntryHasRequest
+  uniqueTxRequests := properties.uniqueTxRequests
 
 end CCFConsistency

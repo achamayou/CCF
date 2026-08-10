@@ -91,12 +91,16 @@ compiles this generated replay proof.
 `initialProperties` proves all 36 translated clauses for `initialState`.
 
 `stepPreservesCore` proves that every one of the ten actions preserves the
-17-clause `CoreBundle`. `reachableCore` lifts that result to every reachable
-state. Two additional full-spec properties are logical consequences of that
-core:
+17-clause `CoreBundle`. `stepPreservesProvenance` extends that to the 20-clause
+`ProvenanceBundle`, which adds stable copied transaction identifiers,
+client-entry request provenance, and unique request transactions.
+`reachableCore` and `reachableProvenance` lift those results to every reachable
+state. Three further full-spec properties are logical consequences of that
+inductive core:
 
 - `coreUniqueRwTxs`
 - `coreSameObservations`
+- `provenanceAtMostOnceObserved`
 
 The exported fixed-point theorem is:
 
@@ -106,93 +110,106 @@ theorem reachableProved
     ProvedBundle state
 ```
 
-It establishes 19 of the 36 translated properties for all reachable states,
+It establishes 23 of the 36 translated properties for all reachable states,
 over abstract and potentially infinite domains.
 
-| Action                    | Preserves all 17 core clauses |
-| ------------------------- | ----------------------------- |
-| `rwTxRequest`             | Proved                        |
-| `roTxRequest`             | Proved                        |
-| `rwTxExecute`             | Proved                        |
-| `appendOtherTxn`          | Proved                        |
-| `rwTxResponse`            | Proved                        |
-| `roTxResponse`            | Proved                        |
-| `statusCommittedResponse` | Proved                        |
-| `statusInvalidResponse`   | Proved                        |
-| `truncateLedger`          | Proved                        |
-| `truncateLedgerToEmpty`   | Proved                        |
+| Action                    | Preserves all 20 provenance clauses |
+| ------------------------- | ----------------------------------- |
+| `rwTxRequest`             | Proved                              |
+| `roTxRequest`             | Proved                              |
+| `rwTxExecute`             | Proved                              |
+| `appendOtherTxn`          | Proved                              |
+| `rwTxResponse`            | Proved                              |
+| `roTxResponse`            | Proved                              |
+| `statusCommittedResponse` | Proved                              |
+| `statusInvalidResponse`   | Proved                              |
+| `truncateLedger`          | Proved                              |
+| `truncateLedgerToEmpty`   | Proved                              |
 
 ## Exact property coverage
 
 All rows have a proved initializer. "Proved" means preservation by all ten
 actions and an exported reachable-state theorem, either directly through
-`CoreBundle` or as a consequence of it. "Open" means all ten preservation
+`ProvenanceBundle` or as a consequence of it. "Open" means all ten preservation
 cases remain outside the exported theorem; no assumption is used in their
 place.
 
-| Lean property                           | Reachable-state status |
-| --------------------------------------- | ---------------------- |
-| `HistoryTypeOk`                         | Proved                 |
-| `HistoryEventKindUnique`                | Proved                 |
-| `HistoryIsPrefix`                       | Proved                 |
-| `ActiveViewsArePrefix`                  | Proved                 |
-| `LedgerTypeOk`                          | Proved                 |
-| `ClientEntriesAreLedgerEntries`         | Proved                 |
-| `LedgerIsPrefix`                        | Proved                 |
-| `LedgerTxIdsAreStableAcrossCopies`      | Open                   |
-| `LedgerEntryExistsInOriginView`         | Proved                 |
-| `ResponseFrontierIsLedgerEntry`         | Proved                 |
-| `ClientEntryHasRequest`                 | Open                   |
-| `ClientEntryMatchesOrigin`              | Proved                 |
-| `LedgerEntryViewsAreMonotonic`          | Proved                 |
-| `LedgerPrefixMatchesFrontierOrigin`     | Proved                 |
-| `ResponseBranchIsView`                  | Proved                 |
-| `ResponseFrontierMatchesOrigin`         | Proved                 |
-| `RwResponseMatchesLedgerEntry`          | Proved                 |
-| `StatusHasRwResponse`                   | Open                   |
-| `CommittedIdIsInCurrentLedger`          | Open                   |
-| `CommittedResponseMatchesCurrentLedger` | Open                   |
-| `AllReceivedAfterSent`                  | Proved                 |
-| `UniqueTxRequests`                      | Open                   |
-| `OnlyObserveSentRequests`               | Open                   |
-| `ObservationsAreWithinResponsePrefix`   | Proved                 |
-| `UniqueRwTxs`                           | Proved from the core   |
-| `SameObservations`                      | Proved from the core   |
-| `UniqueTxIds`                           | Open                   |
-| `UniqueCommittedSeqnos`                 | Open                   |
-| `CommittedOrInvalid`                    | Open                   |
-| `OnceCommittedPreviousIsCommitted`      | Open                   |
-| `OnceCommittedOlderViewSuffixIsInvalid` | Open                   |
-| `OnceInvalidSameViewSuffixIsInvalid`    | Open                   |
-| `AllCommittedObserved`                  | Open                   |
-| `CommittedRwSerializable`               | Open                   |
-| `AtMostOnceObserved`                    | Open                   |
-| `CommittedRwOrderedRealTime`            | Open                   |
+| Lean property                           | Reachable-state status     |
+| --------------------------------------- | -------------------------- |
+| `HistoryTypeOk`                         | Proved                     |
+| `HistoryEventKindUnique`                | Proved                     |
+| `HistoryIsPrefix`                       | Proved                     |
+| `ActiveViewsArePrefix`                  | Proved                     |
+| `LedgerTypeOk`                          | Proved                     |
+| `ClientEntriesAreLedgerEntries`         | Proved                     |
+| `LedgerIsPrefix`                        | Proved                     |
+| `LedgerTxIdsAreStableAcrossCopies`      | Proved                     |
+| `LedgerEntryExistsInOriginView`         | Proved                     |
+| `ResponseFrontierIsLedgerEntry`         | Proved                     |
+| `ClientEntryHasRequest`                 | Proved                     |
+| `ClientEntryMatchesOrigin`              | Proved                     |
+| `LedgerEntryViewsAreMonotonic`          | Proved                     |
+| `LedgerPrefixMatchesFrontierOrigin`     | Proved                     |
+| `ResponseBranchIsView`                  | Proved                     |
+| `ResponseFrontierMatchesOrigin`         | Proved                     |
+| `RwResponseMatchesLedgerEntry`          | Proved                     |
+| `StatusHasRwResponse`                   | Open                       |
+| `CommittedIdIsInCurrentLedger`          | Open                       |
+| `CommittedResponseMatchesCurrentLedger` | Open                       |
+| `AllReceivedAfterSent`                  | Proved                     |
+| `UniqueTxRequests`                      | Proved                     |
+| `OnlyObserveSentRequests`               | Open                       |
+| `ObservationsAreWithinResponsePrefix`   | Proved                     |
+| `UniqueRwTxs`                           | Proved from the core       |
+| `SameObservations`                      | Proved from the core       |
+| `UniqueTxIds`                           | Open                       |
+| `UniqueCommittedSeqnos`                 | Open                       |
+| `CommittedOrInvalid`                    | Open                       |
+| `OnceCommittedPreviousIsCommitted`      | Open                       |
+| `OnceCommittedOlderViewSuffixIsInvalid` | Open                       |
+| `OnceInvalidSameViewSuffixIsInvalid`    | Open                       |
+| `AllCommittedObserved`                  | Open                       |
+| `CommittedRwSerializable`               | Open                       |
+| `AtMostOnceObserved`                    | Proved from the provenance |
+| `CommittedRwOrderedRealTime`            | Open                       |
+
+## How the provenance layer closes
+
+The provenance clauses are inductive together, and each rests on an action
+guard rather than on an assumption:
+
+- `rwTxExecute` carries `txNotInLedger`, so the transaction it writes cannot
+  already sit in a client entry. Comparing the new entry with any older entry
+  is therefore impossible, and `LedgerTxIdsAreStableAcrossCopies` reduces to
+  the induction hypothesis.
+- `truncateLedger` copies a prefix of one branch into a fresh view. Every
+  client entry of the truncated state is resolved back to the entry it was
+  copied from, at the same slot and with the same origin view, so both
+  provenance clauses transfer along the copy.
+- `rwTxRequest` and `roTxRequest` carry `nextTx`, whose `Not (requested tx)`
+  component gives `UniqueTxRequests` directly.
+- Response and status actions only classify a fresh, unused history event, so
+  every already-classified event keeps its transaction.
+
+`AtMostOnceObserved` then needs no induction of its own: both observations of
+one response sit in the branch `eventBranch response`, so stable copied
+transaction identifiers force the two slots to coincide.
 
 ## Fixed-point boundary
 
-The smallest representative open preservation obligation is the new-ledger
-entry case of:
+The 13 remaining clauses form a single mutually dependent cluster around commit
+status rather than a set of independent obligations. `StatusHasRwResponse`
+needs status provenance across truncation; `CommittedIdIsInCurrentLedger` and
+`CommittedResponseMatchesCurrentLedger` need the committed identifier to be
+tracked through every view change; `CommittedOrInvalid` and the three
+`Once...` clauses need commit and invalid closure to be maintained together;
+and `AllCommittedObserved`, `CommittedRwSerializable`,
+`CommittedRwOrderedRealTime`, `UniqueTxIds`, `UniqueCommittedSeqnos`, and
+`OnlyObserveSentRequests` all rest on a real-time ordering fact that the
+current state does not yet record: that a client entry is written only after
+its request event.
 
-```lean
-theorem rwTxExecutePreservesStableCopies
-    (properties : PropertyBundle state)
-    (requestIsRw : state.rwRequestEvent request)
-    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
-    (branchIsActive : state.activeView branch)
-    (nextSlot : state.nextLedgerSlot branch slot) :
-    LedgerTxIdsAreStableAcrossCopies
-      (rwTxExecuteNext state request branch slot)
-```
-
-Its proof must split both compared entries around the newly written point and
-use `txNotInLedger` to exclude an old equal transaction. Completing it is only
-the start of a second, mutually supporting layer: request provenance, request
-uniqueness, status closure, commit/invalid monotonicity, observation
-uniqueness, serializability, and the real-time safety clause depend on one
-another across response, status, and truncation actions.
-
-No theorem in this project claims those 17 open properties.
+No theorem in this project claims those 13 open properties.
 
 ## Trust and correspondence
 
@@ -212,9 +229,16 @@ No theorem in this project claims those 17 open properties.
 
 ## Next proof layers
 
-1. Prove stable copied transaction IDs, client-entry request provenance, and
-   unique requests as one preservation bundle.
-2. Add status provenance and current-ledger commit facts.
-3. Prove commit/invalid closure and observation uniqueness.
-4. Derive serializability and `CommittedRwOrderedRealTime`, then replace
+1. Record request/entry real-time ordering as an inductive clause: a client
+   entry is written only after its request event. This is the missing fact
+   behind `OnlyObserveSentRequests` and the ordering clauses.
+2. Add a response-transaction uniqueness clause, carried by the `notResponded`
+   guard, and derive `UniqueTxIds` from it.
+3. Add status provenance and current-ledger commit facts
+   (`StatusHasRwResponse`, `CommittedIdIsInCurrentLedger`,
+   `CommittedResponseMatchesCurrentLedger`), which need the committed
+   identifier tracked through `truncateLedger`.
+4. Prove commit/invalid closure (`CommittedOrInvalid` and the three `Once...`
+   clauses) as one bundle.
+5. Derive serializability and `CommittedRwOrderedRealTime`, then replace
    `ProvedBundle` with the complete `PropertyBundle` in the reachable theorem.
