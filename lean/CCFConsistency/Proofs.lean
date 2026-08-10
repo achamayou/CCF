@@ -4715,6 +4715,604 @@ theorem responsesUniqueTxIds
 
 omit
   [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View]
+  [LinearOrder Seqno] [OrderBot Seqno]
+  [LinearOrder Event] [OrderBot Event] in
+/-- Transfer of `HasCurrentView` along any action that leaves `activeView`
+alone. Only the two truncation actions need a genuine argument. -/
+theorem hasCurrentViewOfActiveEq
+    {state next : State Tx View Seqno Event}
+    (activeEq : forall view, next.activeView view = state.activeView view)
+    (hasCurrent : HasCurrentView state) :
+    HasCurrentView next := by
+  rcases hasCurrent with ⟨current, currentActive, currentMax⟩
+  refine ⟨current, ?_, ?_⟩
+  · rw [activeEq]
+    exact currentActive
+  · intro later laterGt
+    rw [activeEq]
+    exact currentMax later laterGt
+
+omit [LinearOrder Event] [OrderBot Event] in
+theorem initialHasCurrentView :
+    HasCurrentView (initialState : State Tx View Seqno Event) := by
+  refine ⟨Bot.bot, ?_, ?_⟩
+  · simp [initialState]
+  · intro later laterGt activeLater
+    have laterEq : later = Bot.bot := by simpa [initialState] using activeLater
+    exact laterGt.2 laterEq.symm
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- After a view change the fresh view is the greatest active one, because the
+active views form a prefix and the fresh view was not active before. -/
+theorem nextViewIsCurrent
+    {state : State Tx View Seqno Event}
+    {newView : View}
+    {next : State Tx View Seqno Event}
+    (properties : StructuralBundle state)
+    (viewIsNext : state.nextView newView)
+    (activeNew : next.activeView newView)
+    (activeOther :
+      forall view,
+        Not (view = newView) -> next.activeView view = state.activeView view) :
+    HasCurrentView next := by
+  refine ⟨newView, activeNew, ?_⟩
+  intro later laterGt activeLater
+  have laterNe : Not (later = newView) := fun laterEq => laterGt.2 laterEq.symm
+  rw [activeOther later laterNe] at activeLater
+  exact viewIsNext.1
+    (properties.activeViewsArePrefix later newView ⟨activeLater, laterGt⟩)
+
+theorem initialStatuses :
+    StatusBundle (initialState : State Tx View Seqno Event) where
+  toResponseBundle := initialResponses
+  statusHasRwResponse := initialProperties.statusHasRwResponse
+  hasCurrentView := initialHasCurrentView
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxRequestPreservesStatuses
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : StatusBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    StatusBundle (rwTxRequestNext state tx event) := by
+  refine
+    { toResponseBundle :=
+        rwTxRequestPreservesResponses
+          properties.toResponseBundle nextTx nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      rwTxRequestNext
+    ] using properties.statusHasRwResponse
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit
+  [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem roTxRequestPreservesStatuses
+    {state : State Tx View Seqno Event}
+    {tx : Tx}
+    {event : Event}
+    (properties : StatusBundle state)
+    (nextTx : state.nextTx tx)
+    (nextEvent : state.nextHistoryEvent event) :
+    StatusBundle (roTxRequestNext state tx event) := by
+  refine
+    { toResponseBundle :=
+        roTxRequestPreservesResponses
+          properties.toResponseBundle nextTx nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      roTxRequestNext
+    ] using properties.statusHasRwResponse
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem rwTxExecutePreservesStatuses
+    {state : State Tx View Seqno Event}
+    {request : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : StatusBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (txNotInLedger : Not (state.txInLedger (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    StatusBundle (rwTxExecuteNext state request branch slot) := by
+  refine
+    { toResponseBundle :=
+        rwTxExecutePreservesResponses
+          properties.toResponseBundle
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      rwTxExecuteNext
+    ] using properties.statusHasRwResponse
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+theorem appendOtherTxnPreservesStatuses
+    {state : State Tx View Seqno Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : StatusBundle state)
+    (branchIsActive : state.activeView branch)
+    (nextSlot : state.nextLedgerSlot branch slot) :
+    StatusBundle (appendOtherTxnNext state branch slot) := by
+  refine
+    { toResponseBundle :=
+        appendOtherTxnPreservesResponses
+          properties.toResponseBundle
+          branchIsActive
+          nextSlot
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      appendOtherTxnNext
+    ] using properties.statusHasRwResponse
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem rwTxResponsePreservesStatuses
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {slot : Seqno}
+    (properties : StatusBundle state)
+    (requestIsRw : state.rwRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (entryIsClient : state.clientEntry branch slot)
+    (entryMatches : state.entryTx branch slot = state.eventTx request)
+    (nextEvent : state.nextHistoryEvent response) :
+    StatusBundle (rwTxResponseNext state request branch slot response) := by
+  refine
+    { toResponseBundle :=
+        rwTxResponsePreservesResponses
+          properties.toResponseBundle
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · rw [StatusHasRwResponse]
+    intro status statusIsStatus
+    have oldStatus : state.statusEvent status := by
+      simpa [State.statusEvent, rwTxResponseNext] using statusIsStatus
+    have statusNe : Not (status = response) := by
+      refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+      rcases oldStatus with statusIsCommitted | statusIsInvalid
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl statusIsCommitted))))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr statusIsInvalid))))
+    rcases properties.statusHasRwResponse status oldStatus with
+      ⟨oldResponse, oldResponseIsRw, oldResponseLt, oldView, oldSeqno⟩
+    have oldResponseNe : Not (oldResponse = response) :=
+      classifiedEventNeNext properties.historyTypeOk nextEvent
+        (Or.inr (Or.inl oldResponseIsRw))
+    exact
+      ⟨oldResponse,
+        by simpa [rwTxResponseNext, oldResponseNe] using oldResponseIsRw,
+        oldResponseLt,
+        by simpa [rwTxResponseNext, oldResponseNe, statusNe] using oldView,
+        by simpa [rwTxResponseNext, oldResponseNe, statusNe] using oldSeqno⟩
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem roTxResponsePreservesStatuses
+    {state : State Tx View Seqno Event}
+    {request response : Event}
+    {branch : View}
+    {last : Seqno}
+    (properties : StatusBundle state)
+    (requestIsRo : state.roRequestEvent request)
+    (notResponded : Not (state.responded (state.eventTx request)))
+    (branchIsActive : state.activeView branch)
+    (lastSlot : state.lastLedgerSlot branch last)
+    (nextEvent : state.nextHistoryEvent response) :
+    StatusBundle (roTxResponseNext state request branch last response) := by
+  refine
+    { toResponseBundle :=
+        roTxResponsePreservesResponses
+          properties.toResponseBundle
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · rw [StatusHasRwResponse]
+    intro status statusIsStatus
+    have oldStatus : state.statusEvent status := by
+      simpa [State.statusEvent, roTxResponseNext] using statusIsStatus
+    have statusNe : Not (status = response) := by
+      refine classifiedEventNeNext properties.historyTypeOk nextEvent ?_
+      rcases oldStatus with statusIsCommitted | statusIsInvalid
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl statusIsCommitted))))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr statusIsInvalid))))
+    rcases properties.statusHasRwResponse status oldStatus with
+      ⟨oldResponse, oldResponseIsRw, oldResponseLt, oldView, oldSeqno⟩
+    have oldResponseNe : Not (oldResponse = response) :=
+      classifiedEventNeNext properties.historyTypeOk nextEvent
+        (Or.inr (Or.inl oldResponseIsRw))
+    exact
+      ⟨oldResponse,
+        by simpa [roTxResponseNext, oldResponseNe] using oldResponseIsRw,
+        oldResponseLt,
+        by simpa [roTxResponseNext, oldResponseNe, statusNe] using oldView,
+        by simpa [roTxResponseNext, oldResponseNe, statusNe] using oldSeqno⟩
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusCommittedResponsePreservesStatuses
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    {current : View}
+    (properties : StatusBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (viewIsCurrent : state.currentView current)
+    (responseSlotExists :
+      state.ledgerEntry current (state.eventSeqno response))
+    (responseEntryMatches :
+      state.entryView current (state.eventSeqno response) =
+        state.eventView response)
+    (notInvalid :
+      Not (Exists fun invalid =>
+        state.invalidStatusEvent invalid /\
+          state.eventView invalid = state.eventView response /\
+            state.eventSeqno invalid <= state.eventSeqno response))
+    (nextEvent : state.nextHistoryEvent status) :
+    StatusBundle (statusCommittedResponseNext state response status) := by
+  have responseUsed : state.eventUsed response :=
+    (properties.historyTypeOk response).2 (Or.inr (Or.inl responseIsRw))
+  have responseLtStatus :=
+    usedEventLtNext properties.historyIsPrefix responseUsed nextEvent
+  refine
+    { toResponseBundle :=
+        statusCommittedResponsePreservesResponses
+          properties.toResponseBundle
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · rw [StatusHasRwResponse]
+    intro candidate candidateIsStatus
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      exact
+        ⟨response,
+          by simpa [statusCommittedResponseNext] using responseIsRw,
+          responseLtStatus,
+          by simp [statusCommittedResponseNext, responseLtStatus.2],
+          by simp [statusCommittedResponseNext, responseLtStatus.2]⟩
+    · have oldStatus : state.statusEvent candidate := by
+        simpa [
+          State.statusEvent,
+          statusCommittedResponseNext,
+          candidateEq
+        ] using candidateIsStatus
+      rcases properties.statusHasRwResponse candidate oldStatus with
+        ⟨oldResponse, oldResponseIsRw, oldResponseLt, oldView, oldSeqno⟩
+      have oldResponseNe : Not (oldResponse = status) :=
+        classifiedEventNeNext properties.historyTypeOk nextEvent
+          (Or.inr (Or.inl oldResponseIsRw))
+      exact
+        ⟨oldResponse,
+          by simpa [statusCommittedResponseNext] using oldResponseIsRw,
+          oldResponseLt,
+          by
+            simpa [
+              statusCommittedResponseNext,
+              oldResponseNe,
+              candidateEq
+            ] using oldView,
+          by
+            simpa [
+              statusCommittedResponseNext,
+              oldResponseNe,
+              candidateEq
+            ] using oldSeqno⟩
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem statusInvalidResponsePreservesStatuses
+    {state : State Tx View Seqno Event}
+    {response status : Event}
+    (properties : StatusBundle state)
+    (responseIsRw : state.rwResponseEvent response)
+    (statusAllowed : state.invalidStatusAllowed response)
+    (nextEvent : state.nextHistoryEvent status) :
+    StatusBundle (statusInvalidResponseNext state response status) := by
+  have responseUsed : state.eventUsed response :=
+    (properties.historyTypeOk response).2 (Or.inr (Or.inl responseIsRw))
+  have responseLtStatus :=
+    usedEventLtNext properties.historyIsPrefix responseUsed nextEvent
+  refine
+    { toResponseBundle :=
+        statusInvalidResponsePreservesResponses
+          properties.toResponseBundle
+          responseIsRw
+          statusAllowed
+          nextEvent
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · rw [StatusHasRwResponse]
+    intro candidate candidateIsStatus
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      exact
+        ⟨response,
+          by simpa [statusInvalidResponseNext] using responseIsRw,
+          responseLtStatus,
+          by simp [statusInvalidResponseNext, responseLtStatus.2],
+          by simp [statusInvalidResponseNext, responseLtStatus.2]⟩
+    · have oldStatus : state.statusEvent candidate := by
+        simpa [
+          State.statusEvent,
+          statusInvalidResponseNext,
+          candidateEq
+        ] using candidateIsStatus
+      rcases properties.statusHasRwResponse candidate oldStatus with
+        ⟨oldResponse, oldResponseIsRw, oldResponseLt, oldView, oldSeqno⟩
+      have oldResponseNe : Not (oldResponse = status) :=
+        classifiedEventNeNext properties.historyTypeOk nextEvent
+          (Or.inr (Or.inl oldResponseIsRw))
+      exact
+        ⟨oldResponse,
+          by simpa [statusInvalidResponseNext] using oldResponseIsRw,
+          oldResponseLt,
+          by
+            simpa [
+              statusInvalidResponseNext,
+              oldResponseNe,
+              candidateEq
+            ] using oldView,
+          by
+            simpa [
+              statusInvalidResponseNext,
+              oldResponseNe,
+              candidateEq
+            ] using oldSeqno⟩
+  · exact hasCurrentViewOfActiveEq (fun _ => rfl) properties.hasCurrentView
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem truncateLedgerPreservesStatuses
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    {cut : Seqno}
+    (properties : StatusBundle state)
+    (sourceIsActive : state.activeView source)
+    (cutExists : state.ledgerEntry source cut)
+    (sourceIsValid : state.validTruncationSource source cut)
+    (viewIsNext : state.nextView newView) :
+    StatusBundle (truncateLedgerNext state source cut newView) := by
+  refine
+    { toResponseBundle :=
+        truncateLedgerPreservesResponses
+          properties.toResponseBundle
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      truncateLedgerNext
+    ] using properties.statusHasRwResponse
+  · refine
+      nextViewIsCurrent
+        properties.toStructuralBundle
+        viewIsNext
+        (by simp [truncateLedgerNext, updateUnary])
+        ?_
+    intro view viewNe
+    simp [truncateLedgerNext, updateUnary, viewNe]
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+theorem truncateLedgerToEmptyPreservesStatuses
+    {state : State Tx View Seqno Event}
+    {source newView : View}
+    (properties : StatusBundle state)
+    (sourceIsActive : state.activeView source)
+    (noCommitted : state.noCommittedTxId)
+    (viewIsNext : state.nextView newView) :
+    StatusBundle (truncateLedgerToEmptyNext state newView) := by
+  refine
+    { toResponseBundle :=
+        truncateLedgerToEmptyPreservesResponses
+          properties.toResponseBundle
+          sourceIsActive
+          noCommitted
+          viewIsNext
+      statusHasRwResponse := ?_
+      hasCurrentView := ?_ }
+  · simpa [
+      StatusHasRwResponse,
+      State.statusEvent,
+      truncateLedgerToEmptyNext
+    ] using properties.statusHasRwResponse
+  · refine
+      nextViewIsCurrent
+        properties.toStructuralBundle
+        viewIsNext
+        (by simp [truncateLedgerToEmptyNext, updateUnary])
+        ?_
+    intro view viewNe
+    simp [truncateLedgerToEmptyNext, updateUnary, viewNe]
+
+omit [OrderBot Seqno] [OrderBot Event] in
+theorem stepPreservesStatuses
+    {state next : State Tx View Seqno Event}
+    (properties : StatusBundle state)
+    (transition : Step state next) :
+    StatusBundle next := by
+  cases transition with
+  | rwTxRequest tx event nextTx nextEvent =>
+      exact rwTxRequestPreservesStatuses properties nextTx nextEvent
+  | roTxRequest tx event nextTx nextEvent =>
+      exact roTxRequestPreservesStatuses properties nextTx nextEvent
+  | rwTxExecute
+      request
+      branch
+      slot
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot =>
+      exact
+        rwTxExecutePreservesStatuses
+          properties
+          requestIsRw
+          txNotInLedger
+          branchIsActive
+          nextSlot
+  | appendOtherTxn branch slot branchIsActive nextSlot =>
+      exact appendOtherTxnPreservesStatuses properties branchIsActive nextSlot
+  | rwTxResponse
+      request
+      branch
+      slot
+      response
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent =>
+      exact
+        rwTxResponsePreservesStatuses
+          properties
+          requestIsRw
+          notResponded
+          branchIsActive
+          entryIsClient
+          entryMatches
+          nextEvent
+  | roTxResponse
+      request
+      branch
+      last
+      response
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent =>
+      exact
+        roTxResponsePreservesStatuses
+          properties
+          requestIsRo
+          notResponded
+          branchIsActive
+          lastSlot
+          nextEvent
+  | statusCommittedResponse
+      response
+      status
+      current
+      responseIsRw
+      viewIsCurrent
+      responseSlotExists
+      responseEntryMatches
+      notInvalid
+      nextEvent =>
+      exact
+        statusCommittedResponsePreservesStatuses
+          properties
+          responseIsRw
+          viewIsCurrent
+          responseSlotExists
+          responseEntryMatches
+          notInvalid
+          nextEvent
+  | statusInvalidResponse
+      response
+      status
+      responseIsRw
+      statusAllowed
+      nextEvent =>
+      exact
+        statusInvalidResponsePreservesStatuses
+          properties
+          responseIsRw
+          statusAllowed
+          nextEvent
+  | truncateLedger
+      source
+      cut
+      newView
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext =>
+      exact
+        truncateLedgerPreservesStatuses
+          properties
+          sourceIsActive
+          cutExists
+          sourceIsValid
+          viewIsNext
+  | truncateLedgerToEmpty
+      source
+      newView
+      sourceIsActive
+      noCommitted
+      viewIsNext =>
+      exact
+        truncateLedgerToEmptyPreservesStatuses
+          properties
+          sourceIsActive
+          noCommitted
+          viewIsNext
+
+theorem reachableStatuses
+    {state : State Tx View Seqno Event}
+    (reachable : Reachable state) :
+    StatusBundle state := by
+  induction reachable with
+  | initial => exact initialStatuses
+  | step _ transition properties =>
+      exact stepPreservesStatuses properties transition
+
+omit
+  [LinearOrder Tx] [OrderBot Tx]
   [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
 theorem coreUniqueRwTxs
     {state : State Tx View Seqno Event}
@@ -4801,13 +5399,13 @@ theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
     ProvedBundle state := by
-  have responses := reachableResponses reachable
+  have statuses := reachableStatuses reachable
   exact
-    { responses
-      uniqueRwTxs := coreUniqueRwTxs responses.toCoreBundle
-      sameObservations := coreSameObservations responses.toCoreBundle
+    { statuses
+      uniqueRwTxs := coreUniqueRwTxs statuses.toCoreBundle
+      sameObservations := coreSameObservations statuses.toCoreBundle
       atMostOnceObserved :=
-        provenanceAtMostOnceObserved responses.toProvenanceBundle
-      uniqueTxIds := responsesUniqueTxIds responses }
+        provenanceAtMostOnceObserved statuses.toProvenanceBundle
+      uniqueTxIds := responsesUniqueTxIds statuses.toResponseBundle }
 
 end CCFConsistency

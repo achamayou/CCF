@@ -363,13 +363,24 @@ structure ProvenanceBundle (state : State Tx View Seqno Event) : Prop
   clientEntryHasRequest : ClientEntryHasRequest state
   uniqueTxRequests : UniqueTxRequests state
 
+/-- Auxiliary: the active views always have a greatest element, so a current
+view exists. Every commit clause is stated relative to `currentView`, so this
+is a prerequisite for the commit layer. -/
+def HasCurrentView (state : State Tx View Seqno Event) : Prop :=
+  Exists fun current => state.currentView current
+
 structure ResponseBundle (state : State Tx View Seqno Event) : Prop
     extends ProvenanceBundle state where
   onlyObserveSentRequests : OnlyObserveSentRequests state
   uniqueResponseTxs : UniqueResponseTxs state
 
+structure StatusBundle (state : State Tx View Seqno Event) : Prop
+    extends ResponseBundle state where
+  statusHasRwResponse : StatusHasRwResponse state
+  hasCurrentView : HasCurrentView state
+
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  responses : ResponseBundle state
+  statuses : StatusBundle state
   uniqueRwTxs : UniqueRwTxs state
   sameObservations : SameObservations state
   atMostOnceObserved : AtMostOnceObserved state
