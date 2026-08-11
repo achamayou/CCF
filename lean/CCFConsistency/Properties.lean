@@ -386,6 +386,10 @@ structure CommitBundle (state : State Tx View Seqno Event) : Prop
 structure ClosureBundle (state : State Tx View Seqno Event) : Prop
     extends CommitBundle state where
   committedOrInvalid : CommittedOrInvalid state
+  onceCommittedPreviousIsCommitted : OnceCommittedPreviousIsCommitted state
+  onceCommittedOlderViewSuffixIsInvalid :
+    OnceCommittedOlderViewSuffixIsInvalid state
+  onceInvalidSameViewSuffixIsInvalid : OnceInvalidSameViewSuffixIsInvalid state
 
 structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
   closure : ClosureBundle state

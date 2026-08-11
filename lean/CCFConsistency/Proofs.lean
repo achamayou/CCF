@@ -6241,15 +6241,15 @@ theorem commitsUniqueCommittedSeqnos
       ⟨leftCommitted.1, rightCommitted.1, sameView, sameSeqno⟩
 
 omit [LinearOrder Tx] [OrderBot Tx]
-  [LinearOrder View] [OrderBot View]
-  [LinearOrder Seqno] [OrderBot Seqno]
-  [LinearOrder Event] [OrderBot Event] in
-/-- `CommittedOrInvalid` only inspects the status events and their transaction
-identifiers, so it transfers across any action that leaves the status relations
-alone and rewrites `eventView` and `eventSeqno` only at unclassified events. -/
-theorem committedOrInvalidTransfer
+  [OrderBot View] [OrderBot Seqno] [OrderBot Event] in
+/-- All four closure clauses only inspect the status events and their
+transaction identifiers, so they transfer across any action that leaves the
+status relations alone and rewrites `eventView` and `eventSeqno` only at
+unclassified events. -/
+theorem closureOfStatusPreserving
     {state next : State Tx View Seqno Event}
-    (committedOrInvalid : CommittedOrInvalid state)
+    (properties : ClosureBundle state)
+    (nextCommits : CommitBundle next)
     (committedEq :
       forall candidate,
         next.committedStatusEvent candidate =
@@ -6266,32 +6266,92 @@ theorem committedOrInvalidTransfer
       forall candidate,
         state.statusEvent candidate ->
           next.eventSeqno candidate = state.eventSeqno candidate) :
-    CommittedOrInvalid next := by
-  intro view seqno committed invalid
-  rcases committed with
-    ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
-  rcases invalid with
-    ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
-  rw [committedEq] at eventIsCommitted
-  rw [invalidEq] at eventIsInvalid
-  rw [viewEq committedEvent (Or.inl eventIsCommitted)] at committedView
-  rw [seqnoEq committedEvent (Or.inl eventIsCommitted)] at committedSeqno
-  rw [viewEq invalidEvent (Or.inr eventIsInvalid)] at invalidView
-  rw [seqnoEq invalidEvent (Or.inr eventIsInvalid)] at invalidSeqno
-  exact
-    committedOrInvalid view seqno
-      ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
-      ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+    ClosureBundle next := by
+  have statusBack :
+      forall candidate,
+        next.statusEvent candidate -> state.statusEvent candidate := by
+    intro candidate candidateIsStatus
+    rcases candidateIsStatus with candidateCommitted | candidateInvalid
+    · refine Or.inl ?_
+      rw [<- committedEq]
+      exact candidateCommitted
+    · refine Or.inr ?_
+      rw [<- invalidEq]
+      exact candidateInvalid
+  have committedBack :
+      forall view seqno,
+        next.committedTxId view seqno -> state.committedTxId view seqno := by
+    intro view seqno committed
+    rcases committed with ⟨witness, witnessCommitted, witnessView, witnessSeqno⟩
+    rw [committedEq] at witnessCommitted
+    have witnessIsStatus : state.statusEvent witness := Or.inl witnessCommitted
+    rw [viewEq witness witnessIsStatus] at witnessView
+    rw [seqnoEq witness witnessIsStatus] at witnessSeqno
+    exact ⟨witness, witnessCommitted, witnessView, witnessSeqno⟩
+  have invalidBack :
+      forall view seqno,
+        next.invalidTxId view seqno -> state.invalidTxId view seqno := by
+    intro view seqno invalid
+    rcases invalid with ⟨witness, witnessInvalid, witnessView, witnessSeqno⟩
+    rw [invalidEq] at witnessInvalid
+    have witnessIsStatus : state.statusEvent witness := Or.inr witnessInvalid
+    rw [viewEq witness witnessIsStatus] at witnessView
+    rw [seqnoEq witness witnessIsStatus] at witnessSeqno
+    exact ⟨witness, witnessInvalid, witnessView, witnessSeqno⟩
+  refine
+    { toCommitBundle := nextCommits
+      committedOrInvalid := ?_
+      onceCommittedPreviousIsCommitted := ?_
+      onceCommittedOlderViewSuffixIsInvalid := ?_
+      onceInvalidSameViewSuffixIsInvalid := ?_ }
+  · intro view seqno committed invalid
+    exact
+      properties.committedOrInvalid view seqno
+        (committedBack view seqno committed)
+        (invalidBack view seqno invalid)
+  · intro committedView committedSeq status hypotheses
+    rcases hypotheses with ⟨committed, statusIsStatus, statusView, statusSeqno⟩
+    have statusIsStatusOld := statusBack status statusIsStatus
+    rw [viewEq status statusIsStatusOld] at statusView
+    rw [seqnoEq status statusIsStatusOld] at statusSeqno
+    rw [committedEq status]
+    exact
+      properties.onceCommittedPreviousIsCommitted committedView committedSeq
+        status
+        ⟨committedBack committedView committedSeq committed,
+          statusIsStatusOld, statusView, statusSeqno⟩
+  · intro committedView committedSeq status hypotheses
+    rcases hypotheses with ⟨committed, statusIsStatus, statusViewLt, seqLe⟩
+    have statusIsStatusOld := statusBack status statusIsStatus
+    rw [viewEq status statusIsStatusOld] at statusViewLt
+    rw [seqnoEq status statusIsStatusOld] at seqLe
+    rw [invalidEq status]
+    exact
+      properties.onceCommittedOlderViewSuffixIsInvalid committedView
+        committedSeq status
+        ⟨committedBack committedView committedSeq committed,
+          statusIsStatusOld, statusViewLt, seqLe⟩
+  · intro invalidView invalidSeq status hypotheses
+    rcases hypotheses with ⟨invalid, statusIsStatus, statusView, seqLe⟩
+    have statusIsStatusOld := statusBack status statusIsStatus
+    rw [viewEq status statusIsStatusOld] at statusView
+    rw [seqnoEq status statusIsStatusOld] at seqLe
+    rw [invalidEq status]
+    exact
+      properties.onceInvalidSameViewSuffixIsInvalid invalidView invalidSeq
+        status
+        ⟨invalidBack invalidView invalidSeq invalid, statusIsStatusOld,
+          statusView, seqLe⟩
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
-/-- The specialisation of `committedOrInvalidTransfer` used by every action
+/-- The specialisation of `closureOfStatusPreserving` used by every action
 whose only event change classifies a fresh history event. -/
-theorem committedOrInvalidOfFreshEvent
+theorem closureOfFreshEvent
     {state next : State Tx View Seqno Event}
     {fresh : Event}
-    (properties : StructuralBundle state)
-    (committedOrInvalid : CommittedOrInvalid state)
+    (properties : ClosureBundle state)
+    (nextCommits : CommitBundle next)
     (nextEvent : state.nextHistoryEvent fresh)
     (committedEq :
       forall candidate,
@@ -6309,22 +6369,31 @@ theorem committedOrInvalidOfFreshEvent
       forall candidate,
         Not (candidate = fresh) ->
           next.eventSeqno candidate = state.eventSeqno candidate) :
-    CommittedOrInvalid next :=
-  committedOrInvalidTransfer
-    committedOrInvalid
+    ClosureBundle next :=
+  closureOfStatusPreserving
+    properties
+    nextCommits
     committedEq
     invalidEq
     (fun candidate candidateIsStatus =>
       viewEq candidate
-        (statusEventNeFresh properties nextEvent candidateIsStatus))
+        (statusEventNeFresh properties.toStructuralBundle nextEvent
+          candidateIsStatus))
     (fun candidate candidateIsStatus =>
       seqnoEq candidate
-        (statusEventNeFresh properties nextEvent candidateIsStatus))
+        (statusEventNeFresh properties.toStructuralBundle nextEvent
+          candidateIsStatus))
 
 theorem initialClosure :
     ClosureBundle (initialState : State Tx View Seqno Event) where
   toCommitBundle := initialCommits
   committedOrInvalid := initialProperties.committedOrInvalid
+  onceCommittedPreviousIsCommitted :=
+    initialProperties.onceCommittedPreviousIsCommitted
+  onceCommittedOlderViewSuffixIsInvalid :=
+    initialProperties.onceCommittedOlderViewSuffixIsInvalid
+  onceInvalidSameViewSuffixIsInvalid :=
+    initialProperties.onceInvalidSameViewSuffixIsInvalid
 
 omit
   [OrderBot Tx]
@@ -6337,12 +6406,11 @@ theorem rwTxRequestPreservesClosure
     (nextTx : state.nextTx tx)
     (nextEvent : state.nextHistoryEvent event) :
     ClosureBundle (rwTxRequestNext state tx event) :=
-  { toCommitBundle :=
-      rwTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (rwTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit
   [OrderBot Tx]
@@ -6355,12 +6423,11 @@ theorem roTxRequestPreservesClosure
     (nextTx : state.nextTx tx)
     (nextEvent : state.nextHistoryEvent event) :
     ClosureBundle (roTxRequestNext state tx event) :=
-  { toCommitBundle :=
-      roTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (roTxRequestPreservesCommits properties.toCommitBundle nextTx nextEvent)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit
   [LinearOrder Tx] [OrderBot Tx]
@@ -6376,17 +6443,16 @@ theorem rwTxExecutePreservesClosure
     (branchIsActive : state.activeView branch)
     (nextSlot : state.nextLedgerSlot branch slot) :
     ClosureBundle (rwTxExecuteNext state request branch slot) :=
-  { toCommitBundle :=
-      rwTxExecutePreservesCommits
-        properties.toCommitBundle
-        requestIsRw
-        txNotInLedger
-        branchIsActive
-        nextSlot
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (rwTxExecutePreservesCommits
+      properties.toCommitBundle
+      requestIsRw
+      txNotInLedger
+      branchIsActive
+      nextSlot)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit
   [LinearOrder Tx] [OrderBot Tx]
@@ -6399,13 +6465,12 @@ theorem appendOtherTxnPreservesClosure
     (branchIsActive : state.activeView branch)
     (nextSlot : state.nextLedgerSlot branch slot) :
     ClosureBundle (appendOtherTxnNext state branch slot) :=
-  { toCommitBundle :=
-      appendOtherTxnPreservesCommits
-        properties.toCommitBundle branchIsActive nextSlot
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (appendOtherTxnPreservesCommits
+      properties.toCommitBundle branchIsActive nextSlot)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
@@ -6422,26 +6487,21 @@ theorem rwTxResponsePreservesClosure
     (entryMatches : state.entryTx branch slot = state.eventTx request)
     (nextEvent : state.nextHistoryEvent response) :
     ClosureBundle (rwTxResponseNext state request branch slot response) :=
-  { toCommitBundle :=
-      rwTxResponsePreservesCommits
-        properties.toCommitBundle
-        requestIsRw
-        notResponded
-        branchIsActive
-        entryIsClient
-        entryMatches
-        nextEvent
-    committedOrInvalid :=
-      committedOrInvalidOfFreshEvent
-        properties.toStructuralBundle
-        properties.committedOrInvalid
-        nextEvent
-        (fun _ => rfl)
-        (fun _ => rfl)
-        (fun candidate candidateNe => by
-          simp [rwTxResponseNext, candidateNe])
-        (fun candidate candidateNe => by
-          simp [rwTxResponseNext, candidateNe]) }
+  closureOfFreshEvent
+    properties
+    (rwTxResponsePreservesCommits
+      properties.toCommitBundle
+      requestIsRw
+      notResponded
+      branchIsActive
+      entryIsClient
+      entryMatches
+      nextEvent)
+    nextEvent
+    (fun _ => rfl)
+    (fun _ => rfl)
+    (fun candidate candidateNe => by simp [rwTxResponseNext, candidateNe])
+    (fun candidate candidateNe => by simp [rwTxResponseNext, candidateNe])
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
@@ -6457,25 +6517,20 @@ theorem roTxResponsePreservesClosure
     (lastSlot : state.lastLedgerSlot branch last)
     (nextEvent : state.nextHistoryEvent response) :
     ClosureBundle (roTxResponseNext state request branch last response) :=
-  { toCommitBundle :=
-      roTxResponsePreservesCommits
-        properties.toCommitBundle
-        requestIsRo
-        notResponded
-        branchIsActive
-        lastSlot
-        nextEvent
-    committedOrInvalid :=
-      committedOrInvalidOfFreshEvent
-        properties.toStructuralBundle
-        properties.committedOrInvalid
-        nextEvent
-        (fun _ => rfl)
-        (fun _ => rfl)
-        (fun candidate candidateNe => by
-          simp [roTxResponseNext, candidateNe])
-        (fun candidate candidateNe => by
-          simp [roTxResponseNext, candidateNe]) }
+  closureOfFreshEvent
+    properties
+    (roTxResponsePreservesCommits
+      properties.toCommitBundle
+      requestIsRo
+      notResponded
+      branchIsActive
+      lastSlot
+      nextEvent)
+    nextEvent
+    (fun _ => rfl)
+    (fun _ => rfl)
+    (fun candidate candidateNe => by simp [roTxResponseNext, candidateNe])
+    (fun candidate candidateNe => by simp [roTxResponseNext, candidateNe])
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
@@ -6498,6 +6553,62 @@ theorem statusCommittedResponsePreservesClosure
             state.eventSeqno invalid <= state.eventSeqno response))
     (nextEvent : state.nextHistoryEvent status) :
     ClosureBundle (statusCommittedResponseNext state response status) := by
+  -- Split each new-state fact into an old fact or the freshly created one.
+  have statusSplit :
+      forall candidate,
+        (statusCommittedResponseNext state response status).statusEvent
+            candidate ->
+          state.statusEvent candidate \/ candidate = status := by
+    intro candidate candidateIsStatus
+    by_cases candidateEq : candidate = status
+    · exact Or.inr candidateEq
+    · refine Or.inl ?_
+      rcases candidateIsStatus with candidateCommitted | candidateInvalid
+      · exact Or.inl
+          (by
+            simpa [statusCommittedResponseNext, candidateEq] using
+              candidateCommitted)
+      · exact Or.inr
+          (by simpa [statusCommittedResponseNext] using candidateInvalid)
+  have committedSplit :
+      forall view seqno,
+        (statusCommittedResponseNext state response status).committedTxId
+            view seqno ->
+          state.committedTxId view seqno \/
+            (state.eventView response = view /\
+              state.eventSeqno response = seqno) := by
+    intro view seqno committed
+    rcases committed with ⟨witness, witnessCommitted, witnessView, witnessSeqno⟩
+    by_cases witnessEq : witness = status
+    · subst witness
+      exact Or.inr
+        ⟨by simpa [statusCommittedResponseNext] using witnessView,
+          by simpa [statusCommittedResponseNext] using witnessSeqno⟩
+    · exact Or.inl
+        ⟨witness,
+          by
+            simpa [statusCommittedResponseNext, witnessEq] using
+              witnessCommitted,
+          by simpa [statusCommittedResponseNext, witnessEq] using witnessView,
+          by
+            simpa [statusCommittedResponseNext, witnessEq] using
+              witnessSeqno⟩
+  have invalidBack :
+      forall view seqno,
+        (statusCommittedResponseNext state response status).invalidTxId
+            view seqno ->
+          state.invalidTxId view seqno := by
+    intro view seqno invalid
+    exact
+      invalidTxIdOfFreshEvent
+        properties.toStructuralBundle
+        nextEvent
+        invalid
+        (fun _ => rfl)
+        (fun candidate candidateNe => by
+          simp [statusCommittedResponseNext, candidateNe])
+        (fun candidate candidateNe => by
+          simp [statusCommittedResponseNext, candidateNe])
   refine
     { toCommitBundle :=
         statusCommittedResponsePreservesCommits
@@ -6508,46 +6619,175 @@ theorem statusCommittedResponsePreservesClosure
           responseEntryMatches
           notInvalid
           nextEvent
-      committedOrInvalid := ?_ }
-  intro view seqno committed invalid
-  -- The action adds no invalid status event, so the invalid side is old.
-  have invalidOld :=
-    invalidTxIdOfFreshEvent
-      properties.toStructuralBundle
-      nextEvent
-      invalid
-      (fun _ => rfl)
-      (fun candidate candidateNe => by
-        simp [statusCommittedResponseNext, candidateNe])
-      (fun candidate candidateNe => by
-        simp [statusCommittedResponseNext, candidateNe])
-  rcases committed with
-    ⟨committedEvent, eventIsCommitted, committedView, committedSeqno⟩
-  by_cases committedEq : committedEvent = status
-  · -- The freshly committed identifier is exactly the one the guard protects.
-    subst committedEvent
-    have viewEq : state.eventView response = view := by
-      simpa [statusCommittedResponseNext] using committedView
-    have seqnoEq : state.eventSeqno response = seqno := by
-      simpa [statusCommittedResponseNext] using committedSeqno
-    rcases invalidOld with
-      ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
-    exact
-      notInvalid
-        ⟨invalidEvent, eventIsInvalid, invalidView.trans viewEq.symm,
-          le_of_eq (invalidSeqno.trans seqnoEq.symm)⟩
-  · have eventIsCommittedOld : state.committedStatusEvent committedEvent := by
-      simpa [statusCommittedResponseNext, committedEq] using eventIsCommitted
-    exact
-      properties.committedOrInvalid view seqno
-        ⟨committedEvent, eventIsCommittedOld,
-          by
-            simpa [statusCommittedResponseNext, committedEq] using
-              committedView,
-          by
-            simpa [statusCommittedResponseNext, committedEq] using
-              committedSeqno⟩
-        invalidOld
+      committedOrInvalid := ?_
+      onceCommittedPreviousIsCommitted := ?_
+      onceCommittedOlderViewSuffixIsInvalid := ?_
+      onceInvalidSameViewSuffixIsInvalid := ?_ }
+  · intro view seqno committed invalid
+    have invalidOld := invalidBack view seqno invalid
+    rcases committedSplit view seqno committed with oldCommitted | newCommitted
+    · exact properties.committedOrInvalid view seqno oldCommitted invalidOld
+    · rcases invalidOld with
+        ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
+      exact
+        notInvalid
+          ⟨invalidEvent, eventIsInvalid,
+            invalidView.trans newCommitted.1.symm,
+            le_of_eq (invalidSeqno.trans newCommitted.2.symm)⟩
+  · intro committedView committedSeq candidate hypotheses
+    rcases hypotheses with
+      ⟨committed, candidateIsStatus, candidateView, candidateSeqno⟩
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      simp [statusCommittedResponseNext]
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewOld : state.eventView candidate = committedView := by
+        simpa [statusCommittedResponseNext, candidateEq] using candidateView
+      have candidateSeqnoOld :
+          state.eventSeqno candidate <= committedSeq := by
+        simpa [statusCommittedResponseNext, candidateEq] using candidateSeqno
+      have goalEq :
+          (statusCommittedResponseNext state response status).committedStatusEvent
+              candidate =
+            state.committedStatusEvent candidate := by
+        simp [statusCommittedResponseNext, candidateEq]
+      rw [goalEq]
+      rcases committedSplit committedView committedSeq committed with
+        oldCommitted | newCommitted
+      · exact
+          properties.onceCommittedPreviousIsCommitted
+            committedView committedSeq candidate
+            ⟨oldCommitted, candidateIsStatusOld, candidateViewOld,
+              candidateSeqnoOld⟩
+      · -- The new commit protects the candidate through the `notInvalid` guard.
+        rcases candidateIsStatusOld with candidateCommitted | candidateInvalid
+        · exact candidateCommitted
+        · exact absurd
+            ⟨candidate, candidateInvalid,
+              candidateViewOld.trans newCommitted.1.symm,
+              candidateSeqnoOld.trans_eq newCommitted.2.symm⟩
+            notInvalid
+  · intro committedView committedSeq candidate hypotheses
+    rcases hypotheses with
+      ⟨committed, candidateIsStatus, candidateViewLt, seqLe⟩
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      exfalso
+      have viewEq :
+          (statusCommittedResponseNext state response status).eventView status =
+            state.eventView response := by
+        simp [statusCommittedResponseNext]
+      have seqnoEq :
+          (statusCommittedResponseNext state response status).eventSeqno status =
+            state.eventSeqno response := by
+        simp [statusCommittedResponseNext]
+      rw [viewEq] at candidateViewLt
+      rw [seqnoEq] at seqLe
+      rcases committedSplit committedView committedSeq committed with
+        oldCommitted | newCommitted
+      · have inCurrent :=
+          properties.committedIdIsInCurrentLedger
+            committedView committedSeq current ⟨oldCommitted, viewIsCurrent⟩
+        have monotone :=
+          entryViewMonotoneAt
+            properties.toCoreBundle
+            inCurrent.2
+            responseSlotExists
+            responseEntryMatches
+            seqLe
+        exact candidateViewLt.2 (le_antisymm candidateViewLt.1 monotone)
+      · exact candidateViewLt.2 newCommitted.1
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewLtOld :
+          state.viewLt (state.eventView candidate) committedView := by
+        simpa [statusCommittedResponseNext, candidateEq] using candidateViewLt
+      have seqLeOld : committedSeq <= state.eventSeqno candidate := by
+        simpa [statusCommittedResponseNext, candidateEq] using seqLe
+      have goalEq :
+          (statusCommittedResponseNext state response status).invalidStatusEvent
+              candidate =
+            state.invalidStatusEvent candidate := by
+        simp [statusCommittedResponseNext]
+      rw [goalEq]
+      rcases committedSplit committedView committedSeq committed with
+        oldCommitted | newCommitted
+      · exact
+          properties.onceCommittedOlderViewSuffixIsInvalid
+            committedView committedSeq candidate
+            ⟨oldCommitted, candidateIsStatusOld, candidateViewLtOld, seqLeOld⟩
+      · rcases candidateIsStatusOld with candidateCommitted | candidateInvalid
+        · exfalso
+          -- A committed candidate above the new commit would need a later view.
+          have candidateCommittedId :
+              state.committedTxId
+                (state.eventView candidate) (state.eventSeqno candidate) :=
+            ⟨candidate, candidateCommitted, rfl, rfl⟩
+          have inCurrent :=
+            properties.committedIdIsInCurrentLedger
+              (state.eventView candidate) (state.eventSeqno candidate) current
+              ⟨candidateCommittedId, viewIsCurrent⟩
+          have responseLeCandidate :
+              state.eventSeqno response <= state.eventSeqno candidate :=
+            newCommitted.2.trans_le seqLeOld
+          have monotone :=
+            entryViewMonotoneAt
+              properties.toCoreBundle
+              responseEntryMatches
+              inCurrent.1
+              inCurrent.2
+              responseLeCandidate
+          rw [<- newCommitted.1] at candidateViewLtOld
+          exact
+            candidateViewLtOld.2
+              (le_antisymm candidateViewLtOld.1 monotone)
+        · exact candidateInvalid
+  · intro invalidView invalidSeq candidate hypotheses
+    rcases hypotheses with ⟨invalid, candidateIsStatus, candidateView, seqLe⟩
+    have invalidOld := invalidBack invalidView invalidSeq invalid
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      exfalso
+      have viewEq :
+          (statusCommittedResponseNext state response status).eventView status =
+            state.eventView response := by
+        simp [statusCommittedResponseNext]
+      have seqnoEq :
+          (statusCommittedResponseNext state response status).eventSeqno status =
+            state.eventSeqno response := by
+        simp [statusCommittedResponseNext]
+      rw [viewEq] at candidateView
+      rw [seqnoEq] at seqLe
+      rcases invalidOld with
+        ⟨invalidEvent, eventIsInvalid, witnessView, witnessSeqno⟩
+      exact
+        notInvalid
+          ⟨invalidEvent, eventIsInvalid,
+            witnessView.trans candidateView.symm,
+            witnessSeqno.trans_le seqLe⟩
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewOld : state.eventView candidate = invalidView := by
+        simpa [statusCommittedResponseNext, candidateEq] using candidateView
+      have seqLeOld : invalidSeq <= state.eventSeqno candidate := by
+        simpa [statusCommittedResponseNext, candidateEq] using seqLe
+      have goalEq :
+          (statusCommittedResponseNext state response status).invalidStatusEvent
+              candidate =
+            state.invalidStatusEvent candidate := by
+        simp [statusCommittedResponseNext]
+      rw [goalEq]
+      exact
+        properties.onceInvalidSameViewSuffixIsInvalid
+          invalidView invalidSeq candidate
+          ⟨invalidOld, candidateIsStatusOld, candidateViewOld, seqLeOld⟩
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
@@ -6559,6 +6799,58 @@ theorem statusInvalidResponsePreservesClosure
     (statusAllowed : state.invalidStatusAllowed response)
     (nextEvent : state.nextHistoryEvent status) :
     ClosureBundle (statusInvalidResponseNext state response status) := by
+  have statusSplit :
+      forall candidate,
+        (statusInvalidResponseNext state response status).statusEvent
+            candidate ->
+          state.statusEvent candidate \/ candidate = status := by
+    intro candidate candidateIsStatus
+    by_cases candidateEq : candidate = status
+    · exact Or.inr candidateEq
+    · refine Or.inl ?_
+      rcases candidateIsStatus with candidateCommitted | candidateInvalid
+      · exact Or.inl
+          (by simpa [statusInvalidResponseNext] using candidateCommitted)
+      · exact Or.inr
+          (by
+            simpa [statusInvalidResponseNext, candidateEq] using
+              candidateInvalid)
+  have committedBack :
+      forall view seqno,
+        (statusInvalidResponseNext state response status).committedTxId
+            view seqno ->
+          state.committedTxId view seqno := by
+    intro view seqno committed
+    exact
+      committedTxIdOfFreshEvent
+        properties.toStructuralBundle
+        nextEvent
+        committed
+        (fun _ => rfl)
+        (fun candidate candidateNe => by
+          simp [statusInvalidResponseNext, candidateNe])
+        (fun candidate candidateNe => by
+          simp [statusInvalidResponseNext, candidateNe])
+  have invalidSplit :
+      forall view seqno,
+        (statusInvalidResponseNext state response status).invalidTxId
+            view seqno ->
+          state.invalidTxId view seqno \/
+            (state.eventView response = view /\
+              state.eventSeqno response = seqno) := by
+    intro view seqno invalid
+    rcases invalid with ⟨witness, witnessInvalid, witnessView, witnessSeqno⟩
+    by_cases witnessEq : witness = status
+    · subst witness
+      exact Or.inr
+        ⟨by simpa [statusInvalidResponseNext] using witnessView,
+          by simpa [statusInvalidResponseNext] using witnessSeqno⟩
+    · exact Or.inl
+        ⟨witness,
+          by
+            simpa [statusInvalidResponseNext, witnessEq] using witnessInvalid,
+          by simpa [statusInvalidResponseNext, witnessEq] using witnessView,
+          by simpa [statusInvalidResponseNext, witnessEq] using witnessSeqno⟩
   refine
     { toCommitBundle :=
         statusInvalidResponsePreservesCommits
@@ -6566,47 +6858,147 @@ theorem statusInvalidResponsePreservesClosure
           responseIsRw
           statusAllowed
           nextEvent
-      committedOrInvalid := ?_ }
-  intro view seqno committed invalid
-  -- The action adds no committed status event, so the committed side is old.
-  have committedOld :=
-    committedTxIdOfFreshEvent
-      properties.toStructuralBundle
-      nextEvent
-      committed
-      (fun _ => rfl)
-      (fun candidate candidateNe => by
-        simp [statusInvalidResponseNext, candidateNe])
-      (fun candidate candidateNe => by
-        simp [statusInvalidResponseNext, candidateNe])
-  rcases invalid with
-    ⟨invalidEvent, eventIsInvalid, invalidView, invalidSeqno⟩
-  by_cases invalidEq : invalidEvent = status
-  · -- The freshly invalidated identifier cannot already be committed.
-    subst invalidEvent
-    have viewEq : state.eventView response = view := by
-      simpa [statusInvalidResponseNext] using invalidView
-    have seqnoEq : state.eventSeqno response = seqno := by
-      simpa [statusInvalidResponseNext] using invalidSeqno
-    have committedAtResponse :
-        state.committedTxId (state.eventView response) seqno := by
-      rw [viewEq]
-      exact committedOld
-    exact
-      noCommitAtOrAboveInvalidResponse
-        properties.toCommitBundle
-        responseIsRw
-        statusAllowed
-        (le_of_eq seqnoEq)
-        committedAtResponse
-  · have eventIsInvalidOld : state.invalidStatusEvent invalidEvent := by
-      simpa [statusInvalidResponseNext, invalidEq] using eventIsInvalid
-    exact
-      properties.committedOrInvalid view seqno
-        committedOld
-        ⟨invalidEvent, eventIsInvalidOld,
-          by simpa [statusInvalidResponseNext, invalidEq] using invalidView,
-          by simpa [statusInvalidResponseNext, invalidEq] using invalidSeqno⟩
+      committedOrInvalid := ?_
+      onceCommittedPreviousIsCommitted := ?_
+      onceCommittedOlderViewSuffixIsInvalid := ?_
+      onceInvalidSameViewSuffixIsInvalid := ?_ }
+  · intro view seqno committed invalid
+    have committedOld := committedBack view seqno committed
+    rcases invalidSplit view seqno invalid with oldInvalid | newInvalid
+    · exact properties.committedOrInvalid view seqno committedOld oldInvalid
+    · have committedAtResponse :
+          state.committedTxId (state.eventView response) seqno := by
+        rw [newInvalid.1]
+        exact committedOld
+      exact
+        noCommitAtOrAboveInvalidResponse
+          properties.toCommitBundle
+          responseIsRw
+          statusAllowed
+          (le_of_eq newInvalid.2)
+          committedAtResponse
+  · intro committedView committedSeq candidate hypotheses
+    rcases hypotheses with
+      ⟨committed, candidateIsStatus, candidateView, candidateSeqno⟩
+    have committedOld := committedBack committedView committedSeq committed
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      exfalso
+      have viewEq :
+          (statusInvalidResponseNext state response status).eventView status =
+            state.eventView response := by
+        simp [statusInvalidResponseNext]
+      have seqnoEq :
+          (statusInvalidResponseNext state response status).eventSeqno status =
+            state.eventSeqno response := by
+        simp [statusInvalidResponseNext]
+      rw [viewEq] at candidateView
+      rw [seqnoEq] at candidateSeqno
+      have committedAtResponse :
+          state.committedTxId (state.eventView response) committedSeq := by
+        rw [candidateView]
+        exact committedOld
+      exact
+        noCommitAtOrAboveInvalidResponse
+          properties.toCommitBundle
+          responseIsRw
+          statusAllowed
+          candidateSeqno
+          committedAtResponse
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewOld : state.eventView candidate = committedView := by
+        simpa [statusInvalidResponseNext, candidateEq] using candidateView
+      have candidateSeqnoOld :
+          state.eventSeqno candidate <= committedSeq := by
+        simpa [statusInvalidResponseNext, candidateEq] using candidateSeqno
+      have goalEq :
+          (statusInvalidResponseNext state response status).committedStatusEvent
+              candidate =
+            state.committedStatusEvent candidate := by
+        simp [statusInvalidResponseNext]
+      rw [goalEq]
+      exact
+        properties.onceCommittedPreviousIsCommitted
+          committedView committedSeq candidate
+          ⟨committedOld, candidateIsStatusOld, candidateViewOld,
+            candidateSeqnoOld⟩
+  · intro committedView committedSeq candidate hypotheses
+    rcases hypotheses with
+      ⟨committed, candidateIsStatus, candidateViewLt, seqLe⟩
+    have committedOld := committedBack committedView committedSeq committed
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      simp [statusInvalidResponseNext]
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewLtOld :
+          state.viewLt (state.eventView candidate) committedView := by
+        simpa [statusInvalidResponseNext, candidateEq] using candidateViewLt
+      have seqLeOld : committedSeq <= state.eventSeqno candidate := by
+        simpa [statusInvalidResponseNext, candidateEq] using seqLe
+      have goalEq :
+          (statusInvalidResponseNext state response status).invalidStatusEvent
+              candidate =
+            state.invalidStatusEvent candidate := by
+        simp [statusInvalidResponseNext, candidateEq]
+      rw [goalEq]
+      exact
+        properties.onceCommittedOlderViewSuffixIsInvalid
+          committedView committedSeq candidate
+          ⟨committedOld, candidateIsStatusOld, candidateViewLtOld, seqLeOld⟩
+  · intro invalidView invalidSeq candidate hypotheses
+    rcases hypotheses with ⟨invalid, candidateIsStatus, candidateView, seqLe⟩
+    by_cases candidateEq : candidate = status
+    · subst candidate
+      simp [statusInvalidResponseNext]
+    · have candidateIsStatusOld : state.statusEvent candidate := by
+        rcases statusSplit candidate candidateIsStatus with oldStatus | isNew
+        · exact oldStatus
+        · exact absurd isNew candidateEq
+      have candidateViewOld : state.eventView candidate = invalidView := by
+        simpa [statusInvalidResponseNext, candidateEq] using candidateView
+      have seqLeOld : invalidSeq <= state.eventSeqno candidate := by
+        simpa [statusInvalidResponseNext, candidateEq] using seqLe
+      have goalEq :
+          (statusInvalidResponseNext state response status).invalidStatusEvent
+              candidate =
+            state.invalidStatusEvent candidate := by
+        simp [statusInvalidResponseNext, candidateEq]
+      rw [goalEq]
+      rcases invalidSplit invalidView invalidSeq invalid with
+        oldInvalid | newInvalid
+      · exact
+          properties.onceInvalidSameViewSuffixIsInvalid
+            invalidView invalidSeq candidate
+            ⟨oldInvalid, candidateIsStatusOld, candidateViewOld, seqLeOld⟩
+      · -- A committed candidate at or above the new invalid slot is impossible.
+        rcases candidateIsStatusOld with candidateCommitted | candidateInvalid
+        · exfalso
+          have candidateCommittedId :
+              state.committedTxId
+                (state.eventView candidate) (state.eventSeqno candidate) :=
+            ⟨candidate, candidateCommitted, rfl, rfl⟩
+          have viewEqResponse :
+              state.eventView candidate = state.eventView response :=
+            candidateViewOld.trans newInvalid.1.symm
+          have committedAtResponse :
+              state.committedTxId
+                (state.eventView response) (state.eventSeqno candidate) := by
+            rw [<- viewEqResponse]
+            exact candidateCommittedId
+          exact
+            noCommitAtOrAboveInvalidResponse
+              properties.toCommitBundle
+              responseIsRw
+              statusAllowed
+              (newInvalid.2.trans_le seqLeOld)
+              committedAtResponse
+        · exact candidateInvalid
 
 omit [OrderBot Seqno] [OrderBot Event] in
 theorem truncateLedgerPreservesClosure
@@ -6619,17 +7011,16 @@ theorem truncateLedgerPreservesClosure
     (sourceIsValid : state.validTruncationSource source cut)
     (viewIsNext : state.nextView newView) :
     ClosureBundle (truncateLedgerNext state source cut newView) :=
-  { toCommitBundle :=
-      truncateLedgerPreservesCommits
-        properties.toCommitBundle
-        sourceIsActive
-        cutExists
-        sourceIsValid
-        viewIsNext
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (truncateLedgerPreservesCommits
+      properties.toCommitBundle
+      sourceIsActive
+      cutExists
+      sourceIsValid
+      viewIsNext)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
   [OrderBot Event] in
@@ -6641,16 +7032,15 @@ theorem truncateLedgerToEmptyPreservesClosure
     (noCommitted : state.noCommittedTxId)
     (viewIsNext : state.nextView newView) :
     ClosureBundle (truncateLedgerToEmptyNext state newView) :=
-  { toCommitBundle :=
-      truncateLedgerToEmptyPreservesCommits
-        properties.toCommitBundle
-        sourceIsActive
-        noCommitted
-        viewIsNext
-    committedOrInvalid :=
-      committedOrInvalidTransfer
-        properties.committedOrInvalid
-        (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) }
+  closureOfStatusPreserving
+    properties
+    (truncateLedgerToEmptyPreservesCommits
+      properties.toCommitBundle
+      sourceIsActive
+      noCommitted
+      viewIsNext)
+    (fun _ => rfl) (fun _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+
 
 omit [OrderBot Seqno] [OrderBot Event] in
 theorem stepPreservesClosure

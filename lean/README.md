@@ -100,8 +100,9 @@ which adds request-before-observation ordering and an auxiliary
 more to the 24-clause `StatusBundle`, which adds status provenance and an
 auxiliary "a current view exists" clause. `stepPreservesCommits` extends it to
 the 25-clause `CommitBundle`, which adds the keystone commit clause, and
-`stepPreservesClosure` extends it to the 26-clause `ClosureBundle`, which adds
-commit and invalid exclusivity. `reachableCore`, `reachableProvenance`,
+`stepPreservesClosure` extends it to the 29-clause `ClosureBundle`, which adds
+commit and invalid exclusivity together with the three commit-status closure
+clauses. `reachableCore`, `reachableProvenance`,
 `reachableResponses`, `reachableStatuses`, `reachableCommits`, and
 `reachableClosure` lift those results to every reachable state. Six further
 full-spec properties are logical consequences of that inductive core:
@@ -121,12 +122,12 @@ theorem reachableProved
     ProvedBundle state
 ```
 
-It establishes 30 of the 36 translated properties for all reachable states,
+It establishes 33 of the 36 translated properties for all reachable states,
 over abstract and potentially infinite domains. `ClosureBundle` also carries two
 auxiliary strengthenings that are not themselves among the 36 translated
 clauses: `UniqueResponseTxs` and `HasCurrentView`.
 
-| Action                    | Preserves all 26 closure clauses |
+| Action                    | Preserves all 29 closure clauses |
 | ------------------------- | -------------------------------- |
 | `rwTxRequest`             | Proved                          |
 | `roTxRequest`             | Proved                          |
@@ -178,9 +179,9 @@ place.
 | `UniqueTxIds`                           | Proved from the responses  |
 | `UniqueCommittedSeqnos`                 | Proved from the commits    |
 | `CommittedOrInvalid`                    | Proved                     |
-| `OnceCommittedPreviousIsCommitted`      | Open                       |
-| `OnceCommittedOlderViewSuffixIsInvalid` | Open                       |
-| `OnceInvalidSameViewSuffixIsInvalid`    | Open                       |
+| `OnceCommittedPreviousIsCommitted`      | Proved                     |
+| `OnceCommittedOlderViewSuffixIsInvalid` | Proved                     |
+| `OnceInvalidSameViewSuffixIsInvalid`    | Proved                     |
 | `AllCommittedObserved`                  | Open                       |
 | `CommittedRwSerializable`               | Open                       |
 | `AtMostOnceObserved`                    | Proved from the provenance |
@@ -279,10 +280,7 @@ Two more clauses then follow without any induction of their own:
   same slot of the current view, so they have the same view, so they carry the
   same transaction. This is where `HasCurrentView` earns its place.
 
-## Fixed-point boundary
-
-The 6 remaining clauses are the two remaining commit-side `Once...` clauses,
-the same-view invalid suffix clause, and the three client-facing consequences.
+## How the closure layer closes
 
 `CommittedOrInvalid` is proved by the single lemma
 `noCommitAtOrAboveInvalidResponse`: each of the three disjuncts of
@@ -295,18 +293,34 @@ interesting one, and it needs the keystone commit clause together with
 That same lemma, applied at a later sequence number rather than at the
 response's own, is what `OnceCommittedPreviousIsCommitted` and
 `OnceInvalidSameViewSuffixIsInvalid` need for their `statusInvalidResponse`
-cases. `OnceCommittedOlderViewSuffixIsInvalid` instead needs
-`entryViewMonotoneAt` against the `statusCommittedResponse` guard. Both helper
-lemmas are already proved here, so those three clauses are mechanical rather
-than open-ended; they were left out only to keep this change reviewable.
+cases. Their `statusCommittedResponse` cases instead use the `notInvalid`
+guard: a status event in the same view at or below the newly committed slot
+cannot be invalid, so it must be committed.
+
+`OnceCommittedOlderViewSuffixIsInvalid` uses `entryViewMonotoneAt` against the
+`statusCommittedResponse` guard in both directions. If a status event in a
+strictly older view sat at or above the newly committed slot and were itself
+committed, the keystone clause would place both in the current view, and origin
+views increase along a branch, so the older view would have to be at least the
+newer one. That contradiction leaves only the invalid classification.
+
+All eight non-status actions go through `closureOfStatusPreserving`, which
+observes that the four clauses only inspect status events and their transaction
+identifiers, so they survive any action that leaves the status relations alone
+and rewrites `eventView` and `eventSeqno` only at unclassified events.
+
+## Fixed-point boundary
 
 `AllCommittedObserved`, `CommittedRwSerializable`, and
-`CommittedRwOrderedRealTime` are the client-facing statements. They need the
-closure clauses first, and then a further fact that the model does not yet
-record inductively: that the ledger position of a committed response is
-monotonic in the real-time order of the requests that produced them.
+`CommittedRwOrderedRealTime` are the three remaining clauses, and they are the
+client-facing statements rather than internal structure. They rest on a fact the
+model does not yet record inductively: that the ledger position of a committed
+response is monotonic in the real-time order of the requests that produced them.
+`OnlyObserveSentRequests` supplies half of that picture, since it already orders
+each observation after its request, but nothing yet relates the ledger slot of
+one committed response to the request event of a later one.
 
-No theorem in this project claims those 6 open properties.
+No theorem in this project claims those 3 open properties.
 
 ## Trust and correspondence
 
@@ -326,13 +340,12 @@ No theorem in this project claims those 6 open properties.
 
 ## Next proof layers
 
-1. Prove `OnceCommittedPreviousIsCommitted` and
-   `OnceInvalidSameViewSuffixIsInvalid` from
-   `noCommitAtOrAboveInvalidResponse`, applied at a later sequence number.
-2. Prove `OnceCommittedOlderViewSuffixIsInvalid` from `entryViewMonotoneAt`
-   against the `statusCommittedResponse` guard.
-3. Record ledger-position monotonicity for committed responses relative to the
-   real-time order of their requests.
-4. Derive `AllCommittedObserved`, `CommittedRwSerializable`, and
-   `CommittedRwOrderedRealTime`, then replace `ProvedBundle` with the complete
-   `PropertyBundle` in the reachable theorem.
+1. Record ledger-position monotonicity for committed responses relative to the
+   real-time order of their requests: if one committed response precedes the
+   request of another, its ledger slot is no later.
+2. Derive `AllCommittedObserved` from that fact plus
+   `CommittedResponseMatchesCurrentLedger`, which already places both
+   responses in the current view.
+3. Derive `CommittedRwSerializable` and `CommittedRwOrderedRealTime`, then
+   replace `ProvedBundle` with the complete `PropertyBundle` in the reachable
+   theorem.
