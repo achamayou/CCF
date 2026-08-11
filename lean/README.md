@@ -8,6 +8,9 @@ The model is unbounded: transactions, views, sequence numbers, and history
 events are abstract ordered types, and the final theorem quantifies over every
 state reachable through the ordinary Lean `Step` relation.
 
+All 35 Veil invariants and the one Veil safety property are proved for every
+reachable state, with no remaining assumptions or open cases.
+
 ## Contents
 
 - `CCFConsistency/Model.lean` defines the state, derived predicates,
@@ -15,7 +18,7 @@ state reachable through the ordinary Lean `Step` relation.
 - `CCFConsistency/Properties.lean` translates all 35 Veil invariants and the
   one Veil safety property.
 - `CCFConsistency/Proofs.lean` proves initialization, action preservation, and
-  the reachable-state result described below.
+  the complete reachable-state result described below.
 - `CCFConsistency/Trace.lean` evaluates finite action guards, calls the
   canonical transitions from `Model.lean`, and proves that each successful
   replay step is a canonical `Step`.
@@ -23,8 +26,6 @@ state reachable through the ordinary Lean `Step` relation.
   response path over `Nat` to rule out vacuous guards.
 - `trace_validation.py` reuses the Veil trace planner to generate and check a
   proof for a fresh implementation trace.
-- `PLAN.md` records the translation strategy and the proof-engineering fixed
-  point.
 
 ## Build
 
@@ -88,24 +89,39 @@ compiles this generated replay proof.
 
 ## What is proved
 
-`initialProperties` proves all 36 translated clauses for `initialState`.
+Every one of the 36 translated clauses holds in every reachable state. The
+exported theorem is:
 
-`stepPreservesCore` proves that every one of the ten actions preserves the
-17-clause `CoreBundle`. `stepPreservesProvenance` extends that to the 20-clause
-`ProvenanceBundle`, which adds stable copied transaction identifiers,
-client-entry request provenance, and unique request transactions.
-`stepPreservesResponses` extends it again to the 22-clause `ResponseBundle`,
-which adds request-before-observation ordering and an auxiliary
-"one response per transaction" clause. `stepPreservesStatuses` extends it once
-more to the 24-clause `StatusBundle`, which adds status provenance and an
-auxiliary "a current view exists" clause. `stepPreservesCommits` extends it to
-the 25-clause `CommitBundle`, which adds the keystone commit clause, and
-`stepPreservesClosure` extends it to the 29-clause `ClosureBundle`, which adds
-commit and invalid exclusivity together with the three commit-status closure
-clauses. `reachableCore`, `reachableProvenance`,
-`reachableResponses`, `reachableStatuses`, `reachableCommits`, and
-`reachableClosure` lift those results to every reachable state. Six further
-full-spec properties are logical consequences of that inductive core:
+```lean
+theorem reachableProved
+    (reachable : Reachable state) :
+    PropertyBundle state
+```
+
+`PropertyBundle` is the complete translation of all 35 Veil invariants and the
+one Veil safety property, so nothing is left assumed or omitted. The result
+holds over abstract and potentially infinite domains.
+
+`initialProperties` proves all 36 clauses for `initialState`. The preservation
+argument is built as a tower of inductive bundles, each one preserved by all
+ten actions and lifted to every reachable state:
+
+| Bundle              | Clauses | Adds                                                                       | Lifted by             |
+| ------------------- | ------- | -------------------------------------------------------------------------- | --------------------- |
+| `StructuralBundle`  | 14      | history, ledger and response shape                                          | (inside `CoreBundle`) |
+| `CoreBundle`        | 17      | client-entry origin, monotone origin views, ledger prefix origin            | `reachableCore`       |
+| `ProvenanceBundle`  | 20      | stable copied transaction ids, entry request provenance, unique requests    | `reachableProvenance` |
+| `ResponseBundle`    | 22      | request-before-observation ordering, one response per transaction           | `reachableResponses`  |
+| `StatusBundle`      | 24      | status provenance, existence of a current view                              | `reachableStatuses`   |
+| `CommitBundle`      | 25      | the keystone: the current view holds every committed entry                  | `reachableCommits`    |
+| `ClosureBundle`     | 29      | commit and invalid exclusivity, the three commit-status closure clauses     | `reachableClosure`    |
+
+Two of those clauses, `UniqueResponseTxs` and `HasCurrentView`, are auxiliary
+strengthenings rather than translated Veil invariants, which is why the bundle
+sizes run ahead of the count of translated clauses.
+
+The remaining nine translated properties are logical consequences of that
+inductive core rather than separate inductions:
 
 - `coreUniqueRwTxs`
 - `coreSameObservations`
@@ -113,19 +129,9 @@ full-spec properties are logical consequences of that inductive core:
 - `responsesUniqueTxIds`
 - `commitsCommittedResponseMatchesCurrentLedger`
 - `commitsUniqueCommittedSeqnos`
-
-The exported fixed-point theorem is:
-
-```lean
-theorem reachableProved
-    (reachable : Reachable state) :
-    ProvedBundle state
-```
-
-It establishes 33 of the 36 translated properties for all reachable states,
-over abstract and potentially infinite domains. `ClosureBundle` also carries two
-auxiliary strengthenings that are not themselves among the 36 translated
-clauses: `UniqueResponseTxs` and `HasCurrentView`.
+- `commitsCommittedRwSerializable`
+- `commitsAllCommittedObserved`
+- `commitsCommittedRwOrderedRealTime`
 
 | Action                    | Preserves all 29 closure clauses |
 | ------------------------- | -------------------------------- |
@@ -142,11 +148,10 @@ clauses: `UniqueResponseTxs` and `HasCurrentView`.
 
 ## Exact property coverage
 
-All rows have a proved initializer. "Proved" means preservation by all ten
-actions and an exported reachable-state theorem, either directly through
-`ClosureBundle` or as a consequence of it. "Open" means all ten preservation
-cases remain outside the exported theorem; no assumption is used in their
-place.
+Every row is proved for every reachable state. "Proved" means preservation by
+all ten actions inside one of the inductive bundles; "Proved from ..." means the
+clause is a logical consequence of a bundle rather than a separate induction.
+No assumption, admitted case or open obligation is used anywhere.
 
 | Lean property                           | Reachable-state status     |
 | --------------------------------------- | -------------------------- |
@@ -182,10 +187,10 @@ place.
 | `OnceCommittedPreviousIsCommitted`      | Proved                     |
 | `OnceCommittedOlderViewSuffixIsInvalid` | Proved                     |
 | `OnceInvalidSameViewSuffixIsInvalid`    | Proved                     |
-| `AllCommittedObserved`                  | Open                       |
-| `CommittedRwSerializable`               | Open                       |
+| `AllCommittedObserved`                  | Proved from the commits    |
+| `CommittedRwSerializable`               | Proved from the commits    |
 | `AtMostOnceObserved`                    | Proved from the provenance |
-| `CommittedRwOrderedRealTime`            | Open                       |
+| `CommittedRwOrderedRealTime`            | Proved from the commits    |
 
 ## How the provenance layer closes
 
@@ -309,18 +314,48 @@ observes that the four clauses only inspect status events and their transaction
 identifiers, so they survive any action that leaves the status relations alone
 and rewrites `eventView` and `eventSeqno` only at unclassified events.
 
-## Fixed-point boundary
+## How the client-facing properties close
 
-`AllCommittedObserved`, `CommittedRwSerializable`, and
-`CommittedRwOrderedRealTime` are the three remaining clauses, and they are the
-client-facing statements rather than internal structure. They rest on a fact the
-model does not yet record inductively: that the ledger position of a committed
-response is monotonic in the real-time order of the requests that produced them.
-`OnlyObserveSentRequests` supplies half of that picture, since it already orders
-each observation after its request, but nothing yet relates the ledger slot of
-one committed response to the request event of a later one.
+The last three clauses are the ones a CCF user actually cares about, and all
+three reduce to a single real-time fact, `committedResponseSeqnoLt`: a committed
+response that completes before a request is sent occupies a strictly earlier
+ledger slot than the committed response to that request.
 
-No theorem in this project claims those 3 open properties.
+That lemma is proved by contradiction, and the contradiction is supplied by the
+response layer rather than by any new induction. Suppose the later response sat
+at or below the earlier response's slot. Both committed responses live in the
+current view, so `LedgerPrefixMatchesFrontierOrigin` moves the later response's
+client entry down into the earlier response's own view. The earlier response
+would therefore have *observed* the later transaction, and
+`OnlyObserveSentRequests` puts the request for an observed transaction strictly
+before the observing response. `UniqueTxRequests` identifies that request with
+the given one, so the request would precede the earlier response, contradicting
+the real-time hypothesis.
+
+From there:
+
+- `commitsCommittedRwOrderedRealTime` combines the slot ordering with
+  `entryViewMonotoneAt`: a strictly earlier slot in the current view forces a
+  no-later origin view, which is exactly `txIdLt`.
+- `commitsAllCommittedObserved` reads the earlier response's own slot back out
+  of the later response's prefix, again through
+  `LedgerPrefixMatchesFrontierOrigin`.
+- `commitsCommittedRwSerializable` needs no real-time reasoning at all. Both
+  committed responses read prefixes of the same current view, so whichever has
+  the smaller frontier observes a subset (`observationsSubsetOfSeqnoLe`).
+
+## Possible next steps
+
+The translated specification is fully proved, so the remaining work is about
+reducing the trusted surface rather than closing obligations:
+
+1. Establish a machine-checked correspondence between the Veil DSL elaboration
+   and this hand-written transition system, replacing the manual translation
+   argument recorded above.
+2. Generalise the trace validator to check partial or streaming traces without
+   regenerating the whole replay module.
+3. Explore whether the same bundle tower can be reused for a refinement proof
+   against a lower-level model.
 
 ## Trust and correspondence
 
@@ -337,15 +372,3 @@ No theorem in this project claims those 3 open properties.
 - There is not yet a machine-checked equivalence theorem between the Veil DSL
   elaboration and this hand-written Lean transition system. The Veil model
   remains the canonical checked-in specification and CI gate.
-
-## Next proof layers
-
-1. Record ledger-position monotonicity for committed responses relative to the
-   real-time order of their requests: if one committed response precedes the
-   request of another, its ledger slot is no later.
-2. Derive `AllCommittedObserved` from that fact plus
-   `CommittedResponseMatchesCurrentLedger`, which already places both
-   responses in the current view.
-3. Derive `CommittedRwSerializable` and `CommittedRwOrderedRealTime`, then
-   replace `ProvedBundle` with the complete `PropertyBundle` in the reachable
-   theorem.

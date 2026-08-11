@@ -391,16 +391,6 @@ structure ClosureBundle (state : State Tx View Seqno Event) : Prop
     OnceCommittedOlderViewSuffixIsInvalid state
   onceInvalidSameViewSuffixIsInvalid : OnceInvalidSameViewSuffixIsInvalid state
 
-structure ProvedBundle (state : State Tx View Seqno Event) : Prop where
-  closure : ClosureBundle state
-  uniqueRwTxs : UniqueRwTxs state
-  sameObservations : SameObservations state
-  atMostOnceObserved : AtMostOnceObserved state
-  uniqueTxIds : UniqueTxIds state
-  committedResponseMatchesCurrentLedger :
-    CommittedResponseMatchesCurrentLedger state
-  uniqueCommittedSeqnos : UniqueCommittedSeqnos state
-
 structure PropertyBundle (state : State Tx View Seqno Event) : Prop where
   historyTypeOk : HistoryTypeOk state
   historyEventKindUnique : HistoryEventKindUnique state

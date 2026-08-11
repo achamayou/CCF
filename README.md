@@ -46,7 +46,7 @@ Quick validation commands (from the repo root):
 Notes:
 
 - Run Lean/Lake only from a native WSL filesystem (do not build under `/mnt/c`).
-- The deductive proofs (`CCFConsistency.Proofs`) are still the source of truth for properties; trace validation shows an implementation trace follows the proved transition system and yields a reachable state.
+- The deductive proofs (`CCFConsistency.Proofs`) are still the source of truth for properties; trace validation shows an implementation trace follows the proved transition system and yields a reachable state. `reachableProved` establishes the complete translated property set (all 35 invariants and the safety property) for every reachable state.
 
 ## Third-party components
 

@@ -7176,21 +7176,286 @@ theorem reachableClosure
   | step _ transition properties =>
       exact stepPreservesClosure properties transition
 
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Two committed responses read nested prefixes of the current view, so the
+one with the smaller frontier observes a subset. -/
+theorem observationsSubsetOfSeqnoLe
+    {state : State Tx View Seqno Event}
+    {left right : Event}
+    {current : View}
+    (properties : CommitBundle state)
+    (currentIsCurrent : state.currentView current)
+    (leftCommitted : state.rwResponseCommitted left)
+    (rightCommitted : state.rwResponseCommitted right)
+    (seqLe : state.eventSeqno left <= state.eventSeqno right) :
+    state.observationsSubset left right := by
+  have leftInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView left) (state.eventSeqno left) current
+      ⟨leftCommitted.2, currentIsCurrent⟩
+  have rightInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView right) (state.eventSeqno right) current
+      ⟨rightCommitted.2, currentIsCurrent⟩
+  have leftBranch :=
+    properties.responseBranchIsView left (Or.inl leftCommitted.1)
+  have rightBranch :=
+    properties.responseBranchIsView right (Or.inl rightCommitted.1)
+  intro slot observed observation
+  have slotLeLeft : slot <= state.eventSeqno left := observation.2.1
+  have leftClient : state.clientEntry (state.eventBranch left) slot :=
+    observation.2.2.1
+  have leftTx : state.entryTx (state.eventBranch left) slot = observed :=
+    observation.2.2.2
+  rw [leftBranch] at leftClient
+  rw [leftBranch] at leftTx
+  -- Lift the observation from the response's own view into the current view.
+  have leftPrefix :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      current (state.eventSeqno left) slot ⟨leftInCurrent.1, slotLeLeft⟩
+  rw [leftInCurrent.2] at leftPrefix
+  have currentClient : state.clientEntry current slot :=
+    leftPrefix.2.1.2 leftClient
+  have currentTx : state.entryTx current slot = observed :=
+    (leftPrefix.2.2.2 currentClient).trans leftTx
+  -- Push it back down into the other response's view.
+  have slotLeRight : slot <= state.eventSeqno right := le_trans slotLeLeft seqLe
+  have rightPrefix :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      current (state.eventSeqno right) slot ⟨rightInCurrent.1, slotLeRight⟩
+  rw [rightInCurrent.2] at rightPrefix
+  have rightClient : state.clientEntry (state.eventView right) slot :=
+    rightPrefix.2.1.1 currentClient
+  have rightTx : state.entryTx (state.eventView right) slot = observed :=
+    (rightPrefix.2.2.2 currentClient).symm.trans currentTx
+  refine ⟨Or.inl rightCommitted.1, slotLeRight, ?_, ?_⟩
+  · rw [rightBranch]
+    exact rightClient
+  · rw [rightBranch]
+    exact rightTx
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Committed read-write responses are serializable: their observation sets are
+totally ordered by inclusion. -/
+theorem commitsCommittedRwSerializable
+    {state : State Tx View Seqno Event}
+    (properties : CommitBundle state) :
+    CommittedRwSerializable state := by
+  rw [CommittedRwSerializable]
+  intro left right committedPair
+  rcases committedPair with ⟨leftCommitted, rightCommitted⟩
+  rcases properties.hasCurrentView with ⟨current, currentIsCurrent⟩
+  rcases le_total (state.eventSeqno left) (state.eventSeqno right) with
+    leftLe | rightLe
+  · exact Or.inl
+      (observationsSubsetOfSeqnoLe
+        properties currentIsCurrent leftCommitted rightCommitted leftLe)
+  · exact Or.inr
+      (observationsSubsetOfSeqnoLe
+        properties currentIsCurrent rightCommitted leftCommitted rightLe)
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- The real-time core: a committed response that completes before a request is
+sent occupies a strictly earlier ledger slot than the committed response to that
+request.
+
+If it did not, then the earlier response's own prefix would already contain the
+later response's transaction, so `OnlyObserveSentRequests` would place the
+request before the earlier response, contradicting the real-time hypothesis. -/
+theorem committedResponseSeqnoLt
+    {state : State Tx View Seqno Event}
+    {earlier request later : Event}
+    (properties : CommitBundle state)
+    (earlierCommitted : state.rwResponseCommitted earlier)
+    (requestIsRw : state.rwRequestEvent request)
+    (laterCommitted : state.rwResponseCommitted later)
+    (requestTx : state.eventTx request = state.eventTx later)
+    (earlierLtRequest : state.eventLt earlier request) :
+    state.seqLt (state.eventSeqno earlier) (state.eventSeqno later) := by
+  rcases properties.hasCurrentView with ⟨current, currentIsCurrent⟩
+  have earlierMatch :=
+    commitsCommittedResponseMatchesCurrentLedger properties earlier current
+      ⟨earlierCommitted, currentIsCurrent⟩
+  have laterMatch :=
+    commitsCommittedResponseMatchesCurrentLedger properties later current
+      ⟨laterCommitted, currentIsCurrent⟩
+  have earlierEntry :=
+    properties.clientEntriesAreLedgerEntries
+      current (state.eventSeqno earlier) earlierMatch.1
+  have earlierBranch :=
+    properties.responseBranchIsView earlier (Or.inl earlierCommitted.1)
+  have notLe :
+      Not (state.eventSeqno later <= state.eventSeqno earlier) := by
+    intro laterLe
+    have prefixDown :=
+      properties.ledgerPrefixMatchesFrontierOrigin
+        current (state.eventSeqno earlier) (state.eventSeqno later)
+        ⟨earlierEntry, laterLe⟩
+    rw [earlierMatch.2.1] at prefixDown
+    have clientAtLater :
+        state.clientEntry
+          (state.eventView earlier) (state.eventSeqno later) :=
+      prefixDown.2.1.1 laterMatch.1
+    have txAtLater :
+        state.entryTx (state.eventView earlier) (state.eventSeqno later) =
+          state.eventTx later :=
+      (prefixDown.2.2.2 laterMatch.1).symm.trans laterMatch.2.2
+    have observation :
+        state.observedAt
+          earlier (state.eventSeqno later) (state.eventTx later) := by
+      refine ⟨Or.inl earlierCommitted.1, laterLe, ?_, ?_⟩
+      · rw [earlierBranch]
+        exact clientAtLater
+      · rw [earlierBranch]
+        exact txAtLater
+    rcases
+        properties.onlyObserveSentRequests
+          earlier (state.eventSeqno later) (state.eventTx later)
+          ⟨Or.inl earlierCommitted.1, observation⟩ with
+      ⟨witness, witnessIsRw, witnessTx, witnessLt⟩
+    have witnessEq : witness = request := by
+      by_contra witnessNe
+      exact
+        properties.uniqueTxRequests witness request
+          ⟨Or.inl witnessIsRw, Or.inl requestIsRw, witnessNe⟩
+          (witnessTx.trans requestTx.symm)
+    subst witness
+    exact
+      earlierLtRequest.2 (le_antisymm earlierLtRequest.1 witnessLt.1)
+  have seqLt : state.eventSeqno earlier < state.eventSeqno later :=
+    not_le.mp notLe
+  exact ⟨le_of_lt seqLt, ne_of_lt seqLt⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- Committed read-write transaction identifiers respect the real-time order of
+the requests that produced them. -/
+theorem commitsCommittedRwOrderedRealTime
+    {state : State Tx View Seqno Event}
+    (properties : CommitBundle state) :
+    CommittedRwOrderedRealTime state := by
+  rw [CommittedRwOrderedRealTime]
+  intro earlier request later hypotheses
+  rcases hypotheses with
+    ⟨earlierCommitted, requestIsRw, laterCommitted, requestTx, earlierLt⟩
+  have seqLt :=
+    committedResponseSeqnoLt
+      properties earlierCommitted requestIsRw laterCommitted requestTx
+      earlierLt
+  rcases properties.hasCurrentView with ⟨current, currentIsCurrent⟩
+  have earlierInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView earlier) (state.eventSeqno earlier) current
+      ⟨earlierCommitted.2, currentIsCurrent⟩
+  have laterInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView later) (state.eventSeqno later) current
+      ⟨laterCommitted.2, currentIsCurrent⟩
+  have viewLe : state.eventView earlier <= state.eventView later :=
+    entryViewMonotoneAt
+      properties.toCoreBundle
+      earlierInCurrent.2
+      laterInCurrent.1
+      laterInCurrent.2
+      seqLt.1
+  by_cases viewEq : state.eventView earlier = state.eventView later
+  · exact Or.inr ⟨viewEq, seqLt⟩
+  · exact Or.inl ⟨viewLe, viewEq⟩
+
+omit [LinearOrder Tx] [OrderBot Tx] [OrderBot View] [OrderBot Seqno]
+  [OrderBot Event] in
+/-- A committed response observes every transaction that was already committed
+before its own request was sent. -/
+theorem commitsAllCommittedObserved
+    {state : State Tx View Seqno Event}
+    (properties : CommitBundle state) :
+    AllCommittedObserved state := by
+  rw [AllCommittedObserved]
+  intro earlier request response hypotheses
+  rcases hypotheses with
+    ⟨earlierCommitted, requestIsRw, responseCommitted, requestTx, earlierLt⟩
+  have seqLt :=
+    committedResponseSeqnoLt
+      properties earlierCommitted requestIsRw responseCommitted requestTx
+      earlierLt
+  rcases properties.hasCurrentView with ⟨current, currentIsCurrent⟩
+  have earlierMatch :=
+    commitsCommittedResponseMatchesCurrentLedger properties earlier current
+      ⟨earlierCommitted, currentIsCurrent⟩
+  have responseInCurrent :=
+    properties.committedIdIsInCurrentLedger
+      (state.eventView response) (state.eventSeqno response) current
+      ⟨responseCommitted.2, currentIsCurrent⟩
+  have responseBranch :=
+    properties.responseBranchIsView response (Or.inl responseCommitted.1)
+  have prefixDown :=
+    properties.ledgerPrefixMatchesFrontierOrigin
+      current (state.eventSeqno response) (state.eventSeqno earlier)
+      ⟨responseInCurrent.1, seqLt.1⟩
+  rw [responseInCurrent.2] at prefixDown
+  refine
+    ⟨state.eventSeqno earlier, Or.inl responseCommitted.1, seqLt.1, ?_, ?_⟩
+  · rw [responseBranch]
+    exact prefixDown.2.1.1 earlierMatch.1
+  · rw [responseBranch]
+    exact (prefixDown.2.2.2 earlierMatch.1).symm.trans earlierMatch.2.2
+
 theorem reachableProved
     {state : State Tx View Seqno Event}
     (reachable : Reachable state) :
-    ProvedBundle state := by
+    PropertyBundle state := by
   have closure := reachableClosure reachable
   exact
-    { closure
-      uniqueRwTxs := coreUniqueRwTxs closure.toCoreBundle
-      sameObservations := coreSameObservations closure.toCoreBundle
-      atMostOnceObserved :=
-        provenanceAtMostOnceObserved closure.toProvenanceBundle
-      uniqueTxIds := responsesUniqueTxIds closure.toResponseBundle
+    { historyTypeOk := closure.historyTypeOk
+      historyEventKindUnique := closure.historyEventKindUnique
+      historyIsPrefix := closure.historyIsPrefix
+      activeViewsArePrefix := closure.activeViewsArePrefix
+      ledgerTypeOk := closure.ledgerTypeOk
+      clientEntriesAreLedgerEntries := closure.clientEntriesAreLedgerEntries
+      ledgerIsPrefix := closure.ledgerIsPrefix
+      ledgerTxIdsAreStableAcrossCopies :=
+        closure.ledgerTxIdsAreStableAcrossCopies
+      ledgerEntryExistsInOriginView := closure.ledgerEntryExistsInOriginView
+      responseFrontierIsLedgerEntry := closure.responseFrontierIsLedgerEntry
+      clientEntryHasRequest := closure.clientEntryHasRequest
+      clientEntryMatchesOrigin := closure.clientEntryMatchesOrigin
+      ledgerEntryViewsAreMonotonic := closure.ledgerEntryViewsAreMonotonic
+      ledgerPrefixMatchesFrontierOrigin :=
+        closure.ledgerPrefixMatchesFrontierOrigin
+      responseBranchIsView := closure.responseBranchIsView
+      responseFrontierMatchesOrigin := closure.responseFrontierMatchesOrigin
+      rwResponseMatchesLedgerEntry := closure.rwResponseMatchesLedgerEntry
+      statusHasRwResponse := closure.statusHasRwResponse
+      committedIdIsInCurrentLedger := closure.committedIdIsInCurrentLedger
       committedResponseMatchesCurrentLedger :=
         commitsCommittedResponseMatchesCurrentLedger closure.toCommitBundle
+      allReceivedAfterSent := closure.allReceivedAfterSent
+      uniqueTxRequests := closure.uniqueTxRequests
+      onlyObserveSentRequests := closure.onlyObserveSentRequests
+      observationsAreWithinResponsePrefix :=
+        closure.observationsAreWithinResponsePrefix
+      uniqueRwTxs := coreUniqueRwTxs closure.toCoreBundle
+      sameObservations := coreSameObservations closure.toCoreBundle
+      uniqueTxIds := responsesUniqueTxIds closure.toResponseBundle
       uniqueCommittedSeqnos :=
-        commitsUniqueCommittedSeqnos closure.toCommitBundle }
+        commitsUniqueCommittedSeqnos closure.toCommitBundle
+      committedOrInvalid := closure.committedOrInvalid
+      onceCommittedPreviousIsCommitted :=
+        closure.onceCommittedPreviousIsCommitted
+      onceCommittedOlderViewSuffixIsInvalid :=
+        closure.onceCommittedOlderViewSuffixIsInvalid
+      onceInvalidSameViewSuffixIsInvalid :=
+        closure.onceInvalidSameViewSuffixIsInvalid
+      allCommittedObserved :=
+        commitsAllCommittedObserved closure.toCommitBundle
+      committedRwSerializable :=
+        commitsCommittedRwSerializable closure.toCommitBundle
+      atMostOnceObserved :=
+        provenanceAtMostOnceObserved closure.toProvenanceBundle
+      committedRwOrderedRealTime :=
+        commitsCommittedRwOrderedRealTime closure.toCommitBundle }
 
 end CCFConsistency
