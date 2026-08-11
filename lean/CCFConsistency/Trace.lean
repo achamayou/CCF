@@ -284,7 +284,11 @@ omit [TraceDomain Tx] [TraceDomain View]
   [OrderBot Seqno] [TraceDomain Seqno]
   [OrderBot Event] [TraceDomain Event] in
 /-- An enabled action is a canonical `Step`. This is the whole correspondence
-between this file and `Model.lean`. -/
+between this file and `Model.lean`.
+
+Each case names the guards it destructures after the corresponding `Step`
+constructor's own parameters, so a reviewer can read a case and the constructor
+in `Model.lean` side by side. -/
 theorem enabled_step
     (action : TraceAction Tx View Seqno Event)
     (state : State Tx View Seqno Event)
@@ -292,41 +296,57 @@ theorem enabled_step
     Step state (action.next state) := by
   cases action with
   | rwTxRequest tx event =>
-      exact Step.rwTxRequest state tx event enabled.1 enabled.2
+      obtain ⟨nextTx, nextEvent⟩ := enabled
+      exact Step.rwTxRequest state tx event nextTx nextEvent
   | roTxRequest tx event =>
-      exact Step.roTxRequest state tx event enabled.1 enabled.2
+      obtain ⟨nextTx, nextEvent⟩ := enabled
+      exact Step.roTxRequest state tx event nextTx nextEvent
   | rwTxExecute request branch slot =>
+      obtain ⟨requestIsRw, txNotInLedger, branchIsActive, nextSlot⟩ := enabled
       exact
         Step.rwTxExecute state request branch slot
-          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2
+          requestIsRw txNotInLedger branchIsActive nextSlot
   | appendOtherTxn branch slot =>
-      exact Step.appendOtherTxn state branch slot enabled.1 enabled.2
+      obtain ⟨branchIsActive, nextSlot⟩ := enabled
+      exact Step.appendOtherTxn state branch slot branchIsActive nextSlot
   | rwTxResponse request branch slot response =>
+      obtain
+        ⟨requestIsRw, notResponded, branchIsActive, entryIsClient,
+          entryMatches, nextEvent⟩ := enabled
       exact
         Step.rwTxResponse state request branch slot response
-          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1
-          enabled.2.2.2.2.1 enabled.2.2.2.2.2
+          requestIsRw notResponded branchIsActive entryIsClient
+          entryMatches nextEvent
   | roTxResponse request branch last response =>
+      obtain
+        ⟨requestIsRo, notResponded, branchIsActive, lastSlot, nextEvent⟩ :=
+        enabled
       exact
         Step.roTxResponse state request branch last response
-          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1 enabled.2.2.2.2
+          requestIsRo notResponded branchIsActive lastSlot nextEvent
   | statusCommittedResponse response status current =>
+      obtain
+        ⟨responseIsRw, viewIsCurrent, responseSlotExists,
+          responseEntryMatches, notInvalid, nextEvent⟩ := enabled
       exact
         Step.statusCommittedResponse state response status current
-          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1
-          enabled.2.2.2.2.1 enabled.2.2.2.2.2
+          responseIsRw viewIsCurrent responseSlotExists
+          responseEntryMatches notInvalid nextEvent
   | statusInvalidResponse response status =>
+      obtain ⟨responseIsRw, statusAllowed, nextEvent⟩ := enabled
       exact
         Step.statusInvalidResponse state response status
-          enabled.1 enabled.2.1 enabled.2.2
+          responseIsRw statusAllowed nextEvent
   | truncateLedger source cut newView =>
+      obtain ⟨sourceIsActive, cutExists, sourceIsValid, viewIsNext⟩ := enabled
       exact
         Step.truncateLedger state source cut newView
-          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2
+          sourceIsActive cutExists sourceIsValid viewIsNext
   | truncateLedgerToEmpty source newView =>
+      obtain ⟨sourceIsActive, noCommitted, viewIsNext⟩ := enabled
       exact
         Step.truncateLedgerToEmpty state source newView
-          enabled.1 enabled.2.1 enabled.2.2
+          sourceIsActive noCommitted viewIsNext
 
 end TraceAction
 
