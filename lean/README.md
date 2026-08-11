@@ -30,6 +30,9 @@ reachable state, with no remaining assumptions or open cases.
   response path over `Nat` to rule out vacuous guards.
 - `trace_validation.py` reuses the Veil trace planner to generate and check a
   proof for a fresh implementation trace.
+- `COMPARISON.md` compares this development with the original TLA+ specification
+  in `tla/consistency`: line counts by category, what each approach establishes,
+  and a readability assessment.
 
 ## Build
 
