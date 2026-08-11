@@ -2,31 +2,38 @@
 -- Licensed under the Apache 2.0 License.
 
 import CCFConsistency.Model
+import CCFConsistency.TraceInfra
 
 set_option autoImplicit false
-set_option linter.unnecessarySeqFocus false
-set_option linter.unusedSectionVars false
 
 /-!
-# Executable trace replay
+# CCF consistency trace replay
 
-The canonical `State` and its ten transition functions are executable. This
-file only supplies finite Boolean guard checks and deterministic replay.
-Every accepted action is proved to be a canonical `Step`, so a successful
-replay produces an ordinary `Reachable` state without a second state model.
+The generic half of trace replay lives in `CCFConsistency/TraceInfra.lean`:
+finite domains, decidable quantifiers, and the replay engine with its
+reachability theorems. This file is the CCF-specific half, and it is
+deliberately short so it can be checked by eye.
+
+It contains exactly three things:
+
+1. `Decidable` instances for the derived predicates of `Model.lean`. Each is
+   inferred from the predicate itself, so it cannot disagree with it; nothing
+   here restates a guard.
+2. `TraceAction`, one constructor per action, and `Enabled`, which lists the
+   guards of each action.
+3. `next`, which dispatches to the canonical transition functions, and
+   `enabled_step`, which proves an enabled action is a canonical `Step`.
+
+Auditing this file means checking one thing: that `Enabled` and `next` match
+the corresponding `Step` constructor in `Model.lean`. `enabled_step` is exactly
+that correspondence, and the compiler checks it.
 -/
 
 namespace CCFConsistency
 
-universe uTx uView uSeqno uEvent u
+open TraceReplay
 
-class TraceDomain (Alpha : Type u) where
-  values : List Alpha
-  complete : forall value, List.Mem value values
-
-instance finTraceDomain (size : Nat) : TraceDomain (Fin size) where
-  values := List.finRange size
-  complete value := List.mem_finRange value
+universe uTx uView uSeqno uEvent
 
 variable
   {Tx : Type uTx}
@@ -40,496 +47,151 @@ variable
   [LinearOrder Seqno] [OrderBot Seqno] [TraceDomain Seqno]
   [LinearOrder Event] [OrderBot Event] [TraceDomain Event]
 
-def finiteAll
-    {Alpha : Type u}
-    [TraceDomain Alpha]
-    (predicate : Alpha -> Bool) :
-    Bool :=
-  TraceDomain.values.all predicate
+/-! ## Decidability of the derived predicates
 
-def finiteAny
-    {Alpha : Type u}
-    [TraceDomain Alpha]
-    (predicate : Alpha -> Bool) :
-    Bool :=
-  TraceDomain.values.any predicate
+A trace fixes each domain to a finite one, so every quantifier of the model can
+be evaluated. Each instance below is obtained by unfolding the predicate's own
+definition and letting instance resolution do the rest, so no instance can
+disagree with the predicate it decides. They are ordered so each may use the
+previous. -/
 
-@[simp]
-theorem finiteAll_eq_true
-    {Alpha : Type u}
-    [TraceDomain Alpha]
-    (predicate : Alpha -> Bool) :
-    finiteAll predicate = true <->
-      forall item, predicate item = true := by
-  constructor
-  case mp =>
-    intro all item
-    exact List.all_eq_true.mp all item (TraceDomain.complete item)
-  case mpr =>
-    intro all
-    exact List.all_eq_true.mpr fun item _ => all item
-
-@[simp]
-theorem finiteAny_eq_true
-    {Alpha : Type u}
-    [TraceDomain Alpha]
-    (predicate : Alpha -> Bool) :
-    finiteAny predicate = true <->
-      Exists fun item => predicate item = true := by
-  constructor
-  case mp =>
-    intro any
-    cases List.any_eq_true.mp any with
-    | intro item found =>
-        exact Exists.intro item found.2
-  case mpr =>
-    intro existsItem
-    cases existsItem with
-    | intro item found =>
-        exact
-          List.any_eq_true.mpr
-            (Exists.intro item (And.intro (TraceDomain.complete item) found))
-
-def notBool (value : Bool) : Bool :=
-  !value
-
-def impliesBool (antecedent consequent : Bool) : Bool :=
-  !antecedent || consequent
-
-@[simp]
-theorem notBool_eq_true (value : Bool) :
-    notBool value = true <-> Not (value = true) := by
-  cases value <;> simp [notBool]
-
-@[simp]
-theorem impliesBool_eq_true (antecedent consequent : Bool) :
-    impliesBool antecedent consequent = true <->
-      (antecedent = true -> consequent = true) := by
-  cases antecedent <;> cases consequent <;> simp [impliesBool]
-
-def orderedLtBool
-    {Alpha : Type u}
-    [LinearOrder Alpha]
-    (left right : Alpha) :
-    Bool :=
-  decide (left <= right) && decide (Not (left = right))
-
-@[simp]
-theorem orderedLtBool_eq_true
-    {Alpha : Type u}
-    [LinearOrder Alpha]
-    (left right : Alpha) :
-    orderedLtBool left right = true <->
-      orderedLt left right := by
-  simp [orderedLtBool, orderedLt]
+instance instDecidableOrderedLt
+    {Alpha : Type uTx} [LinearOrder Alpha] (left right : Alpha) :
+    Decidable (orderedLt left right) := by
+  unfold orderedLt
+  infer_instance
 
 namespace State
 
-def responseEventBool
-    (state : State Tx View Seqno Event)
-    (event : Event) :
-    Bool :=
-  state.rwResponseEvent event || state.roResponseEvent event
+instance instDecidableViewLt
+    (state : State Tx View Seqno Event) (left right : View) :
+    Decidable (state.viewLt left right) := by
+  unfold viewLt
+  infer_instance
 
-def rwRequestedBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  finiteAny fun event =>
-    state.rwRequestEvent event && decide (state.eventTx event = tx)
+instance instDecidableSeqLt
+    (state : State Tx View Seqno Event) (left right : Seqno) :
+    Decidable (state.seqLt left right) := by
+  unfold seqLt
+  infer_instance
 
-def roRequestedBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  finiteAny fun event =>
-    state.roRequestEvent event && decide (state.eventTx event = tx)
+instance instDecidableEventLt
+    (state : State Tx View Seqno Event) (left right : Event) :
+    Decidable (state.eventLt left right) := by
+  unfold eventLt
+  infer_instance
 
-def requestedBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  state.rwRequestedBool tx || state.roRequestedBool tx
+instance instDecidableTxLt
+    (state : State Tx View Seqno Event) (left right : Tx) :
+    Decidable (state.txLt left right) := by
+  unfold txLt
+  infer_instance
 
-def respondedBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  finiteAny fun event =>
-    state.responseEventBool event && decide (state.eventTx event = tx)
+instance instDecidableResponseEvent
+    (state : State Tx View Seqno Event) (event : Event) :
+    Decidable (state.responseEvent event) := by
+  unfold responseEvent
+  infer_instance
 
-def txInLedgerBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  finiteAny fun branch =>
-    finiteAny fun slot =>
-      state.clientEntry branch slot &&
-        decide (state.entryTx branch slot = tx)
+instance instDecidableRwRequested
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.rwRequested tx) := by
+  unfold rwRequested
+  infer_instance
 
-def committedTxIdBool
-    (state : State Tx View Seqno Event)
-    (view : View)
-    (seqno : Seqno) :
-    Bool :=
-  finiteAny fun event =>
-    state.committedStatusEvent event &&
-      decide (state.eventView event = view) &&
-        decide (state.eventSeqno event = seqno)
+instance instDecidableRoRequested
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.roRequested tx) := by
+  unfold roRequested
+  infer_instance
 
-def currentViewBool
-    (state : State Tx View Seqno Event)
-    (view : View) :
-    Bool :=
-  state.activeView view &&
-    finiteAll fun later =>
-      impliesBool
-        (orderedLtBool view later)
-        (notBool (state.activeView later))
+instance instDecidableRequested
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.requested tx) := by
+  unfold requested
+  infer_instance
 
-def nextViewBool
-    (state : State Tx View Seqno Event)
-    (view : View) :
-    Bool :=
-  notBool (state.activeView view) &&
-    finiteAll fun earlier =>
-      impliesBool (orderedLtBool earlier view) (state.activeView earlier)
+instance instDecidableResponded
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.responded tx) := by
+  unfold responded
+  infer_instance
 
-def nextLedgerSlotBool
-    (state : State Tx View Seqno Event)
-    (branch : View)
-    (slot : Seqno) :
-    Bool :=
-  notBool (state.ledgerEntry branch slot) &&
-    finiteAll fun earlier =>
-      impliesBool
-        (orderedLtBool earlier slot)
-        (state.ledgerEntry branch earlier)
+instance instDecidableTxInLedger
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.txInLedger tx) := by
+  unfold txInLedger
+  infer_instance
 
-def lastLedgerSlotBool
-    (state : State Tx View Seqno Event)
-    (branch : View)
-    (slot : Seqno) :
-    Bool :=
-  state.ledgerEntry branch slot &&
-    finiteAll fun occupied =>
-      impliesBool
-        (state.ledgerEntry branch occupied)
-        (decide (occupied <= slot))
+instance instDecidableCommittedTxId
+    (state : State Tx View Seqno Event) (view : View) (seqno : Seqno) :
+    Decidable (state.committedTxId view seqno) := by
+  unfold committedTxId
+  infer_instance
 
-def nextHistoryEventBool
-    (state : State Tx View Seqno Event)
-    (event : Event) :
-    Bool :=
-  notBool (state.eventUsed event) &&
-    finiteAll fun earlier =>
-      impliesBool (orderedLtBool earlier event) (state.eventUsed earlier)
+instance instDecidableCurrentView
+    (state : State Tx View Seqno Event) (view : View) :
+    Decidable (state.currentView view) := by
+  unfold currentView
+  infer_instance
 
-def nextTxBool
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    Bool :=
-  notBool (state.requestedBool tx) &&
-    finiteAll fun earlier =>
-      impliesBool (orderedLtBool earlier tx) (state.requestedBool earlier)
+instance instDecidableNextView
+    (state : State Tx View Seqno Event) (view : View) :
+    Decidable (state.nextView view) := by
+  unfold nextView
+  infer_instance
 
-def noCommittedTxIdBool
+instance instDecidableNextLedgerSlot
+    (state : State Tx View Seqno Event) (branch : View) (slot : Seqno) :
+    Decidable (state.nextLedgerSlot branch slot) := by
+  unfold nextLedgerSlot
+  infer_instance
+
+instance instDecidableLastLedgerSlot
+    (state : State Tx View Seqno Event) (branch : View) (slot : Seqno) :
+    Decidable (state.lastLedgerSlot branch slot) := by
+  unfold lastLedgerSlot
+  infer_instance
+
+instance instDecidableNextHistoryEvent
+    (state : State Tx View Seqno Event) (event : Event) :
+    Decidable (state.nextHistoryEvent event) := by
+  unfold nextHistoryEvent
+  infer_instance
+
+instance instDecidableNextTx
+    (state : State Tx View Seqno Event) (tx : Tx) :
+    Decidable (state.nextTx tx) := by
+  unfold nextTx
+  infer_instance
+
+instance instDecidableNoCommittedTxId
     (state : State Tx View Seqno Event) :
-    Bool :=
-  finiteAll fun view =>
-    finiteAll fun seqno =>
-      notBool (state.committedTxIdBool view seqno)
+    Decidable state.noCommittedTxId := by
+  unfold noCommittedTxId
+  infer_instance
 
-def maxCommittedSeqnoBool
-    (state : State Tx View Seqno Event)
-    (seqno : Seqno) :
-    Bool :=
-  (finiteAny fun view => state.committedTxIdBool view seqno) &&
-    finiteAll fun view =>
-      finiteAll fun other =>
-        impliesBool
-          (state.committedTxIdBool view other)
-          (decide (other <= seqno))
+instance instDecidableMaxCommittedSeqno
+    (state : State Tx View Seqno Event) (seqno : Seqno) :
+    Decidable (state.maxCommittedSeqno seqno) := by
+  unfold maxCommittedSeqno
+  infer_instance
 
-def validTruncationSourceBool
-    (state : State Tx View Seqno Event)
-    (source : View)
-    (cut : Seqno) :
-    Bool :=
-  state.noCommittedTxIdBool ||
-    finiteAny fun commitSeq =>
-      state.maxCommittedSeqnoBool commitSeq &&
-        state.ledgerEntry source commitSeq &&
-          state.committedTxIdBool
-              (state.entryView source commitSeq)
-              commitSeq &&
-            decide (commitSeq <= cut)
+instance instDecidableValidTruncationSource
+    (state : State Tx View Seqno Event) (source : View) (cut : Seqno) :
+    Decidable (state.validTruncationSource source cut) := by
+  unfold validTruncationSource
+  infer_instance
 
-def invalidCommitPassedBool
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View)
-    (commitSeq : Seqno) :
-    Bool :=
-  state.maxCommittedSeqnoBool commitSeq &&
-    decide (state.eventSeqno response <= commitSeq) &&
-      state.ledgerEntry current (state.eventSeqno response) &&
-        decide (
-          Not (
-            state.entryView current (state.eventSeqno response) =
-              state.eventView response))
-
-def invalidCommitInNewerViewBool
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View)
-    (commitSeq : Seqno) :
-    Bool :=
-  state.maxCommittedSeqnoBool commitSeq &&
-    orderedLtBool commitSeq (state.eventSeqno response) &&
-      state.ledgerEntry current commitSeq &&
-        orderedLtBool
-          (state.eventView response)
-          (state.entryView current commitSeq)
-
-def invalidCurrentSuffixBool
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View) :
-    Bool :=
-  decide (state.eventView response = current) &&
-    finiteAll fun committedView =>
-      finiteAll fun committedSeq =>
-        impliesBool
-          (state.committedTxIdBool committedView committedSeq)
-          (orderedLtBool committedSeq (state.eventSeqno response))
-
-def invalidStatusAllowedBool
-    (state : State Tx View Seqno Event)
-    (response : Event) :
-    Bool :=
-  finiteAny fun current =>
-    state.currentViewBool current &&
-      ((finiteAny fun commitSeq =>
-          state.invalidCommitPassedBool response current commitSeq) ||
-        (finiteAny fun commitSeq =>
-          state.invalidCommitInNewerViewBool response current commitSeq) ||
-        state.invalidCurrentSuffixBool response current)
-
-@[simp]
-theorem responseEventBool_eq_true
-    (state : State Tx View Seqno Event)
-    (event : Event) :
-    state.responseEventBool event = true <->
-      state.responseEvent event := by
-  simp [responseEventBool, responseEvent]
-
-@[simp]
-theorem rwRequestedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.rwRequestedBool tx = true <->
-      state.rwRequested tx := by
-  simp [rwRequestedBool, rwRequested]
-
-@[simp]
-theorem roRequestedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.roRequestedBool tx = true <->
-      state.roRequested tx := by
-  simp [roRequestedBool, roRequested]
-
-@[simp]
-theorem requestedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.requestedBool tx = true <->
-      state.requested tx := by
-  simp [requestedBool, requested]
-
-@[simp]
-theorem respondedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.respondedBool tx = true <->
-      state.responded tx := by
-  simp [respondedBool, responded]
-
-@[simp]
-theorem txInLedgerBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.txInLedgerBool tx = true <->
-      state.txInLedger tx := by
-  simp [txInLedgerBool, txInLedger]
-
-@[simp]
-theorem committedTxIdBool_eq_true
-    (state : State Tx View Seqno Event)
-    (view : View)
-    (seqno : Seqno) :
-    state.committedTxIdBool view seqno = true <->
-      state.committedTxId view seqno := by
-  simp [committedTxIdBool, committedTxId]
-  aesop
-
-@[simp]
-theorem currentViewBool_eq_true
-    (state : State Tx View Seqno Event)
-    (view : View) :
-    state.currentViewBool view = true <->
-      state.currentView view := by
-  simp [
-    currentViewBool,
-    currentView,
-    viewLt
-  ]
-
-@[simp]
-theorem nextViewBool_eq_true
-    (state : State Tx View Seqno Event)
-    (view : View) :
-    state.nextViewBool view = true <->
-      state.nextView view := by
-  simp [
-    nextViewBool,
-    nextView,
-    viewLt
-  ]
-
-@[simp]
-theorem nextLedgerSlotBool_eq_true
-    (state : State Tx View Seqno Event)
-    (branch : View)
-    (slot : Seqno) :
-    state.nextLedgerSlotBool branch slot = true <->
-      state.nextLedgerSlot branch slot := by
-  simp [
-    nextLedgerSlotBool,
-    nextLedgerSlot,
-    seqLt
-  ]
-
-@[simp]
-theorem lastLedgerSlotBool_eq_true
-    (state : State Tx View Seqno Event)
-    (branch : View)
-    (slot : Seqno) :
-    state.lastLedgerSlotBool branch slot = true <->
-      state.lastLedgerSlot branch slot := by
-  simp [lastLedgerSlotBool, lastLedgerSlot]
-
-@[simp]
-theorem nextHistoryEventBool_eq_true
-    (state : State Tx View Seqno Event)
-    (event : Event) :
-    state.nextHistoryEventBool event = true <->
-      state.nextHistoryEvent event := by
-  simp [
-    nextHistoryEventBool,
-    nextHistoryEvent,
-    eventLt
-  ]
-
-@[simp]
-theorem nextTxBool_eq_true
-    (state : State Tx View Seqno Event)
-    (tx : Tx) :
-    state.nextTxBool tx = true <->
-      state.nextTx tx := by
-  simp [
-    nextTxBool,
-    nextTx,
-    txLt
-  ]
-
-@[simp]
-theorem noCommittedTxIdBool_eq_true
-    (state : State Tx View Seqno Event) :
-    state.noCommittedTxIdBool = true <->
-      state.noCommittedTxId := by
-  simp [noCommittedTxIdBool, noCommittedTxId]
-
-@[simp]
-theorem maxCommittedSeqnoBool_eq_true
-    (state : State Tx View Seqno Event)
-    (seqno : Seqno) :
-    state.maxCommittedSeqnoBool seqno = true <->
-      state.maxCommittedSeqno seqno := by
-  simp [maxCommittedSeqnoBool, maxCommittedSeqno]
-
-@[simp]
-theorem validTruncationSourceBool_eq_true
-    (state : State Tx View Seqno Event)
-    (source : View)
-    (cut : Seqno) :
-    state.validTruncationSourceBool source cut = true <->
-      state.validTruncationSource source cut := by
-  simp [validTruncationSourceBool, validTruncationSource]
-  aesop
-
-@[simp]
-theorem invalidCommitPassedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View)
-    (commitSeq : Seqno) :
-    state.invalidCommitPassedBool response current commitSeq = true <->
-      state.maxCommittedSeqno commitSeq /\
-        state.eventSeqno response <= commitSeq /\
-          state.ledgerEntry current (state.eventSeqno response) /\
-            Not (
-              state.entryView current (state.eventSeqno response) =
-                state.eventView response) := by
-  simp [invalidCommitPassedBool]
-  aesop
-
-@[simp]
-theorem invalidCommitInNewerViewBool_eq_true
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View)
-    (commitSeq : Seqno) :
-    state.invalidCommitInNewerViewBool response current commitSeq = true <->
-      state.maxCommittedSeqno commitSeq /\
-        state.seqLt commitSeq (state.eventSeqno response) /\
-          state.ledgerEntry current commitSeq /\
-            state.viewLt
-              (state.eventView response)
-              (state.entryView current commitSeq) := by
-  simp [
-    invalidCommitInNewerViewBool,
-    seqLt,
-    viewLt
-  ]
-  aesop
-
-@[simp]
-theorem invalidCurrentSuffixBool_eq_true
-    (state : State Tx View Seqno Event)
-    (response : Event)
-    (current : View) :
-    state.invalidCurrentSuffixBool response current = true <->
-      state.eventView response = current /\
-        forall committedView committedSeq,
-          state.committedTxId committedView committedSeq ->
-            state.seqLt committedSeq (state.eventSeqno response) := by
-  simp [invalidCurrentSuffixBool, seqLt]
-
-@[simp]
-theorem invalidStatusAllowedBool_eq_true
-    (state : State Tx View Seqno Event)
-    (response : Event) :
-    state.invalidStatusAllowedBool response = true <->
-      state.invalidStatusAllowed response := by
-  simp [
-    invalidStatusAllowedBool,
-    invalidStatusAllowed
-  ]
-  aesop (config := { maxRuleApplications := 1000 })
+instance instDecidableInvalidStatusAllowed
+    (state : State Tx View Seqno Event) (response : Event) :
+    Decidable (state.invalidStatusAllowed response) := by
+  unfold invalidStatusAllowed
+  infer_instance
 
 end State
+
+/-! ## Actions -/
 
 inductive TraceAction
     (Tx : Type uTx)
@@ -560,6 +222,8 @@ inductive TraceAction
 
 namespace TraceAction
 
+/-- The guard of each action. Each clause is the hypothesis list of the
+corresponding `Step` constructor in `Model.lean`, in the same order. -/
 def Enabled
     (action : TraceAction Tx View Seqno Event)
     (state : State Tx View Seqno Event) :
@@ -612,75 +276,14 @@ def Enabled
   | .truncateLedgerToEmpty source newView =>
       state.activeView source /\ state.noCommittedTxId /\ state.nextView newView
 
-def enabledBool
+instance instDecidableEnabled
     (action : TraceAction Tx View Seqno Event)
     (state : State Tx View Seqno Event) :
-    Bool :=
-  match action with
-  | .rwTxRequest tx event =>
-      state.nextTxBool tx && state.nextHistoryEventBool event
-  | .roTxRequest tx event =>
-      state.nextTxBool tx && state.nextHistoryEventBool event
-  | .rwTxExecute request branch slot =>
-      state.rwRequestEvent request &&
-        notBool (state.txInLedgerBool (state.eventTx request)) &&
-          state.activeView branch &&
-            state.nextLedgerSlotBool branch slot
-  | .appendOtherTxn branch slot =>
-      state.activeView branch && state.nextLedgerSlotBool branch slot
-  | .rwTxResponse request branch slot response =>
-      state.rwRequestEvent request &&
-        notBool (state.respondedBool (state.eventTx request)) &&
-          state.activeView branch &&
-            state.clientEntry branch slot &&
-              decide (state.entryTx branch slot = state.eventTx request) &&
-                state.nextHistoryEventBool response
-  | .roTxResponse request branch last response =>
-      state.roRequestEvent request &&
-        notBool (state.respondedBool (state.eventTx request)) &&
-          state.activeView branch &&
-            state.lastLedgerSlotBool branch last &&
-              state.nextHistoryEventBool response
-  | .statusCommittedResponse response status current =>
-      state.rwResponseEvent response &&
-        state.currentViewBool current &&
-          state.ledgerEntry current (state.eventSeqno response) &&
-            decide (
-              state.entryView current (state.eventSeqno response) =
-                state.eventView response) &&
-              notBool
-                  (finiteAny fun invalid =>
-                    state.invalidStatusEvent invalid &&
-                      decide (
-                        state.eventView invalid = state.eventView response) &&
-                        decide (
-                          state.eventSeqno invalid <=
-                            state.eventSeqno response)) &&
-                state.nextHistoryEventBool status
-  | .statusInvalidResponse response status =>
-      state.rwResponseEvent response &&
-        state.invalidStatusAllowedBool response &&
-          state.nextHistoryEventBool status
-  | .truncateLedger source cut newView =>
-      state.activeView source &&
-        state.ledgerEntry source cut &&
-          state.validTruncationSourceBool source cut &&
-            state.nextViewBool newView
-  | .truncateLedgerToEmpty source newView =>
-      state.activeView source &&
-        state.noCommittedTxIdBool &&
-          state.nextViewBool newView
+    Decidable (action.Enabled state) := by
+  cases action <;> unfold Enabled <;> infer_instance
 
-theorem enabledBool_sound
-    (action : TraceAction Tx View Seqno Event)
-    (state : State Tx View Seqno Event)
-    (enabled : action.enabledBool state = true) :
-    action.Enabled state := by
-  cases action <;>
-    simp [enabledBool] at enabled <;>
-    simp only [Enabled] <;>
-    aesop
-
+/-- The transition of each action, dispatched to the canonical transition
+functions of `Model.lean`. There is no second state model. -/
 def next
     (action : TraceAction Tx View Seqno Event)
     (state : State Tx View Seqno Event) :
@@ -707,6 +310,11 @@ def next
   | .truncateLedgerToEmpty _ newView =>
       CCFConsistency.truncateLedgerToEmptyNext state newView
 
+omit [TraceDomain Tx] [TraceDomain View]
+  [OrderBot Seqno] [TraceDomain Seqno]
+  [OrderBot Event] [TraceDomain Event] in
+/-- An enabled action is a canonical `Step`. This is the whole correspondence
+between this file and `Model.lean`. -/
 theorem enabled_step
     (action : TraceAction Tx View Seqno Event)
     (state : State Tx View Seqno Event)
@@ -719,146 +327,72 @@ theorem enabled_step
       exact Step.roTxRequest state tx event enabled.1 enabled.2
   | rwTxExecute request branch slot =>
       exact
-        Step.rwTxExecute
-          state
-          request
-          branch
-          slot
-          enabled.1
-          enabled.2.1
-          enabled.2.2.1
-          enabled.2.2.2
+        Step.rwTxExecute state request branch slot
+          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2
   | appendOtherTxn branch slot =>
-      exact
-        Step.appendOtherTxn
-          state
-          branch
-          slot
-          enabled.1
-          enabled.2
+      exact Step.appendOtherTxn state branch slot enabled.1 enabled.2
   | rwTxResponse request branch slot response =>
       exact
-        Step.rwTxResponse
-          state
-          request
-          branch
-          slot
-          response
-          enabled.1
-          enabled.2.1
-          enabled.2.2.1
-          enabled.2.2.2.1
-          enabled.2.2.2.2.1
-          enabled.2.2.2.2.2
+        Step.rwTxResponse state request branch slot response
+          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1
+          enabled.2.2.2.2.1 enabled.2.2.2.2.2
   | roTxResponse request branch last response =>
       exact
-        Step.roTxResponse
-          state
-          request
-          branch
-          last
-          response
-          enabled.1
-          enabled.2.1
-          enabled.2.2.1
-          enabled.2.2.2.1
-          enabled.2.2.2.2
+        Step.roTxResponse state request branch last response
+          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1 enabled.2.2.2.2
   | statusCommittedResponse response status current =>
       exact
-        Step.statusCommittedResponse
-          state
-          response
-          status
-          current
-          enabled.1
-          enabled.2.1
-          enabled.2.2.1
-          enabled.2.2.2.1
-          enabled.2.2.2.2.1
-          enabled.2.2.2.2.2
+        Step.statusCommittedResponse state response status current
+          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2.1
+          enabled.2.2.2.2.1 enabled.2.2.2.2.2
   | statusInvalidResponse response status =>
       exact
-        Step.statusInvalidResponse
-          state
-          response
-          status
-          enabled.1
-          enabled.2.1
-          enabled.2.2
+        Step.statusInvalidResponse state response status
+          enabled.1 enabled.2.1 enabled.2.2
   | truncateLedger source cut newView =>
       exact
-        Step.truncateLedger
-          state
-          source
-          cut
-          newView
-          enabled.1
-          enabled.2.1
-          enabled.2.2.1
-          enabled.2.2.2
+        Step.truncateLedger state source cut newView
+          enabled.1 enabled.2.1 enabled.2.2.1 enabled.2.2.2
   | truncateLedgerToEmpty source newView =>
       exact
-        Step.truncateLedgerToEmpty
-          state
-          source
-          newView
-          enabled.1
-          enabled.2.1
-          enabled.2.2
+        Step.truncateLedgerToEmpty state source newView
+          enabled.1 enabled.2.1 enabled.2.2
 
 end TraceAction
 
-def replay
+/-! ## Replay -/
+
+/-- The CCF consistency model as a replayable system. The guard is evaluated,
+not restated: `decide` uses the instances above. -/
+def traceSystem :
+    TraceReplay.System
+      (State Tx View Seqno Event)
+      (TraceAction Tx View Seqno Event) where
+  Reachable := Reachable
+  enabled action state := decide (action.Enabled state)
+  next action state := action.next state
+  preserves action state reachable enabled :=
+    Reachable.step reachable
+      (action.enabled_step state (of_decide_eq_true enabled))
+
+/-- Replay a trace from a state, failing at the first rejected guard. -/
+abbrev replay
     (actions : List (TraceAction Tx View Seqno Event))
     (state : State Tx View Seqno Event) :
     Option (State Tx View Seqno Event) :=
-  match actions with
-  | [] => some state
-  | action :: remaining =>
-      match action.enabledBool state with
-      | true => replay remaining (action.next state)
-      | false => none
-termination_by actions.length
+  traceSystem.replay actions state
 
-theorem replay_reachable
-    {actions : List (TraceAction Tx View Seqno Event)}
-    {state final : State Tx View Seqno Event}
-    (stateReachable : Reachable state)
-    (replayed : replay actions state = some final) :
-    Reachable final := by
-  induction actions generalizing state with
-  | nil =>
-      simp [replay] at replayed
-      subst final
-      exact stateReachable
-  | cons action remaining induction =>
-      cases enabled : action.enabledBool state with
-      | false =>
-          simp [replay, enabled] at replayed
-      | true =>
-        have semanticEnabled := action.enabledBool_sound state enabled
-        simp [replay, enabled] at replayed
-        exact
-          induction
-            (Reachable.step stateReachable
-              (action.enabled_step state semanticEnabled))
-            replayed
-
+omit [OrderBot Event] in
+/-- A successful replay from the initializer reaches a `Reachable` state. This
+is the theorem every generated trace module applies. -/
 theorem replay_from_initial
     {actions : List (TraceAction Tx View Seqno Event)}
     (success :
-      (replay actions
-        (initialState : State Tx View Seqno Event)).isSome) :
+      (replay actions (initialState : State Tx View Seqno Event)).isSome) :
     Exists fun final =>
       replay actions (initialState : State Tx View Seqno Event) =
         some final /\
-        Reachable final := by
-  let existsResult := Option.isSome_iff_exists.mp success
-  cases existsResult with
-  | intro final replayed =>
-      exact
-        Exists.intro final
-          (And.intro replayed
-            (replay_reachable Reachable.initial replayed))
+        Reachable final :=
+  traceSystem.replay_sound Reachable.initial success
 
 end CCFConsistency

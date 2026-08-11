@@ -25,18 +25,22 @@ The Confidential Consortium Framework (CCF) is an open-source framework for buil
 - Browse the [documentation](https://microsoft.github.io/CCF/)
 - Read the [Research Papers](https://microsoft.github.io/CCF/main/research)
 
-## Pure Lean trace validation (recent refactor)
+## Pure Lean consistency proof and trace validation
 
-This repository includes a pure-Lean translation of the Veil consistency model and a trace validator. A recent refactor (branch `vl-consistency`) makes the canonical Lean model executable and simplifies trace replay:
+This repository includes a pure-Lean translation of the Veil consistency model, a complete proof of its properties, and a trace validator that checks real implementation traces against the proved model. See [lean/README.md](lean/README.md) for detail.
 
-- Model.State now stores relations as Bool and the ten canonical transition functions are executable. Trace replay (lean/CCFConsistency/Trace.lean) calls those exact canonical transitions directly; there is no separate "ConcreteState" mirror or duplicated transitions.
-- The trace generator (lean/trace_validation.py) still reuses the Veil planner (veil/trace_validation.py) to parse NDJSON traces, reconstruct unlogged ledger/view events, and emit a typed list of TraceAction constructors.
-- Generated Lean modules now prove only reachability: a successful replay produces `Reachable final`. The general deductive proofs remain in `CCFConsistency.Proofs` (`reachableProved`) and are the authoritative property theorems. Trace validation therefore checks transition conformance and reachability only (much faster) and does not re-evaluate the full set of quantified properties at every concrete state.
-- The generated reachability proofs are kernel-checked and audited for transitive `sorryAx` or native-evaluation dependencies.
+What is proved:
 
-Why this matters:
+- `CCFConsistency.reachableProved` establishes the complete translated property set (all 35 Veil invariants and the one safety property) for every reachable state, over abstract and potentially infinite domains. Nothing is assumed or admitted, and the build rejects any theorem depending on `sorryAx`.
+- The proof is structured as a tower of inductive bundles (core, provenance, response, status, commit, closure), each preserved by all ten actions, with the remaining clauses derived as consequences.
 
-- Avoiding full property re-evaluation for each concrete state dramatically speeds up replay. On the real 73-event / 80-action trace the pure-Lean reachability check completes in about **16 seconds** on a native WSL Linux environment (peak ~4 GB RSS). Previously, re-evaluating properties at every state took minutes to tens of minutes depending on configuration.
+How trace validation works:
+
+- Model.State stores relations as Bool, so the ten canonical transition functions are executable. Trace replay calls those exact functions; there is no separate concrete state, mirrored transition, or equivalence layer.
+- The trace layer is split in two. `lean/CCFConsistency/TraceInfra.lean` is model-independent and reusable: finite domains, decidable quantifiers over them, and the replay engine with its reachability theorems. `lean/CCFConsistency/Trace.lean` is CCF-specific: decidability for the model's derived predicates, the action guards, and the proof that an enabled action is a canonical `Step`.
+- Guards are evaluated, not restated. Decidability for each predicate is inferred from that predicate's own definition, so there are no hand-written Boolean mirrors and no soundness lemmas to check them against. The one thing left to audit is that each guard matches the corresponding `Step` constructor, which `TraceAction.enabled_step` states and the compiler checks.
+- The trace generator (lean/trace_validation.py) reuses the Veil planner (veil/trace_validation.py) to parse NDJSON traces, reconstruct unlogged ledger/view events, and emit a typed list of TraceAction constructors.
+- Generated Lean modules prove reachability only: a successful replay produces `Reachable final`. The properties are proved once and for all by `reachableProved`, so there is no need to re-evaluate them at every concrete state. The generated proofs are kernel-checked and audited for transitive `sorryAx` or native-evaluation dependencies.
 
 Quick validation commands (from the repo root):
 
@@ -46,7 +50,7 @@ Quick validation commands (from the repo root):
 Notes:
 
 - Run Lean/Lake only from a native WSL filesystem (do not build under `/mnt/c`).
-- The deductive proofs (`CCFConsistency.Proofs`) are still the source of truth for properties; trace validation shows an implementation trace follows the proved transition system and yields a reachable state. `reachableProved` establishes the complete translated property set (all 35 invariants and the safety property) for every reachable state.
+- On the real 73-event / 80-action trace, kernel-checked replay takes roughly half a minute, comfortably below the cost of the library build itself.
 
 ## Third-party components
 

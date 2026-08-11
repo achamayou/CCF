@@ -19,9 +19,13 @@ reachable state, with no remaining assumptions or open cases.
   one Veil safety property.
 - `CCFConsistency/Proofs.lean` proves initialization, action preservation, and
   the complete reachable-state result described below.
-- `CCFConsistency/Trace.lean` evaluates finite action guards, calls the
-  canonical transitions from `Model.lean`, and proves that each successful
-  replay step is a canonical `Step`.
+- `CCFConsistency/TraceInfra.lean` is the model-independent half of trace
+  replay: finite domains, decidable quantifiers over them, and the replay
+  engine with its reachability theorems. It could be reused by any other
+  specification.
+- `CCFConsistency/Trace.lean` is the CCF-specific half: decidability instances
+  for the model's derived predicates, the action guards, and the proof that an
+  enabled action is a canonical `Step`.
 - `CCFConsistency/Examples.lean` constructs a concrete request, execute, and
   response path over `Nat` to rule out vacuous guards.
 - `trace_validation.py` reuses the Veil trace planner to generate and check a
@@ -61,13 +65,36 @@ strict NDJSON schema checks, rank normalization, unlogged ledger backfill, and
 view-change reconstruction. The resulting plan is rendered as one typed list
 of the ten pure Lean `TraceAction` constructors over finite `Fin` domains.
 
-`Model.State` itself stores relations as `Bool` functions. The ten transition
-functions used by the unbounded proofs are therefore executable, and
-`TraceAction.next` calls those exact functions directly. There is no second
-trace state, mirrored transition implementation, projection, or transition
-equivalence layer. `Trace.lean` adds only finite Boolean evaluations of the
-canonical guards and proves that an accepted guard constructs the corresponding
-canonical `Step`. The generated module then:
+### Why there is nothing to audit in the guard evaluation
+
+`Model.State` stores relations as `Bool` functions, so the ten transition
+functions used by the unbounded proofs are executable and `TraceAction.next`
+calls those exact functions. There is no second trace state, mirrored
+transition implementation, projection, or transition equivalence layer.
+
+The guards are handled the same way. The model's derived predicates quantify
+over abstract domains, so they cannot be evaluated as they stand. Rather than
+restate each one as a hand-written Boolean twin, which a reader would then have
+to check against the original, `TraceInfra.lean` supplies `Decidable` instances
+for quantifiers over an enumerable domain and `Trace.lean` derives decidability
+for each predicate from its own definition:
+
+```lean
+instance ... : Decidable (state.nextTx tx) := by
+  unfold nextTx
+  infer_instance
+```
+
+Replay then evaluates `decide (action.Enabled state)`. Since every instance is
+inferred from the predicate it decides, no instance can disagree with the
+model, and no soundness lemma is needed to check that it does not.
+
+What remains to audit in `Trace.lean` is one correspondence: that `Enabled` and
+`next` match the hypotheses and conclusion of the matching `Step` constructor
+in `Model.lean`. `TraceAction.enabled_step` states exactly that, and the
+compiler checks it.
+
+The generated module then:
 
 1. reduces the complete deterministic replay with `decide +kernel`;
 2. uses `replay_from_initial` to prove that the final canonical state is
@@ -82,6 +109,13 @@ The generated proof does not use `native_decide`; Lean's kernel checks the
 reduction. It also audits the final reachability theorem for transitive
 `sorryAx` dependencies. Generated modules are written below `lean/Generated/`
 and are not checked in.
+
+Deciding a guard reduces through instance terms rather than through a direct
+chain of Boolean operators, which costs replay time: the current 73-event
+trace takes roughly 35 seconds instead of roughly 15. That is comfortably below
+the cost of the library build itself, and it buys the removal of roughly 400
+lines of hand-written Boolean mirrors and soundness lemmas that previously had
+to be trusted by inspection.
 
 Continuous verification downloads the same fresh implementation trace artifact
 used by TLC and Veil, builds the pure Lean library, tests the generator, and
