@@ -50,42 +50,12 @@ variable
 /-! ## Decidability of the derived predicates
 
 A trace fixes each domain to a finite one, so every quantifier of the model can
-be evaluated. Each instance below is obtained by unfolding the predicate's own
-definition and letting instance resolution do the rest, so no instance can
-disagree with the predicate it decides. They are ordered so each may use the
-previous. -/
-
-instance instDecidableOrderedLt
-    {Alpha : Type uTx} [LinearOrder Alpha] (left right : Alpha) :
-    Decidable (orderedLt left right) := by
-  unfold orderedLt
-  infer_instance
+be evaluated. Each instance below unfolds the predicate's own definition and
+lets instance resolution do the rest, so no instance can disagree with the
+predicate it decides. The `unfold` list of each instance names exactly the
+definitions it depends on. They are ordered so each may use the previous. -/
 
 namespace State
-
-instance instDecidableViewLt
-    (state : State Tx View Seqno Event) (left right : View) :
-    Decidable (state.viewLt left right) := by
-  unfold viewLt
-  infer_instance
-
-instance instDecidableSeqLt
-    (state : State Tx View Seqno Event) (left right : Seqno) :
-    Decidable (state.seqLt left right) := by
-  unfold seqLt
-  infer_instance
-
-instance instDecidableEventLt
-    (state : State Tx View Seqno Event) (left right : Event) :
-    Decidable (state.eventLt left right) := by
-  unfold eventLt
-  infer_instance
-
-instance instDecidableTxLt
-    (state : State Tx View Seqno Event) (left right : Tx) :
-    Decidable (state.txLt left right) := by
-  unfold txLt
-  infer_instance
 
 instance instDecidableResponseEvent
     (state : State Tx View Seqno Event) (event : Event) :
@@ -132,19 +102,19 @@ instance instDecidableCommittedTxId
 instance instDecidableCurrentView
     (state : State Tx View Seqno Event) (view : View) :
     Decidable (state.currentView view) := by
-  unfold currentView
+  unfold currentView viewLt orderedLt
   infer_instance
 
 instance instDecidableNextView
     (state : State Tx View Seqno Event) (view : View) :
     Decidable (state.nextView view) := by
-  unfold nextView
+  unfold nextView viewLt orderedLt
   infer_instance
 
 instance instDecidableNextLedgerSlot
     (state : State Tx View Seqno Event) (branch : View) (slot : Seqno) :
     Decidable (state.nextLedgerSlot branch slot) := by
-  unfold nextLedgerSlot
+  unfold nextLedgerSlot seqLt orderedLt
   infer_instance
 
 instance instDecidableLastLedgerSlot
@@ -156,13 +126,13 @@ instance instDecidableLastLedgerSlot
 instance instDecidableNextHistoryEvent
     (state : State Tx View Seqno Event) (event : Event) :
     Decidable (state.nextHistoryEvent event) := by
-  unfold nextHistoryEvent
+  unfold nextHistoryEvent eventLt orderedLt
   infer_instance
 
 instance instDecidableNextTx
     (state : State Tx View Seqno Event) (tx : Tx) :
     Decidable (state.nextTx tx) := by
-  unfold nextTx
+  unfold nextTx txLt orderedLt
   infer_instance
 
 instance instDecidableNoCommittedTxId
@@ -186,7 +156,7 @@ instance instDecidableValidTruncationSource
 instance instDecidableInvalidStatusAllowed
     (state : State Tx View Seqno Event) (response : Event) :
     Decidable (state.invalidStatusAllowed response) := by
-  unfold invalidStatusAllowed
+  unfold invalidStatusAllowed seqLt viewLt orderedLt
   infer_instance
 
 end State

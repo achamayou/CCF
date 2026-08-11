@@ -92,10 +92,9 @@ instance (priority := 2000) decidableExistsTraceDomain
 
 /-- What a specification must provide to be replayable against a trace.
 
-`Enabled` is the guard, which must be decidable so a concrete trace can be
-checked by evaluation; `next` is the transition taken when it holds; and
-`preserves` is the single proof obligation tying the two to the
-specification's own notion of reachability. -/
+`enabled` is the guard, evaluated to check a concrete trace; `next` is the
+transition taken when it holds; and `preserves` is the single proof obligation
+tying the two to the specification's own notion of reachability. -/
 structure System (State : Type u) (Action : Type v) where
   Reachable : State -> Prop
   enabled : Action -> State -> Bool
