@@ -25,6 +25,14 @@ The Confidential Consortium Framework (CCF) is an open-source framework for buil
 - Browse the [documentation](https://microsoft.github.io/CCF/)
 - Read the [Research Papers](https://microsoft.github.io/CCF/main/research)
 
+## Formal specification
+
+CCF's consistency and consensus protocols have TLA+ specifications in [tla/](tla/), model checked with TLC and validated against traces from the implementation.
+
+The consistency specification additionally has a pure Lean 4 translation in [lean/](lean/), which proves all 35 invariants and the one safety property for **every** reachable state, over unbounded domains, rather than for one finite configuration. The proof is checked by Lean's kernel and the build rejects any theorem depending on `sorryAx`. The same implementation trace that TLC validates is also replayed against the Lean model, producing a kernel-checked reachability theorem.
+
+[lean/COMPARISON.md](lean/COMPARISON.md) compares the two: line counts by category, what each approach establishes, and where each is easier to read. In short, TLA+ is considerably more concise and produces counterexamples, while the Lean development gives an unbounded guarantee and its type checking caught three malformed definitions in `ExternalHistoryInvars.tla` that had survived model checking. They are complementary rather than competing.
+
 ## Third-party components
 
 We rely on several open source third-party components, attributed under [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.txt).

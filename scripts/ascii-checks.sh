@@ -58,6 +58,7 @@ ALLOWLIST=(
   "tests/infra/basicperf.py"          # box-drawing/block glyphs for terminal charts
   "js/ccf-app/doc/theme/partials/analytics.hbs"  # decorative arrow in doc link
   "tla/consensus/MCAliases.tla"       # symbolic state glyphs used as model values
+  "lean/lake-manifest.json"             # Lake-escaped package name
 )
 
 is_allowlisted() {
