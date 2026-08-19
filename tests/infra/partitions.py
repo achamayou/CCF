@@ -12,6 +12,13 @@ import infra.node
 
 CCF_IPTABLES_CHAIN = "CCF-TEST"
 
+# A bare ack is 52 bytes with the timestamp option, and a SYN with the usual
+# options is 60. The smallest node-to-node message observed is a little under
+# 200. 80 splits the two, so a rule can hold back everything a node has to say
+# while leaving the session itself working, or the other way round.
+PAYLOAD_LENGTHS = "80:65535"
+ACK_LENGTHS = "0:79"
+
 CCF_INPUT_RULE = {
     "protocol": "tcp",
     "target": CCF_IPTABLES_CHAIN,
@@ -134,20 +141,35 @@ class Partitioner:
         node: infra.node.Node,
         other: infra.node.Node | None = None,
         isolation_dir: IsolationDir = IsolationDir.ALL,
+        length: str | None = None,
+        target="DROP",
     ):
         """
         Isolates a single :py:class:`infra.node.Node` from the network, or from a specific other node if specified.
 
         :param infra.node.Node node: The :py:class:`infra.node.Node` to isolate.
         :param Optional[infra.node.Node] other: The other node to isolate node from (optional).
+        :param length: Restrict the rules to packets in this iptables length
+            range. :py:const:`PAYLOAD_LENGTHS` matches only packets carrying
+            application data, and :py:const:`ACK_LENGTHS` only bare
+            acknowledgements and handshakes. Without this, blocking one
+            direction of a connection also stalls the other, because the
+            sender's window never opens.
+        :param target: iptables target, in the form iptc.easy expects. Defaults
+            to DROP, which delays traffic without disturbing the session. Pass
+            ``{"REJECT": {"reject-with": "tcp-reset"}}`` to tear the session
+            down instead, discarding everything queued on it.
 
         :return: :py:class:`infra.partitions.Rules`
         """
         if node is other:
             return None
 
-        base_rule = {"protocol": "tcp", "target": "DROP"}
+        base_rule = {"protocol": "tcp", "target": target}
         name = f"Isolate node {node.local_node_id}"
+        if length is not None:
+            base_rule["length"] = {"length": length}
+            name = f"Isolate {length} byte packets of node {node.local_node_id}"
 
         # Isolates node server socket
         server_rule = {

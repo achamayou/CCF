@@ -225,6 +225,7 @@ class Network:
         "snp_endorsements_file",
         "subject_name",
         "idle_connection_timeout_s",
+        "client_connection_timeout_s",
         "host_data_transparent_statement_path",
     ]
 

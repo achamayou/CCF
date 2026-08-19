@@ -1359,6 +1359,638 @@ def test_in_place_restart_with_uncommittable_ledger(network, args):
     return network
 
 
+def _tx_status(node, tx_id):
+    with node.client() as c:
+        r = c.get(
+            f"/node/tx?transaction_id={tx_id.view}.{tx_id.seqno}",
+            log_capture=[],
+        )
+        assert r.status_code == http.HTTPStatus.OK, r
+        return TxStatus(r.body.json()["status"])
+
+
+def _commit_txid(node):
+    with node.client() as c:
+        r = c.get("/node/commit", log_capture=[])
+        assert r.status_code == http.HTTPStatus.OK, r
+        return TxID.from_str(r.body.json()["transaction_id"])
+
+
+def _wait_for_tx_status(node, tx_id, expected, timeout):
+    end_time = time.time() + timeout
+    last = None
+    while time.time() < end_time:
+        last = _tx_status(node, tx_id)
+        if last == expected:
+            return last
+        time.sleep(0.05)
+    raise TimeoutError(
+        f"Node {node.local_node_id} did not observe {tx_id} as {expected.value}: {last}"
+    )
+
+
+def _post_public(node, record_id, msg):
+    last = None
+    for _ in range(10):
+        with node.client("user0") as c:
+            r = c.post("/app/log/public", {"id": record_id, "msg": msg})
+        last = r
+        if r.status_code == http.HTTPStatus.OK:
+            return TxID(r.view, r.seqno)
+        time.sleep(0.2)
+    assert last.status_code == http.HTTPStatus.OK, last
+
+
+def _consensus_details(node):
+    with node.client() as c:
+        r = c.get("/node/consensus", log_capture=[])
+        assert r.status_code == http.HTTPStatus.OK, r
+        return r.body.json()["details"]
+
+
+def _consensus_view(node):
+    return _consensus_details(node)["current_view"]
+
+
+def _block_receive(network, node, other):
+    # Drop only packets node receives from other. node can still send,
+    # so a NACK written by other stays in TCP retransmit until this is
+    # lifted. That is the delayed-NACK stand-in for dispatch_single.
+    return network.partitioner.isolate_node(
+        node,
+        other,
+        isolation_dir=infra.partitions.IsolationDir.INBOUND_REQUESTS
+        | infra.partitions.IsolationDir.OUTBOUND_RESPONSES,
+    )
+
+
+def _collect_rules(*rule_sets, name):
+    rules = []
+    for rule_set in rule_sets:
+        if rule_set is not None:
+            rules.extend(rule_set.rules)
+    return infra.partitions.Rules(rules, name)
+
+
+def _block_send(network, node, other, payload_only=False):
+    # Drop everything node sends to other, leaving other->node open.
+    # A DROP does not reset the session, so bytes node has already written
+    # stay in its TCP retransmit queue and are delivered verbatim, in the
+    # order they were written, whenever the rule is lifted.
+    #
+    # payload_only lets bare acks through. A node pair shares one socket, so
+    # dropping every packet in one direction also starves the other of acks
+    # and the peer's window closes within a couple of round trips, which stops
+    # the traffic that is meant to keep flowing.
+    return network.partitioner.isolate_node(
+        node,
+        other,
+        isolation_dir=infra.partitions.IsolationDir.INBOUND_RESPONSES
+        | infra.partitions.IsolationDir.OUTBOUND_REQUESTS,
+        length=infra.partitions.PAYLOAD_LENGTHS if payload_only else None,
+    )
+
+
+def _wait_for_entry(node, tx_id, timeout):
+    end_time = time.time() + timeout
+    last = None
+    while time.time() < end_time:
+        last = _tx_status(node, tx_id)
+        if last in (TxStatus.Pending, TxStatus.Committed):
+            return last
+        time.sleep(0.05)
+    raise TimeoutError(f"Node {node.local_node_id} never held {tx_id}: {last}")
+
+
+def _grep_log(node, needle):
+    out_path, _ = node.get_logs()
+    if out_path is None or not os.path.exists(out_path):
+        return []
+    with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+        return [line.rstrip() for line in f if needle in line]
+
+
+def _ack_age_ms(node, other):
+    return _consensus_details(node)["acks"][other.node_id]["last_received_ms"]
+
+
+def _client_ack_age_ms(client, other):
+    # Same as _ack_age_ms, but over a connection the caller keeps open. The
+    # window between n0 consuming the retained NACK and it writing the next
+    # message to n2 is one periodic, so a fresh TLS session per poll is a
+    # significant part of the budget.
+    r = client.get("/node/consensus", log_capture=[])
+    assert r.status_code == http.HTTPStatus.OK, r
+    acks = r.body.json()["details"]["acks"]
+    return acks[other.node_id]["last_received_ms"]
+
+
+def _dump_counters(tag):
+    # iptc.easy.dump_chain() does not report the per-rule counters, and those
+    # are the only way to tell a rule that is not matching from one that is
+    # matching but on traffic we did not expect.
+    proc = subprocess.run(
+        ["iptables", "-L", infra.partitions.CCF_IPTABLES_CHAIN, "-n", "-v", "-x"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    LOG.info(
+        f"iptables counters ({tag}):\n{proc.stdout.strip() or proc.stderr.strip()}"
+    )
+
+
+def _sessions_of(node, other):
+    # The node-to-node sessions node holds towards other, as
+    # (description, send queue). A node dials out from its node_client_host to
+    # the peer's n2n interface, so the pair has at most two sessions and each
+    # node holds one end of each. Send-Q is what a DROP rule has held back.
+    mine = {
+        "out": (
+            node.node_client_host,
+            f"{other.n2n_interface.host}:{other.n2n_interface.port}",
+        ),
+        "in": (
+            f"{node.n2n_interface.host}:{node.n2n_interface.port}",
+            other.node_client_host,
+        ),
+    }
+    proc = subprocess.run(
+        ["ss", "-tnH", "state", "established"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    found = []
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        send_q, local, peer = int(fields[-3]), fields[-2], fields[-1]
+        if (local.rsplit(":", 1)[0], peer) == mine["out"]:
+            found.append((f"out {local} -> {peer}", send_q))
+        elif (local, peer.rsplit(":", 1)[0]) == mine["in"]:
+            found.append((f"in {peer} -> {local}", send_q))
+    return found
+
+
+def _send_q(node, other):
+    return max([send_q for _, send_q in _sessions_of(node, other)], default=0)
+
+
+def _reject_acks(network, node, other):
+    # As _block_send, but the kernel answers with a RST instead of dropping,
+    # so the session is torn down rather than delayed, and node_connections
+    # then discards the connection and everything queued on it.
+    #
+    # Only node's own direction is matched, so anything other is sending still
+    # arrives: the RST goes back to whoever sent the packet that matched. Only
+    # bare acks are matched, so the trigger is node acknowledging what it has
+    # just been sent, rather than a retransmission of its own backlog, which
+    # would fire at some arbitrary earlier point in the exponential backoff.
+    return network.partitioner.isolate_node(
+        node,
+        other,
+        isolation_dir=infra.partitions.IsolationDir.INBOUND_RESPONSES
+        | infra.partitions.IsolationDir.OUTBOUND_REQUESTS,
+        length=infra.partitions.ACK_LENGTHS,
+        target={"REJECT": {"reject-with": "tcp-reset"}},
+    )
+
+
+@reqs.description(
+    "A follower must not commit a divergent suffix from a matching prefix AE"
+)
+@reqs.exactly_n_nodes(5)
+def test_divergent_suffix_not_committed_from_prefix_ae(network, args):
+    # Partition version of raft_scenarios/divergent_suffix_commit.
+    #
+    # send_append_entries splits at term boundaries, so a leader whose log is
+    # <prefix>@A, [..]@B, [..]@C sends two messages, and both carry
+    # leader_commit_idx = the leader's own commit index. Delivering only the
+    # first to a follower that already holds that @B range takes the skip path
+    # in recv_append_entries: nothing after r.idx is re-applied or term-checked,
+    # yet execute_append_entries_finish still calls
+    # commit_if_possible(r.leader_commit_idx). A follower holding its own
+    # divergent committable @B suffix therefore commits it.
+    #
+    # Three things have to line up for the leader to send that first message,
+    # and each one dictates a phase below:
+    #
+    #  - sent_idx[n2] has to land inside n0's @B range. Only a NACK moves it
+    #    there, and NACKs only ever lower it
+    #        sent_idx = max(min(this_match, sent_idx), match_idx)
+    #    so it must be one n2 wrote while it was still short, and it must
+    #    arrive after n0 wins term C, since become_leader resets sent_idx. A
+    #    one-way DROP gives exactly that: TCP retransmits the NACK, unchanged,
+    #    until the rule is lifted.
+    #
+    #  - n2's commit_idx must be no higher than the index that NACK reports,
+    #    or recv_append_entries discards the message at
+    #        r.prev_idx < state->commit_idx
+    #    A bare NACK reports {current_view, last_idx}, so n2 needs a log that
+    #    runs past its own commit index at the point the NACK is written. n1
+    #    leads term B, commits once, then permanently loses its quorum, so
+    #    everything it replicates after that extends n2's log and nothing
+    #    moves any commit index again.
+    #
+    #  - n0 must still be in term A when that NACK is written, or it is not
+    #    the leader that sends the AE which provokes it. Whoever first tells
+    #    n0 about term B demotes it, and a NACK from n2 does exactly that
+    #    (recv_append_entries_response calls become_aware_of_new_term), so n2
+    #    stays muted until its log is long enough and the retaining rule is
+    #    already in place.
+    #
+    #  - n2 must not see n0's term-C entries before that message. They are
+    #    ahead of it in n0's send queue, and a DROP only delays traffic, so the
+    #    socket has to be reset once the NACK has been consumed.
+    nodes = network.get_joined_nodes()
+    assert len(nodes) == 5, nodes
+
+    n0, _ = network.find_primary()
+    n1, n2, n3, n4 = [node for node in nodes if node != n0]
+    # The election timeout overrides in run_divergent_suffix_commit_check are
+    # keyed by local node id, and every ordering below depends on them.
+    assert [n.local_node_id for n in (n0, n1, n2, n3, n4)] == [0, 1, 2, 3, 4], [
+        n.local_node_id for n in (n0, n1, n2, n3, n4)
+    ]
+    beat_s = max(args.consensus_update_timeout_ms / 1000, 0.02)
+    n0_beat_s = (
+        network.per_node_args_override.get(0, {}).get(
+            "consensus_update_timeout_ms", args.consensus_update_timeout_ms
+        )
+        / 1000
+    )
+    election_s = args.election_timeout_ms / 1000
+
+    network.wait_for_all_nodes_to_commit(primary=n0)
+    prefix = _commit_txid(n0)
+    term_a = _consensus_view(n0)
+    LOG.info(f"Common prefix {prefix}, n0 leads term {term_a}")
+
+    live = []
+
+    def hold(rules):
+        live.append(rules)
+        return rules
+
+    def release(rules):
+        if rules in live:
+            live.remove(rules)
+            rules.drop()
+
+    try:
+        # (1) n0 hears nothing from n1, is never told about the new term by n3
+        # or n4, and does not talk to n2 at all, so it stays leader in term A
+        # throughout (1) to (5) without ever learning that term B exists.
+        # Muting n0 -> n2 matters as much as the rest: the moment n2 hears a
+        # term-A AppendEntries while it is in term B it answers with a NACK
+        # carrying term B, and recv_append_entries_response demotes n0 on the
+        # spot. n2 is the one node that must not be able to tell it.
+        deaf = hold(
+            _collect_rules(
+                network.partitioner.isolate_node(n0, n1),
+                name="n0 and n1 cannot talk, so n1 is the only node to time out",
+            )
+        )
+        muted0 = hold(
+            _collect_rules(
+                _block_send(network, n0, n2, payload_only=True),
+                name="n2 cannot tell n0 about term B, because it never hears it",
+            )
+        )
+        quiet = hold(
+            _collect_rules(
+                _block_send(network, n3, n0, payload_only=True),
+                _block_send(network, n4, n0, payload_only=True),
+                name="n3 and n4 do not tell n0 about term B",
+            )
+        )
+
+        n1.wait_for_leadership_state(term_a, ["Leader"], timeout=3 * election_s)
+        term_b = _consensus_view(n1)
+        assert term_b > term_a, (term_b, term_a)
+        LOG.info(f"n1 leads term {term_b}")
+
+        # (2) The last thing n1 ever commits, and so the last time any node's
+        # commit index moves. n2 has to reach it before (5) retains a NACK,
+        # because that NACK reports n2's last_idx and the message it produces
+        # is discarded if it points below n2's commit index.
+        frozen = _replicate_range(n1, 740000, "frozen", term_b)
+        _wait_for_tx_status(n1, frozen, TxStatus.Committed, timeout=6 * election_s)
+        for node in (n2, n3, n4):
+            _wait_for_commit(node, frozen.seqno, timeout=6 * election_s)
+        LOG.info(f"n1 committed {frozen} on n1, n2, n3 and n4")
+
+        # (3) n1 loses its quorum. It is still leader and can still replicate,
+        # but nothing is ever committed again, so every commit index in the
+        # test is now pinned where it is.
+        hold(
+            _collect_rules(
+                _block_send(network, n2, n1, payload_only=True),
+                network.partitioner.isolate_node(n1, n3),
+                network.partitioner.isolate_node(n1, n4),
+                name="n1 keeps n0 and n2 but can never commit again",
+            )
+        )
+        time.sleep(max(2 * beat_s, 1.0))
+        n2_frozen = _commit_txid(n2)
+        assert n2_frozen.seqno >= frozen.seqno, (n2_frozen, frozen)
+        LOG.info(f"n2's commit index is pinned at {n2_frozen}")
+
+        # (4) Extend n2's log without extending its commit index. This is the
+        # margin the retained NACK needs: it will report gap, which is above
+        # n2's commit index and, once (6) has run, strictly inside n0's @B
+        # range.
+        gap = _replicate_range(n1, 745000, "gap", term_b)
+        _wait_for_entry(n2, gap, timeout=6 * election_s)
+        assert _commit_txid(n2).seqno == n2_frozen.seqno, _commit_txid(n2)
+        LOG.info(f"n2's log runs to {gap}, still committed only to {n2_frozen}")
+
+        # (5) Retain everything n2 sends n0 for the rest of the test, then let
+        # n0 talk to n2 again. n0 is still leader in term A, so every AE it
+        # delivers is answered with a bare stale-term NACK reporting
+        # {term B, gap}, and every one of them sits in n2's TCP retransmit
+        # queue. Bare acks are let through, or n0's window closes and it stops
+        # sending the heartbeats that provoke the NACKs in the first place.
+        seen = len(_grep_log(n2, "but our term is later"))
+        held = hold(_block_send(network, n2, n0, payload_only=True))
+        release(muted0)
+        retained = _wait_for_log(
+            n2, "but our term is later", seen + 2, timeout=6 * election_s
+        )
+        assert _consensus_view(n0) == term_a, _consensus_view(n0)
+        LOG.info(f"n2 retained {retained - seen} NACKs, all reporting {gap}")
+
+        # (6) n1 extends the @B range onto n0 as well as n2, which is also how
+        # n0 finally learns about term B. The retained NACK now points strictly
+        # inside that range on both nodes. n3 and n4 are unblocked at the same
+        # time, since n0 needs their votes in (8).
+        release(deaf)
+        release(quiet)
+        shared = _replicate_range(n1, 750000, "shared", term_b)
+        for node in (n0, n2):
+            _wait_for_entry(node, shared, timeout=6 * election_s)
+        assert _commit_txid(n2).seqno == n2_frozen.seqno, _commit_txid(n2)
+        assert n2_frozen.seqno <= gap.seqno < shared.seqno, (n2_frozen, gap, shared)
+        LOG.info(f"n0 and n2 hold the shared @B range through {shared}")
+
+        # (7) n1 keeps only n2, and gives it a signed suffix that no other node
+        # will ever hold. n1 is then quarantined outright: left connected to
+        # n2 it would campaign once CheckQuorum demotes it and drag n2 into a
+        # term above n0's.
+        hold(
+            _collect_rules(
+                network.partitioner.isolate_node(n1, n0),
+                name="the divergent suffix goes to n2 alone",
+            )
+        )
+        old_branch = _replicate_range(n1, 760000, "old-branch", term_b)
+        _wait_for_entry(n2, old_branch, timeout=6 * election_s)
+        hold(
+            _collect_rules(
+                network.partitioner.isolate_node(n1, n2),
+                name="n1 is quarantined so it cannot raise n2's term",
+            )
+        )
+        LOG.info(f"n2 alone holds the divergent @B suffix through {old_branch}")
+
+        # (8) n0 takes term C with n3 and n4 and commits a conflicting suffix
+        # over the same indices. n0 -> n2 has to be muted throughout: those
+        # entries have prev = the end of the shared @B range, which n2 has, so
+        # n2 would match, roll its own suffix back and converge.
+        muted = hold(_block_send(network, n0, n2, payload_only=True))
+        new_branch = _term_c_commit(n0, term_b, old_branch, election_s)
+        assert _tx_status(n2, old_branch) == TxStatus.Pending, old_branch
+        LOG.info(f"n0 committed {new_branch}, n2 still holds {old_branch}")
+        _dump_counters("term C committed")
+
+        # (9) Release the retained NACK. n0 walks sent_idx[n2] back inside the
+        # @B range, and from then on everything it sends n2 starts with the
+        # matching-prefix message. Its term-C messages are ahead of that in the
+        # session, and a DROP only delays them, so the session has to go.
+        #
+        # ss -K cannot do that here: WSL builds its kernel without
+        # CONFIG_INET_DIAG_DESTROY, so it reports RTNETLINK answers: Invalid
+        # argument and changes nothing. Arm a REJECT on the bare acks n0 sends
+        # n2 instead, before the NACK is let through, because the packet that
+        # triggers the RST is n0's own ack for that NACK. Nothing n2 sends is
+        # matched, so the NACK still arrives, and the host reads it off the
+        # socket long before the delayed ack goes back out.
+        LOG.info(f"n0 sessions towards n2 before the reset: {_sessions_of(n0, n2)}")
+        reset = _reject_acks(network, n0, n2)
+        LOG.info("Releasing the retained NACK")
+        try:
+            with n0.client() as c:
+                before = _client_ack_age_ms(c, n2)
+                released = time.time()
+                release(held)
+
+                deadline = time.time() + 12 * election_s
+                landed = False
+                next_report = 0
+                while time.time() < deadline:
+                    if _client_ack_age_ms(c, n2) < before:
+                        landed = True
+                        break
+                    if time.time() > next_report:
+                        LOG.info(f"n0 ack age for n2 {_client_ack_age_ms(c, n2)}ms")
+                        next_report = time.time() + 5
+                    time.sleep(0.002)
+            if not landed:
+                _dump_counters("NACK never arrived")
+                raise TimeoutError("n0 never received the retained NACK from n2")
+            LOG.info(
+                f"n0 consumed the retained NACK after {time.time() - released:.3f}s"
+            )
+
+            # The RST follows within a round trip of that ack. Waiting for the
+            # session to actually go keeps the window in which n0 could write
+            # its next message into a refused connection down to the delete
+            # below, rather than a whole periodic.
+            gone_by = time.time() + 4 * n0_beat_s
+            while time.time() < gone_by and _sessions_of(n0, n2):
+                time.sleep(0.005)
+            still_up = _sessions_of(n0, n2)
+        finally:
+            reset.drop()
+        if still_up:
+            _dump_counters("session survived the reset")
+            raise TimeoutError(f"n0 -> n2 session was still up: {still_up}")
+        LOG.info("n0 -> n2 session reset, its term C queue is gone")
+
+        # n0 reconnects on its next periodic and writes the split pair into a
+        # session that has nothing else on it. Send-Q growing on that session
+        # is that write landing in the mute, and is the earliest point at which
+        # lifting the mute delivers the matching prefix first.
+        deadline = time.time() + 4 * n0_beat_s + 10
+        while time.time() < deadline and _send_q(n0, n2) == 0:
+            time.sleep(0.01)
+        LOG.info(
+            f"n0 holds {_send_q(n0, n2)} bytes for n2 on {_sessions_of(n0, n2)}, "
+            "unmuting n0 -> n2"
+        )
+        release(muted)
+
+        deadline = time.time() + 12 * election_s
+        observed = None
+        next_report = 0
+        while time.time() < deadline:
+            observed = _tx_status(n2, old_branch)
+            if observed in (TxStatus.Committed, TxStatus.Invalid):
+                break
+            if time.time() > next_report:
+                LOG.info(
+                    f"waiting: n2 has {old_branch} as {observed.value}, "
+                    f"commit {_commit_txid(n2)}"
+                )
+                next_report = time.time() + 5
+            time.sleep(0.05)
+
+        n2_commit = _commit_txid(n2)
+        LOG.info(
+            f"n2 has {old_branch} as {observed.value}, commit {n2_commit}; "
+            f"n0 committed {new_branch}"
+        )
+        for needle in (
+            "Dropping conflicting branch",
+            "Ignoring conflicting AppendEntries",
+        ):
+            for line in _grep_log(n2, needle):
+                LOG.warning(f"n2: {line}")
+
+        assert _tx_status(n0, new_branch) == TxStatus.Committed
+        assert observed != TxStatus.Committed, (
+            f"n2 committed divergent {old_branch} while {new_branch} is "
+            f"committed on the term-C branch"
+        )
+        if n2_commit.seqno >= old_branch.seqno:
+            assert n2_commit.view != old_branch.view, n2_commit
+    finally:
+        for rules in reversed(live):
+            rules.drop()
+
+    # No reunification: this is a one-sided safety check on n2.
+    return network
+
+
+def _replicate_range(node, first_id, msg, term, count=4):
+    # `count` entries, then the signature the next index always carries when
+    # nothing else is being written. The signature is what makes the range a
+    # committable index on whoever receives it.
+    last = None
+    for i in range(count):
+        last = _post_public(node, first_id + i, f"{msg}-{i}")
+        assert last.view == term, (last, term)
+    sig = TxID(term, last.seqno + 1)
+    _wait_for_entry(node, sig, timeout=10)
+    return sig
+
+
+def _wait_for_commit(node, seqno, timeout):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = _commit_txid(node)
+        if last.seqno >= seqno:
+            return last
+        time.sleep(0.05)
+    raise TimeoutError(f"Node {node.local_node_id} did not commit {seqno}: {last}")
+
+
+def _wait_for_log(node, needle, count, timeout):
+    deadline = time.time() + timeout
+    found = 0
+    while time.time() < deadline:
+        found = len(_grep_log(node, needle))
+        if found >= count:
+            return found
+        time.sleep(0.1)
+    raise TimeoutError(
+        f"Node {node.local_node_id} logged {needle!r} {found} times, wanted {count}"
+    )
+
+
+def _term_c_commit(n0, term_b, old_branch, election_s):
+    n0.wait_for_leadership_state(term_b, ["Leader"], timeout=6 * election_s)
+    term_c = _consensus_view(n0)
+    assert term_c > term_b, (term_c, term_b)
+    # The conflicting suffix has to reach at least as far as n2's divergent
+    # signature, or leader_commit_idx will not be high enough to select it.
+    # n0 starts one index short of the shared range (become_leader writes a
+    # new-view signature there), and n2's suffix is 4 entries plus whatever
+    # signatures the timer interleaved, so 16 is comfortably past it.
+    new_branch = _replicate_range(n0, 770000, "new-branch", term_c, count=16)
+    assert new_branch.seqno >= old_branch.seqno, (new_branch, old_branch)
+    _wait_for_tx_status(n0, new_branch, TxStatus.Committed, timeout=6 * election_s)
+    LOG.info(f"n0 leads term {term_c} and committed {new_branch}")
+    return new_branch
+
+
+def run_divergent_suffix_commit_check(const_args):
+    LOG.info(
+        "Confirm a follower does not commit a divergent suffix from a "
+        "matching prefix AppendEntries"
+    )
+    args = copy.deepcopy(const_args)
+    args.label += "_divergent_suffix"
+    args.nodes = infra.e2e_args.nodes(args, 5)
+    # The periodic decides how long there is between n0 consuming the retained
+    # NACK and it writing the next message to n2. The socket has to be reset in
+    # that window, so this is deliberately much longer than it needs to be.
+    args.consensus_update_timeout_ms = 1000
+    # This is node 1's timeout. It has to cover the term-B election, and then,
+    # as its CheckQuorum window, everything from (3) to (7).
+    args.election_timeout_ms = 25000
+    # Signatures must be frequent, so each replicated range becomes committable
+    # promptly.
+    args.sig_ms_interval = 100
+
+    with infra.network.network(
+        args.nodes,
+        args.binary_dir,
+        args.debug_nodes,
+        pdb=args.pdb,
+        txs=app.LoggingTxs("user0"),
+        init_partitioner=True,
+    ) as network:
+        # An iptables DROP does not reset the session, but TCP_USER_TIMEOUT
+        # does: the host sets it to client_connection_timeout on every
+        # node-to-node socket, and at its 2s default the kernel destroys the
+        # socket - and the NACK retained on it - long before the test is ready
+        # to deliver it.
+        args.client_connection_timeout_s = 600
+        # election_timeout_ms doubles as the CheckQuorum window, and the
+        # ratios here are what make the orderings reliable:
+        #  - node 1 is the only node that can time out in phase (1), and its
+        #    window then has to cover phases (3) to (7);
+        #  - node 0 hears nothing at all from phase (1), so its window has to
+        #    cover everything up to (6), where it learns term B from node 1
+        #    and becomes the first node to campaign for term C;
+        #  - nodes 2, 3 and 4 only ever vote. Node 2 in particular hears
+        #    nothing from phase (7) onwards and must not campaign.
+        network.per_node_args_override[0] = {
+            "election_timeout_ms": 60000,
+            # Node 0's periodic is the whole budget for resetting the session
+            # between it consuming the retained NACK and it writing the next
+            # message to node 2, so give it room. Nothing else waits on it:
+            # the replication in (2), (6) and (7) is node 1's, and node 0's
+            # own responses are sent as soon as a message arrives.
+            "consensus_update_timeout_ms": 4000,
+        }
+        network.per_node_args_override[2] = {"election_timeout_ms": 400000}
+        for local_id in (3, 4):
+            network.per_node_args_override[local_id] = {"election_timeout_ms": 150000}
+        network.start_and_open(args)
+        # Node 0's periodic is long, so give the cluster more than the default
+        # three seconds to line up before anything starts asserting on it.
+        network.wait_for_node_commit_sync(timeout=30)
+        # node 0 opens the service and so is already primary; this only
+        # confirms it and waits for a signature in its own term.
+        force_become_primary(network, args, network.nodes[0])
+        test_divergent_suffix_not_committed_from_prefix_ae(network, args)
+
+
 def run_in_place_restart_uncommittable_ledger_check(const_args):
     LOG.info(
         "Confirm that in-place restart ignores uncommitted and uncommittable ledger files"
@@ -1583,6 +2215,7 @@ def run(args):
         test_ledger_invariants(network, args)
     run_ledger_chunk_bytes_check(args)
     run_in_place_restart_uncommittable_ledger_check(args)
+    run_divergent_suffix_commit_check(args)
 
 
 if __name__ == "__main__":
@@ -1593,4 +2226,19 @@ if __name__ == "__main__":
         20  # Increase snapshot frequency for faster reconfigurations
     )
 
-    run(args)
+    loops = int(os.getenv("CCF_DIVERGENT_SUFFIX_LOOPS", "1"))
+    if os.getenv("CCF_DIVERGENT_SUFFIX_ONLY"):
+        failures = 0
+        for i in range(loops):
+            LOG.info(f"Divergent-suffix partition attempt {i + 1}/{loops}")
+            try:
+                run_divergent_suffix_commit_check(args)
+            except Exception:
+                failures += 1
+                LOG.exception(f"Attempt {i + 1} failed")
+        if failures:
+            raise SystemExit(
+                f"{failures}/{loops} divergent-suffix partition attempts failed"
+            )
+    else:
+        run(args)
