@@ -43,6 +43,15 @@ Main continuous integration job. Builds CCF for all target platforms, runs unit,
 File: `ci.yml`
 3rd party dependencies: None
 
+# Debug Unit Tests
+
+Builds CCF in Debug mode and runs the unit tests on the standard GitHub-hosted `ubuntu-24.04` x64 runner, which provides 4 vCPUs and 16 GB RAM free of charge for public repositories. The build runs in the same Azure Linux 3 container as the main CI and reuses the shared dependency setup.
+
+Runs on pull requests targeting `main`, pushes to `main`, and manually. Ninja builds the default target with `-j2 -l4` to limit memory pressure, Cargo is limited to two jobs, and `tests.sh -L unit -j4` runs the unit suite without running end-to-end tests. Diagnostic logs and JUnit results are retained for seven days.
+
+File: `debug-unit-tests.yml`
+3rd party dependencies: None
+
 # Continuous Integration AL4
 
 Builds CCF on Azure Linux 4 and runs unit and end to end tests, to track readiness for the move from Azure Linux 3, which `ci.yml` builds against. Runs daily on `main` on week days, and manually. It deliberately does not run on PRs, to keep PR feedback fast and limit pool usage.
