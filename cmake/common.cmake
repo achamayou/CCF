@@ -72,6 +72,7 @@ function(add_unit_test name)
 
   add_test(NAME ${name} COMMAND ${name})
   set_property(TEST ${name} APPEND PROPERTY LABELS unit)
+  set_property(GLOBAL APPEND PROPERTY CCF_UNIT_TEST_TARGETS ${name})
 
   if(COVERAGE)
     set_property(

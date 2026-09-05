@@ -60,8 +60,8 @@ jobs:
             -DBUILD_TESTS=ON \
             -DBUILD_UNIT_TESTS=ON
 
-      - name: Build Debug
-        run: ninja -C build -j2 -l4
+      - name: Build Debug unit-test dependencies
+        run: ninja -C build -j2 -l4 unit_tests
 
       - name: Run unit tests
         working-directory: build
@@ -76,5 +76,7 @@ jobs:
             build/Testing/Temporary/
             build/unit-tests.xml
             build/CMakeFiles/CMakeConfigureLog.yaml
+            build/.ninja_log
+          include-hidden-files: true
           retention-days: 7
           if-no-files-found: ignore
