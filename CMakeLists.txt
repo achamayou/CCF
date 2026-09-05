@@ -1066,6 +1066,16 @@ if(BUILD_TESTS)
     )
     set_property(TEST csr_test APPEND PROPERTY LABELS unit_test)
 
+    get_property(_unit_test_targets GLOBAL PROPERTY CCF_UNIT_TEST_TARGETS)
+    # Include the binaries exercised through shell and Python wrappers.
+    add_custom_target(
+      unit_tests
+      DEPENDS
+        ${_unit_test_targets}
+        verify_uvm_attestation_and_endorsements
+        kp_cert_test
+    )
+
     add_test(
       NAME versionifier_test
       COMMAND ${PYTHON} ${CMAKE_SOURCE_DIR}/python/src/ccf/_versionifier.py
