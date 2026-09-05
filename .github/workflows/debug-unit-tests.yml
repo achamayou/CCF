@@ -54,6 +54,7 @@ jobs:
 
       - name: Configure Debug
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cmake -S . -B build -GNinja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTS=ON \
