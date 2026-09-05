@@ -34,34 +34,3 @@ jobs:
         run: |
           set -ex
           ./scripts/setup-ubuntu-ci-checks.sh
-
-  default-runner-build:
-    name: "Build CCF without CodeQL"
-    runs-on: ubuntu-latest
-    container:
-      image: mcr.microsoft.com/azurelinux/base/core:3.0
-      options: --user root
-
-    steps:
-      - name: "Checkout dependencies"
-        shell: bash
-        run: |
-          set -ex
-          gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
-          tdnf -y update
-          tdnf -y install ca-certificates git
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: "Install dependencies"
-        uses: ./.github/actions/install-ci-dependencies
-        with:
-          cache-python-packages: "false"
-
-      - name: "Configure"
-        shell: bash
-        run: cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=OFF
-
-      - name: "Build"
-        shell: bash
-        run: time cmake --build build
