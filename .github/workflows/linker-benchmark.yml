@@ -1,0 +1,175 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the Apache 2.0 License.
+
+name: CI Linker Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Linkers on Azure Linux ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "3.0"
+            image: mcr.microsoft.com/azurelinux/base/core:3.0
+            pool: gha-vmss-d16av6-ci
+          - version: "4.0"
+            image: azlpubstagingacroxz2o4gw.azurecr.io/azurelinux/base/core:4.0
+            pool: gha-vmss-d16av5-ci
+    runs-on:
+      [
+        self-hosted,
+        "1ES.Pool=${{ matrix.pool }}",
+        "JobId=linker_benchmark_${{ matrix.version }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}",
+      ]
+    container:
+      image: ${{ matrix.image }}
+      options: --user root --publish-all --cap-add SYS_PTRACE
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout dependencies
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          if [[ "$VERSION_ID" == "3.0" ]]; then
+            gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
+            package_manager=tdnf
+          else
+            package_manager=dnf
+          fi
+          "$package_manager" -y update
+          "$package_manager" -y install ca-certificates git
+          echo "PACKAGE_MANAGER=$package_manager" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-ci-dependencies
+
+      - name: Install and identify linkers
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/linker-results"
+          "$PACKAGE_MANAGER" -y install lld time
+          linkers="default lld"
+          if "$PACKAGE_MANAGER" -y install mold; then
+            linkers+=" mold"
+          else
+            echo "::warning::mold could not be installed; see package manager output."
+            echo "mold could not be installed on this image; comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "LINKERS=$linkers" >> "$GITHUB_ENV"
+          {
+            cat /etc/os-release
+            lscpu
+            cmake --version
+            ninja --version
+            clang --version
+            rustc --version
+            rpm -q binutils clang lld time
+            for linker in $linkers; do
+              flags=()
+              if [[ "$linker" != default ]]; then
+                flags+=("-fuse-ld=$linker")
+              fi
+              echo "=== $linker: compiler-selected linker ==="
+              clang++ "${flags[@]}" -Wl,--version
+            done
+          } 2>&1 | tee "$GITHUB_WORKSPACE/linker-results/toolchain.log"
+
+      - name: Measure clean Debug builds
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          results="$GITHUB_WORKSPACE/linker-results"
+          printf '| Linker | Clean build (seconds) | Max child RSS (KiB) |\n| --- | ---: | ---: |\n' >> "$GITHUB_STEP_SUMMARY"
+          for linker in $LINKERS; do
+            flags=""
+            if [[ "$linker" != default ]]; then
+              flags="-fuse-ld=$linker"
+            fi
+            build="$GITHUB_WORKSPACE/build-$linker"
+            cmake -S "$GITHUB_WORKSPACE" -B "$build" -GNinja \
+              -DCMAKE_BUILD_TYPE=Debug -DCLANG_TIDY=OFF \
+              "-DCMAKE_EXE_LINKER_FLAGS=$flags" \
+              "-DCMAKE_SHARED_LINKER_FLAGS=$flags" \
+              "-DCMAKE_MODULE_LINKER_FLAGS=$flags" \
+              "-DCMAKE_C_LINKER_LAUNCHER=/usr/bin/time;-a;-o;$results/clean-$linker-links.log;-f;wall_seconds=%e max_rss_kib=%M command=%C" \
+              "-DCMAKE_CXX_LINKER_LAUNCHER=/usr/bin/time;-a;-o;$results/clean-$linker-links.log;-f;wall_seconds=%e max_rss_kib=%M command=%C" \
+              2>&1 | tee "$results/clean-$linker-configure.log"
+            /usr/bin/time -o "$results/clean-$linker-time.txt" \
+              -f "| $linker | %e | %M |" \
+              ninja -C "$build" -v > "$results/clean-$linker-build.log" 2>&1
+            cat "$results/clean-$linker-time.txt" >> "$GITHUB_STEP_SUMMARY"
+            cp "$build/.ninja_log" "$results/clean-$linker-ninja.log"
+            cp "$build/CMakeCache.txt" "$results/clean-$linker-CMakeCache.txt"
+            # Keep only the baseline objects for the controlled relink comparison.
+            if [[ "$linker" != default ]]; then
+              rm -rf "$build"
+            fi
+          done
+
+      - name: Measure identical-object relinks and validate each linker
+        run: |
+          set -euo pipefail
+          results="$GITHUB_WORKSPACE/linker-results"
+          build="$GITHUB_WORKSPACE/build-default"
+          printf '\n| Linker | Repetition | Relink build (seconds) | Max child RSS (KiB) |\n| --- | ---: | ---: | ---: |\n' >> "$GITHUB_STEP_SUMMARY"
+          for linker in $LINKERS; do
+            flags=""
+            if [[ "$linker" != default ]]; then
+              flags="-fuse-ld=$linker"
+            fi
+            for repeat in 1 2 3; do
+              prefix="$results/relink-$linker-$repeat"
+              # A distinct launcher log changes every link command, forcing relinks
+              # without touching or recompiling any C/C++ objects.
+              cmake -S "$GITHUB_WORKSPACE" -B "$build" \
+                "-DCMAKE_EXE_LINKER_FLAGS=$flags" \
+                "-DCMAKE_SHARED_LINKER_FLAGS=$flags" \
+                "-DCMAKE_MODULE_LINKER_FLAGS=$flags" \
+                "-DCMAKE_C_LINKER_LAUNCHER=/usr/bin/time;-a;-o;$prefix-links.log;-f;wall_seconds=%e max_rss_kib=%M command=%C" \
+                "-DCMAKE_CXX_LINKER_LAUNCHER=/usr/bin/time;-a;-o;$prefix-links.log;-f;wall_seconds=%e max_rss_kib=%M command=%C" \
+                > "$prefix-configure.log" 2>&1
+              /usr/bin/time -o "$prefix-time.txt" \
+                -f "| $linker | $repeat | %e | %M |" \
+                ninja -C "$build" -v > "$prefix-build.log" 2>&1
+              cat "$prefix-time.txt" >> "$GITHUB_STEP_SUMMARY"
+              cp "$build/.ninja_log" "$prefix-ninja.log"
+            done
+            (
+              cd "$build"
+              ./tests.sh --output-on-failure -L unit -j"$(nproc)"
+              ./tests.sh --output-on-failure --timeout 360 -R '^e2e_logging$'
+              readelf --sections --wide samples/apps/logging/logging
+              readelf --notes samples/apps/logging/logging
+            ) > "$results/$linker-validation.log" 2>&1
+            cp "$build/Testing/Temporary/LastTest.log" "$results/$linker-LastTest.log"
+          done
+
+      - name: Upload measurements and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linker-benchmark-al${{ matrix.version }}
+          path: |
+            linker-results/
+            build-default/Testing/Temporary/
+            build-default/workspace/*/out
+            build-default/workspace/*/err
+            build-default/workspace/*/stack_trace
+          if-no-files-found: warn

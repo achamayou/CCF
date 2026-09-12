@@ -50,6 +50,19 @@ Builds CCF on Azure Linux 4 and runs unit and end to end tests, to track readine
 File: `ci-al4.yml`
 3rd party dependencies: None
 
+# CI Linker Benchmark
+
+Run `linker-benchmark.yml` manually on the branch to benchmark. Each Azure Linux 3/4 job compares the compiler's default linker, LLVM LLD, and mold sequentially on the same runner. LLD is required; if the image's package repositories cannot install mold, the workflow reports the skipped comparison rather than downloading an unverified binary. Linker dependencies and selection are confined to this workflow: normal CI, release/reproducible builds, and installed CMake helpers are unchanged.
+
+The workflow records the compiler-selected linker version, clean Debug build wall time, individual C/C++ link times, and three relinks per linker using the baseline build's identical objects. It uses compiler-driver flags and CMake's linker launcher support, compatible with the project's CMake 3.21 minimum. Changing only linker flags and launcher log paths forces relinking without recompiling C/C++ objects. Unit tests and the logging e2e test run against each linker's relinked binaries, and ELF section/note information is retained for debugging checks.
+
+Download the `linker-benchmark-al*` artifacts for verbose commands, per-link wall time and maximum RSS, Ninja logs, CMake caches, and test output. The job summary contains clean-build and relink-build measurements. GNU time's maximum RSS is the maximum reported for an individual child, **not aggregate concurrent-build peak memory**. Relink-build wall time includes Ninja and Cargo's up-to-date checks; use the individual link measurements to isolate linking. Static archive creation and Rust compilation/LTO are not measured by the C/C++ linker launchers.
+
+Clang-tidy is disabled to isolate build performance. Debug information, frame pointers, undefined-symbol checks, and existing hardening defaults are preserved. Clean builds use fresh build directories (including Cargo targets), but dependency and filesystem caches may warm during the run. Repeat runs before drawing conclusions; compare linkers within each job, not between the different AL3/AL4 runner pools. Check symbolized stack traces as well as runtime tests before adoption. Full sanitizer, compatibility, and release/reproducibility validation is still required before extending the change to those configurations. Thread limits or reduced/split debug information are deliberately deferred until these measurements justify them.
+
+File: `linker-benchmark.yml`
+3rd party dependencies: None
+
 # Coverage
 
 Builds CCF with coverage enabled, runs unit and end to end tests, and uploads HTML coverage reports. Triggered on every commit on `main`, twice daily on week days, and manually.
