@@ -5,7 +5,7 @@
 # Checks (and optionally fixes) all tracked Lean files via leanfmt.
 # Pass -f to auto-fix formatting issues. Pass package names under lean/ to
 # check only those packages; the default checks every package except
-# mathlib-equivalence, which needs Mathlib and has its own workflow.
+# mathlib-equivalence and kv-rust, which need additional tooling.
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ if ! command -v lake >/dev/null 2>&1; then
   exit 1
 fi
 
-declare -A LIBRARIES=([disaster-recovery]=DisasterRecovery [consensus]=Consensus [consistency]=consistency [kv]=Kv [mathlib-equivalence]=MathlibEquivalence)
+declare -A LIBRARIES=([disaster-recovery]=DisasterRecovery [consensus]=Consensus [consistency]=consistency [kv]=Kv [kv-rust]=KvRust [mathlib-equivalence]=MathlibEquivalence)
 PACKAGES=("$@")
 if [ ${#PACKAGES[@]} -eq 0 ]; then
   PACKAGES=(disaster-recovery consensus consistency kv)
@@ -37,7 +37,7 @@ for package in "${PACKAGES[@]}"; do
   fi
   # The disaster recovery package also checks Lean files outside lean/.
   if [ "$package" == "disaster-recovery" ]; then
-    PATHSPEC=("*.lean" ":(exclude)lean/consensus/*" ":(exclude)lean/consistency/*" ":(exclude)lean/kv/*" ":(exclude)lean/mathlib-equivalence/*")
+    PATHSPEC=("*.lean" ":(exclude)lean/consensus/*" ":(exclude)lean/consistency/*" ":(exclude)lean/kv/*" ":(exclude)lean/kv-rust/*" ":(exclude)lean/mathlib-equivalence/*")
   else
     PATHSPEC=("lean/$package/*.lean")
   fi

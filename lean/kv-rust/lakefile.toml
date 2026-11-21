@@ -1,0 +1,21 @@
+name = "kv_rust"
+version = "0.1.0"
+defaultTargets = ["KvRust"]
+
+[leanOptions]
+autoImplicit = false
+warningAsError = true
+
+[[require]]
+name = "kv"
+path = "../kv"
+copy = false
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/AeneasVerif/aeneas.git"
+rev = "2e3d4488280bb8a95411db81019a7854a784861f"
+subDir = "backends/lean"
+
+[[lean_lib]]
+name = "KvRust"

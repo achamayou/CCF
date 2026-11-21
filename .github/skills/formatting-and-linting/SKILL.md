@@ -53,6 +53,7 @@ It needs the compilation database, generated headers, and Clang's extra tools (1
 Run it with `./scripts/clang-tidier.py -p build`; use `--all` for a full scan and `--help` for selection and parallelism options.
 
 The Lean formatting check runs in `.github/workflows/lean.yml`, not `scripts/ci-checks.sh`.
+The opt-in `kv-rust` package is checked with `scripts/lean-format-checks.sh kv-rust` after Aeneas extraction.
 It requires elan and the package's Lean toolchain.
 See [Lean formatting setup](../../../lean/disaster-recovery/README.md#formatting).
 
