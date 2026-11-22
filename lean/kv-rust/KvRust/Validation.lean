@@ -16,20 +16,6 @@ local instance : DecidableEq Spike.engine.Address :=
   fun a b =>
     decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
-private theorem project_find (xs : List (Spike.engine.Address × Spike.engine.Cell))
-    (addr : Spike.engine.Address)
-    : find (xs.map fun (a, c) => (byteAddr a, byteCell c)) (byteAddr addr)
-      = (find xs addr).map byteCell := by
-  induction xs with
-  | nil => rfl
-  | cons row xs ih =>
-      obtain ⟨a, c⟩ := row
-      by_cases he : a = addr
-      · subst a
-        simp [find]
-      · have hn : byteAddr a ≠ byteAddr addr := fun h => he (byteAddr_inj h)
-        simp [find, he, hn, ih]
-
 /-- Extracted cell lookup computes the model's point observation on the committed data. -/
 theorem data_lookup (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
     (addr : Spike.engine.Address)
@@ -43,7 +29,7 @@ theorem data_lookup (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.C
       Spike.engine.Address.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone db addr
       (fun a => compare_address a addr) clone_cell)
   intro result hr
-  rw [hr, byteData, project_find]
+  rw [hr, byteData, find_projected db.val addr byteAddr byteCell (fun _ _ => byteAddr_inj)]
 
 /-- Cell comparison includes the version, so the same value written twice is not the same cell. -/
 theorem cell_same (a b : Spike.engine.Cell)
@@ -304,5 +290,105 @@ theorem validate_dependencies_matches_model
       rw [ite_eq_right h, WP.spec_ok]
       simpa [List.drop_eq_nil_of_le hb, checks, validates] using hinv
   · simp
+
+/-- Encode both coordinates of a byte address as strings. -/
+def encodeAddr (encode : List U8 → String) (a : Addr (List U8) (List U8))
+    : Addr String String :=
+  (encode a.1, encode a.2)
+
+/-- Encode a value while preserving the version that wrote it. -/
+def encodeCell (encode : List U8 → String) (c : Cell (List U8)) : Cell String :=
+  {value := encode c.value, version := c.version}
+
+/-- Encode an ordered cell image without changing its order. -/
+def encodeImage (encode : List U8 → String) (rows : Assoc (List U8) (Cell (List U8)))
+    : Assoc String (Cell String) :=
+  rows.map fun (k, c) => (encode k, encodeCell encode c)
+
+/-- Encode committed data for the string instance used by the executable KV model. -/
+def encodeData (encode : List U8 → String) (db : DB (List U8) (List U8) (List U8))
+    : Data :=
+  db.map fun (a, c) => (encodeAddr encode a, encodeCell encode c)
+
+/-- Encode the observation that is tested by a dependency. -/
+def encodeDependency (encode : List U8 → String)
+    : Dependency (List U8) (List U8) (List U8) → Dependency String String String
+  | .key a c => .key (encodeAddr encode a) (c.map (encodeCell encode))
+  | .map m cells => .map (encode m) (encodeImage encode cells)
+
+private theorem encode_addr_inj {encode : List U8 → String}
+    (inj : Function.Injective encode)
+    : Function.Injective (encodeAddr encode) := by
+  intro a b h
+  exact Prod.ext (inj (congrArg Prod.fst h)) (inj (congrArg Prod.snd h))
+
+private theorem encode_cell_inj {encode : List U8 → String}
+    (inj : Function.Injective encode)
+    : Function.Injective (encodeCell encode) := by
+  intro a b h
+  cases a
+  cases b
+  simp only [encodeCell, Cell.mk.injEq] at h ⊢
+  exact ⟨inj h.1, h.2⟩
+
+private theorem encode_image_inj {encode : List U8 → String}
+    (inj : Function.Injective encode)
+    : Function.Injective (encodeImage encode) := by
+  intro a b hab
+  induction a generalizing b with
+  | nil => cases b <;> simp_all [encodeImage]
+  | cons row rows ih =>
+      cases b with
+      | nil => simp [encodeImage] at hab
+      | cons row' rows' =>
+          have hr : Prod.map encode (encodeCell encode) row =
+              Prod.map encode (encodeCell encode) row' ∧
+                encodeImage encode rows = encodeImage encode rows' := by
+            obtain ⟨k, c⟩ := row
+            obtain ⟨k', c'⟩ := row'
+            simpa only [encodeImage, List.map_cons, List.cons.injEq, Prod.map] using hab
+          rw [(inj.prodMap (encode_cell_inj inj)) hr.1, ih hr.2]
+
+private theorem image_encoding (encode : List U8 → String)
+    (inj : Function.Injective encode) (db : DB (List U8) (List U8) (List U8))
+    (m : List U8)
+    : image (encodeData encode db) (encode m) = encodeImage encode (image db m) := by
+  induction db with
+  | nil => rfl
+  | cons row rest ih =>
+      obtain ⟨⟨map, key⟩, cell⟩ := row
+      by_cases h : map = m
+      · subst map
+        simp [image, encodeData, encodeImage, encodeAddr] at ih ⊢
+        exact ih
+      · have hn : encode map ≠ encode m := fun he => h (inj he)
+        simp [image, encodeData, encodeImage, encodeAddr, h, hn] at ih ⊢
+        exact ih
+
+private theorem dependency_encoding (encode : List U8 → String)
+    (inj : Function.Injective encode) (db : DB (List U8) (List U8) (List U8))
+    (d : Dependency (List U8) (List U8) (List U8))
+    : (encodeDependency encode d).holds (encodeData encode db) = d.holds db := by
+  cases d with
+  | key a expected =>
+      apply decide_eq_decide.mpr
+      unfold encodeData
+      rw [find_projected db a (encodeAddr encode) (encodeCell encode)
+            (encode_addr_inj inj)]
+      exact ⟨fun h => Option.map_injective (encode_cell_inj inj) h,
+        congrArg (Option.map (encodeCell encode))⟩
+  | map m expected =>
+      apply decide_eq_decide.mpr
+      rw [image_encoding encode inj]
+      exact ⟨fun h => encode_image_inj inj h, congrArg (encodeImage encode)⟩
+
+/-- Dependency validation is unchanged by an injective encoding into the executable model. -/
+theorem validates_encoding (encode : List U8 → String) (inj : Function.Injective encode)
+    (db : DB (List U8) (List U8) (List U8))
+    (ds : List (Dependency (List U8) (List U8) (List U8)))
+    : validates (encodeData encode db) (ds.map (encodeDependency encode))
+      = validates db ds := by
+  simp only [validates, List.all_map, Function.comp_def]
+  exact List.all_congr rfl (dependency_encoding encode inj db)
 
 end KvRust

@@ -203,4 +203,20 @@ theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
   intro out hout
   simpa [hnext, Kv.Model.set] using hout
 
+/-- A key-preserving projection commutes with association-list lookup. -/
+theorem find_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
+    (rows : Kv.Model.Assoc K V) (key : K) (keyOf : K → K') (valueOf : V → V')
+    (injective : Function.Injective keyOf)
+    : find (rows.map fun (k, v) => (keyOf k, valueOf v)) (keyOf key)
+      = (find rows key).map valueOf := by
+  induction rows with
+  | nil => rfl
+  | cons row rows ih =>
+      obtain ⟨k, v⟩ := row
+      by_cases h : k = key
+      · subst k
+        simp [find]
+      · have hn : keyOf k ≠ keyOf key := fun h' => h (injective h')
+        simp [find, h, hn, ih]
+
 end KvRust
