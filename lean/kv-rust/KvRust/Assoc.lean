@@ -13,7 +13,8 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-private theorem index_loop {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+/-- The extracted index search locates the same first binding as model lookup. -/
+theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
     (rows : Spike.engine.Assoc K V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     : WP.spec (Spike.engine.Assoc.index eq rows key)
@@ -84,7 +85,7 @@ theorem assoc_get {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
     : WP.spec (Spike.engine.Assoc.get eq ck cv rows key)
         (fun r => r = find rows.val key) := by
   unfold Spike.engine.Assoc.get
-  apply WP.spec_bind (index_loop eq rows key heq)
+  apply WP.spec_bind (assoc_index eq rows key heq)
   rintro (_ | i) h
   · simpa using h.symm
   · obtain ⟨v, hget, hfind⟩ := h
