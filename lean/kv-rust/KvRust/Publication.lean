@@ -5,6 +5,7 @@ module
 
 public import KvRust.Assoc
 public import KvRust.Keys
+public import Kv.Properties
 
 @[expose] public section
 
@@ -212,5 +213,31 @@ theorem publish_matches_model
         omega
       simpa [hz, byteWrites, publish, expected] using hremaining
   · simp [capacity, expected]
+
+/-- The existing model's lookup and uniqueness theorems apply to the extracted publication. -/
+theorem extracted_publish_properties
+    (data : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
+    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (capacity : data.val.length + pending.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.publish data pending version)
+        (fun after =>
+          (∀ addr,
+            find (byteData after) addr
+            = match find (byteWrites pending.val) addr with
+              | none => find (byteData data) addr
+              | some none => none
+              | some (some value) => some {value, version := version.val})
+          ∧ (Kv.Properties.Unique (byteData data)
+              → Kv.Properties.Unique (byteData after))) := by
+  apply WP.spec_mono (publish_matches_model data pending version capacity)
+  intro after h
+  rw [h]
+  constructor
+  · intro addr
+    have lookup := Kv.Properties.publish_lookup (byteData data) version.val (byteWrites pending.val) addr
+    cases he : find (byteWrites pending.val) addr with
+    | none => simpa only [he] using lookup
+    | some val => cases val <;> simpa only [he] using lookup
+  · exact Kv.Properties.publish_unique (byteData data) version.val (byteWrites pending.val)
 
 end KvRust
