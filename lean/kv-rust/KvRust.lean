@@ -3,4 +3,6 @@
 
 module
 
+public import KvRust.Assoc
 public import KvRust.Correspondence
+public import KvRust.History

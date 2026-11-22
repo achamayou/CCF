@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the Apache 2.0 License.
 
@@ -41,3 +41,7 @@ fi
 
 cd "$proof_dir"
 lake build --wfail
+for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
+  KvRust.Correspondence KvRust.Assoc KvRust.History; do
+  lake env leanchecker "$module"
+done

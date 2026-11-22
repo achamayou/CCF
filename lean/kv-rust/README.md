@@ -1,12 +1,17 @@
-# Rust KV extraction spike
+# Rust KV verification prototype
 
-This opt-in package checks [a small Rust crate](../../src/rust/kv-spike) against the existing [KV model](../kv/Kv/Model/Transitions.lean).
+This opt-in package checks [a Rust prototype](../../src/rust/kv-spike) against the existing [KV model](../kv/Kv/Model/Transitions.lean).
 It is not linked into CCF and does not change the existing Lean specification.
-The spike has one store, two maps with one key each, empty and one-byte values, and no compaction, rollback, global reads, or replication.
 
-[`slot_read`, `slot_publish`, and `two_map_schedule`](KvRust/Correspondence.lean) compare the extracted Rust functions to the model.
-The schedule varies the values, but keeps the action order fixed.
-It is not a refinement theorem for all transactions.
+The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, ordered association lists, and owned, contiguous version frames.
+Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
+Compaction advances the global frontier and changes which map views can be acquired; it does not yet reclaim old frames.
+The prototype has no C++ adapter, multiple-store lifecycle, or persistence integration.
+
+The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
+The [association-list proof](KvRust/Assoc.lean) connects extracted lookup to the model's first-match lookup, given correct equality and cloning.
+The [dynamic history proofs](KvRust/History.lean) cover cut calculation, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
+The rest of the dynamic engine is extracted and exercised by native tests, but does not yet have a step-by-step simulation proof.
 
 ## Reproduce
 
@@ -26,6 +31,6 @@ cargo test --locked --manifest-path src/rust/kv-spike/Cargo.toml
 bash lean/kv-rust/verify.sh build-kv-aeneas/aeneas
 ```
 
-The script translates the Rust with the pinned Charon and Aeneas, then builds the Lean correspondence proof with warnings treated as errors.
+The script translates the Rust with the pinned Charon and Aeneas, builds the Lean proofs with warnings treated as errors, and rechecks the resulting modules in the Lean kernel.
 It rejects extraction that needs handwritten models of opaque functions or types.
 Generated Lean and intermediate LLBC are not checked in.

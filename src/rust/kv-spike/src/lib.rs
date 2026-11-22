@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-//! A single-store extraction spike with one key in each of two maps.
+//! A Rust KV prototype, with the original fixed-size extraction spike retained for comparison.
+
+pub mod engine;
 
 #[derive(Clone, Copy)]
 pub enum Map {
