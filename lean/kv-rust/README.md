@@ -9,7 +9,7 @@ Compaction advances the global frontier and changes which map views can be acqui
 The prototype has no C++ adapter, multiple-store lifecycle, or persistence integration.
 
 The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
-The [association-list proof](KvRust/Assoc.lean) connects extracted lookup to the model's first-match lookup, given correct equality and cloning.
+The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
 The [dynamic history proofs](KvRust/History.lean) cover cut calculation, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
 The rest of the dynamic engine is extracted and exercised by native tests, but does not yet have a step-by-step simulation proof.
