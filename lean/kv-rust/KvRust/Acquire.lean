@@ -112,7 +112,8 @@ private theorem map_encoding_injective (encode : List U8 → String)
     : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
   inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
 
-private theorem clone_view (v : Spike.engine.View)
+/-- Cloning a view preserves its pinned data and stamps. -/
+theorem clone_view (v : Spike.engine.View)
     : Spike.engine.View.Insts.CoreCloneClone.clone v = .ok v := by
   cases v
   simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_assoc]

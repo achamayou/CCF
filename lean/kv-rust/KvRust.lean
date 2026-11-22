@@ -11,5 +11,6 @@ public import KvRust.Correspondence
 public import KvRust.History
 public import KvRust.Keys
 public import KvRust.Lineage
+public import KvRust.Point
 public import KvRust.Publication
 public import KvRust.Validation

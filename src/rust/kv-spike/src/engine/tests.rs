@@ -237,6 +237,34 @@ fn two_map_application_and_conflicts_preserve_versioned_read_dependencies() {
 }
 
 #[test]
+fn reads_of_staged_deletions_and_global_values_do_not_add_dependencies() {
+    let mut s = Store::new(0);
+    put(&mut s, 0, b"a", b"k", b"", 1);
+    run(&mut s, Action::Compact(1));
+
+    begin(&mut s, 1);
+    acquire(&mut s, 1, b"a");
+    write(&mut s, 1, b"a", b"k", None);
+    assert_read(&mut s, 1, b"a", b"k", false, None);
+    assert_read(&mut s, 1, b"a", b"k", true, Some(b""));
+    let key = Bytes::copy_from(b"k");
+    assert!(matches!(
+        op(&mut s, 1, b"a", Operation::Has(key.clone(), false)),
+        Output::Presence(false)
+    ));
+    assert!(matches!(
+        op(&mut s, 1, b"a", Operation::Has(key, true)),
+        Output::Presence(true)
+    ));
+
+    put(&mut s, 0, b"a", b"k", b"replacement", 2);
+    applied(&mut s, 1, Outcome::Success, 3);
+    begin(&mut s, 2);
+    acquire(&mut s, 2, b"a");
+    assert_read(&mut s, 2, b"a", b"k", false, None);
+}
+
+#[test]
 fn byte_ranges_are_ordered_and_take_whole_map_dependencies_except_when_empty() {
     let mut s = Store::new(0);
     begin(&mut s, 1);
