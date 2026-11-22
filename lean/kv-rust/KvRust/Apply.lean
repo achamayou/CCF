@@ -12,7 +12,8 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-private theorem tx_index (s : Spike.engine.Store) (id : U64)
+/-- The extracted dispatcher finds the first live attempt with the given ID. -/
+theorem tx_index (s : Spike.engine.Store) (id : U64)
     : WP.spec (Spike.engine.Store.tx_index s id)
         (fun result =>
           match result with

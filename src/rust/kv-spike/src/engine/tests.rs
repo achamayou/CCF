@@ -111,6 +111,37 @@ fn distinct_global_cuts_are_pinned_per_map() {
 }
 
 #[test]
+fn late_acquisition_uses_the_surviving_cut_without_refreshing_existing_views() {
+    let mut s = Store::new(0);
+    put(&mut s, 0, b"late", b"k", b"base", 1);
+    put(&mut s, 0, b"pinned", b"k", b"discarded", 2);
+    put(&mut s, 0, b"late", b"k", b"discarded", 3);
+
+    begin(&mut s, 1);
+    assert!(matches!(
+        acquire(&mut s, 1, b"pinned"),
+        Output::Acquired(2, 0)
+    ));
+    assert!(matches!(
+        run(&mut s, Action::Rollback(1, 1)),
+        Output::RolledBack(1)
+    ));
+    put(&mut s, 0, b"late", b"k", b"replacement", 2);
+    run(&mut s, Action::Compact(2));
+    put(&mut s, 0, b"late", b"beyond", b"newer", 3);
+    put(&mut s, 0, b"late", b"beyond", b"too new", 4);
+    assert!(matches!(
+        acquire(&mut s, 1, b"late"),
+        Output::Acquired(3, 2)
+    ));
+    assert_read(&mut s, 1, b"late", b"k", false, Some(b"replacement"));
+    assert_read(&mut s, 1, b"late", b"beyond", false, Some(b"newer"));
+    assert_read(&mut s, 1, b"late", b"beyond", true, None);
+    assert_read(&mut s, 1, b"pinned", b"k", false, Some(b"discarded"));
+    assert_read(&mut s, 1, b"pinned", b"k", true, None);
+}
+
+#[test]
 fn rollback_reuses_sequence_number_but_not_empty_map_birth() {
     let mut s = Store::new(2);
     begin(&mut s, 0);

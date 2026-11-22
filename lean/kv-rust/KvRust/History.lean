@@ -100,6 +100,97 @@ theorem history_head (history : Spike.engine.History) (prior : List Spike.engine
   rw [alloc.vec.Vec.getElem?_Nat_eq, h, hi']
   simp
 
+/-- The extracted cut lookup clamps to the last retained vector index. -/
+theorem history_at_cut_index (s : Spike.engine.History) (cut : U64)
+    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (hframes : s.frames.val = prior ++ [head])
+    : WP.spec (Spike.engine.History.at_cut s cut)
+        (fun f => s.frames.val[min cut.val prior.length]? = some f) := by
+  have hlen : (alloc.vec.Vec.len s.frames).val = prior.length + 1 := by simp [hframes]
+  have hone : (1#usize : Usize).val = 1 := rfl
+  have hsize : s.frames.val.length = prior.length + 1 := by simp [hframes]
+  have hbounded := alloc.vec.Vec.len_ineq s.frames
+  unfold Spike.engine.History.at_cut
+  apply WP.spec_bind
+    (Usize.sub_spec (x := alloc.vec.Vec.len s.frames) (y := 1#usize) (by omega))
+  intro i hi
+  have hi' : i.val = prior.length := by omega
+  let head64 := UScalar.cast .U64 i
+  have hcast : head64.val = prior.length := by
+    rw [show head64.val = i.val from UScalar.cast_val_mod_pow_greater_numBits_eq .U64 i
+      (by
+        simp only [UScalarTy.Usize_numBits_eq, UScalarTy.U64_numBits_eq]
+        rcases System.Platform.numBits_eq with h | h <;> simp [h]), hi']
+  simp only [lift, bind_ok, alloc.vec.Vec.index_slice_index]
+  by_cases hcut : cut < head64
+  · have hn : cut.val < prior.length := by
+      change cut.val < head64.val at hcut
+      omega
+    have hc : (UScalar.cast .Usize cut).val = cut.val := by
+      apply UScalar.cast_val_mod_pow_of_inBounds_eq
+      rw [← UScalar.max_USize_eq, UScalar.max] at hbounded
+      have := Nat.two_pow_pos UScalarTy.Usize.numBits
+      omega
+    rw [ite_eq_left hcut]
+    apply WP.spec_mono (alloc.vec.Vec.index_usize_spec s.frames (UScalar.cast .Usize cut)
+      (by change (UScalar.cast .Usize cut).val < s.frames.val.length; omega))
+    intro f hf
+    rw [Nat.min_eq_left (Nat.le_of_lt hn), ← hc, List.getElem?_eq_getElem (by omega)]
+    exact congrArg some hf.symm
+  · have hn : prior.length ≤ cut.val := by
+      change ¬cut.val < head64.val at hcut
+      omega
+    rw [ite_eq_right hcut]
+    apply WP.spec_mono (alloc.vec.Vec.index_usize_spec s.frames i
+      (by change i.val < s.frames.val.length; omega))
+    intro f hf
+    rw [Nat.min_eq_right hn, ← hi', List.getElem?_eq_getElem (by omega)]
+    exact congrArg some hf.symm
+
+private theorem find_reverse_indexed {α : Type} (xs : List α) (project : α → Frame)
+    (cut : Nat) (hversions : ∀ i (hi : i < xs.length), (project xs[i]).version = i)
+    : ((xs.reverse.map project).find? fun f => decide (f.version ≤ cut))
+      = xs[min cut (xs.length - 1)]?.map project := by
+  induction xs using List.reverseRecOn with
+  | nil => simp
+  | append_singleton prior last ih =>
+      have hlast : (project last).version = prior.length := by
+        have ht := hversions prior.length (by simp)
+        rw [List.getElem_append_right (Nat.le_refl _)] at ht
+        simpa using ht
+      have hprior : ∀ i (hi : i < prior.length), (project prior[i]).version = i := by
+        intro i hi
+        have ht := hversions i (by simp; omega)
+        rwa [List.getElem_append_left hi] at ht
+      simp only [List.reverse_append, List.reverse_singleton, List.singleton_append,
+        List.map_cons, List.find?_cons, hlast, List.length_append, List.length_singleton,
+        Nat.add_sub_cancel]
+      by_cases hc : prior.length ≤ cut
+      · simp [hc]
+      · have hi' : cut < prior.length := Nat.lt_of_not_ge hc
+        have hmin : cut ≤ prior.length - 1 := by omega
+        simp only [hc, decide_false, Nat.min_eq_left (Nat.le_of_lt hi'),
+          List.getElem?_append_left hi']
+        simpa only [Nat.min_eq_left hmin] using ih hprior
+
+/-- Indexed Rust lookup and the model's search of the current branch select the same frame. -/
+theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
+    (model : Store) (project : Spike.engine.Frame → Frame)
+    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (hframes : s.frames.val = prior ++ [head])
+    (hmodel : model.history = modelFrames s project)
+    (hversions
+      : ∀ i (hi : i < s.frames.val.length), (project s.frames.val[i]).version = i)
+    : WP.spec (Spike.engine.History.at_cut s cut)
+        (fun f => project f = atCut model cut.val ∧ project f ∈ model.history) := by
+  apply WP.spec_mono (history_at_cut_index s cut prior head hframes)
+  intro f hf
+  have hlen : s.frames.val.length - 1 = prior.length := by simp [hframes]
+  have he : model.history.find? (fun fr => decide (fr.version ≤ cut.val)) = some (project f) := by
+    rw [hmodel, modelFrames, find_reverse_indexed _ project _ hversions, hlen, hf]
+    rfl
+  exact ⟨by simp [atCut, he], List.mem_of_find?_eq_some he⟩
+
 /-- Compaction preserves the frames, term and identity counter, and matches the model's frontier. -/
 theorem history_compact (s : Spike.engine.History) (requested : U64)
     (model : Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)

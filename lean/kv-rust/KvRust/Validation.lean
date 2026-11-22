@@ -349,7 +349,8 @@ private theorem encode_image_inj {encode : List U8 → String}
             simpa only [encodeImage, List.map_cons, List.cons.injEq, Prod.map] using hab
           rw [(inj.prodMap (encode_cell_inj inj)) hr.1, ih hr.2]
 
-private theorem image_encoding (encode : List U8 → String)
+/-- An injective encoding preserves the contents and order of a map image. -/
+theorem image_encoding (encode : List U8 → String)
     (inj : Function.Injective encode) (db : DB (List U8) (List U8) (List U8))
     (m : List U8)
     : image (encodeData encode db) (encode m) = encodeImage encode (image db m) := by

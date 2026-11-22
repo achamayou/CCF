@@ -31,10 +31,11 @@ local instance : DecidableEq Spike.engine.Bytes :=
     decidable_of_iff (alloc.vec.Vec.val a = alloc.vec.Vec.val b)
       ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
-private theorem key_same (a b : Spike.engine.Bytes)
+/-- The extracted byte key comparison implements decidable equality. -/
+theorem key_same [DecidableEq Spike.engine.Bytes] (a b : Spike.engine.Bytes)
     : Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a b = .ok (decide (a = b)) := by
-  rw [bytes_same]
-  congr 1
+  rw [bytes_same, Result.ok.injEq]
+  exact decide_eq_decide.mpr ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
 private theorem stamp_same (a b : Spike.engine.Stamp)
     : Spike.engine.Stamp.same a b = .ok (modelStamp a == modelStamp b) := by
@@ -49,7 +50,8 @@ private theorem stamp_same (a b : Spike.engine.Stamp)
     by_cases he : a.identity.val = b.identity.val <;> simp [he]
   · simp [Spike.engine.Stamp.same, h, hv]
 
-private theorem stamps_find (encode : Spike.engine.Bytes → String)
+/-- Extracted stamp lookup commutes with the map-name and stamp projections. -/
+theorem stamps_find (encode : Spike.engine.Bytes → String)
     (inj : Function.Injective encode)
     (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Stamp)
     (m : Spike.engine.Bytes)
