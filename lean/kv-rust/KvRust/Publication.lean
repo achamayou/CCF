@@ -47,7 +47,8 @@ theorem clone_bytes (v : Spike.engine.Bytes)
     : Spike.engine.Bytes.Insts.CoreCloneClone.clone v = .ok v := by
   simp [Spike.engine.Bytes.Insts.CoreCloneClone.clone, clone_vec core.clone.CloneU8 v (fun _ => rfl)]
 
-private theorem clone_address (a : Spike.engine.Address)
+/-- Cloning an extracted address preserves both of its coordinates. -/
+theorem clone_address (a : Spike.engine.Address)
     : Spike.engine.Address.Insts.CoreCloneClone.clone a = .ok a := by
   cases a
   simp [Spike.engine.Address.Insts.CoreCloneClone.clone, clone_bytes]

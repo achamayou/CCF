@@ -15,7 +15,7 @@ The [publication proof](KvRust/Publication.lean) discharges equality and cloning
 The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
 The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
 The [lineage proofs](KvRust/Lineage.lean) compose the read-set check with captured terms, map birth and revision stamps, and acquisition failures to match the model's commit eligibility test on related states.
-The [apply proof](KvRust/Apply.lean) checks that a rejected local application leaves the Rust store and attempts unchanged.
+The [local application proofs](KvRust/Apply.lean) check that rejection preserves the Rust state and that an eligible, representable application returns the model's write set and advances the history and the committing attempt.
 The [dynamic history proofs](KvRust/History.lean) cover cut calculation, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
 The rest of the dynamic engine is extracted and exercised by native tests, but does not yet have a step-by-step simulation proof.
 
