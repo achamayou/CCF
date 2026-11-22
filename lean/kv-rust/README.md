@@ -12,6 +12,7 @@ The [original two-map proofs](KvRust/Correspondence.lean) still exercise the sch
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
 The [publication proof](KvRust/Publication.lean) discharges equality and cloning for the actual publication types and checks the full write-set fold against `Kv.Model.publish` instantiated over byte lists.
+The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
 The [dynamic history proofs](KvRust/History.lean) cover cut calculation, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
 The rest of the dynamic engine is extracted and exercised by native tests, but does not yet have a step-by-step simulation proof.
 

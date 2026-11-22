@@ -33,7 +33,8 @@ private theorem clone_vec {α : Type} (inst : core.clone.Clone α) (v : alloc.ve
   cases v
   simp
 
-private theorem clone_bytes (v : Spike.engine.Bytes)
+/-- Cloning extracted bytes preserves their contents. -/
+theorem clone_bytes (v : Spike.engine.Bytes)
     : Spike.engine.Bytes.Insts.CoreCloneClone.clone v = .ok v := by
   simp [Spike.engine.Bytes.Insts.CoreCloneClone.clone, clone_vec core.clone.CloneU8 v (fun _ => rfl)]
 
@@ -42,7 +43,8 @@ private theorem clone_address (a : Spike.engine.Address)
   cases a
   simp [Spike.engine.Address.Insts.CoreCloneClone.clone, clone_bytes]
 
-private theorem clone_cell (c : Spike.engine.Cell)
+/-- Cloning a cell preserves both its value and version. -/
+theorem clone_cell (c : Spike.engine.Cell)
     : Spike.engine.Cell.Insts.CoreCloneClone.clone c = .ok c := by
   cases c
   simp [Spike.engine.Cell.Insts.CoreCloneClone.clone, clone_bytes, lift]
@@ -66,19 +68,22 @@ local instance : DecidableEq Spike.engine.Address :=
   fun a b =>
     decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
-private theorem compare_address (a b : Spike.engine.Address)
+/-- The engine's address comparison implements decidable equality. -/
+theorem compare_address [DecidableEq Spike.engine.Address] (a b : Spike.engine.Address)
     : Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same a b
       = .ok (decide (a = b)) := by
   have h : a = b ↔ byteAddr a = byteAddr b :=
     ⟨congrArg byteAddr, byteAddr_inj⟩
   simp [address_same, h, byteAddr]
 
+/-- Project an extracted cell with its byte value and previous-write version. -/
+def byteCell (c : Spike.engine.Cell) : Cell (List U8) :=
+  {value := alloc.vec.Vec.val c.value, version := c.version.val}
+
 /-- Project extracted committed data without collapsing absence and an empty byte list. -/
 def byteData (data : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
     : DB (List U8) (List U8) (List U8) :=
-  data.val.map
-    fun (a, c) =>
-      (byteAddr a, {value := alloc.vec.Vec.val c.value, version := c.version.val})
+  data.val.map fun (a, c) => (byteAddr a, byteCell c)
 
 /-- Project staged puts and removals to the model's representation. -/
 def byteWrites (pending : List (Spike.engine.Address × Spike.engine.Write))
@@ -185,7 +190,7 @@ theorem publish_matches_model
             omega
           have hdata : byteData next =
               publish (byteData current) version.val (byteWrites [(addr, .Put value)]) := by
-            simp [byteData, byteWrites, hnext, publish, Kv.Model.set, cell, project_erase]
+            simp [byteData, byteCell, byteWrites, hnext, publish, Kv.Model.set, cell, project_erase]
           exact ⟨⟨by omega, by omega, hdata ▸ hfold⟩, by omega⟩
       | Remove =>
           change WP.spec (do
@@ -205,7 +210,7 @@ theorem publish_matches_model
             exact List.length_filter_le _ _
           have hdata : byteData next =
               publish (byteData current) version.val (byteWrites [(addr, .Remove)]) := by
-            simp [byteData, byteWrites, hnext, publish, project_erase]
+            simp [byteData, byteCell, byteWrites, hnext, publish, project_erase]
           exact ⟨⟨by omega, by omega, hdata ▸ hfold⟩, by omega⟩
     · rw [ite_eq_right h, WP.spec_ok]
       have hz : i.val = 0 := by
