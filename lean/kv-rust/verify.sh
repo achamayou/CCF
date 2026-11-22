@@ -42,6 +42,6 @@ fi
 cd "$proof_dir"
 lake build --wfail
 for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
-  KvRust.Correspondence KvRust.Assoc KvRust.History; do
+  KvRust.Correspondence KvRust.Assoc KvRust.History KvRust.Keys; do
   lake env leanchecker "$module"
 done
