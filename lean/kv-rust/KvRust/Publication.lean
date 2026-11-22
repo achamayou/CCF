@@ -7,6 +7,8 @@ public import KvRust.Assoc
 public import KvRust.Keys
 public import Kv.Properties
 
+import all Aeneas.Std.Core.Core
+
 @[expose] public section
 
 namespace KvRust
@@ -32,6 +34,13 @@ private theorem clone_vec {α : Type} (inst : core.clone.Clone α) (v : alloc.ve
   subst slice
   cases v
   simp
+
+/-- Cloning an extracted association list preserves the ordered bindings. -/
+theorem clone_assoc {K V : Type} (ck : core.clone.Clone K) (cv : core.clone.Clone V)
+    (rows : Spike.engine.Assoc K V)
+    : Spike.engine.Assoc.Insts.CoreCloneClone.clone ck cv rows = .ok rows := by
+  simp [Spike.engine.Assoc.Insts.CoreCloneClone.clone, clone_vec (BuiltinClone (K × V)) rows
+    (fun _ => rfl)]
 
 /-- Cloning extracted bytes preserves their contents. -/
 theorem clone_bytes (v : Spike.engine.Bytes)

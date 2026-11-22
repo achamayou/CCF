@@ -3,6 +3,7 @@
 
 module
 
+public import KvRust.Advance
 public import KvRust.Apply
 public import KvRust.Assoc
 public import KvRust.Correspondence

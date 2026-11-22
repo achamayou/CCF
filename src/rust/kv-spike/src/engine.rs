@@ -270,22 +270,39 @@ impl Frame {
     }
 
     fn advance(&self, version: Version, identity: u64, pending: &Pending) -> Self {
-        let mut next = self.clone();
-        next.version = version;
         let stamp = Stamp { version, identity };
+        let mut revisions = self.revisions.clone();
+        let mut births = self.births.clone();
         let mut i = 0;
         while i < pending.0.len() {
             let row = &pending.0[i];
-            if matches!(row.1, Write::Put(_)) || self.data.index(&row.0).is_some() {
-                next.revisions.set(row.0.map.clone(), stamp);
-            }
-            if next.births.index(&row.0.map).is_none() {
-                next.births.set(row.0.map.clone(), stamp);
-            }
+            update_revision(&mut revisions, &self.data, row, stamp);
+            update_birth(&mut births, &row.0.map, stamp);
             i += 1;
         }
-        next.data = publish(next.data, pending, version);
-        next
+        Self {
+            version,
+            data: publish(self.data.clone(), pending, version),
+            revisions,
+            births,
+        }
+    }
+}
+
+fn update_revision(
+    revisions: &mut Assoc<Bytes, Stamp>,
+    data: &Data,
+    row: &(Address, Write),
+    stamp: Stamp,
+) {
+    if matches!(row.1, Write::Put(_)) || data.index(&row.0).is_some() {
+        revisions.set(row.0.map.clone(), stamp);
+    }
+}
+
+fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
+    if births.index(map).is_none() {
+        births.set(map.clone(), stamp);
     }
 }
 

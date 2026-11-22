@@ -12,6 +12,7 @@ The [original two-map proofs](KvRust/Correspondence.lean) still exercise the sch
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
 The [publication proof](KvRust/Publication.lean) discharges equality and cloning for the actual publication types and checks the full write-set fold against `Kv.Model.publish` instantiated over byte lists.
+The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
 The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
 The [lineage proofs](KvRust/Lineage.lean) compose the read-set check with captured terms, map birth and revision stamps, and acquisition failures to match the model's commit eligibility test on related states.
 The [apply proof](KvRust/Apply.lean) checks that a rejected local application leaves the Rust store and attempts unchanged.

@@ -316,8 +316,8 @@ def encodeDependency (encode : List U8 → String)
   | .key a c => .key (encodeAddr encode a) (c.map (encodeCell encode))
   | .map m cells => .map (encode m) (encodeImage encode cells)
 
-private theorem encode_addr_inj {encode : List U8 → String}
-    (inj : Function.Injective encode)
+/-- An injective encoding preserves address identity. -/
+theorem encode_addr_inj {encode : List U8 → String} (inj : Function.Injective encode)
     : Function.Injective (encodeAddr encode) := by
   intro a b h
   exact Prod.ext (inj (congrArg Prod.fst h)) (inj (congrArg Prod.snd h))
@@ -390,5 +390,32 @@ theorem validates_encoding (encode : List U8 → String) (inj : Function.Injecti
       = validates db ds := by
   simp only [validates, List.all_map, Function.comp_def]
   exact List.all_congr rfl (dependency_encoding encode inj db)
+
+/-- Encoding staged writes preserves deletions and the order of writes. -/
+def encodeWrites (encode : List U8 → String)
+    (writes : Writes (List U8) (List U8) (List U8))
+    : Pending :=
+  writes.map fun (addr, v) => (encodeAddr encode addr, v.map encode)
+
+/-- Publication commutes with an injective encoding into the executable model. -/
+theorem publish_encoding (encode : List U8 → String) (inj : Function.Injective encode)
+    (db : DB (List U8) (List U8) (List U8)) (version : Nat)
+    (writes : Writes (List U8) (List U8) (List U8))
+    : encodeData encode (publish db version writes)
+      = publish (encodeData encode db) version (encodeWrites encode writes) := by
+  induction writes with
+  | nil => rfl
+  | cons w rest ih =>
+      obtain ⟨addr, value⟩ := w
+      cases value with
+      | none =>
+          simp only [encodeWrites, publish, List.map_cons, List.foldr_cons, Option.map_none] at ih ⊢
+          rw [← ih]
+          exact (erase_projected _ addr (encodeAddr encode) (encodeCell encode) (encode_addr_inj inj)).symm
+      | some v =>
+          simp only [encodeWrites, publish, List.map_cons, List.foldr_cons, Option.map_some] at ih ⊢
+          rw [← ih]
+          exact (set_projected _ addr {value := v, version} (encodeAddr encode) (encodeCell encode)
+            (encode_addr_inj inj)).symm
 
 end KvRust

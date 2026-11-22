@@ -220,4 +220,30 @@ theorem find_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
       · have hn : keyOf k ≠ keyOf key := fun h' => h (injective h')
         simp [find, h, hn, ih]
 
+/-- Injective key projection commutes with erasure. -/
+theorem erase_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
+    (rows : Kv.Model.Assoc K V) (key : K) (keyOf : K → K') (valueOf : V → V')
+    (injective : Function.Injective keyOf)
+    : erase (rows.map fun (k, v) => (keyOf k, valueOf v)) (keyOf key)
+      = (erase rows key).map (fun (k, v) => (keyOf k, valueOf v)) := by
+  induction rows with
+  | nil => rfl
+  | cons row rows ih =>
+      obtain ⟨k, v⟩ := row
+      by_cases h : k = key
+      · subst k
+        simpa [erase] using ih
+      · have hn : keyOf k ≠ keyOf key := fun h' => h (injective h')
+        simp only [erase, List.map_cons, List.filter_cons] at ih ⊢
+        simp [h, hn, ih]
+
+/-- Injective key projection commutes with replacement. -/
+theorem set_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
+    (rows : Kv.Model.Assoc K V) (key : K) (value : V)
+    (keyOf : K → K') (valueOf : V → V') (injective : Function.Injective keyOf)
+    : Kv.Model.set (rows.map fun (k, v) => (keyOf k, valueOf v)) (keyOf key)
+        (valueOf value)
+      = (Kv.Model.set rows key value).map (fun (k, v) => (keyOf k, valueOf v)) := by
+  simp only [Kv.Model.set, List.map_cons, erase_projected rows key keyOf valueOf injective]
+
 end KvRust
