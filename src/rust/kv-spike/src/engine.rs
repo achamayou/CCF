@@ -185,6 +185,26 @@ type Pending = Assoc<Address, Write>;
 type Image = Assoc<Bytes, Cell>;
 pub type Entries = Vec<(Bytes, Bytes)>;
 
+fn publish(mut data: Data, pending: &Pending, version: Version) -> Data {
+    // The reference model folds the ordered write list right-to-left.
+    let mut i = pending.0.len();
+    while i > 0 {
+        i -= 1;
+        let row = &pending.0[i];
+        match &row.1 {
+            Write::Put(v) => data.set(
+                row.0.clone(),
+                Cell {
+                    value: v.clone(),
+                    version,
+                },
+            ),
+            Write::Remove => data = data.erase(&row.0),
+        }
+    }
+    data
+}
+
 fn image(data: &Data, map: &Bytes) -> Image {
     let mut out = Vec::new();
     let mut i = 0;
@@ -264,21 +284,7 @@ impl Frame {
             }
             i += 1;
         }
-        // The reference model folds the ordered write list right-to-left.
-        while i > 0 {
-            i -= 1;
-            let row = &pending.0[i];
-            match &row.1 {
-                Write::Put(v) => next.data.set(
-                    row.0.clone(),
-                    Cell {
-                        value: v.clone(),
-                        version,
-                    },
-                ),
-                Write::Remove => next.data = next.data.erase(&row.0),
-            }
-        }
+        next.data = publish(next.data, pending, version);
         next
     }
 }

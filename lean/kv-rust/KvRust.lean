@@ -7,3 +7,4 @@ public import KvRust.Assoc
 public import KvRust.Correspondence
 public import KvRust.History
 public import KvRust.Keys
+public import KvRust.Publication
