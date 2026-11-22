@@ -183,16 +183,15 @@ theorem assoc_erase {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
   intro out hout
   simpa using hout
 
-/-- Extracted replacement prepends the new binding and removes all older bindings for that key. -/
-theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+private theorem assoc_replace {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
     (rows : Spike.engine.Assoc K V) (key : K) (value : V)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
     (hcap : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.Assoc.set eq ck cv rows key value)
+    : WP.spec (Spike.engine.Assoc.replace_and_prepend eq ck cv rows key value)
         (fun r => r.val = set rows.val key value) := by
-  unfold Spike.engine.Assoc.set
+  unfold Spike.engine.Assoc.replace_and_prepend
   simp only [hck, bind_ok]
   have hstart : (alloc.vec.Vec.new (K × V)).val.length < Usize.max := by
     simpa using Nat.zero_lt_of_lt hcap
@@ -203,6 +202,60 @@ theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
   apply WP.spec_bind (copy_other eq ck cv rows key next heq hck hcv hrows)
   intro out hout
   simpa [hnext, Kv.Model.set] using hout
+
+private theorem erase_missing {K V : Type} [DecidableEq K]
+    (rows : Kv.Model.Assoc K V) (key : K) (missing : find rows key = none)
+    : erase rows key = rows := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      obtain ⟨k, v⟩ := row
+      by_cases he : k = key
+      · simp [find, he] at missing
+      · have hm : find rest key = none := by simpa [find, he] using missing
+        have hp := ih hm
+        simp [erase, he] at hp ⊢
+        exact hp
+
+/-- Set prepends the new binding and removes all older bindings for that key.
+A fresh key can be inserted without copying the existing values. -/
+theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+    (ck : core.clone.Clone K) (cv : core.clone.Clone V)
+    (rows : Spike.engine.Assoc K V) (key : K) (value : V)
+    (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
+    (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
+    (hcap : rows.val.length < Usize.max)
+    : WP.spec (Spike.engine.Assoc.set eq ck cv rows key value)
+        (fun r => r.val = Kv.Model.set rows.val key value) := by
+  unfold Spike.engine.Assoc.set
+  apply WP.spec_bind (assoc_index eq rows key heq)
+  intro found hf
+  cases found with
+  | some i => exact assoc_replace eq ck cv rows key value heq hck hcv hcap
+  | none =>
+      change find rows.val key = none at hf
+      have he := erase_missing rows.val key hf
+      change WP.spec (do
+        let b ← alloc.vec.Vec.is_empty rows
+        if b then
+          let out ← alloc.vec.Vec.push rows (key, value)
+          Result.ok out
+        else
+          let out ← alloc.vec.Vec.insert rows 0#usize (key, value)
+          Result.ok out) _
+      rw [alloc.vec.Vec.is_empty, bind_ok, Kv.Model.set, he]
+      by_cases h : rows.val.length = 0
+      · have hz : decide (rows.length = 0) = true := decide_eq_true h
+        rw [ite_eq_left hz]
+        apply WP.spec_bind (alloc.vec.Vec.push_spec rows (key, value) hcap)
+        intro out hout
+        simp [hout, List.length_eq_zero_iff.mp h]
+      · have hz : ¬ decide (rows.length = 0) = true := fun hd => h (of_decide_eq_true hd)
+        rw [ite_eq_right hz]
+        have hidx : (0#usize : Usize).val < rows.val.length := Nat.pos_of_ne_zero h
+        apply WP.spec_bind (alloc.vec.Vec.insert_spec rows 0#usize (key, value) hidx hcap)
+        intro out hout
+        simp [hout]
 
 /-- A key-preserving projection commutes with association-list lookup. -/
 theorem find_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']

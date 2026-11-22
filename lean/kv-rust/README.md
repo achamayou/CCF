@@ -49,3 +49,28 @@ bash lean/kv-rust/verify.sh build-kv-aeneas/aeneas
 The script translates the Rust with the pinned Charon and Aeneas, builds the Lean proofs with warnings treated as errors, and rechecks the resulting modules in the Lean kernel.
 It rejects extraction that needs handwritten models of opaque functions or types.
 Generated Lean and intermediate LLBC are not checked in.
+
+## Performance
+
+The standalone benchmark exercises the public Rust action dispatcher.
+It reports the median, minimum, and maximum of nine timed samples after a warmup, with a fresh store per sample and setup outside the timer.
+Each key is eight bytes and each value is 64 bytes.
+
+```sh
+taskset -c 2 cargo +1.90.0 bench --locked --offline \
+  --manifest-path src/rust/kv-spike/Cargo.toml --bench engine
+```
+
+The table compares the baseline at `6e828f794` with the fresh-key insertion fast path.
+The ranges are the two run medians on the same logical CPU, with the baseline and optimized binaries run in both orders on an Intel Core i7-1265U Linux x86-64 host.
+
+| Workload                 | Baseline        | Fast path       |
+| ------------------------ | --------------- | --------------- |
+| Stage 512 distinct keys  | 30.4-45.7 us/op | 2.6-3.1 us/op   |
+| Stage 2048 distinct keys | 112-215 us/op   | 10.6-13.0 us/op |
+| Apply 512 writes         | 17.6-19.9 ms/tx | 1.67-1.68 ms/tx |
+| Apply 2048 writes        | 238-278 ms/tx   | 23.4-23.6 ms/tx |
+
+The change prepends a fresh binding in place instead of cloning the existing bindings, while retaining the original replacement path for existing keys.
+Replacement and point-read measurements varied across runs and do not establish a speedup for those workloads.
+These measurements compare two versions of the Rust prototype, not the C++ backend or replicated CCF.

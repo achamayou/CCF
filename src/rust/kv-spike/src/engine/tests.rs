@@ -3,6 +3,21 @@
 
 use super::*;
 
+#[test]
+fn set_prepends_new_and_existing_keys_without_reordering_other_entries() {
+    let mut rows = Assoc::<u64, u64>::new();
+    rows.set(1, 10);
+    rows.set(2, 20);
+    rows.set(3, 30);
+    assert_eq!(rows.0, [(3, 30), (2, 20), (1, 10)]);
+    rows.set(2, 21);
+    assert_eq!(rows.0, [(2, 21), (3, 30), (1, 10)]);
+
+    let mut duplicate = Assoc(vec![(3_u64, 30_u64), (1, 10), (3, 31), (2, 20)]);
+    duplicate.set(3, 32);
+    assert_eq!(duplicate.0, [(3, 32), (1, 10), (2, 20)]);
+}
+
 fn run(s: &mut Store, action: Action) -> Output {
     s.execute(action).unwrap()
 }

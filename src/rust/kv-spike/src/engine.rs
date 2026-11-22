@@ -121,6 +121,16 @@ impl<K: Key + Clone, V: Clone> Assoc<K, V> {
     }
 
     fn set(&mut self, key: K, value: V) {
+        if self.index(&key).is_some() {
+            self.replace_and_prepend(key, value);
+        } else if self.0.is_empty() {
+            self.0.push((key, value));
+        } else {
+            self.0.insert(0, (key, value));
+        }
+    }
+
+    fn replace_and_prepend(&mut self, key: K, value: V) {
         let mut next = Vec::new();
         next.push((key.clone(), value));
         self.copy_other_rows(&key, &mut next);
