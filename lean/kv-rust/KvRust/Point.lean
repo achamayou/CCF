@@ -34,12 +34,12 @@ def pointDeps (encode : List U8 → String) (t : Spike.engine.Tx)
     : List (Dependency String String String) :=
   (t.deps.val.map (encodeDependency encode ∘ byteDependency)).reverse
 
-private def encAddr (encode : List U8 → String) (a : Spike.engine.Address)
-    : Addr String String :=
+/-- Encode the two components of a native address. -/
+def encAddr (encode : List U8 → String) (a : Spike.engine.Address) : Addr String String :=
   encodeAddr encode (byteAddr a)
 
-private def encWrite (encode : List U8 → String) (w : Spike.engine.Write)
-    : Option String :=
+/-- Encode a staged put or deletion. -/
+def encWrite (encode : List U8 → String) (w : Spike.engine.Write) : Option String :=
   match w with
   | .Put value => encodeValue encode (some value)
   | .Remove => none
@@ -48,7 +48,8 @@ private theorem clone_write (w : Spike.engine.Write)
     : Spike.engine.Write.Insts.CoreCloneClone.clone w = .ok w := by
   cases w <;> simp [Spike.engine.Write.Insts.CoreCloneClone.clone, clone_bytes]
 
-private theorem pending_projection (encode : List U8 → String) (t : Spike.engine.Tx)
+/-- Project the ordered write overlay row by row. -/
+theorem pending_projection (encode : List U8 → String) (t : Spike.engine.Tx)
     : pointWrites encode t
       = t.pending.val.map fun (a, w) => (encAddr encode a, encWrite encode w) := by
   simp only [pointWrites, encodeWrites, byteWrites, List.map_map, Function.comp_def]
@@ -114,7 +115,8 @@ private theorem copy_cell_exact (c : Option Spike.engine.Cell)
     : Spike.engine.copy_cell c = .ok c := by
   cases c <;> simp [Spike.engine.copy_cell, clone_cell]
 
-private theorem deps_push (encode : List U8 → String) (t : Spike.engine.Tx)
+/-- Appending a native dependency prepends its model projection. -/
+theorem deps_push (encode : List U8 → String) (t : Spike.engine.Tx)
     (d : Spike.engine.Dependency) (room : t.deps.val.length < Usize.max)
     : WP.spec (alloc.vec.Vec.push t.deps d)
         (fun deps =>
@@ -183,7 +185,8 @@ private theorem observe_local (encode : List U8 → String)
         have hh := hdep deps hd <;>
         simp [← hw, valueAt, needs, ← hc, hh, encodeValue, encodeCell, byteCell, Function.comp_def]
 
-private theorem stage_write (encode : List U8 → String) (inj : Function.Injective encode)
+/-- Staging a write replaces its model binding and adds at most one entry. -/
+theorem stage_write_bounded (encode : List U8 → String) (inj : Function.Injective encode)
     (t : Spike.engine.Tx) (a : Spike.engine.Address) (w : Spike.engine.Write)
     (room : t.pending.val.length < Usize.max)
     : WP.spec
@@ -192,17 +195,33 @@ private theorem stage_write (encode : List U8 → String) (inj : Function.Inject
           Spike.engine.Write.Insts.CoreCloneClone t.pending a w)
         (fun pending =>
           pointWrites encode {t with pending}
-          = Kv.Model.set (pointWrites encode t) (encAddr encode a)
-              (encWrite encode w)) := by
+            = Kv.Model.set (pointWrites encode t) (encAddr encode a) (encWrite encode w)
+          ∧ pending.val.length ≤ t.pending.val.length + 1) := by
   have hi : Function.Injective (encAddr encode) :=
     (encode_addr_inj inj).comp (fun _ _ => byteAddr_inj)
   apply WP.spec_mono (assoc_set Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey
     Spike.engine.Address.Insts.CoreCloneClone Spike.engine.Write.Insts.CoreCloneClone
     t.pending a w (fun b => compare_address b a) clone_address clone_write room)
   intro pending h
-  simp only [pending_projection]
-  rw [h]
-  exact (set_projected t.pending.val a w (encAddr encode) (encWrite encode) hi).symm
+  constructor
+  · simp only [pending_projection]
+    rw [h]
+    exact (set_projected t.pending.val a w (encAddr encode) (encWrite encode) hi).symm
+  · rw [h, Kv.Model.set, List.length_cons]
+    exact Nat.succ_le_succ (List.length_filter_le _ _)
+
+/-- Staging a native write replaces its model binding. -/
+theorem stage_write (encode : List U8 → String) (inj : Function.Injective encode)
+    (t : Spike.engine.Tx) (a : Spike.engine.Address) (w : Spike.engine.Write)
+    (room : t.pending.val.length < Usize.max)
+    : WP.spec
+        (Spike.engine.Assoc.set Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey
+          Spike.engine.Address.Insts.CoreCloneClone
+          Spike.engine.Write.Insts.CoreCloneClone t.pending a w)
+        (fun pending =>
+          pointWrites encode {t with pending}
+          = Kv.Model.set (pointWrites encode t) (encAddr encode a) (encWrite encode w)) :=
+  WP.spec_mono (stage_write_bounded encode inj t a w room) (fun _ h => h.1)
 
 /-- Operations on a single key; a `none` write is a staged deletion. -/
 inductive PointOperation where
@@ -249,7 +268,8 @@ def pointOutput (encode : List U8 → String)
 def pointKeepsContext (t next : Spike.engine.Tx) : Prop :=
   {next with pending := t.pending, deps := t.deps} = t
 
-private theorem view_lookup (encode : List U8 → String) (inj : Function.Injective encode)
+/-- Lookup of a native handle returns the corresponding pinned view. -/
+theorem view_lookup (encode : List U8 → String) (inj : Function.Injective encode)
     (t : Spike.engine.Tx) (m : Spike.engine.Bytes)
     : WP.spec
         (Spike.engine.Assoc.get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey

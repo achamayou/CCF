@@ -191,6 +191,20 @@ theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
     rfl
   exact ⟨by simp [atCut, he], List.mem_of_find?_eq_some he⟩
 
+/-- The version of the selected reference frame is the cut clamped to the surviving branch. -/
+theorem model_cut_version (s : Spike.engine.History) (model : Store)
+    (project : Spike.engine.Frame → Frame)
+    (nonempty : s.frames.val ≠ [])
+    (hmodel : model.history = modelFrames s project)
+    (indexed : ∀ i (hi : i < s.frames.val.length), (project s.frames.val[i]).version = i)
+    (cut : Nat)
+    : (atCut model cut).version = min cut (s.frames.val.length - 1) := by
+  have hlen : 0 < s.frames.val.length := List.length_pos_iff.mpr nonempty
+  have hi : min cut (s.frames.val.length - 1) < s.frames.val.length := by omega
+  rw [atCut, hmodel, modelFrames, find_reverse_indexed _ _ _ indexed,
+    List.getElem?_eq_getElem hi]
+  exact indexed _ hi
+
 /-- Compaction preserves the frames, term and identity counter, and matches the model's frontier. -/
 theorem history_compact (s : Spike.engine.History) (requested : U64)
     (model : Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
@@ -310,6 +324,7 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
         Spike.engine.Store.execute s (.Rollback requested term)
           = .ok (.Ok (.RolledBack cut), after)
         ∧ cut.val = rollbackCut model requested.val
+        ∧ after.history.frames.val = s.history.frames.val.take (cut.val + 1)
         ∧ modelFrames after.history project
           = (rollbackStore model requested.val term.val).history
         ∧ after.txs = s.txs
@@ -320,7 +335,7 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
     history_rollback s.history requested term prior head hframes hindex hcut hterm
   have hmodelcut : cut.val = rollbackCut model requested.val := by
     simpa [rollbackCut, hglobal, hhead] using hvalue
-  refine ⟨cut, {s with history := retained}, ?_, hmodelcut, ?_, rfl, hg, hi, ht⟩
+  refine ⟨cut, {s with history := retained}, ?_, hmodelcut, htake, ?_, rfl, hg, hi, ht⟩
   · simp [Spike.engine.Store.execute, hrun]
   · have hfilter : s.history.frames.val.filter
         (fun f => decide ((project f).version ≤ cut.val))

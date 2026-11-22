@@ -51,7 +51,8 @@ def rustPinnedViews (encode : List U8 → String)
 def modelPinnedViews (rows : Assoc String GlobalView) : Assoc String PinnedView :=
   rows.map fun (m, v) => (m, modelPinnedView m v)
 
-private theorem projected_view_missing (rows : Assoc String GlobalView) (m : String)
+/-- Projection cannot add a lookup binding for a map that was not acquired. -/
+theorem projected_view_missing (rows : Assoc String GlobalView) (m : String)
     (h : find rows m = none)
     : find (modelPinnedViews rows) m = none := by
   induction rows with
@@ -462,6 +463,23 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             ∧ modelAfter = {w with txs := Kv.Model.set w.txs id.val txAfter}
             ∧ modelPinnedViews txAfter.globalViews = rustPinnedViews encode tAfter.views
             ∧ txAfter.unavailable = tAfter.unavailable
+            ∧ (if available model snap (encode (alloc.vec.Vec.val m)) then
+                  tAfter = {t with views := tAfter.views}
+                else
+                  tAfter = {t with unavailable := true})
+            ∧ (if available model snap (encode (alloc.vec.Vec.val m)) then
+                  txAfter
+                  = {
+                    tx with
+                      globalViews :=
+                        Kv.Model.set tx.globalViews (encode (alloc.vec.Vec.val m))
+                          (captureGlobal model snap (encode (alloc.vec.Vec.val m)))
+                      data :=
+                        pinData tx.data (encode (alloc.vec.Vec.val m))
+                          (captureLocal model snap (encode (alloc.vec.Vec.val m))).data
+                  }
+                else
+                  txAfter = {tx with unavailable := true})
             ∧ (∀ other,
                 image txAfter.data other
                 = if available model snap (encode (alloc.vec.Vec.val m))
@@ -537,7 +555,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             data := pinData tx.data k v.current.data
         }
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
-          .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, rfl, hrow, hupdate⟩
+          .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_left ha, ← hl, ← hg]
         · rw [hout]
@@ -547,6 +565,16 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
           exact hViews.symm
         · rw [hNext]
           exact hUnavailable
+        · change (if available model snap k then _ else _)
+          rw [ite_eq_left ha, hNext]
+        · change (if available model snap k then _ else _)
+          rw [ite_eq_left ha]
+          have hv : v.current = captureLocal model snap k := by
+            change (captureGlobal model snap k).current = _
+            by_cases hb : (find (captureLocal model snap k).births k).isNone <;>
+              simp [captureGlobal, hb]
+          simp only [modelNext, hv]
+          rfl
         · intro other
           have he : v.current = captureLocal model snap k := by
             change (captureGlobal model snap k).current = _
@@ -560,7 +588,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         obtain ⟨hout, hNext⟩ := hn
         let modelNext := {tx with unavailable := true}
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
-          .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, rfl, hrow, hupdate⟩
+          .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_right ha]
         · rw [hout]
@@ -568,6 +596,10 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         · rw [hNext]
           exact hPinned
         · rw [hNext]
+        · change (if available model snap k then _ else _)
+          rw [ite_eq_right ha, hNext]
+        · change (if available model snap k then _ else _)
+          rw [ite_eq_right ha]
         · have ha' : ¬available model snap (encode (alloc.vec.Vec.val m)) = true := ha
           simp [modelNext, ha']
 

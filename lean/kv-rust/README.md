@@ -19,7 +19,14 @@ The [local application proofs](KvRust/Apply.lean) check that rejection preserves
 The [dynamic history proofs](KvRust/History.lean) cover frame lookup at a cut, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
 The [acquisition proofs](KvRust/Acquire.lean) cover the `Acquire` action, including independent local and global views, rejection without mutation, and updates to the model's pinned read image.
 The [point-operation proofs](KvRust/Point.lean) cover enabled `Get`, `Has`, `Previous`, and `Write` actions, including the returned observations, write overlay, and read dependencies.
-The rest of the dynamic engine is extracted and exercised by native tests, but does not yet have a step-by-step simulation proof.
+The [map-operation proofs](KvRust/Scan.lean) cover scans, sizes, clears, and half-open ranges sorted in byte order.
+The [lifecycle proofs](KvRust/Lifecycle.lean) cover store initialization, attempt creation and removal, term and snapshot capture, and commit initiation and completion.
+
+[`initialized_run_matches`](KvRust/Simulation.lean) composes these results from the actual model's empty state: every in-bounds finite trace over the native single-store action surface produces the same observations and ends in related states.
+A disabled model action maps to an unchanged native store with `Error::Disabled`; rollback below the compacted frontier is a separate observable result in both implementations.
+The proof uses an injective, order-preserving encoding of native byte strings into the model's string type.
+`FitsTrace` states the capacity requirements for the counters and vectors that the original, unbounded model does not have.
+The proof does not cover allocation failure, a C++ adapter, or distributed execution.
 
 ## Reproduce
 

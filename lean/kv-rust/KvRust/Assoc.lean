@@ -246,4 +246,87 @@ theorem set_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
       = (Kv.Model.set rows key value).map (fun (k, v) => (keyOf k, valueOf v)) := by
   simp only [Kv.Model.set, List.map_cons, erase_projected rows key keyOf valueOf injective]
 
+/-- Erase removes precisely the selected lookup binding. -/
+theorem find_erase_key {K V : Type} [DecidableEq K] (rows : Kv.Model.Assoc K V) (k q : K)
+    : find (erase rows k) q = if q = k then none else find rows q := by
+  by_cases he : q = k
+  · subst q
+    induction rows with
+    | nil => simp [erase, find]
+    | cons row rest ih =>
+        obtain ⟨a, v⟩ := row
+        by_cases h : a = k <;> simp_all [erase, find]
+  · induction rows with
+    | nil => simp [he, erase, find]
+    | cons row rest ih =>
+        obtain ⟨a, v⟩ := row
+        by_cases h : a = k <;> by_cases hq : a = q <;> simp_all [erase, find]
+
+/-- Set replaces the selected lookup binding without affecting other keys. -/
+theorem find_set_key {K V : Type} [DecidableEq K] (rows : Kv.Model.Assoc K V) (k q : K)
+    (v : V)
+    : find (Kv.Model.set rows k v) q = if q = k then some v else find rows q := by
+  by_cases he : q = k
+  · subst q
+    simp [Kv.Model.set, find]
+  · simp [Kv.Model.set, find, he, Ne.symm he, find_erase_key]
+
+private theorem lookup_missing_of_not_mem {K V : Type} [DecidableEq K]
+    (rows : Kv.Model.Assoc K V) (k : K) (h : k ∉ rows.map Prod.fst)
+    : find rows k = none := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      obtain ⟨a, v⟩ := row
+      have hk : k ≠ a := fun he => h (by simp [he])
+      have ht : k ∉ rest.map Prod.fst := fun hm => h (by simp [hm])
+      simp [find, Ne.symm hk, ih ht]
+
+/-- A native in-place update agrees with the model's association-list replacement on lookups. -/
+theorem find_index_update {K V : Type} [DecidableEq K] (rows : Kv.Model.Assoc K V)
+    (i : Nat) (k q : K) (old next : V)
+    (h : rows[i]? = some (k, old)) (unique : (rows.map Prod.fst).Nodup)
+    : find (rows.set i (k, next)) q = find (Kv.Model.set rows k next) q := by
+  rw [find_set_key]
+  induction rows generalizing i with
+  | nil => simp at h
+  | cons row rest ih =>
+      obtain ⟨a, v⟩ := row
+      cases i with
+      | zero =>
+          have he : (a, v) = (k, old) := by simpa using h
+          have hak := congrArg Prod.fst he
+          change a = k at hak
+          subst a
+          by_cases hk : q = k
+          · subst q
+            simp [find]
+          · simp [find, hk, Ne.symm hk]
+      | succ i =>
+          have hn : a ∉ rest.map Prod.fst ∧ (rest.map Prod.fst).Nodup :=
+            List.nodup_cons.mp unique
+          have hr : rest[i]? = some (k, old) := h
+          have hak : a ≠ k := by
+            intro he
+            have mem : (k, old) ∈ rest := List.mem_of_getElem? hr
+            apply hn.1
+            rw [he]
+            exact List.mem_map.mpr ⟨_, mem, rfl⟩
+          by_cases ha : a = q
+          · have hq : q ≠ k := ha ▸ hak
+            simp [find, ha, hq]
+          · simp [find, ha, ih i hr hn.2]
+
+/-- A native in-place update preserves the sequence of keys. -/
+theorem index_update_keys {K V : Type} (rows : Kv.Model.Assoc K V) (i : Nat)
+    (k : K) (old next : V) (h : rows[i]? = some (k, old))
+    : (rows.set i (k, next)).map Prod.fst = rows.map Prod.fst := by
+  obtain ⟨hidx, he⟩ := List.getElem?_eq_some_iff.mp h
+  rw [List.map_set]
+  have hm : i < (rows.map Prod.fst).length := by simpa using hidx
+  have hk : (rows.map Prod.fst)[i] = k := by
+    rw [List.getElem_map, he]
+  rw [← hk]
+  exact List.set_getElem_self hm
+
 end KvRust
