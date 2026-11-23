@@ -2,7 +2,8 @@
 // Licensed under the Apache 2.0 License.
 
 use super::{ByteIndex, Link, NibbleRadix, Value};
-use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot, release_reference, retain_reference};
+use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot, retain_reference};
+use ccf_kv_spike::retire_queue::{RetireQueue, release_owner};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -18,7 +19,7 @@ struct Arena {
     dir_refs: Vec<u32>,
     row_refs: Vec<u32>,
     activation: Vec<Link>,
-    retired: VecDeque<Link>,
+    retired: RetireQueue,
 }
 
 fn children(dir: RadixDir) -> impl Iterator<Item = Link> {
@@ -64,9 +65,12 @@ impl Arena {
         if node.empty() {
             return;
         }
-        if release_reference(self.count(node)) {
-            self.retired.push_back(node);
-        }
+        let count = if node.leaf() {
+            &mut self.row_refs[node.index()]
+        } else {
+            &mut self.dir_refs[node.index()]
+        };
+        release_owner(count, &mut self.retired, node.0);
     }
 
     fn release(&mut self, pin: Pin) {
@@ -76,9 +80,10 @@ impl Arena {
     fn collect(&mut self, budget: usize) -> usize {
         let mut freed = 0;
         for _ in 0..budget {
-            let Some(link) = self.retired.pop_front() else {
+            let Some(raw) = self.retired.pop_front() else {
                 break;
             };
+            let link = Link(raw);
             assert_eq!(*self.count(link), 0);
             let i = link.index();
             if link.leaf() {
@@ -166,7 +171,9 @@ fn check_accounting(arena: &Arena, pins: &[&Pin]) {
         true,
     ));
     retired.sort_unstable();
-    let mut queued: Vec<_> = arena.retired.iter().map(|link| link.0).collect();
+    let mut queued: Vec<_> = (0..arena.retired.len())
+        .map(|i| arena.retired.get(i).unwrap())
+        .collect();
     queued.sort_unstable();
     assert_eq!(queued, retired);
 }

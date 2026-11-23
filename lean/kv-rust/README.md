@@ -306,6 +306,8 @@ The benchmark uses the extracted `recycle_slot` primitive.
 The [reclamation proofs](KvRust/RadixLiveness.lean) check the extracted retain and release arithmetic against exact owner multiplicities.
 For the dual index they count every live stamp row as an owner of its value, even if the stamp row awaits retirement.
 Recycling an unowned stamp row preserves pinned views and removes exactly one such reference; recycling an unowned value row preserves both views of every pinned root.
+The benchmark now uses the [extracted retirement FIFO](KvRust/RetireQueue.lean), whose reads, pushes, and pops agree with a list through wraparound and capacity growth.
+The per-tick retirement budget does not bound queue growth, allocator latency, or the cost of a queue expansion.
 End-to-end accounting for attaching and releasing roots and directory edges, and scheduling retirement, is still open.
 Retirement is not used by the transaction backend.
 
