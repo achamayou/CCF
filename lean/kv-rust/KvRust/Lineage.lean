@@ -125,12 +125,13 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
       : model.history.map (fun f => (find f.births (encode m), revision f (encode m)))
         = (modelFrames s (modelMetadata encode)).map
             (fun f => (find f.births (encode m), revision f (encode m))))
+    (valid : BranchValid s.log)
     : WP.spec (Spike.engine.History.map_lineage s m birth rev)
         (fun result => result = mapLineage model captured (encode m)) := by
   let matchesFrame := fun f : Spike.engine.Frame =>
     (find (modelMetadata encode f).births (encode m) == birth.map modelStamp) &&
       (revision (modelMetadata encode f) (encode m) == modelStamp rev)
-  have hmodel : mapLineage model captured (encode m) = s.frames.val.any matchesFrame := by
+  have hmodel : mapLineage model captured (encode m) = s.activeFrames.any matchesFrame := by
     let check := fun (p : Option Stamp × Stamp) =>
       (p.1 == birth.map modelStamp) && (p.2 == modelStamp rev)
     have h := congrArg (fun fs => List.any fs check) hHistory
@@ -138,18 +139,22 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
       using h
   rw [hmodel]
   unfold Spike.engine.History.map_lineage Spike.engine.History.map_lineage_loop
-  apply loop.spec_decr_nat (fun (i : Usize) => s.frames.val.length - i.val)
-    (fun i => (s.frames.val.drop i.val).any matchesFrame = s.frames.val.any matchesFrame)
+  apply loop.spec_decr_nat (fun (i : Usize) => s.activeFrames.length - i.val)
+    (fun i =>
+      (s.activeFrames.drop i.val).any matchesFrame = s.activeFrames.any matchesFrame)
     _ _ _
   · intro i hinv
     unfold Spike.engine.History.map_lineage_loop.body
-    have hlen : (alloc.vec.Vec.len s.frames).val = s.frames.val.length := alloc.vec.Vec.len_val _
-    have hbound := alloc.vec.Vec.len_ineq s.frames
+    apply WP.spec_bind (branch_active_len s.log valid)
+    intro count hlen
+    change count.val = s.activeFrames.length at hlen
+    have hbound : s.activeFrames.length ≤ Usize.max := branch_values_capacity s.log
     have hone : (1#usize : Usize).val = 1 := rfl
-    by_cases h : i < alloc.vec.Vec.len s.frames
-    · have hi : i.val < s.frames.val.length := by rw [← hlen]; exact h
-      rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
-      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec s.frames i hi)
+    by_cases h : i < count
+    · have hi : i.val < s.activeFrames.length := by rw [← hlen]; exact h
+      rw [ite_eq_left h]
+      apply WP.spec_bind (branch_active_at s.log valid i s.activeFrames[i.val]
+        (List.getElem?_eq_getElem hi))
       intro frame hf
       apply WP.spec_bind (frame_matches encode inj frame m birth rev)
       intro result hr
@@ -166,7 +171,7 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
           have hj' : j.val = i.val + 1 := by omega
           simp only [WP.spec_ok]
           exact ⟨by simpa [hj'] using hstep, by omega⟩
-    · have hi : s.frames.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+    · have hi : s.activeFrames.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
       rw [ite_eq_right h, WP.spec_ok]
       simpa [List.drop_eq_nil_of_le hi] using hinv
   · simp
@@ -194,6 +199,7 @@ private theorem view_on_branch (encode : Spike.engine.Bytes → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (model : Store)
     (view : Spike.engine.Bytes × Spike.engine.View)
     (hHistory : model.history.map onlyMetadata = modelFrames s (modelMetadata encode))
+    (valid : BranchValid s.log)
     : WP.spec (Spike.engine.History.map_lineage s view.1 view.2.birth view.2.revision)
         (fun result => result = stampsOnBranch model (viewStamps encode view)) := by
   let frame : Frame := {
@@ -210,7 +216,7 @@ private theorem view_on_branch (encode : Spike.engine.Bytes → String)
     (List.map fun (f : Frame) => (find f.births (encode view.1), revision f (encode view.1))) hHistory
   simp only [List.map_map, Function.comp_def, onlyMetadata, revision] at hs
   have h := map_lineage_matches_model encode inj s view.1 view.2.birth view.2.revision model frame
-    hb hr (by simpa only [revision] using hs)
+    hb hr (by simpa only [revision] using hs) valid
   simpa [mapLineage, hb, hr, stampsOnBranch, viewStamps] using h
 
 /-- The extracted lineage check covers every acquired map and distinguishes reused versions. -/
@@ -219,6 +225,7 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
     (model : Store) (tx : Tx)
     (hHistory : model.history.map onlyMetadata = modelFrames s (modelMetadata encode))
     (hViews : tx.globalViews.map capturedStamps = t.views.val.map (viewStamps encode))
+    (valid : BranchValid s.log)
     : WP.spec (Spike.engine.Tx.valid_lineage t s)
         (fun r =>
           r = tx.globalViews.all (fun (m, view) => mapLineage model view.current m)) := by
@@ -249,7 +256,7 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
           let next ← i + 1#usize
           Result.ok (ControlFlow.cont next)
         else Result.ok (ControlFlow.done false)) _
-      apply WP.spec_bind (view_on_branch encode inj s model (m, view) hHistory)
+      apply WP.spec_bind (view_on_branch encode inj s model (m, view) hHistory valid)
       intro result hr
       change result = check (m, view) at hr
       have hstep := hinv
@@ -273,7 +280,7 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
 theorem can_apply_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (t : Spike.engine.Tx)
     (model : Store) (tx : Tx) (prior : List Spike.engine.Frame)
-    (head : Spike.engine.Frame) (hHead : s.frames.val = prior ++ [head])
+    (head : Spike.engine.Frame) (hHead : s.activeFrames = prior ++ [head])
     (hHistory
       : model.history.map onlyMetadata
         = modelFrames s (modelMetadata (encode ∘ alloc.vec.Vec.val)))
@@ -289,11 +296,12 @@ theorem can_apply_matches_model (encode : List U8 → String)
       : tx.snapshot.map Snapshot.term = t.snapshot.map (fun snap => snap.term.val))
     (hEmpty : t.snapshot = none → t.views.val = [])
     (hUnavailable : tx.unavailable = t.unavailable)
+    (valid : BranchValid s.log)
     : WP.spec (Spike.engine.Tx.can_apply t s) (fun r => r = canApply model tx) := by
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
   have hl := acquired_lineage_matches_model (encode ∘ alloc.vec.Vec.val) hinj
-    s t model tx hHistory hViews
+    s t model tx hHistory hViews valid
   have hd : WP.spec (Spike.engine.Tx.valid_dependencies t head.data)
       (fun r => r = validates model.head.data tx.normal.deps) := by
     have hv := validates_encoding encode inj (byteData head.data) (t.deps.val.map byteDependency)
@@ -313,7 +321,7 @@ theorem can_apply_matches_model (encode : List U8 → String)
         && validates model.head.data tx.normal.deps)) := by
     apply WP.spec_bind hl
     intro b hb
-    cases b <;> simp [← hb, history_head s prior head hHead, hd]
+    cases b <;> simp [← hb, history_head s prior head hHead valid, hd]
   unfold Spike.engine.Tx.can_apply
   by_cases hu : t.unavailable = true
   · simp [hu, canApply, hUnavailable]

@@ -173,7 +173,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       (execute_acquire_matches_model encode inj n id w sid s tx t snap
                         rustSnap m prior head hf hh.frames hh.indexed hh.global hn hlookup
                         hns hms hCut hp hphase hr.views hr.unavailable hm
-                        (hr.fresh_log hm) (room t hn))
+                        (hr.fresh_log hm) (room t hn) hh.valid)
                     rintro ⟨output, after⟩ ⟨modelAfter, txAfter, tAfter, obs, index, hstep, ho, hw, hv, hu,
                       han, ham, _, hhist, hidx, hrow⟩
                     rw [hstep]

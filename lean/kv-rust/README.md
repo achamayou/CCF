@@ -244,6 +244,8 @@ The benchmark uses the extracted `recycle_slot` primitive.
 [`RadixLiveness`](KvRust/RadixLiveness.lean) proves that recycling preserves every retained root and its values when the selected slot has no incoming links or pins.
 The proof of reference accounting and the retirement queue is still open, and retirement is not used by the transaction backend.
 
-The experimental [`BranchLog`](KvRust/BranchLog.lean) separates active branch offsets from immutable frame IDs.
+The experimental history now uses [`BranchLog`](KvRust/BranchLog.lean) to separate active branch offsets from stable frame IDs.
 Its extracted proofs show that rewind truncates the active sequence without invalidating old IDs and that an append at a reused offset names a new frame.
-This is not yet wired into transaction acquisition and does not reclaim discarded frames.
+The single-store trace theorem relates the active sequence to the same model history, with an additional capacity bound for the retained frame arena.
+Acquisition still copies its map images.
+The frame arena retains discarded frames until the log is replaced or dropped; this is not a production reclamation strategy.

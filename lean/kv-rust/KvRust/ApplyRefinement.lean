@@ -17,7 +17,7 @@ def FitsApply (n : Spike.engine.Store) (id : U64) : Prop :=
   ∀ t,
     find n.txs.val id = some t
     → ∀ prior head,
-        n.history.frames.val = prior ++ [head] → ApplyCapacity n.history head t
+        n.history.activeFrames = prior ++ [head] → ApplyCapacity n.history head t
 
 private def nativeCommitting : Spike.engine.Phase → Bool
   | .Committing => true
@@ -33,7 +33,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     {sid : Nat} {s : Store} {n : Spike.engine.History}
     {tx : Tx} {t : Spike.engine.Tx} (hs : HistoryMatches encode n s)
     (ht : AttemptMatches encode sid t tx) (prior : List Spike.engine.Frame)
-    (head : Spike.engine.Frame) (hf : n.frames.val = prior ++ [head])
+    (head : Spike.engine.Frame) (hf : n.activeFrames = prior ++ [head])
     (hh : s.head = modelFrame encode head)
     : WP.spec (Spike.engine.Tx.can_apply t n) (fun r => r = canApply s tx) := by
   have hmeta : s.history.map onlyMetadata = modelFrames n (modelMetadata (encode ∘ alloc.vec.Vec.val)) := by
@@ -48,7 +48,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
       Function.comp_def]
       using congrArg (Option.map Prod.snd) ht.snapshot
   exact can_apply_matches_model encode inj n t s tx prior head hf hmeta ht.stamps
-    (congrArg Frame.data hh) hdeps hs.term hsnap ht.noSnapshot ht.unavailable
+    (congrArg Frame.data hh) hdeps hs.term hsnap ht.noSnapshot ht.unavailable hs.valid
 
 /-- Local publication both takes the model's enabled transition and preserves the state relation.
 Disabled publication leaves the store unchanged. -/
@@ -109,8 +109,8 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             apply WP.spec_mono
               (apply_accepted_matches_model encode inj n id t s prior head hn hPhase
                 hWrites hOk hframes hhist.frames hhead hhist.term hhist.global
-                hhist.identity (room t hn prior head hframes))
-            rintro ⟨observed, after⟩ ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi, hidx, hr⟩
+                hhist.identity (room t hn prior head hframes) hhist.valid)
+            rintro ⟨observed, after⟩ ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi, hidx, hr, hvalid⟩
             let store := advance s tx.normal.writes
             let next := {tx with phase := .applied store.head.version}
             let w' : State := {w with stores := Kv.Model.set w.stores sid store
@@ -127,6 +127,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                 (by simpa only [← hw', store] using hg.symm)
                 (by simpa only [← hw', store] using hterm'.symm)
                 (by simpa only [← hw', store] using hi.symm)
+                hvalid
             have hv' : version.val = store.head.version := by
               simpa only [← hw', store] using hv
             have htx

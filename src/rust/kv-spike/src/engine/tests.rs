@@ -291,7 +291,7 @@ fn restored_snapshot_retains_versions_and_only_rolls_back_its_suffix() {
         }],
     )
     .unwrap();
-    assert_eq!(s.history.frames.len(), 1);
+    assert_eq!(s.history.log.active_len(), 1);
     assert_eq!(s.history.global, version);
     let maps = s.snapshot_maps(version).unwrap();
     assert_eq!(maps.len(), 1);
@@ -306,7 +306,7 @@ fn restored_snapshot_retains_versions_and_only_rolls_back_its_suffix() {
     assert_read(&mut s, 1, name, b"k", true, Some(b"old"));
     write(&mut s, 1, name, b"k", Some(b"new"));
     applied(&mut s, 1, Outcome::Success, version + 1);
-    assert_eq!(s.history.frames.len(), 2);
+    assert_eq!(s.history.log.active_len(), 2);
     assert!(matches!(
         run(&mut s, Action::Rollback(version - 1, 8)),
         Output::RollbackRejected
@@ -315,7 +315,7 @@ fn restored_snapshot_retains_versions_and_only_rolls_back_its_suffix() {
         run(&mut s, Action::Rollback(version, 8)),
         Output::RolledBack(v) if v == version
     ));
-    assert_eq!(s.history.frames.len(), 1);
+    assert_eq!(s.history.log.active_len(), 1);
     assert_eq!(s.history.head().version, version);
     begin(&mut s, 2);
     acquire(&mut s, 2, name);
@@ -615,6 +615,43 @@ fn rollback_restores_prefix_and_stale_term_cannot_publish() {
 }
 
 #[test]
+fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
+    let mut store = Store::new(0);
+    put(&mut store, 0, b"a", b"k", b"first", 1);
+    put(&mut store, 0, b"a", b"k", b"discarded", 2);
+    let pinned = store.history.log.at_cut(2);
+    assert!(matches!(
+        run(&mut store, Action::Rollback(1, 1)),
+        Output::RolledBack(1)
+    ));
+    put(&mut store, 0, b"a", b"k", b"replacement", 2);
+    let key = Address {
+        map: Bytes::copy_from(b"a"),
+        key: Bytes::copy_from(b"k"),
+    };
+    let saved = store.history.log.read(pinned);
+    assert_eq!(saved.version, 2);
+    assert_eq!(
+        saved.data.get_ref(&key).unwrap().value.as_slice(),
+        b"discarded"
+    );
+    let head = store.history.head();
+    assert_eq!(head.version, 2);
+    assert_eq!(
+        head.data.get_ref(&key).unwrap().value.as_slice(),
+        b"replacement"
+    );
+    store.install_snapshot(3, Vec::new()).unwrap();
+    assert_eq!(store.history.log.active_len(), 1);
+    assert_eq!(store.history.head().version, 3);
+    let saved = store.history.log.read(pinned);
+    assert_eq!(
+        saved.data.get_ref(&key).unwrap().value.as_slice(),
+        b"discarded"
+    );
+}
+
+#[test]
 fn identity_exhaustion_never_looks_like_conflict_or_partially_applies() {
     let mut s = Store::new(0);
     s.history.next_identity = u64::MAX;
@@ -624,7 +661,7 @@ fn identity_exhaustion_never_looks_like_conflict_or_partially_applies() {
     run(&mut s, Action::CommitBegin(0));
     assert!(matches!(s.execute(Action::Apply(0)), Err(Error::Exhausted)));
     assert_eq!(s.history.next_identity, u64::MAX);
-    assert_eq!(s.history.frames.len(), 1);
+    assert_eq!(s.history.log.active_len(), 1);
     begin(&mut s, 1);
     acquire(&mut s, 1, b"a");
     assert_read(&mut s, 1, b"a", b"k", false, None);

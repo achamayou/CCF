@@ -20,7 +20,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
             execute {} (.storeCreate sid term.val) = some (w, .unit)
             ∧ StateMatches encode sid n w) := by
   apply WP.spec_mono (store_new_lifecycle encode term)
-  intro n ⟨head, _, _, hf, hg, ht, hi, htx⟩
+  intro n ⟨head, _, _, hf, hg, ht, hi, htx, valid⟩
   let s : Store := {term := term.val}
   let w : State := {stores := [(sid, s)]}
   have hs : find w.stores sid = some s := by simp [w, find]
@@ -28,7 +28,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     simp [execute, find, Kv.Model.set, erase, s, w]
   have hReach := reachable_execute (CCF.TransitionSystem.Reachable.initial rfl) he
   have hr := history_related (encode := encode) (n := n.history) hReach hs hf.symm hg.symm
-    (by change term.val = n.history.term.val; rw [ht]) hi.symm
+    (by change term.val = n.history.term.val; rw [ht]) hi.symm valid
   refine ⟨w, he, ⟨⟨s, hs, hr⟩, ?_, ?_, hReach⟩⟩
   · simp [htx]
   · intro id
@@ -124,7 +124,7 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
   obtain ⟨s, hs, hh⟩ := h.history
   obtain ⟨prior, head, hf, hhead⟩ := hh.split
   apply related_row encode sid n w id _ h
-  apply execute_snapshot_matches_model encode n w sid id prior head hf
+  apply execute_snapshot_matches_model encode n w sid id prior head hf hh.valid
   have he := h.lookupRelated hs id
   cases hn : find n.txs.val id <;> cases hm : lookupTx w sid id.val <;>
     rw [hn, hm] at he

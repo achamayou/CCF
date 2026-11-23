@@ -21,7 +21,7 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
   obtain ⟨s, hs, h⟩ := related.history
   obtain ⟨prior, head, hframes, hhead⟩ := h.split
   obtain ⟨result, hrun, hcut⟩ := history_compact native.history cut s prior head
-    hframes h.global (congrArg Frame.version hhead)
+    hframes h.global (congrArg Frame.version hhead) h.valid
   let store := compactStore s cut.val
   let w' := {w with stores := Kv.Model.set w.stores sid store}
   let next := {native with history := {native.history with global := result}}
@@ -31,7 +31,7 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     have he' : store = {s with global := store.global} := by
       unfold store compactStore
       split <;> rfl
-    refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_⟩
+    refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_, h.valid⟩
     · rw [he']; exact h.frames
     · rw [he']; exact h.head
     · rw [he']; exact h.term
@@ -61,21 +61,21 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
     · let store := rollbackStore s requested.val term.val
       let w' := {w with stores := Kv.Model.set w.stores sid store}
       have hindex : head.version.val = prior.length := by
-        have hidx : prior.length < native.history.frames.val.length := by simp [hframes]
+        have hidx : prior.length < native.history.activeFrames.length := by simp [hframes]
         have hh := h.indexed prior.length hidx
-        have he : native.history.frames.val[prior.length] = head := by
+        have he : native.history.activeFrames[prior.length] = head := by
           apply Option.some.inj
           rw [← List.getElem?_eq_getElem hidx, hframes]
           simp
         rw [he] at hh
         exact hh
-      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm⟩ :=
+      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm, hlog⟩ :=
         rollback_retains_model_frames native requested term s (modelFrame encode) prior head
-          hframes hindex (fun v => history_relative_cut_zero native.history v h.nonempty h.indexed)
+          hframes hindex (fun v => history_relative_cut_zero native.history v h.nonempty h.indexed h.valid)
           h.indexed h.frames h.global (congrArg Frame.version hhead)
-          (Nat.le_of_not_gt hLow) (Nat.le_of_not_gt hStale)
+          (Nat.le_of_not_gt hLow) (Nat.le_of_not_gt hStale) h.valid
       have hh : store.head.version = cut.val := by
-        have hsize : native.history.frames.val.length - 1 = prior.length := by simp [hframes]
+        have hsize : native.history.activeFrames.length - 1 = prior.length := by simp [hframes]
         have hc : s.head.version = prior.length := (congrArg Frame.version hhead).trans hindex
         have hreach := (Kv.Properties.reachable_store_invariants w sid s related.reachable hs).2.2.1
         have hbounded : cut.val ≤ prior.length := by
@@ -89,15 +89,15 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
       have reach := reachable_execute related.reachable he
       have hstore : find w'.stores sid = some store := by simp [w', find_set_key]
       have hvalid : HistoryMatches encode after.history store := by
-        refine ⟨?_, hmodel.symm, ?_, ?_, ?_, ?_, ?_⟩
+        refine ⟨?_, hmodel.symm, ?_, ?_, ?_, ?_, ?_, hlog⟩
         · simp [htake, List.take_eq_nil_iff, h.nonempty]
         · exact (Kv.Properties.reachable_store_invariants w' sid store reach hstore).2.1
         · intro i hi
-          have hi' : i < (native.history.frames.val.take (cut.val + 1)).length := by
+          have hi' : i < (native.history.activeFrames.take (cut.val + 1)).length := by
             rwa [← htake]
-          have hElem : after.history.frames.val[i] = native.history.frames.val[i]'(by
+          have hElem : after.history.activeFrames[i] = native.history.activeFrames[i]'(by
               simp only [List.length_take] at hi'; omega) := by
-            have he := List.getElem_take (h := hi') (xs := native.history.frames.val)
+            have he := List.getElem_take (h := hi') (xs := native.history.activeFrames)
             simpa only [htake] using he
           rw [hElem]
           exact h.indexed _ _

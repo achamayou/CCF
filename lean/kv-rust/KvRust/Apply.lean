@@ -163,7 +163,8 @@ structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
   /-- The next application identity does not overflow. -/
   identity : s.next_identity.val < U64.max
   /-- A new frame can be appended. -/
-  history : s.frames.val.length < Usize.max
+  history : s.activeFrames.length < Usize.max
+  archive : s.log.frames.val.length < Usize.max
   /-- Capacity for publication. -/
   data : head.data.val.length + t.pending.val.length ≤ Usize.max
   /-- Capacity for revision records. -/
@@ -178,13 +179,14 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
     (head : Spike.engine.Frame) (hTx : find s.txs.val id = some t)
     (hPhase : t.phase = .Committing) (hWrites : t.pending.val ≠ [])
     (hEligible : WP.spec (Spike.engine.Tx.can_apply t s.history) (fun r => r = true))
-    (hHead : s.history.frames.val = prior ++ [head])
+    (hHead : s.history.activeFrames = prior ++ [head])
     (hFrames : model.history = modelFrames s.history (modelFrame encode))
     (hModelHead : model.head = modelFrame encode head)
     (hTerm : model.term = s.history.term.val)
     (hGlobal : model.global = s.history.global.val)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (hCap : ApplyCapacity s.history head t)
+    (valid : BranchValid s.history.log)
     : let writes := encodeWrites encode (byteWrites t.pending.val)
       let expected := advance model writes
       WP.spec (Spike.engine.Store.execute s (.Apply id))
@@ -199,8 +201,8 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ after.history.term.val = expected.term
             ∧ after.history.next_identity.val = expected.nextIdentity
             ∧ s.txs.val[index]? = some (id, t)
-            ∧ after.txs.val
-              = s.txs.val.set index (id, {t with phase := .Applied version})) := by
+            ∧ after.txs.val = s.txs.val.set index (id, {t with phase := .Applied version})
+            ∧ BranchValid after.history.log) := by
   dsimp only
   unfold Spike.engine.Store.execute Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -227,7 +229,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         have hv := congrArg (fun v : U64 => v.val) h
         have hd := hCap.identity
         omega
-      simp only [ite_true, history_head s.history prior head hHead, bind_ok, hn, hi, ite_false]
+      simp only [ite_true, history_head s.history prior head hHead valid, bind_ok, hn, hi, ite_false]
       have hone : (1#u64 : U64).val = 1 := rfl
       have hvbound : head.version.val + (1#u64 : U64).val ≤ U64.max := by
         have := hCap.version
@@ -245,8 +247,11 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       intro next hnext
       apply WP.spec_bind (report_matches encode t.pending)
       intro reported hreported
-      apply WP.spec_bind (alloc.vec.Vec.push_spec s.history.frames next hCap.history)
-      intro frames hf
+      have branchRoom : s.history.log.branch.val.length < Usize.max :=
+        (branch_values_length s.history.log valid) ▸ hCap.history
+      apply WP.spec_bind
+        (branch_append_refines s.history.log next valid hCap.archive branchRoom)
+      rintro ⟨_, log⟩ ⟨logValid, hf, _, _, _⟩
       have hibound : s.history.next_identity.val + (1#u64 : U64).val ≤ U64.max := by
         have := hCap.identity
         omega
@@ -260,13 +265,14 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       change WP.spec (Result.ok
         (core.result.Result.Ok (Spike.engine.Output.Applied version s.history.term reported),
           ({s with
-            history := {s.history with frames, next_identity := identity}
+            history := {s.history with log, next_identity := identity}
             txs := back (id, {t with phase := .Applied version})} : Spike.engine.Store))) _
       rw [WP.spec_ok]
       refine ⟨version, reported, ?_⟩
       refine ⟨rfl, hv', hTerm.symm, hreported, ?_, hGlobal.symm,
-        hTerm.symm, ?_, i.val, hrow, ?_⟩
-      · simp only [modelFrames, hf, List.reverse_append, List.reverse_singleton, List.singleton_append,
+        hTerm.symm, ?_, i.val, hrow, ?_, logValid⟩
+      · simp only [modelFrames, Spike.engine.History.activeFrames, hf, List.reverse_append,
+          List.reverse_singleton, List.singleton_append,
           List.map_cons]
         unfold modelFrames at hFrames
         rw [← hFrames, hnext]
@@ -304,12 +310,13 @@ theorem pending_writes_match (encode : List U8 → String)
 /-- A gap or duplicate version is rejected before changing the store. -/
 theorem replay_next_rejects_wrong_version
     (s : Spike.engine.Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hHead : s.history.frames.val = prior ++ [head])
+    (hHead : s.history.activeFrames = prior ++ [head])
     (hVersion : head.version.val < U64.max)
     (hIdentity : s.history.next_identity.val < U64.max)
     (requested : U64)
     (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
     (wrong : requested.val ≠ head.version.val + 1)
+    (valid : BranchValid s.history.log)
     : WP.spec (Spike.engine.Store.replay_next s requested writes)
         (fun r => r = (.Err .Disabled, s)) := by
   have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
@@ -322,7 +329,7 @@ theorem replay_next_rejects_wrong_version
   have hone : (1#u64 : U64).val = 1 := rfl
   have hroom : head.version.val + (1#u64 : U64).val ≤ U64.max := by omega
   unfold Spike.engine.Store.replay_next
-  simp only [history_head s.history prior head hHead, bind_ok, hv, hi, ite_false]
+  simp only [history_head s.history prior head hHead valid, bind_ok, hv, hi, ite_false]
   apply WP.spec_bind (U64.add_spec hroom)
   intro v hval
   have hne : requested ≠ v := fun he => by
@@ -343,16 +350,18 @@ supplied write set and a fresh application identity. -/
 theorem replay_next_matches_advance (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.Store) (model : Store)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hHead : s.history.frames.val = prior ++ [head])
+    (hHead : s.history.activeFrames = prior ++ [head])
     (hModelHead : model.head = modelFrame encode head)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (version : U64) (hVersion : version.val = head.version.val + 1)
     (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
-    (hF : s.history.frames.val.length < Usize.max)
+    (hF : s.history.activeFrames.length < Usize.max)
     (hI : s.history.next_identity.val < U64.max)
     (hD : head.data.val.length + writes.val.length ≤ Usize.max)
     (hR : head.revisions.val.length + writes.val.length ≤ Usize.max)
     (hB : head.births.val.length + writes.val.length ≤ Usize.max)
+    (valid : BranchValid s.history.log)
+    (archiveRoom : s.history.log.frames.val.length < Usize.max)
     : WP.spec (Spike.engine.Store.replay_next s version writes)
         (fun (result, after) =>
           (result = .Err .Disabled ∧ after = s)
@@ -360,11 +369,12 @@ theorem replay_next_matches_advance (encode : List U8 → String)
               ∧ ∃ next,
                   modelFrame encode next
                     = (advance model (encodeReport encode writes)).head
-                  ∧ after.history.frames.val = s.history.frames.val ++ [next]
+                  ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
                   ∧ after.history.next_identity.val = s.history.next_identity.val + 1
                   ∧ after.history.term = s.history.term
                   ∧ after.history.global = s.history.global
-                  ∧ after.txs = s.txs)) := by
+                  ∧ after.txs = s.txs
+                  ∧ BranchValid after.history.log)) := by
   have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
   have hle : version.val ≤ U64.max := by scalar_tac
   have hv : head.version ≠ core.num.U64.MAX := fun he => by
@@ -376,7 +386,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
   have hone : (1#u64 : U64).val = 1 := rfl
   have hroom : head.version.val + (1#u64 : U64).val ≤ U64.max := by omega
   unfold Spike.engine.Store.replay_next
-  simp only [history_head s.history prior head hHead, bind_ok, hv, hi, ite_false]
+  simp only [history_head s.history prior head hHead valid, bind_ok, hv, hi, ite_false]
   apply WP.spec_bind (U64.add_spec hroom)
   intro v hv'
   have hEq : v = version := by
@@ -387,15 +397,16 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     Spike.engine.Assoc.new, bind_ok]
   apply WP.spec_bind
     (Pₘ :=
-      fun (result, frames, identity) =>
+      fun (result, log, identity) =>
         (result = .Err .Disabled
-          ∧ frames = s.history.frames
+          ∧ log = s.history.log
           ∧ identity = s.history.next_identity)
         ∨ (result = .Ok ()
             ∧ ∃ next,
                 modelFrame encode next = (advance model (encodeReport encode writes)).head
-                ∧ frames.val = s.history.frames.val ++ [next]
-                ∧ identity.val = s.history.next_identity.val + 1))
+                ∧ branchValues log = s.history.activeFrames ++ [next]
+                ∧ identity.val = s.history.next_identity.val + 1
+                ∧ BranchValid log))
   · unfold Spike.engine.Store.replay_next_loop
     apply loop.spec_decr_nat
       (fun (p : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write × Usize) =>
@@ -476,22 +487,25 @@ theorem replay_next_matches_advance (encode : List U8 → String)
                 (by simpa [hlength] using hD) (by simpa [hlength] using hR)
                 (by simpa [hlength] using hB))
             intro next hn
-            apply WP.spec_bind (alloc.vec.Vec.push_spec s.history.frames next hF)
-            intro frames hf
+            have branchRoom : s.history.log.branch.val.length < Usize.max :=
+              (branch_values_length s.history.log valid) ▸ hF
+            apply WP.spec_bind
+              (branch_append_refines s.history.log next valid archiveRoom branchRoom)
+            rintro ⟨_, log⟩ ⟨logValid, hf, _, _, _⟩
             have hsucc : s.history.next_identity.val + (1#u64 : U64).val ≤ U64.max := by
               omega
             apply WP.spec_bind (U64.add_spec hsucc)
             intro ident hident
             simp only [WP.spec_ok]
-            exact Or.inr ⟨True.intro, next, hWrite ▸ hn, hf, by omega⟩
+            exact Or.inr ⟨True.intro, next, hWrite ▸ hn, hf, by omega, logValid⟩
     · simp
-  · rintro ⟨result, frames, identity⟩ hr
+  · rintro ⟨result, log, identity⟩ hr
     dsimp only at hr
     change WP.spec (Result.ok (result, {s with history :=
-      {s.history with frames, next_identity := identity}})) _
+      {s.history with log, next_identity := identity}})) _
     rw [WP.spec_ok]
-    rcases hr with ⟨rfl, rfl, rfl⟩ | ⟨rfl, next, hn, hf, hi'⟩
+    rcases hr with ⟨rfl, rfl, rfl⟩ | ⟨rfl, next, hn, hf, hi', hvalid⟩
     · exact Or.inl ⟨rfl, rfl⟩
-    · exact Or.inr ⟨rfl, next, hn, hf, hi', rfl, rfl, rfl⟩
+    · exact Or.inr ⟨rfl, next, hn, hf, hi', rfl, rfl, rfl, hvalid⟩
 
 end KvRust

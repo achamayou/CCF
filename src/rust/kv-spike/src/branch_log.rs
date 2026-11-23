@@ -6,6 +6,7 @@ pub struct FrameId(usize);
 
 /// Experimental snapshot storage. Rollback truncates the active branch, not
 /// the immutable frames; IDs are local to the issuing log and are never reused.
+#[derive(Clone)]
 pub struct BranchLog<T> {
     frames: Vec<T>,
     branch: Vec<usize>,
@@ -25,6 +26,26 @@ impl<T> BranchLog<T> {
         self.frames.push(frame);
         self.branch.push(id);
         FrameId(id)
+    }
+
+    pub fn active_len(&self) -> usize {
+        self.branch.len()
+    }
+
+    pub fn active_at(&self, offset: usize) -> &T {
+        self.read(FrameId(self.branch[offset]))
+    }
+
+    pub(crate) fn reset_branch(&mut self, base: T) {
+        self.branch.resize(0, 0);
+        self.append(base);
+    }
+
+    /// Ledger replay may finish preparing the most recently appended frame
+    /// before the enclosing store operation returns.
+    pub(crate) fn replay_frame_mut(&mut self) -> &mut T {
+        let last = self.frames.len() - 1;
+        &mut self.frames[last]
     }
 
     pub fn resolve(&self, offset: usize) -> Option<FrameId> {

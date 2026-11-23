@@ -31,25 +31,22 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
     : WP.spec (Spike.engine.Store.new term)
         (fun s =>
           ∃ head,
-            s.history.frames.val = [head]
+            s.history.activeFrames = [head]
             ∧ modelFrame encode head = ({term := term.val} : Store).head
             ∧ modelFrames s.history (modelFrame encode)
               = ({term := term.val} : Store).history
             ∧ s.history.global.val = 0
             ∧ s.history.term = term
             ∧ s.history.next_identity.val = 1
-            ∧ s.txs.val = []) := by
+            ∧ s.txs.val = []
+            ∧ BranchValid s.history.log) := by
   simp only [Spike.engine.Store.new, Spike.engine.History.new, Spike.engine.Frame.empty,
     Spike.engine.Assoc.new, Aeneas.Std.bind_assoc, bind_ok]
-  have room : (alloc.vec.Vec.new Spike.engine.Frame).val.length < Usize.max := by
-    change 0 < Usize.max
-    have h := Usize.max_succ_eq_pow
-    rcases System.Platform.numBits_eq with hbits | hbits <;> simp [hbits] at h <;> omega
-  apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new _) emptyFrame room)
-  intro frames hframes
+  apply WP.spec_bind (branch_new_refines emptyFrame)
+  intro log ⟨valid, hframes⟩
   simp only [WP.spec_ok]
-  refine ⟨emptyFrame, by simpa using hframes, rfl, ?_, by simp, by simp, by simp, by simp⟩
-  simp [modelFrames, hframes]
+  refine ⟨emptyFrame, hframes, rfl, ?_, by simp, by simp, by simp, by simp, valid⟩
+  simp [modelFrames, Spike.engine.History.activeFrames, hframes]
   rfl
 
 /-- The exact native transaction installed by a fresh `Begin`. -/
@@ -214,7 +211,8 @@ private theorem restore_row (s : Spike.engine.Store) (id : U64) (t : Spike.engin
 /-- `Snapshot` freezes the actual head version and term, only on a fresh active attempt. -/
 theorem execute_snapshot_lifecycle (s : Spike.engine.Store) (id : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hframes : s.history.frames.val = prior ++ [head])
+    (hframes : s.history.activeFrames = prior ++ [head])
+    (valid : BranchValid s.history.log)
     : WP.spec (Spike.engine.Store.execute s (.Snapshot id))
         (LifecycleTxPost s id
           fun t =>
@@ -247,7 +245,7 @@ theorem execute_snapshot_lifecycle (s : Spike.engine.Store) (id : U64)
           | some _ => simp [LifecycleTxPost, ht, hp, hs, core.option.Option.is_some]
           | none =>
               simp [LifecycleTxPost, ht, hp, hs, core.option.Option.is_some,
-                history_head s.history prior head hframes, index_mut_row s i id t hrow]
+                history_head s.history prior head hframes valid, index_mut_row s i id t hrow]
               simpa [hp] using (row_update s id t
                 {t with snapshot := some {version := head.version, term := s.history.term}} i hrow)
       | Committing => simp [LifecycleTxPost, ht, hp]
@@ -648,7 +646,8 @@ theorem execute_commit_begin_matches_model (encode : List U8 → String)
 theorem execute_snapshot_matches_model (encode : List U8 → String)
     (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hframes : s.history.frames.val = prior ++ [head])
+    (hframes : s.history.activeFrames = prior ++ [head])
+    (valid : BranchValid s.history.log)
     (lookup
       : Option.Rel
           (fun t (model, tx) =>
@@ -674,7 +673,7 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
     (fun t model tx => LifecycleAttempt encode t tx
       ∧ model.head = modelFrame encode head
       ∧ model.global = s.history.global.val ∧ model.term = s.history.term.val)
-    lookup ?_ ?_ ?_ (execute_snapshot_lifecycle s id prior head hframes)
+    lookup ?_ ?_ ?_ (execute_snapshot_lifecycle s id prior head hframes valid)
   · intro t store tx ⟨h, hh, hg, ht⟩
     dsimp only [nStep, mStep]
     rw [phase_not_active, ← h.phase]

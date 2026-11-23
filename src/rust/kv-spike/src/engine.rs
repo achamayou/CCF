@@ -3,6 +3,8 @@
 
 //! A single-store KV state machine over finite association lists.
 
+use crate::branch_log::BranchLog;
+
 pub type Version = u64;
 pub type Term = u64;
 pub type Attempt = u64;
@@ -438,8 +440,8 @@ fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
 
 #[derive(Clone)]
 struct History {
-    // Oldest first. Versions are contiguous from the first retained frame.
-    frames: Vec<Frame>,
+    // The active branch is oldest first and contiguous in version.
+    log: BranchLog<Frame>,
     global: Version,
     term: Term,
     next_identity: u64,
@@ -447,10 +449,8 @@ struct History {
 
 impl History {
     fn new(term: Term) -> Self {
-        let mut frames = Vec::new();
-        frames.push(Frame::empty());
         Self {
-            frames,
+            log: BranchLog::new(Frame::empty()),
             global: 0,
             term,
             next_identity: 1,
@@ -458,28 +458,22 @@ impl History {
     }
 
     fn head(&self) -> &Frame {
-        &self.frames[self.frames.len() - 1]
+        self.log.active_at(self.log.active_len() - 1)
     }
 
     fn relative_cut(&self, cut: Version) -> Version {
-        let base = self.frames[0].version;
+        let base = self.log.active_at(0).version;
         if cut < base { 0 } else { cut - base }
     }
 
     fn at_cut(&self, cut: Version) -> &Frame {
-        let offset = self.relative_cut(cut);
-        let head = self.frames.len() - 1;
-        if offset < head as Version {
-            &self.frames[offset as usize]
-        } else {
-            &self.frames[head]
-        }
+        self.log.read(self.log.at_cut(self.relative_cut(cut)))
     }
 
     fn map_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
         let mut i = 0;
-        while i < self.frames.len() {
-            if self.frames[i].matches_lineage(map, birth, revision) {
+        while i < self.log.active_len() {
+            if self.log.active_at(i).matches_lineage(map, birth, revision) {
                 return true;
             }
             i += 1;
@@ -504,7 +498,7 @@ impl History {
         if cut < head {
             // The cut's offset is below the last retained frame's index.
             let offset = self.relative_cut(cut);
-            self.frames.resize(offset as usize + 1, Frame::empty());
+            assert!(self.log.rewind(offset as usize));
         }
         self.term = term;
         Ok(Output::RolledBack(cut))
@@ -1174,7 +1168,7 @@ impl Store {
         if !matches!(t.phase, Phase::Active) || t.views.index(&map).is_some() {
             return Err(Error::Disabled);
         }
-        if snapshot.version < self.history.frames[0].version {
+        if snapshot.version < self.history.log.active_at(0).version {
             t.unavailable = true;
             return Ok(Output::Unavailable);
         }
@@ -1250,8 +1244,8 @@ impl Store {
             their_views.set(name.clone(), self.recovery_view(name));
             i += 1;
         }
-        self.history.frames = my_frames;
-        source.history.frames = their_frames;
+        self.history.log = my_frames;
+        source.history.log = their_frames;
         self.history.next_identity = my_identity + 1;
         source.history.next_identity = their_identity + 1;
         self.recovery_views = my_views;
@@ -1275,7 +1269,7 @@ impl Store {
         let t = &mut self.txs.0[i].1;
         if !matches!(t.phase, Phase::Active)
             || t.snapshot.is_some()
-            || version < self.history.frames[0].version
+            || version < self.history.log.active_at(0).version
             || version > self.history.head().version
         {
             return Err(Error::Disabled);
@@ -1374,9 +1368,7 @@ impl Store {
             }
             i += 1;
         }
-        let mut frames = Vec::new();
-        frames.push(frame);
-        self.history.frames = frames;
+        self.history.log.reset_branch(frame);
         self.history.next_identity = identity + 1;
         self.history.global = version;
         let mut i = 0;
@@ -1450,12 +1442,17 @@ impl Store {
         source: &History,
         names: &Vec<Bytes>,
         identity: u64,
-    ) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        let mut i = 0;
-        while i < destination.frames.len() {
-            frames.push(Self::recovery_frame(
-                &destination.frames[i],
+    ) -> BranchLog<Frame> {
+        let mut frames = BranchLog::new(Self::recovery_frame(
+            destination.log.active_at(0),
+            source,
+            names,
+            identity,
+        ));
+        let mut i = 1;
+        while i < destination.log.active_len() {
+            frames.append(Self::recovery_frame(
+                destination.log.active_at(i),
                 source,
                 names,
                 identity,
@@ -1491,7 +1488,7 @@ impl Store {
             i += 1;
         }
         let next = head.advance(version, identity, &pending);
-        self.history.frames.push(next);
+        self.history.log.append(next);
         self.history.next_identity += 1;
         Ok(())
     }
@@ -1556,8 +1553,7 @@ impl Store {
 
     fn stamp_historical_maps(&mut self, version: Version, maps: &Vec<Bytes>) {
         let identity = self.history.next_identity - 1;
-        let at = self.history.frames.len() - 1;
-        let revisions = &mut self.history.frames[at].revisions;
+        let revisions = &mut self.history.log.replay_frame_mut().revisions;
         let mut i = 0;
         while i < maps.len() {
             revisions.set(maps[i].clone(), Stamp { version, identity });
@@ -1588,7 +1584,7 @@ impl Store {
         let version = head.version + 1;
         let next = head.advance(version, self.history.next_identity, &t.pending);
         let writes = reported_writes(&t.pending);
-        self.history.frames.push(next);
+        self.history.log.append(next);
         self.history.next_identity += 1;
         self.txs.0[i].1.phase = Phase::Applied(version);
         Ok(Output::Applied(version, self.history.term, writes))

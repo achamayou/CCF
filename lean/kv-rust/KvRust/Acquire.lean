@@ -194,16 +194,17 @@ theorem acquire_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (model : Store)
     (t : Spike.engine.Tx) (snap : Snapshot) (rustSnap : Spike.engine.Snapshot)
     (m : Spike.engine.Bytes) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hframes : s.frames.val = prior ++ [head])
+    (hframes : s.activeFrames = prior ++ [head])
     (hmodel : model.history = modelFrames s (modelFrame encode))
     (hversions
-      : ∀ i (hi : i < s.frames.val.length),
-          (modelFrame encode s.frames.val[i]).version = i)
+      : ∀ i (hi : i < s.activeFrames.length),
+          (modelFrame encode s.activeFrames[i]).version = i)
     (hglobal : model.global = s.global.val) (hSnapshot : t.snapshot = some rustSnap)
     (hCut : snap.current.version = rustSnap.version.val) (hPhase : t.phase = .Active)
     (hAbsent
       : find (rustPinnedViews encode t.views) (encode (alloc.vec.Vec.val m)) = none)
     (hRoom : t.views.val.length < Usize.max)
+    (valid : BranchValid s.log)
     : let k := encode (alloc.vec.Vec.val m)
       let v := captureGlobal model snap k
       WP.spec (Spike.engine.Tx.acquire t s m)
@@ -222,7 +223,7 @@ theorem acquire_matches_model (encode : List U8 → String)
   let k := enc m
   let v := captureGlobal model snap k
   have hzero (cut : U64) : Spike.engine.History.relative_cut s cut = .ok cut :=
-    history_relative_cut_zero s cut (by simp [hframes]) hversions
+    history_relative_cut_zero s cut (by simp [hframes]) hversions valid
   change WP.spec (Spike.engine.Tx.acquire t s m) (fun (output, after) =>
     if available model snap k then
       ∃ localVer globalVer views,
@@ -253,7 +254,7 @@ theorem acquire_matches_model (encode : List U8 → String)
       simp only [core.option.Option.is_some]
       apply WP.spec_bind
         (history_at_cut_matches_model s rustSnap.version model (modelFrame encode)
-          prior head hframes hmodel (hzero rustSnap.version) hversions)
+          prior head hframes hmodel (hzero rustSnap.version) hversions valid)
       intro current ⟨hCurrent, hMem⟩
       have hCutFrame : modelFrame encode current = atCut model snap.current.version := by
         rwa [hCut]
@@ -295,7 +296,7 @@ theorem acquire_matches_model (encode : List U8 → String)
           simp only [core.option.Option.is_none]
           apply WP.spec_bind
             (history_at_cut_matches_model s s.global model (modelFrame encode)
-              prior head hframes hmodel (hzero s.global) hversions)
+              prior head hframes hmodel (hzero s.global) hversions valid)
           intro global hg
           have hGlobal : modelFrame encode global = atCut model model.global := by
             rw [hglobal]; exact hg.1
@@ -468,11 +469,11 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     (sid : Nat) (model : Store) (tx : Tx) (t : Spike.engine.Tx) (snap : Snapshot)
     (rustSnap : Spike.engine.Snapshot) (m : Spike.engine.Bytes)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hframes : s.history.frames.val = prior ++ [head])
+    (hframes : s.history.activeFrames = prior ++ [head])
     (hmodel : model.history = modelFrames s.history (modelFrame encode))
     (hversions
-      : ∀ i (hi : i < s.history.frames.val.length),
-          (modelFrame encode s.history.frames.val[i]).version = i)
+      : ∀ i (hi : i < s.history.activeFrames.length),
+          (modelFrame encode s.history.activeFrames[i]).version = i)
     (hglobal : model.global = s.history.global.val)
     (hNativeTx : find s.txs.val id = some t)
     (hLookup : lookupTx w sid id.val = some (model, tx))
@@ -484,6 +485,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     (hFresh : find tx.globalViews (encode (alloc.vec.Vec.val m)) = none)
     (hLog : tx.normal.log.all (fun op => op.map != encode (alloc.vec.Vec.val m)) = true)
     (hRoom : t.views.val.length < Usize.max)
+    (valid : BranchValid s.history.log)
     : WP.spec (Spike.engine.Store.execute s (.Acquire id m))
         (fun (output, after) =>
           ∃ modelAfter txAfter tAfter obs index,
@@ -560,7 +562,8 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         Result.ok (out, {s with txs := back (id, next)})) _
       apply WP.spec_bind
         (acquire_matches_model encode inj s.history model t snap rustSnap m prior head
-          hframes hmodel hversions hglobal hNativeSnap hCut hNativePhase hMissing hRoom)
+          hframes hmodel hversions hglobal hNativeSnap hCut hNativePhase hMissing hRoom
+          valid)
       rintro ⟨out, next⟩ hn
       change (if available model snap k then
           ∃ localVer globalVer views,

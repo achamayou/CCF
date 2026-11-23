@@ -87,26 +87,27 @@ structure AttemptMatches (encode : List U8 → String) (sid : Nat)
   /-- Each native condition is tested by the reference, in reverse recording order. -/
   deps : pointDeps encode native = model.normal.deps
 
-/-- A native contiguous oldest-first array represents the model's newest-first branch. -/
+/-- The native active offsets project to the model's newest-first branch. -/
 structure HistoryMatches (encode : List U8 → String)
     (native : Spike.engine.History) (model : Store)
     : Prop where
   /-- The initial frame is retained. -/
-  nonempty : native.frames.val ≠ []
+  nonempty : native.activeFrames ≠ []
   /-- The entire surviving branch is represented. -/
   frames : model.history = modelFrames native (modelFrame encode)
   /-- The selected model head is the first projected frame. -/
   head : model.history.head? = some model.head
   /-- Frame versions equal their native indices. -/
   indexed
-    : ∀ i (h : i < native.frames.val.length),
-        (modelFrame encode native.frames.val[i]).version = i
+    : ∀ i (h : i < native.activeFrames.length),
+        (modelFrame encode native.activeFrames[i]).version = i
   /-- The compacted frontier agrees. -/
   global : model.global = native.global.val
   /-- The current term agrees. -/
   term : model.term = native.term.val
   /-- The next identity agrees, including after local version reuse. -/
   identity : model.nextIdentity = native.next_identity.val
+  valid : BranchValid native.log
 
 /-- The single Rust store represents one live store in the reference transition system. -/
 structure StateMatches (encode : List U8 → String) (sid : Nat)
@@ -129,10 +130,11 @@ structure StateMatches (encode : List U8 → String) (sid : Nat)
 /-- Retrieve the exact split used by the extracted history proofs. -/
 theorem HistoryMatches.split {encode : List U8 → String} {n : Spike.engine.History}
     {s : Store} (h : HistoryMatches encode n s)
-    : ∃ prior head, n.frames.val = prior ++ [head] ∧ s.head = modelFrame encode head := by
-  obtain he | ⟨prior, head, he⟩ := List.eq_nil_or_concat n.frames.val
+    : ∃ prior head,
+        n.activeFrames = prior ++ [head] ∧ s.head = modelFrame encode head := by
+  obtain he | ⟨prior, head, he⟩ := List.eq_nil_or_concat n.activeFrames
   · exact (h.nonempty he).elim
-  · have he' : n.frames.val = prior ++ [head] := by simpa using he
+  · have he' : n.activeFrames = prior ++ [head] := by simpa using he
     refine ⟨prior, head, he', ?_⟩
     have hh := h.head
     rw [h.frames, modelFrames, he', List.reverse_append] at hh
@@ -325,6 +327,7 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     (frames : s.history = modelFrames n (modelFrame encode))
     (global : s.global = n.global.val) (term : s.term = n.term.val)
     (ident : s.nextIdentity = n.next_identity.val)
+    (valid : BranchValid n.log)
     : HistoryMatches encode n s := by
   have h := Kv.Properties.reachable_store_invariants w sid s reach hs
   have versions {rows : List Frame} {v : Nat} (hh : Kv.Properties.History rows v) :
@@ -334,12 +337,12 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     | succ f k rest hversion _ _ ih =>
         simp only [List.reverse_cons, List.map_append, List.map_cons, List.map_nil, ih, hversion]
         exact (List.range_succ (n := k + 1)).symm
-  have hn : (n.frames.val.map fun f => (modelFrame encode f).version) =
+  have hn : (n.activeFrames.map fun f => (modelFrame encode f).version) =
       List.range (s.head.version + 1) := by
     simpa only [frames, modelFrames, ← List.map_reverse, List.reverse_reverse,
       List.map_map, Function.comp_def]
       using versions h.1
-  refine ⟨?_, frames, h.2.1, ?_, global, term, ident⟩
+  refine ⟨?_, frames, h.2.1, ?_, global, term, ident, valid⟩
   · intro he
     simp [he] at hn
   · intro i hi

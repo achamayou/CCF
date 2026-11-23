@@ -20,6 +20,28 @@ def BranchValid {T : Type} (log : Spike.branch_log.BranchLog T) : Prop :=
 def branchValues {T : Type} (log : Spike.branch_log.BranchLog T) : List T :=
   log.branch.val.filterMap fun id => log.frames.val[id.val]?
 
+theorem branch_values_length {T : Type} (log : Spike.branch_log.BranchLog T)
+    (valid : BranchValid log)
+    : (branchValues log).length = log.branch.val.length := by
+  have hl (ids : List Usize) (live : ∀ id ∈ ids, id.val < log.frames.val.length) :
+      (ids.filterMap fun id => log.frames.val[id.val]?).length = ids.length := by
+    induction ids with
+    | nil => rfl
+    | cons h t ih =>
+        simp [List.getElem?_eq_getElem (live h List.mem_cons_self),
+          ih (fun i hm => live i (List.mem_cons_of_mem _ hm))]
+  exact hl _ valid.2
+
+theorem branch_values_capacity {T : Type} (log : Spike.branch_log.BranchLog T)
+    : (branchValues log).length ≤ Usize.max :=
+  (List.length_filterMap_le _ _).trans (alloc.vec.Vec.len_ineq _)
+
+theorem branch_active_len {T : Type} (log : Spike.branch_log.BranchLog T)
+    (valid : BranchValid log)
+    : WP.spec (Spike.branch_log.BranchLog.active_len log)
+        (fun n => n.val = (branchValues log).length) := by
+  simp [Spike.branch_log.BranchLog.active_len, branch_values_length log valid]
+
 theorem branch_new_refines {T : Type} (base : T)
     : WP.spec (Spike.branch_log.BranchLog.new base)
         (fun log => BranchValid log ∧ branchValues log = [base]) := by
@@ -76,6 +98,26 @@ private theorem indexed_branch_values {T : Type} (frames : List T) (ids : List U
           simp only [List.filterMap_cons, List.getElem?_eq_getElem bound,
             List.getElem?_cons_succ]
           exact ih (fun i hm => live i (List.mem_cons_of_mem _ hm)) offset
+
+theorem branch_active_at {T : Type} (log : Spike.branch_log.BranchLog T)
+    (valid : BranchValid log) (i : Usize) (frame : T)
+    (saved : (branchValues log)[i.val]? = some frame)
+    : WP.spec (Spike.branch_log.BranchLog.active_at log i) (· = frame) := by
+  have inside : i.val < log.branch.val.length := by
+    by_contra outside
+    have hn : (branchValues log).length ≤ i.val := by
+      rw [branch_values_length log valid]
+      exact Nat.le_of_not_gt outside
+    rw [List.getElem?_eq_none hn] at saved
+    cases saved
+  unfold Spike.branch_log.BranchLog.active_at
+  rw [alloc.vec.Vec.index_slice_index]
+  apply WP.spec_bind (alloc.vec.Vec.index_usize_spec log.branch i inside)
+  intro id he
+  have pick := indexed_branch_values log.frames.val log.branch.val valid.2 i.val
+  change (branchValues log)[i.val]? = _ at pick
+  rw [pick, List.getElem?_eq_getElem inside, ← he, Option.bind_some] at saved
+  exact branch_read_refines log id frame saved
 
 /-- A requested offset past the last surviving frame selects the current head.
 The handle still identifies the immutable value, not just its branch offset. -/
