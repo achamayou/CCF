@@ -13,6 +13,11 @@ pub fn address_key(map: &[u8], key: &[u8]) -> Vec<u8> {
     encoded
 }
 
+/// Lexicographic enumeration of these keys visits newer stamps first.
+pub fn reverse_stamp_key(stamp: u64) -> Box<[u8]> {
+    Box::new((!stamp).to_be_bytes())
+}
+
 /// Zero is the end-of-key symbol; the high and low nibbles occupy 1..=16.
 #[inline]
 pub fn symbol(key: &[u8], digit: usize) -> usize {
@@ -531,9 +536,203 @@ impl<V> Default for OrderedRadix<V> {
     }
 }
 
+struct Arena<V> {
+    dirs: Vec<Option<RadixDir>>,
+    rows: Vec<Option<RadixRow<V>>>,
+    free_dirs: Vec<usize>,
+    free_rows: Vec<usize>,
+    path: Vec<(u32, usize)>,
+}
+
+impl<V> Arena<V> {
+    fn new() -> Self {
+        Self {
+            dirs: Vec::new(),
+            rows: Vec::new(),
+            free_dirs: Vec::new(),
+            free_rows: Vec::new(),
+            path: Vec::new(),
+        }
+    }
+
+    fn put(&mut self, root: u32, row: RadixRow<V>) -> (u32, u32, Option<u32>) {
+        put(
+            &mut self.dirs,
+            &mut self.free_dirs,
+            &mut self.rows,
+            &mut self.free_rows,
+            &mut self.path,
+            root,
+            row,
+        )
+    }
+
+    fn remove(&mut self, root: u32, key: &[u8]) -> u32 {
+        remove(
+            &mut self.dirs,
+            &mut self.free_dirs,
+            &self.rows,
+            &mut self.path,
+            root,
+            key,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DualRoot {
+    lookup: u32,
+    order: u32,
+}
+
+struct Stamped<V> {
+    stamp: u64,
+    value: V,
+}
+
+/// Persistent ordered storage with a byte-key radix and a write-stamp radix.
+/// The two roots refer to the issuing arena, which is currently append-only.
+pub struct DualRadix<V> {
+    values: Arena<Stamped<V>>,
+    order: Arena<u32>,
+    last: u64,
+}
+
+impl<V> DualRadix<V> {
+    pub fn new() -> Self {
+        Self {
+            values: Arena::new(),
+            order: Arena::new(),
+            last: 0,
+        }
+    }
+
+    pub fn empty_root(&self) -> DualRoot {
+        DualRoot {
+            lookup: 0,
+            order: 0,
+        }
+    }
+
+    pub fn get(&self, root: DualRoot, key: &[u8]) -> Option<&V> {
+        match get(&self.values.dirs, &self.values.rows, root.lookup, key) {
+            Some(cell) => Some(&cell.value),
+            None => None,
+        }
+    }
+
+    pub fn put(&mut self, root: DualRoot, row: RadixRow<V>) -> DualRoot {
+        assert!(self.last < u64::MAX, "radix stamp capacity");
+        let stamp = self.last + 1;
+        let (lookup, leaf, old) = self.values.put(
+            root.lookup,
+            RadixRow {
+                key: row.key,
+                value: Stamped {
+                    stamp,
+                    value: row.value,
+                },
+            },
+        );
+        let mut order = root.order;
+        if let Some(old) = old {
+            let previous = row_at(&self.values.rows, old).value.stamp;
+            order = self.order.remove(order, &reverse_stamp_key(previous));
+        }
+        let (order, _, _) = self.order.put(
+            order,
+            RadixRow {
+                key: reverse_stamp_key(stamp),
+                value: leaf,
+            },
+        );
+        self.last = stamp;
+        DualRoot { lookup, order }
+    }
+
+    pub fn remove(&mut self, root: DualRoot, key: &[u8]) -> DualRoot {
+        match get(&self.values.dirs, &self.values.rows, root.lookup, key) {
+            None => root,
+            Some(row) => {
+                let order = self.order.remove(root.order, &reverse_stamp_key(row.stamp));
+                let lookup = self.values.remove(root.lookup, key);
+                DualRoot { lookup, order }
+            }
+        }
+    }
+
+    pub fn scan_links(&self, root: DualRoot) -> Vec<u32> {
+        let mut links = scan_leaves(&self.order.dirs, root.order);
+        let mut i = 0;
+        while i < links.len() {
+            links[i] = row_at(&self.order.rows, links[i]).value;
+            i += 1;
+        }
+        links
+    }
+
+    /// Otherwise private link decoding for the storage benchmark.
+    pub fn scan_row(&self, link: u32) -> (&[u8], &V) {
+        let row = row_at(&self.values.rows, link);
+        (&row.key, &row.value.value)
+    }
+}
+
+impl<V> Default for DualRadix<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dual_radix_keeps_write_order_after_fork_and_removal() {
+        let mut arena = DualRadix::new();
+        let mut write = |root, key: &[u8], value| {
+            arena.put(
+                root,
+                RadixRow {
+                    key: key.into(),
+                    value,
+                },
+            )
+        };
+        let first = DualRoot {
+            lookup: 0,
+            order: 0,
+        };
+        let base = write(first, b"a", 1);
+        let base = write(base, b"", 2);
+        let base = write(base, b"aa", 3);
+        let replaced = write(base, b"a", 4);
+        let fork = write(base, b"\xff", 5);
+        let removed = arena.remove(replaced, b"");
+        let unchanged = arena.remove(removed, b"absent");
+        let scan = |root| {
+            arena
+                .scan_links(root)
+                .into_iter()
+                .map(|link| {
+                    let (key, value) = arena.scan_row(link);
+                    (key, *value)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(scan(first), []);
+        assert_eq!(scan(base), [(b"aa".as_slice(), 3), (b"", 2), (b"a", 1)]);
+        assert_eq!(scan(replaced), [(b"a".as_slice(), 4), (b"aa", 3), (b"", 2)]);
+        assert_eq!(scan(removed), [(b"a".as_slice(), 4), (b"aa", 3)]);
+        assert_eq!(
+            scan(fork),
+            [(b"\xff".as_slice(), 5), (b"aa", 3), (b"", 2), (b"a", 1)]
+        );
+        assert_eq!(scan(unchanged), scan(removed));
+        assert_eq!(arena.get(removed, b""), None);
+        assert_eq!(arena.get(base, b""), Some(&2));
+    }
 
     #[test]
     fn address_encoding_distinguishes_empty_maps_and_prefix_boundaries() {

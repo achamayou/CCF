@@ -23,6 +23,7 @@ public import KvRust.Point
 public import KvRust.Publication
 public import KvRust.Radix
 public import KvRust.RadixAddress
+public import KvRust.RadixDual
 public import KvRust.RadixLiveness
 public import KvRust.Range
 public import KvRust.Relation

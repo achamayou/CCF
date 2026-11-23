@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Extracted.Funs
+public import KvRust.Keys
 
 import all Aeneas.Data.BitVec
 import all Aeneas.Std.Alloc.Vec
@@ -128,5 +129,116 @@ theorem native_address_key (map key : Slice U8)
         exact room))
   intro out complete
   simpa [addressBytes, hmm, headerOnly, hHeader] using complete
+
+private theorem compare_same_bytes (a : List U8) : byteOrder a a = 0#i8 := by
+  induction a <;> simp [byteOrder, *]
+
+private theorem compare_append_bytes (a b x y : List U8)
+    (sameLength : a.length = b.length)
+    : byteOrder (a ++ x) (b ++ y) = if a = b then byteOrder x y else byteOrder a b := by
+  induction a generalizing b with
+  | nil => cases b <;> simp_all
+  | cons a rest ih =>
+      cases b with
+      | nil => simp at sameLength
+      | cons b bs =>
+          simp only [List.length_cons, Nat.succ.injEq] at sameLength
+          by_cases lt : a < b
+          · have diff : a ≠ b := ne_of_lt lt
+            simp [byteOrder, lt, diff]
+          · by_cases gt : b < a
+            · have diff : a ≠ b := ne_of_gt gt
+              simp [byteOrder, lt, gt, diff]
+            · have eq : a = b := le_antisymm (le_of_not_gt gt) (le_of_not_gt lt)
+              subst b
+              simpa [byteOrder] using ih bs sameLength
+
+private def beBytes {w : Nat} (x : BitVec w) : List U8 :=
+  x.toBEBytes.map (@UScalar.mk .U8)
+
+private theorem be_bytes_lt (w : Nat) (aligned : w % 8 = 0) (a b : BitVec w)
+    (lt : a.toNat < b.toNat)
+    : byteOrder (beBytes a) (beBytes b) = (-1)#i8 := by
+  induction w using Nat.strong_induction_on with
+  | ind w ih =>
+      have atLeast : 8 ≤ w := by
+        by_contra hn
+        have zero : w = 0 := by omega
+        subst w
+        have ha := a.isLt
+        have hb := b.isLt
+        simp at ha hb
+        omega
+      let top (k : BitVec w) := (k >>> 8).setWidth (w - 8)
+      let low (k : BitVec w) : U8 := UScalar.mk (k.setWidth 8)
+      have split (k : BitVec w) : beBytes k = beBytes (top k) ++ [low k] := by
+        unfold beBytes BitVec.toBEBytes
+        rw [BitVec.toLEBytes, ite_eq_left (show 0 < w by omega)]
+        simp [top, low, List.reverse_cons]
+      have highVal (k : BitVec w) : (top k).toNat = k.toNat / 256 := by
+        unfold top
+        rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt (BitVec.toNat_ushiftRight_lt k 8 atLeast),
+          BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+      have lowVal (k : BitVec w) : (low k).val = k.toNat % 256 := by
+        change (k.setWidth 8).toNat = _
+        rw [BitVec.toNat_setWidth]
+      have sameLength : (beBytes (top a)).length = (beBytes (top b)).length := by
+        simp [beBytes, BitVec.toBEBytes_length]
+      rw [split a, split b, compare_append_bytes _ _ _ _ sameLength]
+      by_cases high : (top a).toNat < (top b).toNat
+      · have result := ih (w - 8) (by omega) (by omega) (top a) (top b) high
+        have different : beBytes (top a) ≠ beBytes (top b) := by
+          intro eq
+          rw [eq, compare_same_bytes] at result
+          contradiction
+        simp [different, result]
+      · have highEq : top a = top b := by
+          apply BitVec.eq_of_toNat_eq
+          rw [highVal, highVal] at high ⊢
+          omega
+        have bytesEq : beBytes (top a) = beBytes (top b) := congrArg beBytes highEq
+        have lo : low a < low b := by
+          change (low a).val < (low b).val
+          rw [lowVal, lowVal]
+          have eq := congrArg BitVec.toNat highEq
+          rw [highVal, highVal] at eq
+          omega
+        simp [bytesEq, byteOrder, lo]
+
+/-- The order key is fixed-width, complemented, big-endian stamp bytes. -/
+def reverseStampBytes (stamp : U64) : List U8 :=
+  (core.num.U64.to_be_bytes (~~~stamp)).val
+
+theorem reverse_stamp_key_refines (stamp : U64)
+    : WP.spec (Spike.radix.reverse_stamp_key stamp)
+        (fun out => out.val = reverseStampBytes stamp) := by
+  simp [Spike.radix.reverse_stamp_key, reverseStampBytes, lift, Array.val_to_slice]
+
+/-- The latest stamp compares before every previously issued stamp. -/
+theorem reverse_stamp_order (older newer : U64) (lt : older.val < newer.val)
+    : byteOrder (reverseStampBytes newer) (reverseStampBytes older) = (-1)#i8 := by
+  have header (stamp : U64) : reverseStampBytes stamp = beBytes ((~~~stamp : U64).bv) := by
+    change (core.num.U64.to_be_bytes (~~~stamp)).val = _
+    have bytes := core.num.U64.to_be_bytes.step_spec (~~~stamp)
+    simpa [lift, beBytes] using bytes
+  rw [header, header]
+  apply be_bytes_lt 64 (by decide)
+  change (~~~newer.bv).toNat < (~~~older.bv).toNat
+  rw [BitVec.toNat_not, BitVec.toNat_not]
+  change 2 ^ 64 - 1 - newer.val < 2 ^ 64 - 1 - older.val
+  have bound : newer.val < 2 ^ 64 := by scalar_tac
+  omega
+
+theorem reverse_stamp_bytes_inj : Function.Injective reverseStampBytes := by
+  intro a b same
+  by_contra diff
+  have values : a.val ≠ b.val := diff ∘ UScalar.eq_of_val_eq
+  rcases Nat.lt_or_gt_of_ne values with lt | gt
+  · have eq := reverse_stamp_order a b lt
+    rw [same, compare_same_bytes] at eq
+    contradiction
+  · have eq := reverse_stamp_order b a gt
+    rw [same, compare_same_bytes] at eq
+    contradiction
 
 end KvRust

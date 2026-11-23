@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-use ccf_kv_spike::radix::{OrderedRadix, RadixRow, Root as OrderedRoot};
+use ccf_kv_spike::radix::{DualRadix, DualRoot, OrderedRadix, RadixRow, Root as OrderedRoot};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -357,23 +357,32 @@ impl OrderedIndex for nibble_radix::StampedRadix {
     }
 }
 
-impl OrderedIndex for nibble_radix::DualRadix {
-    type Root = nibble_radix::DualRoot;
+impl OrderedIndex for DualRadix<Value> {
+    type Root = DualRoot;
 
     fn empty_root(&self) -> Self::Root {
-        Self::Root::default()
+        self.empty_root()
     }
 
     fn put(&mut self, root: Self::Root, key: &Key, value: Value) -> Self::Root {
-        self.put(root, key, value)
+        self.put(
+            root,
+            RadixRow {
+                key: key.as_slice().into(),
+                value,
+            },
+        )
     }
 
     fn get(&self, root: Self::Root, key: &Key) -> Option<&Value> {
         self.get(root, key)
     }
 
-    fn scan(&self, root: Self::Root, visit: impl FnMut(&[u8], &Value)) {
-        self.scan(root, visit);
+    fn scan(&self, root: Self::Root, mut visit: impl FnMut(&[u8], &Value)) {
+        for link in self.scan_links(root) {
+            let (key, value) = self.scan_row(link);
+            visit(key, value);
+        }
     }
 }
 
@@ -478,12 +487,11 @@ fn main() {
     }
     if mode.as_deref() == Some("ordered") {
         nibble_radix::check_stamp_reuse();
-        nibble_radix::check_dual_order();
         println!("backend,workload,entries,operations,median_ns_per_operation,min_ns,max_ns");
         ordered_suite::<OrderedRadix<Value>>("ordered_nibble_radix", false);
         ordered_suite::<nibble_radix::StampedRadix>("stamped_nibble_radix", false);
-        ordered_suite::<nibble_radix::DualRadix>("dual_nibble_radix", false);
-        ordered_suite::<nibble_radix::DualRadix>("dual_nibble_radix_scrambled", true);
+        ordered_suite::<DualRadix<Value>>("dual_nibble_radix", false);
+        ordered_suite::<DualRadix<Value>>("dual_nibble_radix_scrambled", true);
         ordered_suite::<nibble_radix::StampedRadix>("stamped_nibble_radix_scrambled", true);
         ordered_suite::<OrderedRadix<Value>>("ordered_nibble_radix_scrambled", true);
         return;
