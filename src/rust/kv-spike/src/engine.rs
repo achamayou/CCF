@@ -610,12 +610,12 @@ impl History {
     }
 
     fn map_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
-        let mut i = 0;
-        while i < self.log.active_len() {
+        let mut i = self.log.active_len();
+        while i > 0 {
+            i -= 1;
             if self.log.active_at(i).matches_lineage(map, birth, revision) {
                 return true;
             }
-            i += 1;
         }
         false
     }

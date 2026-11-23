@@ -290,6 +290,28 @@ fn replay_rejects_gaps_and_duplicates_without_publishing() {
 }
 
 #[test]
+fn lineage_search_finds_older_active_revisions_but_not_rolled_back_ones() {
+    let mut store = Store::new(0);
+    let name = b"public:map";
+    let map = Bytes::copy_from(name);
+    put(&mut store, 0, name, b"key", b"one", 1);
+    let first = store.history.head().revision(&map);
+    let birth = store.history.head().births.get(&map);
+    put(&mut store, 0, name, b"key", b"two", 2);
+    let discarded = store.history.head().revision(&map);
+    assert!(store.history.map_lineage(&map, birth, first));
+    assert!(store.history.map_lineage(&map, birth, discarded));
+
+    assert!(matches!(
+        store.execute(Action::Rollback(1, 1)),
+        Ok(Output::RolledBack(1))
+    ));
+    put(&mut store, 0, name, b"key", b"replacement", 2);
+    assert!(store.history.map_lineage(&map, birth, first));
+    assert!(!store.history.map_lineage(&map, birth, discarded));
+}
+
+#[test]
 fn invalid_provisional_replay_does_not_cut_back_the_indexed_branch() {
     let mut store = Store::new(0);
     let map = b"public:map";

@@ -139,42 +139,44 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
       using h
   rw [hmodel]
   unfold Spike.engine.History.map_lineage Spike.engine.History.map_lineage_loop
-  apply loop.spec_decr_nat (fun (i : Usize) => s.activeFrames.length - i.val)
+  apply WP.spec_bind (branch_active_len s.log valid)
+  intro count hlen
+  change count.val = s.activeFrames.length at hlen
+  apply loop.spec_decr_nat (fun (i : Usize) => i.val)
     (fun i =>
-      (s.activeFrames.drop i.val).any matchesFrame = s.activeFrames.any matchesFrame)
+      i.val ≤ s.activeFrames.length
+      ∧ (s.activeFrames.take i.val).any matchesFrame = s.activeFrames.any matchesFrame)
     _ _ _
-  · intro i hinv
+  · intro i ⟨bound, hinv⟩
     unfold Spike.engine.History.map_lineage_loop.body
-    apply WP.spec_bind (branch_active_len s.log valid)
-    intro count hlen
-    change count.val = s.activeFrames.length at hlen
-    have hbound : s.activeFrames.length ≤ Usize.max := branch_values_capacity s.log
     have hone : (1#usize : Usize).val = 1 := rfl
-    by_cases h : i < count
-    · have hi : i.val < s.activeFrames.length := by rw [← hlen]; exact h
+    by_cases h : (0#usize : Usize) < i
+    · have pos : 0 < i.val := h
       rw [ite_eq_left h]
-      apply WP.spec_bind (branch_active_at s.log valid i s.activeFrames[i.val]
+      apply WP.spec_bind (Usize.sub_spec (x := i) (y := 1#usize) (by omega))
+      intro j hj
+      have step : i.val = j.val + 1 := by omega
+      have hi : j.val < s.activeFrames.length := by omega
+      apply WP.spec_bind (branch_active_at s.log valid j s.activeFrames[j.val]
         (List.getElem?_eq_getElem hi))
       intro frame hf
       apply WP.spec_bind (frame_matches encode inj frame m birth rev)
       intro result hr
       change result = matchesFrame frame at hr
       have hstep := hinv
-      rw [List.drop_eq_getElem_cons hi, ← hf, List.any_cons, ← hr] at hstep
+      rw [step, List.take_succ_eq_append_getElem hi, ← hf, List.any_append, List.any_cons,
+        List.any_nil, Bool.or_false, ← hr] at hstep
       cases result with
       | true => simpa using hstep
       | false =>
-          simp only [Bool.false_eq_true, ite_false]
-          have hinc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
-          apply WP.spec_bind (Usize.add_spec hinc)
-          intro j hj
-          have hj' : j.val = i.val + 1 := by omega
-          simp only [WP.spec_ok]
-          exact ⟨by simpa [hj'] using hstep, by omega⟩
-    · have hi : s.activeFrames.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+          simp only [Bool.false_eq_true, ite_false, WP.spec_ok]
+          exact ⟨⟨by omega, by simpa using hstep⟩, by omega⟩
+    · have hi : i.val = 0 := by
+        have no : ¬ 0 < i.val := h
+        omega
       rw [ite_eq_right h, WP.spec_ok]
-      simpa [List.drop_eq_nil_of_le hi] using hinv
-  · simp
+      simpa [hi] using hinv
+  · simp [hlen]
 
 /-- Forget a frame's data for a comparison that only depends on its map stamps. -/
 def onlyMetadata (f : Frame) : Frame := { f with data := [] }

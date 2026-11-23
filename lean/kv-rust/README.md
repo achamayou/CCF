@@ -189,6 +189,21 @@ Checking address-key length and the last byte before the full comparison reduced
 It preserves full byte equality, including keys with the same last byte.
 The commit and mixed-workload timings did not establish a comparable improvement.
 
+For tail latency and peak process RSS under compaction, run each backend in its own process:
+
+```sh
+/usr/bin/time -v taskset -c 2 build/kv_backend_bench cpp pinned-churn 65536
+/usr/bin/time -v taskset -c 2 build/kv_backend_bench rust pinned-churn 65536
+```
+
+The workload starts with 512 entries, retains one old reader, refreshes a second reader every 64 commits, and compacts after each single-key replacement.
+It checks that both readers retain their captured values.
+The p99 covers transaction construction, staging, commit, and compaction; peak RSS includes the process, allocator, and timing samples, not just live KV allocations.
+Changing lineage validation to search newest-first reduced Rust p99 at 65,536 commits from 1.87-5.79 ms to 64.8-66.6 us across three runs per revision.
+C++ p99 in the final pairs was 4.60-5.48 us.
+Peak RSS was 132-161 MiB for Rust versus 11.3-11.5 MiB for C++.
+The lineage improvement does not reclaim memory or establish latency parity.
+
 ### Persistent storage experiment
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.

@@ -9,11 +9,14 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
+#include <vector>
 
 namespace
 {
@@ -291,16 +294,101 @@ namespace
       });
     });
   }
+
+  template <typename Store>
+  void pinned_churn(size_t commits)
+  {
+    constexpr size_t ENTRIES = 512;
+    constexpr size_t REFRESH_INTERVAL = 64;
+    const Bytes initial(64, 0x3a);
+    const Bytes update(64, 0xc5);
+    const auto first = key(0);
+    Store store;
+    store.set_encryptor(std::make_shared<ccf::kv::NullTxEncryptor>());
+    seed(store, ENTRIES, initial, TABLE);
+    store.compact(store.current_version());
+    auto old = store.create_read_only_tx();
+    auto* old_reader = old.template ro<Map>(TABLE);
+    if (old_reader->get(first) != initial)
+    {
+      throw std::runtime_error("Unexpected old pinned value");
+    }
+
+    std::vector<double> samples;
+    samples.reserve(commits);
+    for (size_t block = 0; block < commits; block += REFRESH_INTERVAL)
+    {
+      auto recent = store.create_read_only_tx();
+      auto* recent_reader = recent.template ro<Map>(TABLE);
+      const auto expected = recent_reader->get(first);
+      if (!expected.has_value())
+      {
+        throw std::runtime_error("Missing recently pinned value");
+      }
+      for (size_t i = block; i < std::min(commits, block + REFRESH_INTERVAL);
+           ++i)
+      {
+        const auto k = key((i * 17) % ENTRIES);
+        const auto& value = (i / ENTRIES) % 2 == 0 ? update : initial;
+        samples.push_back(elapsed([&] {
+          auto tx = store.create_tx();
+          tx.template rw<Map>(TABLE)->put(k, value);
+          commit(tx);
+          store.compact(store.current_version());
+        }));
+      }
+      if (
+        recent_reader->get(first) != expected ||
+        old_reader->get(first) != initial)
+      {
+        throw std::runtime_error("Pinned value changed during churn");
+      }
+    }
+
+    std::sort(samples.begin(), samples.end());
+    const auto p99_index = commits - commits / 100 - 1;
+    std::cout << "entries,commits,median_ns,p99_ns\n"
+              << std::fixed << std::setprecision(1) << ENTRIES << ',' << commits
+              << ',' << samples[commits / 2] << ',' << samples[p99_index]
+              << '\n';
+  }
 }
 
 int main(int argc, char** argv)
 {
-  const std::string_view backend = argc == 2 ? argv[1] : "";
+  const std::string_view backend = argc > 1 ? argv[1] : "";
   if (
-    backend != "cpp" && backend != "rust" && backend != "champ" &&
-    backend != "champ_scrambled")
+    argc == 4 && std::string_view(argv[2]) == "pinned-churn" &&
+    (backend == "cpp" || backend == "rust"))
   {
-    std::cerr << "Usage: kv_backend_bench cpp|rust|champ|champ_scrambled\n";
+    const std::string_view count = argv[3];
+    size_t commits = 0;
+    const auto [end, error] =
+      std::from_chars(count.data(), count.data() + count.size(), commits);
+    if (
+      error != std::errc{} || end != count.data() + count.size() ||
+      commits == 0 || commits > 65536)
+    {
+      std::cerr << "Pinned churn commit count must be between 1 and 65536\n";
+      return 2;
+    }
+    if (backend == "cpp")
+    {
+      pinned_churn<ccf::kv::Store>(commits);
+    }
+    else
+    {
+      pinned_churn<ccf::kv::rust_test::Store>(commits);
+    }
+    return 0;
+  }
+  if (
+    argc != 2 ||
+    (backend != "cpp" && backend != "rust" && backend != "champ" &&
+     backend != "champ_scrambled"))
+  {
+    std::cerr << "Usage: kv_backend_bench cpp|rust|champ|champ_scrambled\n"
+                 "       kv_backend_bench cpp|rust pinned-churn commits\n";
     return 2;
   }
   std::cout
