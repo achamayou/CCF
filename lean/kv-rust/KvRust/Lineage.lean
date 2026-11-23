@@ -287,7 +287,10 @@ theorem can_apply_matches_model (encode : List U8 → String)
     (hViews
       : tx.globalViews.map capturedStamps
         = t.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)))
-    (hData : model.head.data = encodeData encode (byteData head.data))
+    (rows : CellRows) (indexView : IndexView s.index head.data rows)
+    (indexValid : IndexValid s.index)
+    (room : ∀ d ∈ t.deps.val, DependencyRoom rows d)
+    (hData : model.head.data = encodeData encode (indexedCellData rows))
     (hDeps
       : tx.normal.deps.reverse
         = t.deps.val.map (encodeDependency encode ∘ byteDependency))
@@ -302,26 +305,24 @@ theorem can_apply_matches_model (encode : List U8 → String)
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
   have hl := acquired_lineage_matches_model (encode ∘ alloc.vec.Vec.val) hinj
     s t model tx hHistory hViews valid
-  have hd : WP.spec (Spike.engine.Tx.valid_dependencies t head.data)
+  have hd : WP.spec (Spike.engine.Tx.valid_dependencies t s)
       (fun r => r = validates model.head.data tx.normal.deps) := by
-    have hv := validates_encoding encode inj (byteData head.data) (t.deps.val.map byteDependency)
+    have hv := validates_encoding encode inj (indexedCellData rows) (t.deps.val.map byteDependency)
     have he : validates model.head.data tx.normal.deps =
-        validates (byteData head.data) (t.deps.val.map byteDependency) := by
+        validates (indexedCellData rows) (t.deps.val.map byteDependency) := by
       rw [← hv, hData, List.map_map, ← hDeps]
       exact (List.all_reverse).symm
     rw [he]
-    exact validate_dependencies_matches_model t head.data
+    exact validate_dependencies_matches_model t s head rows indexView indexValid
+      (by simp [history_head s prior head hHead valid]) room
   have hcheck : WP.spec (do
       let b ← Spike.engine.Tx.valid_lineage t s
-      if b then
-        let f ← Spike.engine.History.head s
-        Spike.engine.Tx.valid_dependencies t f.data
-      else Result.ok false)
+      if b then Spike.engine.Tx.valid_dependencies t s else Result.ok false)
       (fun r => r = (tx.globalViews.all (fun (m, view) => mapLineage model view.current m)
         && validates model.head.data tx.normal.deps)) := by
     apply WP.spec_bind hl
     intro b hb
-    cases b <;> simp [← hb, history_head s prior head hHead valid, hd]
+    cases b <;> simp [← hb, hd]
   unfold Spike.engine.Tx.can_apply
   by_cases hu : t.unavailable = true
   · simp [hu, canApply, hUnavailable]

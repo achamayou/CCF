@@ -95,13 +95,12 @@ structure HistoryMatches (encode : List U8 → String)
   /-- The initial frame is retained. -/
   nonempty : native.activeFrames ≠ []
   /-- The entire surviving branch is represented. -/
-  frames : model.history = modelFrames native (modelFrame encode)
+  frames : model.history = modelFrames native (modelFrame encode native.index)
   /-- The selected model head is the first projected frame. -/
   head : model.history.head? = some model.head
   /-- Frame versions equal their native indices. -/
   indexed
-    : ∀ i (h : i < native.activeFrames.length),
-        (modelFrame encode native.activeFrames[i]).version = i
+    : ∀ i (h : i < native.activeFrames.length), native.activeFrames[i].version.val = i
   /-- The compacted frontier agrees. -/
   global : model.global = native.global.val
   /-- The current term agrees. -/
@@ -109,6 +108,7 @@ structure HistoryMatches (encode : List U8 → String)
   /-- The next identity agrees, including after local version reuse. -/
   identity : model.nextIdentity = native.next_identity.val
   valid : BranchValid native.log
+  indexValid : HistoryIndexValid native
 
 /-- The single Rust store represents one live store in the reference transition system. -/
 structure StateMatches (encode : List U8 → String) (sid : Nat)
@@ -132,7 +132,7 @@ structure StateMatches (encode : List U8 → String) (sid : Nat)
 theorem HistoryMatches.split {encode : List U8 → String} {n : Spike.engine.History}
     {s : Store} (h : HistoryMatches encode n s)
     : ∃ prior head,
-        n.activeFrames = prior ++ [head] ∧ s.head = modelFrame encode head := by
+        n.activeFrames = prior ++ [head] ∧ s.head = modelFrame encode n.index head := by
   obtain he | ⟨prior, head, he⟩ := List.eq_nil_or_concat n.activeFrames
   · exact (h.nonempty he).elim
   · have he' : n.activeFrames = prior ++ [head] := by simpa using he
@@ -288,19 +288,20 @@ theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
 
 theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
     {before after : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
-    (h : AttemptMatches encode sid before n t) (kept : FrameSlotsPreserved before after)
+    (h : AttemptMatches encode sid before n t) (kept : HistoryKeeps before after)
+    (valid : HistoryIndexValid before)
     : AttemptMatches encode sid after n t := by
-  obtain ⟨live, views⟩ := pinned_views_preserved encode kept n.views h.live
+  obtain ⟨live, views⟩ := pinned_views_preserved encode kept valid n.views h.live
   exact { h with views := h.views.trans views.symm, live }
 
 private theorem related_frame_slots {encode : List U8 → String} {sid : Nat}
     {before after : Spike.engine.History} {n : Option Spike.engine.Tx} {t : Option Tx}
     (h : Option.Rel (AttemptMatches encode sid before) n t)
-    (kept : FrameSlotsPreserved before after)
+    (kept : HistoryKeeps before after) (valid : HistoryIndexValid before)
     : Option.Rel (AttemptMatches encode sid after) n t := by
   cases h with
   | none => exact .none
-  | some hr => exact .some (hr.withHistory kept)
+  | some hr => exact .some (hr.withHistory kept valid)
 
 /-- Replace a modeled attempt at its native index, preserving every other binding and the key set. -/
 theorem replace_attempts {encode : List U8 → String} {sid : Nat}
@@ -310,7 +311,7 @@ theorem replace_attempts {encode : List U8 → String} {sid : Nat}
     (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx)
     (ht : AttemptMatches encode sid n'.history next tx)
-    (kept : FrameSlotsPreserved n.history n'.history)
+    (kept : HistoryKeeps n.history n'.history)
     : (n'.txs.val.map Prod.fst).Nodup
       ∧ ∀ q : U64,
           Option.Rel (AttemptMatches encode sid n'.history)
@@ -324,7 +325,8 @@ theorem replace_attempts {encode : List U8 → String} {sid : Nat}
     · subst q
       simpa using Option.Rel.some ht
     · have hn' : q.val ≠ id.val := fun e => h (UScalar.eq_of_val_eq e)
-      simpa [h, hn'] using related_frame_slots (before.attempts q) kept
+      obtain ⟨s, _, hs⟩ := before.history
+      simpa [h, hn'] using related_frame_slots (before.attempts q) kept hs.indexValid
 
 /-- Lift a successful one-step reference transition to reachability for the relation. -/
 theorem reachable_execute {w w' : State} {action : Action} {output : Output}
@@ -343,7 +345,7 @@ theorem replace_attempt {encode : List U8 → String} {sid : Nat}
     (history : ∃ s, find w'.stores sid = some s ∧ HistoryMatches encode n'.history s)
     (ht : AttemptMatches encode sid n'.history next tx)
     (reach : transitionSystem.Reachable w')
-    (kept : FrameSlotsPreserved n.history n'.history)
+    (kept : HistoryKeeps n.history n'.history)
     : StateMatches encode sid n' w' :=
   let ⟨unique, attempts⟩ := replace_attempts h id i old next tx hidx hn hw ht kept
   ⟨history, unique, attempts, reach⟩
@@ -352,10 +354,10 @@ theorem replace_attempt {encode : List U8 → String} {sid : Nat}
 theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     {w : State} {sid : Nat} {s : Store}
     (reach : transitionSystem.Reachable w) (hs : find w.stores sid = some s)
-    (frames : s.history = modelFrames n (modelFrame encode))
+    (frames : s.history = modelFrames n (modelFrame encode n.index))
     (global : s.global = n.global.val) (term : s.term = n.term.val)
     (ident : s.nextIdentity = n.next_identity.val)
-    (valid : BranchValid n.log)
+    (valid : BranchValid n.log) (indexed : HistoryIndexValid n)
     : HistoryMatches encode n s := by
   have h := Kv.Properties.reachable_store_invariants w sid s reach hs
   have versions {rows : List Frame} {v : Nat} (hh : Kv.Properties.History rows v) :
@@ -365,12 +367,12 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     | succ f k rest hversion _ _ ih =>
         simp only [List.reverse_cons, List.map_append, List.map_cons, List.map_nil, ih, hversion]
         exact (List.range_succ (n := k + 1)).symm
-  have hn : (n.activeFrames.map fun f => (modelFrame encode f).version) =
+  have hn : (n.activeFrames.map fun f => f.version.val) =
       List.range (s.head.version + 1) := by
     simpa only [frames, modelFrames, ← List.map_reverse, List.reverse_reverse,
-      List.map_map, Function.comp_def]
+      List.map_map, Function.comp_def, modelFrame, modelMetadata]
       using versions h.1
-  refine ⟨?_, frames, h.2.1, ?_, global, term, ident, valid⟩
+  refine ⟨?_, frames, h.2.1, ?_, global, term, ident, valid, indexed⟩
   · intro he
     simp [he] at hn
   · intro i hi
@@ -389,13 +391,14 @@ theorem replace_history {encode : List U8 → String} {sid : Nat}
     {s : Store} (history : HistoryMatches encode n'.history s)
     (hs : find w'.stores sid = some s) (hn : n'.txs = n.txs) (hw : w'.txs = w.txs)
     (reach : transitionSystem.Reachable w')
-    (kept : FrameSlotsPreserved n.history n'.history)
+    (kept : HistoryKeeps n.history n'.history)
     : StateMatches encode sid n' w' := by
   refine ⟨⟨s, hs, history⟩, ?_, ?_, reach⟩
   · rw [hn]; exact h.unique
   · intro id
     rw [hn, hw]
-    exact related_frame_slots (h.attempts id) kept
+    obtain ⟨s, _, hs⟩ := h.history
+    exact related_frame_slots (h.attempts id) kept hs.indexValid
 
 /-- A bounded Rust step either agrees with the reference action or rejects without mutation. -/
 def StepMatches (encode : List U8 → String) (sid : Nat)

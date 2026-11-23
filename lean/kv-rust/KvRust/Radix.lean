@@ -2980,6 +2980,8 @@ theorem radix_put_existing_matches {V : Type}
           ∧ (∀ (i : Nat) previous,
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
           ∧ replaced = some oldLeaf
+          ∧ arena.val.length ≤ dirs.val.length + height
+          ∧ values.val.length ≤ rows.val.length + 1
           ∧ ∃ height,
               2147483648 < leaf.val
               ∧ radixRow values.val leaf = some row
@@ -3013,7 +3015,7 @@ theorem radix_put_existing_matches {V : Type}
     simpa [ds, alloc.vec.Vec.deref] using visit
   apply WP.spec_bind
     (radix_allocate_matches rows freeRows row availableRows (fun _ => by omega))
-  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, _, free, _⟩
+  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, rowGrowth, free, _⟩
   apply WP.spec_bind (radix_link_matches i true (by omega))
   intro leaf hleaf
   have hlink : leaf.val = i.val + 1 + 2147483648 := by simpa using hleaf
@@ -3037,12 +3039,26 @@ theorem radix_put_existing_matches {V : Type}
       (by
         rw [lengthEq, hTip]
         exact ⟨0, .leaf 0 leaf row.key.val (by exact Nat.le_of_lt htag)⟩))
-  rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, _, shape⟩
+  rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, growth, shape⟩
   change WP.spec (Result.ok ((new, leaf, some oldLeaf), arena, available, values, unused, path)) _
   simp only [WP.spec_ok]
   obtain ⟨h, hshape⟩ := shape
   rw [head] at hshape
-  refine ⟨keep, hdr, inv invariant, ?_, free, kept, trivial, h, htag, hnew, hshape⟩
+  refine ⟨
+    keep,
+    hdr,
+    inv invariant,
+    ?_,
+    free,
+    kept,
+    trivial,
+    by omega,
+    rowGrowth,
+    h,
+    htag,
+    hnew,
+    hshape
+  ⟩
   intro known
   have keysKept := radix_keys_kept rows.val values.val kept
   apply radix_knowledge_extend dirs arena _ _ known keep keysKept
@@ -3073,13 +3089,14 @@ theorem radix_put_empty_matches {V : Type}
           ∧ 2147483648 < leaf.val
           ∧ radixRow values.val leaf = some row
           ∧ replaced = none
+          ∧ values.val.length ≤ rows.val.length + 1
           ∧ RadixTree arena.val 0 next [(row.key.val, leaf)]) := by
   have hmax : 2147483647 ≤ Usize.max := by scalar_tac
   unfold Spike.radix.put
   simp only [ite_true]
   apply WP.spec_bind
     (radix_allocate_matches rows freeRows row available (fun _ => by omega))
-  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, _, free, _⟩
+  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, rowGrowth, free, _⟩
   apply WP.spec_bind (radix_link_matches i true (by omega))
   intro leaf hleaf
   have hlink : leaf.val = i.val + 1 + 2147483648 := by simpa using hleaf
@@ -3088,7 +3105,7 @@ theorem radix_put_empty_matches {V : Type}
     have hi : leaf.val - 2147483648 - 1 = i.val := by omega
     simp [radixRow, hi, value]
   simp only [WP.spec_ok]
-  exact ⟨trivial, trivial, trivial, free, kept, htag, hnew, trivial,
+  exact ⟨trivial, trivial, trivial, free, kept, htag, hnew, trivial, rowGrowth,
     .leaf 0 leaf row.key.val (Nat.le_of_lt htag)⟩
 
 /-- Inserting a fresh key into a nonempty compressed root creates exactly
@@ -3121,6 +3138,8 @@ theorem radix_put_fresh_matches {V : Type}
           ∧ (∀ (i : Nat) previous,
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
           ∧ replaced = none
+          ∧ arena.val.length ≤ dirs.val.length + height + 1
+          ∧ values.val.length ≤ rows.val.length + 1
           ∧ ∃ height,
               2147483648 < leaf.val
               ∧ radixRow values.val leaf = some row
@@ -3157,7 +3176,7 @@ theorem radix_put_fresh_matches {V : Type}
     simpa [ds, alloc.vec.Vec.deref] using source
   apply WP.spec_bind
     (radix_allocate_matches rows freeRows row availableRows (fun _ => by omega))
-  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, _, free, _⟩
+  rintro ⟨i, values, unused⟩ ⟨value, kept, _, eligible, rowGrowth, free, _⟩
   apply WP.spec_bind (radix_link_matches i true (by omega))
   intro leaf hleaf
   have hlink : leaf.val = i.val + 1 + 2147483648 := by simpa using hleaf
@@ -3183,7 +3202,7 @@ theorem radix_put_fresh_matches {V : Type}
         simpa [input, alloc.vec.Vec.deref]
           using radix_path_step_preserved keeps (steps j hi))
       (by rw [lengthEq, tail]; exact subtree))
-  rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, _, shape⟩
+  rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, rebuiltGrowth, shape⟩
   change WP.spec (Result.ok ((new, leaf, none), arena, available, values, unused, path)) _
   simp only [WP.spec_ok]
   obtain ⟨h, hshape⟩ := shape
@@ -3198,8 +3217,21 @@ theorem radix_put_fresh_matches {V : Type}
     intro q eq
     have sameLeaf : q = leaf := (Option.some.inj eq).symm
     simp [sameLeaf, radixKeyOf, hnew]
-  refine ⟨fun j dir present => keep j dir (keeps j dir present), hdr, inv invTip, ?_,
-    free, kept, trivial, h, htag, hnew, hshape⟩
+  refine ⟨
+    fun j dir present => keep j dir (keeps j dir present),
+    hdr,
+    inv invTip,
+    ?_,
+    free,
+    kept,
+    trivial,
+    by omega,
+    rowGrowth,
+    h,
+    htag,
+    hnew,
+    hshape
+  ⟩
   intro known
   have routeAddition : RadixAdds newDirs arena (KnowsRows (radixKeyOf values.val)) := by
     apply radix_path_adds_knowledge dirs newDirs arena _ _ row.key.val (some split.digit)
@@ -3415,6 +3447,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
           ∧ replaced = Kv.Model.find bindings row.key.val
           ∧ radixRow values.val leaf = some row
+          ∧ arena.val.length ≤ dirs.val.length + height + 1
+          ∧ values.val.length ≤ rows.val.length + 1
           ∧ ∃ h,
               RadixTree arena.val h next (Kv.Model.set bindings row.key.val leaf)
               ∧ RadixRows values.val (Kv.Model.set bindings row.key.val leaf)
@@ -3427,13 +3461,13 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
     apply WP.spec_mono (radix_put_empty_matches dirs freeDirs rows freeRows scratch row
       availableRows rowRoom)
     rintro ⟨⟨next, leaf, replaced⟩, arena, avail, values, unused, _⟩
-      ⟨hd, hf, _, vacant, kept, tagged, inserted, hr, ht⟩
+      ⟨hd, hf, _, vacant, kept, tagged, inserted, hr, rowGrowth, ht⟩
     subst arena avail
     have hp := radix_project_set rows.val values.val kept [] leaf row valid tagged inserted
     exact ⟨fun _ _ h => h, availableDirs, invariant,
       (fun h => radix_knowledge_extend dirs dirs _ _ h (fun _ _ hk => hk)
         (radix_keys_kept rows.val values.val kept) (fun _ _ live absent => (absent live).elim)),
-      vacant, kept, hr, inserted, 0, ht, hp.1, hp.2⟩
+      vacant, kept, hr, inserted, by omega, rowGrowth, 0, ht, hp.1, hp.2⟩
   · have h := find_binding bindings row.key.val
     cases hf : Kv.Model.find bindings row.key.val with
     | none =>
@@ -3443,7 +3477,7 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
             bindings tree zero absent valid compressed invariant availableDirs
             availableRows dirRoom rowRoom keyRoom)
         rintro ⟨⟨next, leaf, replaced⟩, arena, avail, values, unused, _⟩
-          ⟨keep, av, inv, knows, vacant, kept, hr, h, tag, ins, ht⟩
+          ⟨keep, av, inv, knows, vacant, kept, hr, dirGrowth, rowGrowth, h, tag, ins, ht⟩
         exact ⟨
           keep,
           av,
@@ -3453,6 +3487,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           kept,
           hr,
           ins,
+          dirGrowth,
+          rowGrowth,
           h,
           ht,
           radix_project_set rows.val values.val kept bindings leaf row valid tag ins
@@ -3470,7 +3506,7 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
             (by omega)
             rowRoom keyRoom)
         rintro ⟨⟨next, added, replaced⟩, arena, avail, values, unused, _⟩
-          ⟨keep, av, inv, knows, vacant, kept, hr, h, tag, ins, ht⟩
+          ⟨keep, av, inv, knows, vacant, kept, hr, dirGrowth, rowGrowth, h, tag, ins, ht⟩
         exact ⟨
           keep,
           av,
@@ -3480,6 +3516,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           kept,
           hr,
           ins,
+          by omega,
+          rowGrowth,
           h,
           ht,
           radix_project_set rows.val values.val kept bindings added row valid tag ins
@@ -3647,6 +3685,57 @@ inductive RadixScanPlan (dirs : List (Option Spike.radix.RadixDir))
     (live : dirs[node.val - 1]? = some (some dir))
     (tail : RadixScanPlan dirs (dir.children.val.filter (· != 0#u32) ++ rest) fuel leaves)
     : RadixScanPlan dirs (node :: rest) (fuel + 17) leaves
+
+private theorem filter_has_two_slots {α : Type} (p : α → Bool) (xs : List α)
+    {i j : Nat} {a b : α} (distinct : i ≠ j)
+    (first : xs[i]? = some a) (second : xs[j]? = some b)
+    (keepA : p a = true) (keepB : p b = true)
+    : 2 ≤ (xs.filter p).length := by
+  have suffix (tail : List α) (k : Nat) (v : α)
+      (saved : tail[k]? = some v) (keep : p v = true) : 1 ≤ (tail.filter p).length := by
+    have mem : v ∈ tail.filter p := List.mem_filter.mpr
+      ⟨List.mem_iff_getElem?.mpr ⟨k, saved⟩, keep⟩
+    have := List.length_pos_of_mem mem
+    omega
+  induction xs generalizing i j with
+  | nil => simp at first
+  | cons x rest ih =>
+      cases i with
+      | zero =>
+          cases j with
+          | zero => exact (distinct rfl).elim
+          | succ j =>
+              have same : x = a := Option.some.inj first
+              have count := suffix rest j b second keepB
+              simp [same, keepA]
+              omega
+      | succ i =>
+          cases j with
+          | zero =>
+              have same : x = b := Option.some.inj second
+              have count := suffix rest i a first keepA
+              simp [same, keepB]
+              omega
+          | succ j =>
+              have count := ih (fun eq => distinct (congrArg Nat.succ eq)) first second
+              cases h : p x <;> simp [h] <;> omega
+
+theorem radix_scan_plan_bound (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (invariant : RadixDirectoryInvariant dirs) {stack : List U32} {fuel : Nat}
+    {leaves : List U32} (plan : RadixScanPlan dirs.val stack fuel leaves)
+    : fuel + 17 * stack.length ≤ 18 * leaves.length := by
+  induction plan with
+  | done => exact Nat.le_refl _
+  | leaf node rest fuel leaves tagged tail ih =>
+      simp only [List.length_cons]
+      omega
+  | branch node dir rest fuel leaves positive untagged live tail ih =>
+      obtain ⟨_, _, _, i, j, distinct, ⟨a, savedA, nonzeroA⟩, ⟨b, savedB, nonzeroB⟩⟩ :=
+        invariant _ _ live
+      have two := filter_has_two_slots (· != 0#u32) dir.children.val distinct savedA savedB
+        (bne_iff_ne.mpr nonzeroA) (bne_iff_ne.mpr nonzeroB)
+      simp only [List.length_cons, List.length_append] at ih ⊢
+      omega
 
 private theorem scan_plan_unique {dirs : List (Option Spike.radix.RadixDir)}
     {stack : List U32} {f g : Nat} {xs ys : List U32}
@@ -4475,7 +4564,7 @@ theorem ordered_put_refines {V : Type} (a : Spike.radix.OrderedRadix V)
     prior.lookup row height bs tree valid (radix_compressed_of_knowledge _ _ good.known)
     good.directories good.freeDirs good.freeRows room rowRoom keyRoom)
   rintro ⟨⟨lookup, added, removed⟩, dirs, freeDirs, rows, freeRows, path⟩
-    ⟨keepDirs, vacantDirs, invariant, knowledge, vacantRows, keepRows, removedEq, _,
+    ⟨keepDirs, vacantDirs, invariant, knowledge, vacantRows, keepRows, removedEq, _, _, _,
       newHeight, newTree, newRows, valueEq⟩
   have room : (alloc.vec.Vec.deref prior.order).val.length + (some added).toList.length
       ≤ Usize.max := by simpa [alloc.vec.Vec.deref, priorOrder, Nat.add_one_le_iff] using orderRoom

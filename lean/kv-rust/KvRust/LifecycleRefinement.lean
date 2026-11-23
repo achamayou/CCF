@@ -20,7 +20,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
             execute {} (.storeCreate sid term.val) = some (w, .unit)
             ∧ StateMatches encode sid n w) := by
   apply WP.spec_mono (store_new_lifecycle encode term)
-  intro n ⟨head, _, _, hf, hg, ht, hi, htx, valid⟩
+  intro n ⟨head, _, _, hf, hg, ht, hi, htx, valid, indexed⟩
   let s : Store := {term := term.val}
   let w : State := {stores := [(sid, s)]}
   have hs : find w.stores sid = some s := by simp [w, find]
@@ -28,7 +28,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     simp [execute, find, Kv.Model.set, erase, s, w]
   have hReach := reachable_execute (CCF.TransitionSystem.Reachable.initial rfl) he
   have hr := history_related (encode := encode) (n := n.history) hReach hs hf.symm hg.symm
-    (by change term.val = n.history.term.val; rw [ht]) hi.symm valid
+    (by change term.val = n.history.term.val; rw [ht]) hi.symm valid indexed
   refine ⟨w, he, ⟨⟨s, hs, hr⟩, ?_, ?_, hReach⟩⟩
   · simp [htx]
   · intro id
@@ -83,7 +83,8 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
   · rw [hh, hw]
     exact h.history
   · rw [hh]; exact ht
-  · exact FrameSlotsPreserved.of_same _ _ (congrArg (fun h => h.log.frames) hh)
+  · exact HistoryKeeps.of_same (congrArg (fun h => h.log.frames) hh)
+      (congrArg (fun h => h.index) hh)
 
 private theorem lookup_for_lifecycle (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64)
@@ -147,14 +148,14 @@ theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
   intro w' _ _ ⟨he, hn⟩ reach
   have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} :=
-    {hh with term := rfl}
+    {hh with term := rfl, indexValid := hh.indexValid.congr rfl rfl}
   refine replace_history h (s := {s with term := term.val}) ?_ ?_ ?_ ?_ reach ?_
   · rw [hn]; exact hh'
   · rw [he]; simp [find_set_key]
   · rw [hn]
   · rw [he]
-  · apply FrameSlotsPreserved.of_same
-    rw [hn]
+  · rw [hn]
+    exact HistoryKeeps.of_same rfl rfl
 
 private theorem keys_erase {K V : Type} [DecidableEq K] (xs : Assoc K V) (k : K)
     (h : (xs.map Prod.fst).Nodup)

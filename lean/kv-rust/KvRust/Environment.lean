@@ -31,14 +31,15 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     have he' : store = {s with global := store.global} := by
       unfold store compactStore
       split <;> rfl
-    refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_, h.valid⟩
+    refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_, h.valid,
+      h.indexValid.congr rfl rfl⟩
     · rw [he']; exact h.frames
     · rw [he']; exact h.head
     · rw [he']; exact h.term
     · rw [he']; exact h.identity
   have rel := replace_history related hn (w' := w')
     (by simp [w', find_set_key]) rfl rfl (reachable_execute related.reachable he)
-    (FrameSlotsPreserved.of_same _ _ rfl)
+    (HistoryKeeps.of_same rfl rfl)
   simp only [Spike.engine.Store.execute, hrun, bind_ok, he]
   change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.Compacted result), next)) _
   rw [WP.spec_ok]
@@ -70,8 +71,9 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           simp
         rw [he] at hh
         exact hh
-      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm, hlog, hkept⟩ :=
-        rollback_retains_model_frames native requested term s (modelFrame encode) prior head
+      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm, hlog,
+        hkept, hindexKept⟩ :=
+        rollback_retains_model_frames native requested term s (modelFrame encode native.history.index) prior head
           hframes hindex (fun v => history_relative_cut_zero native.history v h.nonempty h.indexed h.valid)
           h.indexed h.frames h.global (congrArg Frame.version hhead)
           (Nat.le_of_not_gt hLow) (Nat.le_of_not_gt hStale) h.valid
@@ -82,7 +84,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         have hbounded : cut.val ≤ prior.length := by
           rw [hcut, rollbackCut, max_le_iff, ← hc]
           exact ⟨hreach, min_le_left _ _⟩
-        have hp := model_cut_version native.history s (modelFrame encode) h.nonempty h.frames
+        have hp := model_cut_version native.history s (modelFrame encode native.history.index) h.nonempty h.frames
           h.indexed cut.val
         simpa [store, rollbackStore, ← hcut, hsize, Nat.min_eq_left hbounded] using hp
       have he : execute w (.rollback sid requested.val term.val) = some (w', .rolledBack cut.val) := by
@@ -90,8 +92,9 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
       have reach := reachable_execute related.reachable he
       have hstore : find w'.stores sid = some store := by simp [w', find_set_key]
       have hvalid : HistoryMatches encode after.history store := by
-        refine ⟨?_, hmodel.symm, ?_, ?_, ?_, ?_, ?_, hlog⟩
+        refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, hlog, h.indexValid.congr hindexKept hkept⟩
         · simp [htake, List.take_eq_nil_iff, h.nonempty]
+        · rw [hindexKept]; exact hmodel.symm
         · exact (Kv.Properties.reachable_store_invariants w' sid store reach hstore).2.1
         · intro i hi
           have hi' : i < (native.history.activeFrames.take (cut.val + 1)).length := by
@@ -109,7 +112,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         · change s.nextIdentity = after.history.next_identity.val
           rw [hidentity]; exact h.identity
       have rel := replace_history related hvalid hstore htxs rfl reach
-        (FrameSlotsPreserved.of_same _ _ hkept)
+        (HistoryKeeps.of_same hkept hindexKept)
       simp only [he, StepMatches, hrun, WP.spec_ok]
       exact ⟨.RolledBack cut, rfl, rfl, rel⟩
 

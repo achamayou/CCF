@@ -13,6 +13,9 @@ public import KvRust.BranchLog
 public import KvRust.Correspondence
 public import KvRust.Environment
 public import KvRust.History
+public import KvRust.IndexedHistory
+public import KvRust.IndexedImage
+public import KvRust.IndexedPublication
 public import KvRust.Keys
 public import KvRust.KvIndex
 public import KvRust.Lifecycle

@@ -274,6 +274,48 @@ fn replay_rejects_gaps_and_duplicates_without_publishing() {
 }
 
 #[test]
+fn invalid_provisional_replay_does_not_cut_back_the_indexed_branch() {
+    let mut store = Store::new(0);
+    let map = b"public:map";
+    let key = b"key";
+    let address = Address {
+        map: Bytes::copy_from(map),
+        key: Bytes::copy_from(key),
+    };
+    put(&mut store, 0, map, key, b"one", 1);
+    put(&mut store, 0, map, key, b"two", 2);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, map);
+
+    let identity = store.history.next_identity;
+    assert_eq!(
+        store.replay_ccf(
+            2,
+            vec![(address.clone(), None), (address.clone(), None)],
+            false
+        ),
+        Err(Error::Disabled)
+    );
+    assert_eq!(store.history.head().version, 2);
+    assert_eq!(store.history.next_identity, identity);
+    begin(&mut store, 2);
+    acquire(&mut store, 2, map);
+    assert_read(&mut store, 2, map, key, false, Some(b"two"));
+
+    store
+        .replay_ccf(
+            2,
+            vec![(address, Some(Bytes::copy_from(b"replacement")))],
+            false,
+        )
+        .unwrap();
+    assert_read(&mut store, 1, map, key, false, Some(b"two"));
+    begin(&mut store, 3);
+    acquire(&mut store, 3, map);
+    assert_read(&mut store, 3, map, key, false, Some(b"replacement"));
+}
+
+#[test]
 fn restored_snapshot_retains_versions_and_only_rolls_back_its_suffix() {
     let mut s = Store::new(7);
     let name = b"public:restored";
@@ -632,13 +674,25 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
     let saved = store.history.log.read(pinned);
     assert_eq!(saved.version, 2);
     assert_eq!(
-        saved.data.get_ref(&key).unwrap().value.as_slice(),
+        store
+            .history
+            .index
+            .get(saved.data, &key)
+            .unwrap()
+            .value
+            .as_slice(),
         b"discarded"
     );
     let head = store.history.head();
     assert_eq!(head.version, 2);
     assert_eq!(
-        head.data.get_ref(&key).unwrap().value.as_slice(),
+        store
+            .history
+            .index
+            .get(head.data, &key)
+            .unwrap()
+            .value
+            .as_slice(),
         b"replacement"
     );
     store.install_snapshot(3, Vec::new()).unwrap();
@@ -646,7 +700,13 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
     assert_eq!(store.history.head().version, 3);
     let saved = store.history.log.read(pinned);
     assert_eq!(
-        saved.data.get_ref(&key).unwrap().value.as_slice(),
+        store
+            .history
+            .index
+            .get(saved.data, &key)
+            .unwrap()
+            .value
+            .as_slice(),
         b"discarded"
     );
 }

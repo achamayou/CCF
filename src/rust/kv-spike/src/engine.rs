@@ -4,6 +4,8 @@
 //! A single-store KV state machine over finite association lists.
 
 use crate::branch_log::{BranchLog, FrameId};
+use crate::kv_index::AddressIndex;
+use crate::radix::DualRoot;
 
 pub type Version = u64;
 pub type Term = u64;
@@ -370,16 +372,16 @@ fn same_image(data: &Data, map: &Bytes, expected: &Image) -> bool {
 #[derive(Clone)]
 struct Frame {
     version: Version,
-    data: Data,
+    data: DualRoot,
     revisions: Assoc<Bytes, Stamp>,
     births: Assoc<Bytes, Stamp>,
 }
 
 impl Frame {
-    fn empty() -> Self {
+    fn empty(data: DualRoot) -> Self {
         Self {
             version: 0,
-            data: Assoc::new(),
+            data,
             revisions: Assoc::new(),
             births: Assoc::new(),
         }
@@ -401,24 +403,136 @@ impl Frame {
         same_birth && self.revision(map).same(revision)
     }
 
-    fn advance(&self, version: Version, identity: u64, pending: &Pending) -> Self {
+    fn advance(
+        &self,
+        index: &mut AddressIndex<Cell>,
+        version: Version,
+        identity: u64,
+        pending: &Pending,
+    ) -> Self {
         let stamp = Stamp { version, identity };
         let mut revisions = self.revisions.clone();
         let mut births = self.births.clone();
         let mut i = 0;
         while i < pending.0.len() {
-            let row = &pending.0[i];
-            update_revision(&mut revisions, &self.data, row, stamp);
-            update_birth(&mut births, &row.0.map, stamp);
+            advance_stamps(
+                &mut revisions,
+                &mut births,
+                index,
+                self.data,
+                &pending.0[i],
+                stamp,
+            );
             i += 1;
         }
         Self {
             version,
-            data: publish(&self.data, pending, version),
+            data: publish_indexed(index, self.data, pending, version),
             revisions,
             births,
         }
     }
+}
+
+fn advance_stamps(
+    revisions: &mut Assoc<Bytes, Stamp>,
+    births: &mut Assoc<Bytes, Stamp>,
+    index: &AddressIndex<Cell>,
+    root: DualRoot,
+    row: &(Address, Write),
+    stamp: Stamp,
+) {
+    let (a, w) = row;
+    if matches!(w, Write::Put(_)) || index.get(root, a).is_some() {
+        revisions.set(a.map.clone(), stamp);
+    }
+    update_birth(births, &a.map, stamp);
+}
+
+fn publish_indexed(
+    index: &mut AddressIndex<Cell>,
+    mut root: DualRoot,
+    pending: &Pending,
+    version: Version,
+) -> DualRoot {
+    let mut i = pending.0.len();
+    while i > 0 {
+        i -= 1;
+        root = publish_indexed_row(index, root, &pending.0[i], version);
+    }
+    root
+}
+
+fn publish_indexed_row(
+    index: &mut AddressIndex<Cell>,
+    root: DualRoot,
+    row: &(Address, Write),
+    version: Version,
+) -> DualRoot {
+    let (address, write) = row;
+    match write {
+        Write::Put(value) => index.put(
+            root,
+            address.clone(),
+            Cell {
+                value: value.clone(),
+                version,
+            },
+        ),
+        Write::Remove => index.remove(root, address),
+    }
+}
+
+fn indexed_data(index: &AddressIndex<Cell>, root: DualRoot) -> Data {
+    let links = index.scan_links(root);
+    let mut rows = Vec::with_capacity(links.len());
+    let mut i = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        rows.push((address.clone(), cell.clone()));
+        i += 1;
+    }
+    Assoc(rows)
+}
+
+fn indexed_image(index: &AddressIndex<Cell>, root: DualRoot, map: &Bytes) -> Image {
+    let links = index.scan_links(root);
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        append_image_row(&mut rows, address, cell, map);
+        i += 1;
+    }
+    Assoc(rows)
+}
+
+fn append_image_row(rows: &mut Vec<(Bytes, Cell)>, address: &Address, cell: &Cell, map: &Bytes) {
+    if address.map.same(map) {
+        rows.push((address.key.clone(), cell.clone()));
+    }
+}
+
+fn append_snapshot_cell(
+    cells: &mut Vec<(Bytes, Version, Bytes)>,
+    address: &Address,
+    cell: &Cell,
+    map: &Bytes,
+) {
+    if address.map.same(map) {
+        cells.push((address.key.clone(), cell.version, cell.value.clone()));
+    }
+}
+
+fn index_from_rows(index: &mut AddressIndex<Cell>, rows: Data) -> DualRoot {
+    let mut root = index.empty_root();
+    let mut i = rows.0.len();
+    while i > 0 {
+        i -= 1;
+        let (address, cell) = &rows.0[i];
+        root = index.put(root, address.clone(), cell.clone());
+    }
+    root
 }
 
 fn update_revision(
@@ -438,10 +552,10 @@ fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
     }
 }
 
-#[derive(Clone)]
 struct History {
     // The active branch is oldest first and contiguous in version.
     log: BranchLog<Frame>,
+    index: AddressIndex<Cell>,
     global: Version,
     term: Term,
     next_identity: u64,
@@ -449,8 +563,10 @@ struct History {
 
 impl History {
     fn new(term: Term) -> Self {
+        let index = AddressIndex::new();
         Self {
-            log: BranchLog::new(Frame::empty()),
+            log: BranchLog::new(Frame::empty(index.empty_root())),
+            index,
             global: 0,
             term,
             next_identity: 1,
@@ -468,6 +584,11 @@ impl History {
 
     fn at_cut(&self, cut: Version) -> &Frame {
         self.log.read(self.pin_cut(cut))
+    }
+
+    fn prepare_frame(&mut self, version: Version, identity: u64, pending: &Pending) -> Frame {
+        let head = self.log.active_at(self.log.active_len() - 1);
+        head.advance(&mut self.index, version, identity, pending)
     }
 
     fn pin_cut(&self, cut: Version) -> FrameId {
@@ -539,7 +660,10 @@ impl PinnedImage {
     fn point(&self, history: &History, address: &Address) -> Option<Cell> {
         match self {
             Self::Empty => None,
-            Self::Frame(id) => history.log.read(*id).data.get(address),
+            Self::Frame(id) => match history.index.get(history.log.read(*id).data, address) {
+                Some(cell) => Some(cell.clone()),
+                None => None,
+            },
             Self::Recovered(image) => image.get(&address.key),
         }
     }
@@ -547,7 +671,7 @@ impl PinnedImage {
     fn materialize(&self, history: &History, map: &Bytes) -> Image {
         match self {
             Self::Empty => Assoc::new(),
-            Self::Frame(id) => image(&history.log.read(*id).data, map),
+            Self::Frame(id) => indexed_image(&history.index, history.log.read(*id).data, map),
             Self::Recovered(rows) => rows.clone(),
         }
     }
@@ -620,16 +744,50 @@ fn copy_cell(cell: &Option<Cell>) -> Option<Cell> {
 }
 
 impl Dependency {
-    fn holds(&self, db: &Data) -> bool {
+    fn holds(&self, index: &AddressIndex<Cell>, root: DualRoot) -> bool {
         match self {
-            Self::Key(a, expected) => match (db.get(a), expected) {
+            Self::Key(a, expected) => match (index.get(root, a), expected) {
                 (None, None) => true,
                 (Some(current), Some(old)) => current.same(old),
                 _ => false,
             },
-            Self::Map(map, expected) => same_image(db, map, expected),
+            Self::Map(map, expected) => {
+                let links = index.scan_links(root);
+                let mut i = 0;
+                let mut matched = 0;
+                while i < links.len() {
+                    let (address, cell) = index.scan_row(links[i]);
+                    let Some(next) = match_indexed_row(address, cell, map, expected, matched)
+                    else {
+                        return false;
+                    };
+                    matched = next;
+                    i += 1;
+                }
+                matched == expected.0.len()
+            }
         }
     }
+}
+
+fn match_indexed_row(
+    address: &Address,
+    cell: &Cell,
+    map: &Bytes,
+    expected: &Image,
+    at: usize,
+) -> Option<usize> {
+    if !address.map.same(map) {
+        return Some(at);
+    }
+    if at >= expected.0.len() {
+        return None;
+    }
+    let (key, old) = &expected.0[at];
+    if !address.key.same(key) || !cell.same(old) {
+        return None;
+    }
+    Some(at + 1)
 }
 
 #[derive(Clone, Copy)]
@@ -856,7 +1014,7 @@ impl Tx {
                 return false;
             }
         }
-        self.valid_lineage(history) && self.valid_dependencies(&history.head().data)
+        self.valid_lineage(history) && self.valid_dependencies(history)
     }
 
     fn valid_lineage(&self, history: &History) -> bool {
@@ -871,10 +1029,10 @@ impl Tx {
         true
     }
 
-    fn valid_dependencies(&self, data: &Data) -> bool {
+    fn valid_dependencies(&self, history: &History) -> bool {
         let mut i = 0;
         while i < self.deps.len() {
-            if !self.deps[i].holds(data) {
+            if !self.deps[i].holds(&history.index, history.head().data) {
                 return false;
             }
             i += 1;
@@ -1019,7 +1177,7 @@ fn without_map(data: &Data, map: &Bytes) -> Data {
     Assoc(out)
 }
 
-fn add_snapshot_map(frame: &mut Frame, map: &SnapshotMap, identity: u64) -> bool {
+fn add_snapshot_map(frame: &mut Frame, rows: &mut Data, map: &SnapshotMap, identity: u64) -> bool {
     if map.revision > frame.version {
         return false;
     }
@@ -1029,7 +1187,7 @@ fn add_snapshot_map(frame: &mut Frame, map: &SnapshotMap, identity: u64) -> bool
         }
     }
     // A snapshot updates each included map. An omitted map is not a deletion.
-    frame.data = without_map(&frame.data, &map.name);
+    *rows = without_map(rows, &map.name);
     let stamp = Stamp {
         version: map.revision,
         identity,
@@ -1047,10 +1205,10 @@ fn add_snapshot_map(frame: &mut Frame, map: &SnapshotMap, identity: u64) -> bool
             map: map.name.clone(),
             key: key.clone(),
         };
-        if *written == 0 || *written > map.revision || frame.data.index(&address).is_some() {
+        if *written == 0 || *written > map.revision || rows.index(&address).is_some() {
             return false;
         }
-        frame.data.0.push((
+        rows.0.push((
             address,
             Cell {
                 version: *written,
@@ -1177,13 +1335,12 @@ impl Store {
             if snapshot.term != self.history.term {
                 // CCF checks conflicts before requesting a version in the
                 // current term, so lineage or dependency failure takes priority.
-                let outcome = if t.valid_lineage(&self.history)
-                    && t.valid_dependencies(&self.history.head().data)
-                {
-                    Outcome::NoReplicate
-                } else {
-                    Outcome::Conflict
-                };
+                let outcome =
+                    if t.valid_lineage(&self.history) && t.valid_dependencies(&self.history) {
+                        Outcome::NoReplicate
+                    } else {
+                        Outcome::Conflict
+                    };
                 return Ok(CommitPreparation::Rejected(outcome));
             }
         }
@@ -1270,8 +1427,9 @@ impl Store {
         if my_identity == u64::MAX || their_identity == u64::MAX {
             return Err(Error::Exhausted);
         }
-        let my_frames = Self::recovery_frames(&self.history, &source.history, &names, my_identity);
-        let their_frames =
+        let (my_frames, my_index) =
+            Self::recovery_frames(&self.history, &source.history, &names, my_identity);
+        let (their_frames, their_index) =
             Self::recovery_frames(&source.history, &self.history, &names, their_identity);
         let mut my_views = self.recovery_views.clone();
         let mut their_views = source.recovery_views.clone();
@@ -1284,6 +1442,8 @@ impl Store {
         }
         self.history.log = my_frames;
         source.history.log = their_frames;
+        self.history.index = my_index;
+        source.history.index = their_index;
         self.history.next_identity = my_identity + 1;
         source.history.next_identity = their_identity + 1;
         self.recovery_views = my_views;
@@ -1298,7 +1458,7 @@ impl Store {
         let frame = self.history.at_cut(self.history.global);
         RecoveryView {
             revision: frame.revision(name).version,
-            image: image(&frame.data, name),
+            image: indexed_image(&self.history.index, frame.data, name),
         }
     }
 
@@ -1359,17 +1519,16 @@ impl Store {
             return Err(Error::Disabled);
         }
         let frame = self.history.at_cut(version);
+        let links = self.history.index.scan_links(frame.data);
         let mut maps = Vec::new();
         let mut i = 0;
         while i < frame.births.0.len() {
             let name = &frame.births.0[i].0;
             let mut cells = Vec::new();
             let mut j = 0;
-            while j < frame.data.0.len() {
-                let (address, cell) = &frame.data.0[j];
-                if address.map.same(name) {
-                    cells.push((address.key.clone(), cell.version, cell.value.clone()));
-                }
+            while j < links.len() {
+                let (address, cell) = self.history.index.scan_row(links[j]);
+                append_snapshot_cell(&mut cells, address, cell, name);
                 j += 1;
             }
             maps.push(SnapshotMap {
@@ -1398,14 +1557,16 @@ impl Store {
         }
 
         let mut frame = self.history.at_cut(version).clone();
+        let mut rows = indexed_data(&self.history.index, frame.data);
         frame.version = version;
         let mut i = 0;
         while i < maps.len() {
-            if !add_snapshot_map(&mut frame, &maps[i], identity) {
+            if !add_snapshot_map(&mut frame, &mut rows, &maps[i], identity) {
                 return Err(Error::Disabled);
             }
             i += 1;
         }
+        frame.data = index_from_rows(&mut self.history.index, rows);
         self.history.log.reset_branch(frame);
         self.history.next_identity = identity + 1;
         self.history.global = version;
@@ -1427,8 +1588,15 @@ impl Store {
         }
     }
 
-    fn copy_recovery_map(dst: &mut Frame, src: &Frame, name: &Bytes, identity: u64) {
-        dst.data = without_map(&dst.data, name);
+    fn copy_recovery_map(
+        dst: &mut Frame,
+        rows: &mut Data,
+        src: &Frame,
+        source_rows: &Data,
+        name: &Bytes,
+        identity: u64,
+    ) {
+        *rows = without_map(rows, name);
         if let Some(birth) = src.births.get(name) {
             dst.births.set(
                 name.clone(),
@@ -1452,8 +1620,8 @@ impl Store {
             dst.revisions = dst.revisions.erase(name);
         }
         let mut i = 0;
-        while i < src.data.0.len() {
-            Self::append_recovery_row(&mut dst.data, &src.data.0[i], name);
+        while i < source_rows.0.len() {
+            Self::append_recovery_row(rows, &source_rows.0[i], name);
             i += 1;
         }
     }
@@ -1464,14 +1632,31 @@ impl Store {
         }
     }
 
-    fn recovery_frame(base: &Frame, source: &History, names: &Vec<Bytes>, identity: u64) -> Frame {
+    fn recovery_frame(
+        output: &mut AddressIndex<Cell>,
+        base: &Frame,
+        initial: &AddressIndex<Cell>,
+        source: &History,
+        names: &Vec<Bytes>,
+        identity: u64,
+    ) -> Frame {
         let mut next = base.clone();
         let donor = source.at_cut(base.version);
+        let mut rows = indexed_data(initial, base.data);
+        let donor_rows = indexed_data(&source.index, donor.data);
         let mut i = 0;
         while i < names.len() {
-            Self::copy_recovery_map(&mut next, donor, &names[i], identity);
+            Self::copy_recovery_map(
+                &mut next,
+                &mut rows,
+                donor,
+                &donor_rows,
+                &names[i],
+                identity,
+            );
             i += 1;
         }
+        next.data = index_from_rows(output, rows);
         next
     }
 
@@ -1480,9 +1665,12 @@ impl Store {
         source: &History,
         names: &Vec<Bytes>,
         identity: u64,
-    ) -> BranchLog<Frame> {
+    ) -> (BranchLog<Frame>, AddressIndex<Cell>) {
+        let mut index = AddressIndex::new();
         let mut frames = BranchLog::new(Self::recovery_frame(
+            &mut index,
             destination.log.active_at(0),
+            &destination.index,
             source,
             names,
             identity,
@@ -1490,25 +1678,117 @@ impl Store {
         let mut i = 1;
         while i < destination.log.active_len() {
             frames.append(Self::recovery_frame(
+                &mut index,
                 destination.log.active_at(i),
+                &destination.index,
                 source,
                 names,
                 identity,
             ));
             i += 1;
         }
-        frames
+        (frames, index)
     }
 
     /// Apply an already validated ordinary ledger entry at the next version.
     /// Import does not set the term for subsequent locally authored commits.
     pub fn replay_next(&mut self, version: Version, writes: WriteSet) -> Result<(), Error> {
-        let head = self.history.head();
+        self.replay_indexed(version, &writes, false)
+    }
+
+    /// CCF historical queries can replay a single later entry into an empty
+    /// store. Missing-key deletions may be visible to a historical diff.
+    pub fn replay_ccf(
+        &mut self,
+        version: Version,
+        writes: WriteSet,
+        track_deletes: bool,
+    ) -> Result<(), Error> {
+        if version != 0 && version <= self.history.head().version {
+            let previous = version - 1;
+            if previous < self.history.global {
+                return Err(Error::Disabled);
+            }
+            // Validate before cutting back the active branch. The index and
+            // all frame IDs stay in the same arena.
+            let pending = Self::prepare_replay(
+                self.history.at_cut(previous).version,
+                self.history.next_identity,
+                version,
+                &writes,
+            )?;
+            if !matches!(
+                self.history.rollback(previous, self.history.term)?,
+                Output::RolledBack(_)
+            ) {
+                return Err(Error::Disabled);
+            }
+            self.append_replay(version, &pending, track_deletes);
+            return Ok(());
+        }
+        if version > 1 && self.history.head().version == 0 {
+            if !self.txs.0.is_empty() {
+                return Err(Error::Disabled);
+            }
+            let mut isolated = Store::new(self.history.term);
+            isolated.history.next_identity = self.history.next_identity;
+            isolated.install_snapshot(version - 1, Vec::new())?;
+            isolated.replay_indexed(version, &writes, track_deletes)?;
+            self.history = isolated.history;
+            Ok(())
+        } else {
+            self.replay_indexed(version, &writes, track_deletes)
+        }
+    }
+
+    fn replay_indexed(
+        &mut self,
+        version: Version,
+        writes: &WriteSet,
+        track_deletes: bool,
+    ) -> Result<(), Error> {
+        let pending = Self::prepare_replay(
+            self.history.head().version,
+            self.history.next_identity,
+            version,
+            writes,
+        )?;
+        self.append_replay(version, &pending, track_deletes);
+        Ok(())
+    }
+
+    fn append_replay(&mut self, version: Version, pending: &Pending, track_deletes: bool) {
         let identity = self.history.next_identity;
-        if head.version == u64::MAX || identity == u64::MAX {
+        let mut next = self.history.prepare_frame(version, identity, pending);
+        if track_deletes {
+            let mut i = 0;
+            while i < pending.0.len() {
+                next.revisions
+                    .set(pending.0[i].0.map.clone(), Stamp { version, identity });
+                i += 1;
+            }
+        }
+        self.history.log.append(next);
+        self.history.next_identity += 1;
+    }
+
+    fn tx_index(&self, tx: Attempt) -> Result<usize, Error> {
+        match self.txs.index(&tx) {
+            Some(i) => Ok(i),
+            None => Err(Error::Disabled),
+        }
+    }
+
+    fn prepare_replay(
+        previous: Version,
+        identity: u64,
+        version: Version,
+        writes: &WriteSet,
+    ) -> Result<Pending, Error> {
+        if previous == u64::MAX || identity == u64::MAX {
             return Err(Error::Exhausted);
         }
-        if version != head.version + 1 {
+        if version != previous + 1 {
             return Err(Error::Disabled);
         }
         let mut pending = Assoc::new();
@@ -1525,85 +1805,7 @@ impl Store {
             pending.0.push((address.clone(), write));
             i += 1;
         }
-        let next = head.advance(version, identity, &pending);
-        self.history.log.append(next);
-        self.history.next_identity += 1;
-        Ok(())
-    }
-
-    /// CCF historical queries can replay a single later entry into an empty
-    /// store. Missing-key deletions may be visible to a historical diff.
-    pub fn replay_ccf(
-        &mut self,
-        version: Version,
-        writes: WriteSet,
-        track_deletes: bool,
-    ) -> Result<(), Error> {
-        if version != 0 && version <= self.history.head().version {
-            // Replacement of a provisional suffix is atomic even if the
-            // replacement write set fails validation.
-            let mut replacement = Store::new(self.history.term);
-            replacement.history = self.history.clone();
-            if !matches!(
-                replacement
-                    .history
-                    .rollback(version - 1, self.history.term)?,
-                Output::RolledBack(_)
-            ) {
-                return Err(Error::Disabled);
-            }
-            replacement.replay_ccf_next(version, writes, track_deletes)?;
-            self.history = replacement.history;
-            return Ok(());
-        }
-        self.replay_ccf_next(version, writes, track_deletes)
-    }
-
-    fn replay_ccf_next(
-        &mut self,
-        version: Version,
-        writes: WriteSet,
-        track_deletes: bool,
-    ) -> Result<(), Error> {
-        let mut maps = Vec::new();
-        if track_deletes {
-            let mut i = 0;
-            while i < writes.len() {
-                maps.push(writes[i].0.map.clone());
-                i += 1;
-            }
-        }
-        if version > 1 && self.history.head().version == 0 {
-            if !self.txs.0.is_empty() {
-                return Err(Error::Disabled);
-            }
-            let mut isolated = Store::new(self.history.term);
-            isolated.history.next_identity = self.history.next_identity;
-            isolated.install_snapshot(version - 1, Vec::new())?;
-            isolated.replay_next(version, writes)?;
-            self.history = isolated.history;
-        } else {
-            self.replay_next(version, writes)?;
-        }
-        self.stamp_historical_maps(version, &maps);
-        Ok(())
-    }
-
-    fn stamp_historical_maps(&mut self, version: Version, maps: &Vec<Bytes>) {
-        let identity = self.history.next_identity - 1;
-        let revisions = &mut self.history.log.replay_frame_mut().revisions;
-        let mut i = 0;
-        while i < maps.len() {
-            revisions.set(maps[i].clone(), Stamp { version, identity });
-            i += 1;
-        }
-    }
-
-    fn tx_index(&self, tx: Attempt) -> Result<usize, Error> {
-        match self.txs.index(&tx) {
-            Some(i) => Ok(i),
-            None => Err(Error::Disabled),
-        }
+        Ok(pending)
     }
 
     fn apply(&mut self, tx: Attempt) -> Result<Output, Error> {
@@ -1620,7 +1822,9 @@ impl Store {
             return Err(Error::Exhausted);
         }
         let version = head.version + 1;
-        let next = head.advance(version, self.history.next_identity, &t.pending);
+        let next = self
+            .history
+            .prepare_frame(version, self.history.next_identity, &t.pending);
         let writes = reported_writes(&t.pending);
         self.history.log.append(next);
         self.history.next_identity += 1;

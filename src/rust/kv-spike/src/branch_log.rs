@@ -41,13 +41,6 @@ impl<T> BranchLog<T> {
         self.append(base);
     }
 
-    /// Ledger replay may finish preparing the most recently appended frame
-    /// before the enclosing store operation returns.
-    pub(crate) fn replay_frame_mut(&mut self) -> &mut T {
-        let last = self.frames.len() - 1;
-        &mut self.frames[last]
-    }
-
     pub fn resolve(&self, offset: usize) -> Option<FrameId> {
         if offset < self.branch.len() {
             Some(FrameId(self.branch[offset]))

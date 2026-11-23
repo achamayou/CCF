@@ -3,7 +3,7 @@
 
 module
 
-public import KvRust.Lineage
+public import KvRust.IndexedHistory
 
 @[expose] public section
 
@@ -16,17 +16,19 @@ def PinLive (history : Spike.engine.History) : Spike.engine.PinnedImage → Prop
   | .Frame id => ∃ frame, history.log.frames.val[id.val]? = some frame
   | _ => True
 
-def pinImage (history : Spike.engine.History) (map : Spike.engine.Bytes)
+noncomputable def pinImage (history : Spike.engine.History) (map : Spike.engine.Bytes)
     : Spike.engine.PinnedImage → Assoc (List U8) (Cell (List U8))
   | .Empty => []
   | .Frame id =>
       (history.log.frames.val[id.val]?.map
-        fun frame => image (byteData frame.data) map.val).getD
+        fun frame =>
+          image (indexedCellData (indexRows history.index frame.data)) map.val).getD
         []
   | .Recovered rows => byteImage rows
 
 theorem pin_preserved {before after : Spike.engine.History}
-    (preserved : FrameSlotsPreserved before after) (map : Spike.engine.Bytes)
+    (preserved : HistoryKeeps before after) (valid : HistoryIndexValid before)
+    (map : Spike.engine.Bytes)
     (pin : Spike.engine.PinnedImage) (live : PinLive before pin)
     : PinLive after pin ∧ pinImage after map pin = pinImage before map pin := by
   cases pin with
@@ -34,18 +36,39 @@ theorem pin_preserved {before after : Spike.engine.History}
   | Recovered rows => exact ⟨trivial, rfl⟩
   | Frame id =>
       obtain ⟨frame, old⟩ := live
-      have kept := preserved id.val frame old
-      exact ⟨⟨frame, kept⟩, by simp [pinImage, old, kept]⟩
+      have kept := preserved.slots id.val frame old
+      have rows := preserved.rows valid id.val frame old
+      exact ⟨⟨frame, kept⟩, by simp [pinImage, old, kept, rows]⟩
 
 theorem clone_pin (pin : Spike.engine.PinnedImage)
     : Spike.engine.PinnedImage.Insts.CoreCloneClone.clone pin = .ok pin := by
   cases pin <;> simp [Spike.engine.PinnedImage.Insts.CoreCloneClone.clone,
     Spike.branch_log.FrameId.Insts.CoreCloneClone.clone, clone_assoc]
 
+def PinScanRoom (history : Spike.engine.History) : Spike.engine.PinnedImage → Prop
+  | .Frame id =>
+      ∀ (frame : Spike.engine.Frame),
+        history.log.frames.val[id.val]? = some frame
+        → 18 * (indexRows history.index frame.data).length ≤ Usize.max
+  | _ => True
+
+def HistoryScanRoom (history : Spike.engine.History) : Prop :=
+  ∀ (i : Nat) (frame : Spike.engine.Frame),
+    history.log.frames.val[i]? = some frame
+    → 18 * (indexRows history.index frame.data).length ≤ Usize.max
+
+theorem HistoryScanRoom.pin {history : Spike.engine.History}
+    (room : HistoryScanRoom history) (pin : Spike.engine.PinnedImage)
+    : PinScanRoom history pin := by
+  cases pin with
+  | Frame id => exact room id.val
+  | Empty | Recovered => trivial
+
 /-- Materializing a frame handle copies precisely its selected ordered map. -/
 theorem pin_materialize_refines (history : Spike.engine.History)
     (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
-    (live : PinLive history pin)
+    (live : PinLive history pin) (valid : HistoryIndexValid history)
+    (space : PinScanRoom history pin)
     : WP.spec (Spike.engine.PinnedImage.materialize pin history map)
         (fun rows => byteImage rows = pinImage history map pin) := by
   unfold Spike.engine.PinnedImage.materialize
@@ -57,7 +80,11 @@ theorem pin_materialize_refines (history : Spike.engine.History)
       apply WP.spec_bind (branch_read_refines history.log id frame saved)
       intro current he
       subst current
-      simpa [pinImage, saved] using image_matches_model frame.data map
+      apply WP.spec_mono (indexed_image_refines history.index frame.data _ map
+        (valid.archived id.val frame saved) valid.index (space frame saved))
+      intro rows h
+      simp only [byteImage, h, pinImage, saved, Option.map_some, Option.getD_some]
+      exact indexed_image_projects _ _
 
 private theorem find_in_image {M K V : Type} [DecidableEq M] [DecidableEq K]
     (db : DB M K V) (map : M) (key : K)
@@ -80,7 +107,8 @@ local instance pinDecidableEqBytes : DecidableEq Spike.engine.Bytes :=
 /-- A borrowed point read agrees with a lookup after exact map materialization. -/
 theorem pin_point_refines (history : Spike.engine.History)
     (address : Spike.engine.Address) (pin : Spike.engine.PinnedImage)
-    (live : PinLive history pin)
+    (live : PinLive history pin) (valid : HistoryIndexValid history)
+    (space : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
     : WP.spec (Spike.engine.PinnedImage.point pin history address)
         (fun cell =>
           cell.map byteCell
@@ -99,6 +127,10 @@ theorem pin_point_refines (history : Spike.engine.History)
       apply WP.spec_bind (branch_read_refines history.log id frame saved)
       intro current he
       subst current
-      simpa [pinImage, saved, find_in_image, byteAddr] using data_lookup frame.data address
+      apply WP.spec_bind (index_data_lookup history.index frame.data _
+        (valid.archived id.val frame saved) address space)
+      intro found he
+      cases found <;> simp [clone_cell, pinImage, saved, find_in_image, byteAddr] at he ⊢ <;>
+        exact he
 
 end KvRust

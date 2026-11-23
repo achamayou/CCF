@@ -189,8 +189,8 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       replace_attempt rel id index t tAfter txAfter hidx hrow
                         (congrArg State.txs hw) ?_ ?_
                         (reachable_execute rel.reachable hstep)
-                        (FrameSlotsPreserved.of_same _ _
-                          (congrArg (fun h => h.log.frames) hhist))
+                        (HistoryKeeps.of_same (congrArg (fun h => h.log.frames) hhist)
+                          (congrArg (fun h => h.index) hhist))
                     ⟩
                     · rw [hw, hhist]; exact rel.history
                     · rw [hhist]

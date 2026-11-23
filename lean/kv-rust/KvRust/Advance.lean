@@ -3,7 +3,7 @@
 
 module
 
-public import KvRust.Lineage
+public import KvRust.IndexedHistory
 
 @[expose] public section
 
@@ -13,7 +13,6 @@ open Aeneas.Std
 open Kv.Model
 
 private abbrev Stamps := Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Stamp
-private abbrev NativeData := Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell
 private abbrev NativeWrites := Spike.engine.Assoc Spike.engine.Address Spike.engine.Write
 private abbrev StampMap := Assoc String Stamp
 
@@ -34,13 +33,6 @@ private theorem byte_same (a b : Spike.engine.Bytes)
 private def encodedStamps (encode : Spike.engine.Bytes → String) (rows : Stamps)
     : StampMap :=
   rows.val.map fun (m, s) => (encode m, modelStamp s)
-
-/-- Project the entire extracted frame into the executable model. -/
-def modelFrame (encode : List U8 → String) (f : Spike.engine.Frame) : Frame :=
-  {
-    modelMetadata (encode ∘ alloc.vec.Vec.val) f with
-      data := encodeData encode (byteData f.data)
-  }
 
 private def revisionStep (data : Data) (stamp : Stamp) (rev : StampMap)
     (row : Addr String String × Option String)
@@ -113,61 +105,129 @@ private theorem update_birth_step (encode : List U8 → String)
       obtain ⟨s, _, he⟩ := why
       simp [hf, he]
 
+private def advanceRevision (revisions : Stamps) (index : CellIndex)
+    (root : Spike.radix.DualRoot) (a : Spike.engine.Address) (w : Spike.engine.Write)
+    (stamp : Spike.engine.Stamp)
+    : Result (Stamps × Spike.engine.Address) := do
+  let written ←
+    match w with
+    | .Put _ => Result.ok true
+    | .Remove => Result.ok false
+  if written then
+    let m ← Spike.engine.Bytes.Insts.CoreCloneClone.clone a.map
+    let next ←
+      Spike.engine.Assoc.set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
+        Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone
+        revisions m stamp
+    Result.ok (next, a)
+  else
+    let c ← Spike.kv_index.AddressIndex.get index root a
+    if core.option.Option.is_some c then
+      let m ← Spike.engine.Bytes.Insts.CoreCloneClone.clone a.map
+      let next ←
+        Spike.engine.Assoc.set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
+          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone
+          revisions m stamp
+      Result.ok (next, a)
+    else
+      Result.ok (revisions, a)
+
 private theorem update_revision_step (encode : List U8 → String)
-    (inj : Function.Injective encode) (rows : Stamps) (data : NativeData)
-    (row : Spike.engine.Address × Spike.engine.Write) (stamp : Spike.engine.Stamp)
-    (hc : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.update_revision rows data row stamp)
-        (fun next =>
-          encodedStamps (encode ∘ alloc.vec.Vec.val) next
-            = revisionStep (encodeData encode (byteData data)) (modelStamp stamp)
-                (encodedStamps (encode ∘ alloc.vec.Vec.val) rows) (encodeRow encode row)
-          ∧ next.val.length ≤ rows.val.length + 1) := by
+    (inj : Function.Injective encode) (revisions : Stamps) (index : CellIndex)
+    (root : Spike.radix.DualRoot) (data : CellRows) (view : IndexView index root data)
+    (a : Spike.engine.Address) (w : Spike.engine.Write) (stamp : Spike.engine.Stamp)
+    (hc : revisions.val.length < Usize.max) (room : IndexKeyRoom (a, w))
+    : WP.spec (advanceRevision revisions index root a w stamp)
+        (fun (next, addr) =>
+          addr = a
+          ∧ encodedStamps (encode ∘ alloc.vec.Vec.val) next
+            = revisionStep (encodeData encode (indexedCellData data)) (modelStamp stamp)
+                (encodedStamps (encode ∘ alloc.vec.Vec.val) revisions)
+                (encodeRow encode (a, w))
+          ∧ next.val.length ≤ revisions.val.length + 1) := by
   let enc := encode ∘ alloc.vec.Vec.val (α := U8)
   have hi : Function.Injective enc := inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
-  obtain ⟨a, w⟩ := row
-  have hs := stamp_set enc hi rows a.map stamp hc
+  have hs := stamp_set enc hi revisions a.map stamp hc
   cases w with
   | Put value =>
-      simpa [Spike.engine.update_revision, clone_bytes, revisionStep, encodeRow,
-        encodeAddr, byteAddr, enc] using hs
+      simp only [advanceRevision, bind_ok, ite_true, clone_bytes]
+      apply WP.spec_bind hs
+      intro next h
+      simpa [revisionStep, encodeRow, encodeAddr, byteAddr, enc] using h
   | Remove =>
+      have keyRoom : 2 * (8 + a.map.val.length + a.key.val.length) + 1 ≤ Usize.max := room
       have hinj : Function.Injective (encodeAddr encode ∘ byteAddr) :=
         (encode_addr_inj inj).comp (fun _ _ => byteAddr_inj)
-      have hf
-          : find (encodeData encode (byteData data)) (encodeAddr encode (byteAddr a))
-            = (find data.val a).map (encodeCell encode ∘ byteCell) := by
-        simpa [encodeData, byteData, Function.comp_def]
-          using find_projected data.val a (encodeAddr encode ∘ byteAddr)
+      have hf : find (encodeData encode (indexedCellData data)) (encodeAddr encode (byteAddr a))
+            = (find data a).map (encodeCell encode ∘ byteCell) := by
+        simpa [encodeData, indexedCellData, Function.comp_def]
+          using find_projected data a (encodeAddr encode ∘ byteAddr)
             (encodeCell encode ∘ byteCell) hinj
-      simp [Spike.engine.update_revision]
-      apply WP.spec_bind
-        (assoc_index Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey data a
-          (fun addr => compare_address addr a))
-      intro i why
-      cases i with
+      simp only [advanceRevision, bind_ok, Bool.false_eq_true, ite_false]
+      apply WP.spec_bind (index_get_refines index root data view a (by omega))
+      intro cell read
+      rw [← read] at hf
+      change find (encodeData encode (indexedCellData data)) (encode a.map.val, encode a.key.val)
+        = cell.map (encodeCell encode ∘ byteCell) at hf
+      cases cell with
       | none =>
-          simp [revisionStep, encodeRow, hf, why]
-      | some i =>
-          obtain ⟨c, _, hc⟩ := why
-          have hf' : find (encodeData encode (byteData data))
-              (encode (alloc.vec.Vec.val a.map), encode (alloc.vec.Vec.val a.key)) =
-              (find data.val a).map (encodeCell encode ∘ byteCell) := hf
-          simpa [revisionStep, encodeRow, hf', hc, clone_bytes, enc, encodeAddr, byteAddr] using hs
+          simp [revisionStep, encodeRow, encodeAddr, byteAddr, hf, core.option.Option.is_some]
+      | some c =>
+          simp only [core.option.Option.is_some, clone_bytes, bind_ok]
+          apply WP.spec_bind hs
+          intro next h
+          simpa [revisionStep, encodeRow, hf, enc, encodeAddr, byteAddr] using h
+
+private theorem advance_stamps_matches (encode : List U8 → String)
+    (inj : Function.Injective encode) (revisions births : Stamps) (index : CellIndex)
+    (root : Spike.radix.DualRoot) (data : CellRows) (view : IndexView index root data)
+    (row : IndexWrite) (stamp : Spike.engine.Stamp)
+    (hr : revisions.val.length < Usize.max) (hb : births.val.length < Usize.max)
+    (room : IndexKeyRoom row)
+    : WP.spec (Spike.engine.advance_stamps revisions births index root row stamp)
+        (fun (rev, birth) =>
+          (encodedStamps (encode ∘ alloc.vec.Vec.val) rev
+              = revisionStep (encodeData encode (indexedCellData data)) (modelStamp stamp)
+                  (encodedStamps (encode ∘ alloc.vec.Vec.val) revisions)
+                  (encodeRow encode row)
+            ∧ rev.val.length ≤ revisions.val.length + 1)
+          ∧ (encodedStamps (encode ∘ alloc.vec.Vec.val) birth
+                = birthStep (modelStamp stamp)
+                    (encodedStamps (encode ∘ alloc.vec.Vec.val) births)
+                    (encodeRow encode row)
+              ∧ birth.val.length ≤ births.val.length + 1)) := by
+  obtain ⟨a, w⟩ := row
+  have he : Spike.engine.advance_stamps revisions births index root (a, w) stamp = (do
+      let (rev, addr) ← advanceRevision revisions index root a w stamp
+      let birth ← Spike.engine.update_birth births addr.map stamp
+      Result.ok (rev, birth)) := by
+    cases w <;> simp [Spike.engine.advance_stamps, advanceRevision]
+  rw [he]
+  apply WP.spec_bind
+    (update_revision_step encode inj revisions index root data view a w stamp hr room)
+  rintro ⟨rev, addr⟩ ⟨same, hv⟩
+  change addr = a at same
+  subst addr
+  apply WP.spec_bind (update_birth_step encode inj births (a, w) stamp hb)
+  intro birth h
+  rw [WP.spec_ok]
+  exact ⟨hv, h⟩
 
 private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injective encode)
-    (data : NativeData) (pending : NativeWrites) (version identity : U64)
+    (index : CellIndex) (root : Spike.radix.DualRoot) (data : CellRows)
+    (view : IndexView index root data) (pending : NativeWrites) (version identity : U64)
     (revs births : Stamps)
     (hr : revs.val.length + pending.val.length ≤ Usize.max)
     (hb : births.val.length + pending.val.length ≤ Usize.max)
+    (room : ∀ w ∈ pending.val, IndexKeyRoom w)
     : WP.spec
-        (Spike.engine.Frame.advance_loop data pending version identity revs births
+        (Spike.engine.Frame.advance_loop root index pending version identity revs births
           0#usize)
         (fun (p, r, b) =>
           p = pending
           ∧ encodedStamps (encode ∘ alloc.vec.Vec.val) r
             = (pending.val.map (encodeRow encode)).foldl
-                (revisionStep (encodeData encode (byteData data))
+                (revisionStep (encodeData encode (indexedCellData data))
                   { version := version.val, identity := identity.val })
                 (encodedStamps (encode ∘ alloc.vec.Vec.val) revs)
           ∧ encodedStamps (encode ∘ alloc.vec.Vec.val) b
@@ -179,7 +239,7 @@ private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injecti
   let stamp : Spike.engine.Stamp := {version, identity}
   let foldRev := fun (r : Stamps) (ws : List (Spike.engine.Address × Spike.engine.Write)) =>
     (ws.map (encodeRow encode)).foldl
-      (revisionStep (encodeData encode (byteData data)) (modelStamp stamp)) (encodedStamps enc r)
+      (revisionStep (encodeData encode (indexedCellData data)) (modelStamp stamp)) (encodedStamps enc r)
   let foldBirth := fun (b : Stamps) (ws : List (Spike.engine.Address × Spike.engine.Write)) =>
     (ws.map (encodeRow encode)).foldl (birthStep (modelStamp stamp)) (encodedStamps enc b)
   unfold Spike.engine.Frame.advance_loop
@@ -203,14 +263,12 @@ private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injecti
       rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec pending i hx)
       intro row hrow
-      apply WP.spec_bind (update_revision_step encode inj r data row stamp (by omega))
-      intro rs hrs
+      apply WP.spec_bind (advance_stamps_matches encode inj r b index root data view row stamp
+        (by omega) (by omega) (room row (hrow ▸ List.getElem_mem _)))
+      rintro ⟨rs, bs⟩ ⟨hrs, hbs⟩
       change WP.spec (do
-        let bs ← Spike.engine.update_birth b row.1.map stamp
         let j ← i + 1#usize
         Result.ok (ControlFlow.cont (pending, rs, bs, j))) _
-      apply WP.spec_bind (update_birth_step encode inj b row stamp (by omega))
-      intro bs hbs
       have hinc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
       apply WP.spec_bind (Usize.add_spec hinc)
       intro j hj
@@ -231,44 +289,111 @@ private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injecti
 
 /-- The extracted advance publishes the entire frame, including revision and birth metadata. -/
 theorem frame_advance_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (before : Spike.engine.Frame) (model : Store)
+    (inj : Function.Injective encode) (before : Spike.engine.Frame)
+    (index : CellIndex) (valid : IndexValid index)
+    (view : IndexView index before.data (indexRows index before.data)) (model : Store)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
-    (version identity : U64) (hBefore : model.head = modelFrame encode before)
+    (version identity : U64) (hBefore : model.head = modelFrame encode index before)
     (hVersion : version.val = model.head.version + 1)
     (hIdentity : identity.val = model.nextIdentity)
-    (hData : before.data.val.length + pending.val.length ≤ Usize.max)
+    (space
+      : IndexBatchRoom index ((indexRows index before.data).length + pending.val.length)
+          pending.val.length)
+    (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     (hRevs : before.revisions.val.length + pending.val.length ≤ Usize.max)
     (hBirths : before.births.val.length + pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Frame.advance before version identity pending)
-        (fun after =>
-          modelFrame encode after
-          = (advance model (encodeWrites encode (byteWrites pending.val))).head) := by
+    : WP.spec (Spike.engine.Frame.advance before index version identity pending)
+        (fun (after, arena) =>
+          modelFrame encode arena after
+            = (advance model (encodeWrites encode (byteWrites pending.val))).head
+          ∧ IndexView arena after.data (indexRows arena after.data)
+          ∧ IndexValid arena
+          ∧ IndexKeeps index arena) := by
+  let data := indexRows index before.data
   unfold Spike.engine.Frame.advance
   simp only [clone_assoc, bind_ok]
   apply WP.spec_bind
-    (stamp_loop encode inj before.data pending version identity before.revisions
-      before.births hRevs hBirths)
+    (stamp_loop encode inj index before.data data view pending version identity
+      before.revisions before.births hRevs hBirths addresses)
   rintro ⟨actualPending, rev, birth⟩ ⟨hp, hr, hb⟩
   subst actualPending
   change WP.spec (do
-    let data ← Spike.engine.publish before.data pending version
-    Result.ok ({version, data, revisions := rev, births := birth} : Spike.engine.Frame)) _
-  apply WP.spec_bind (publish_matches_model before.data pending version hData)
-  intro actual hd
+    let (root, after) ← Spike.engine.publish_indexed index before.data pending version
+    Result.ok (({version, data := root, revisions := rev, births := birth} : Spike.engine.Frame),
+      after)) _
+  apply WP.spec_bind (indexed_publication_refines index before.data data pending version
+    view valid space addresses)
+  rintro ⟨root, after⟩ ⟨updated, arenaValid, kept, _⟩
   have hw : encodeWrites encode (byteWrites pending.val) = pending.val.map (encodeRow encode) := by
     simp only [encodeWrites, byteWrites, List.map_map, Function.comp_def]
     apply List.map_congr_left
     rintro ⟨a, w⟩ _
     cases w <;> rfl
-  simp only [WP.spec_ok, modelFrame, modelMetadata, advance]
-  have hdb : encodeData encode (byteData actual) =
-      publish (encodeData encode (byteData before.data)) version.val
+  have projected := index_rows_eq updated
+  have hdb : encodeData encode (indexedCellData (indexRows after root)) =
+      publish (encodeData encode (indexedCellData data)) version.val
         (encodeWrites encode (byteWrites pending.val)) := by
-    rw [hd, publish_encoding encode inj]
+    rw [projected, indexed_fold_projects, publish_encoding encode inj]
+  change WP.spec (Result.ok (({version, data := root, revisions := rev, births := birth} :
+    Spike.engine.Frame), after)) _
+  rw [WP.spec_ok]
+  refine ⟨?_, projected.symm ▸ updated, arenaValid, kept⟩
+  simp only [modelFrame, modelMetadata, advance]
   simp only [hBefore, modelFrame, modelMetadata] at hVersion ⊢
   rw [← hVersion, ← hIdentity, hdb, hw]
   simp only [encodedStamps] at hr hb
   rw [hr, hb]
   rfl
+
+theorem prepare_frame_matches_model (encode : List U8 → String)
+    (inj : Function.Injective encode) (history : Spike.engine.History)
+    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (branch : BranchValid history.log) (split : history.activeFrames = prior ++ [head])
+    (valid : HistoryIndexValid history) (model : Store)
+    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
+    (version identity : U64)
+    (before : model.head = modelFrame encode history.index head)
+    (nextVersion : version.val = model.head.version + 1)
+    (nextId : identity.val = model.nextIdentity)
+    (room
+      : IndexBatchRoom history.index
+          ((indexRows history.index head.data).length + pending.val.length)
+          pending.val.length)
+    (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
+    (revisions : head.revisions.val.length + pending.val.length ≤ Usize.max)
+    (births : head.births.val.length + pending.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.History.prepare_frame history version identity pending)
+        (fun (after, prepared) =>
+          ∃ arena,
+            prepared = {history with index := arena}
+            ∧ modelFrame encode arena after
+              = (advance model (encodeWrites encode (byteWrites pending.val))).head
+            ∧ IndexView arena after.data (indexRows arena after.data)
+            ∧ IndexValid arena
+            ∧ IndexKeeps history.index arena) := by
+  unfold Spike.engine.History.prepare_frame
+  apply WP.spec_bind (branch_active_len history.log branch)
+  intro count hc
+  have size : count.val = prior.length + 1 := by
+    change count.val = history.activeFrames.length at hc
+    simpa [split] using hc
+  have one : (1#usize : Usize).val = 1 := rfl
+  apply WP.spec_bind (Usize.sub_spec (x := count) (y := 1#usize) (by omega))
+  intro off ho
+  have selected : history.activeFrames[off.val]? = some head := by
+    have pos : off.val = prior.length := by omega
+    rw [split, pos, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]
+    rfl
+  apply WP.spec_bind (branch_active_at history.log branch off head selected)
+  intro f h
+  subst f
+  apply WP.spec_bind
+    (frame_advance_matches_model encode inj head history.index valid.index
+      (valid.head prior head split) model pending version identity before nextVersion
+      nextId room addresses revisions births)
+  rintro ⟨next, arena⟩ spec
+  change WP.spec (Result.ok (next, {history with index := arena})) _
+  rw [WP.spec_ok]
+  exact ⟨arena, rfl, spec⟩
 
 end KvRust

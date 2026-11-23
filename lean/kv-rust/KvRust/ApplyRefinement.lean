@@ -35,7 +35,8 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     {tx : Tx} {t : Spike.engine.Tx} (hs : HistoryMatches encode n s)
     (ht : AttemptMatches encode sid n t tx) (prior : List Spike.engine.Frame)
     (head : Spike.engine.Frame) (hf : n.activeFrames = prior ++ [head])
-    (hh : s.head = modelFrame encode head)
+    (hh : s.head = modelFrame encode n.index head)
+    (space : ApplyCapacity n head t)
     : WP.spec (Spike.engine.Tx.can_apply t n) (fun r => r = canApply s tx) := by
   have hmeta : s.history.map onlyMetadata = modelFrames n (modelMetadata (encode ∘ alloc.vec.Vec.val)) := by
     simp only [hs.frames, modelFrames, List.map_map]
@@ -49,7 +50,9 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
       Function.comp_def]
       using congrArg (Option.map Prod.snd) ht.snapshot
   exact can_apply_matches_model encode inj n t s tx prior head hf hmeta ht.stamps
-    (congrArg Frame.data hh) hdeps hs.term hsnap ht.noSnapshot ht.unavailable hs.valid
+    (indexRows n.index head.data) (hs.indexValid.head prior head hf) hs.indexValid.index
+    space.dependencies (congrArg Frame.data hh) hdeps hs.term hsnap ht.noSnapshot
+    ht.unavailable hs.valid
 
 /-- Local publication both takes the model's enabled transition and preserves the state relation.
 Disabled publication leaves the store unchanged. -/
@@ -99,7 +102,8 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             simp [hWrites])
           simp [hr, he, hempty, hWrites, StepMatches]
         · have hw : t.pending.val.isEmpty = false := by simpa using hWrites
-          have heligible := eligibility encode inj hhist ht prior head hframes hhead
+          have capacity := room t hn prior head hframes
+          have heligible := eligibility encode inj hhist ht prior head hframes hhead capacity
           by_cases ha : canApply s tx
           · have hw'
                 : tx.normal.writes = encodeWrites encode (byteWrites t.pending.val) :=
@@ -110,8 +114,10 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             apply WP.spec_mono
               (apply_accepted_matches_model encode inj n id t s prior head hn hPhase
                 hWrites hOk hframes hhist.frames hhead hhist.term hhist.global
-                hhist.identity (room t hn prior head hframes) hhist.valid)
-            rintro ⟨observed, after⟩ ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi, hidx, hr, hvalid, kept⟩
+                hhist.identity capacity hhist.valid hhist.indexValid)
+            rintro ⟨observed, after⟩
+              ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi,
+                hidx, hr, hvalid, indexed, kept⟩
             let store := advance s tx.normal.writes
             let next := {tx with phase := .applied store.head.version}
             let w' : State := {w with stores := Kv.Model.set w.stores sid store
@@ -128,13 +134,13 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                 (by simpa only [← hw', store] using hg.symm)
                 (by simpa only [← hw', store] using hterm'.symm)
                 (by simpa only [← hw', store] using hi.symm)
-                hvalid
+                hvalid indexed
             have hv' : version.val = store.head.version := by
               simpa only [← hw', store] using hv
             have htx
                 : AttemptMatches encode sid after.history {t with phase := .Applied version} next := by
               simpa only [next, modelPhase, hv']
-                using (ht.withPhase (.Applied version)).withHistory kept
+                using (ht.withPhase (.Applied version)).withHistory kept hhist.indexValid
             have rel :=
               replace_attempt h id index t {t with phase := .Applied version} next hidx hr
                 rfl ⟨store, hstore, hrel⟩ htx reach kept

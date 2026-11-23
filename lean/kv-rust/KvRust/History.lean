@@ -300,7 +300,8 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
         ∧ after.next_identity = s.next_identity
         ∧ after.term = term
         ∧ BranchValid after.log
-        ∧ after.log.frames = s.log.frames := by
+        ∧ after.log.frames = s.log.frames
+        ∧ after.index = s.index := by
   let model : Store := { global := s.global.val, head := {version := head.version.val} }
   have hspec := rollback_cut_model s.global head.version requested model rfl rfl
   have hsuccess : ∃ cut, Spike.engine.rollback_cut s.global head.version requested = .ok cut
@@ -333,11 +334,11 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     have hasPrefix : branchValues retained = s.activeFrames.take (cut.val + 1) := by
       simpa [hi] using htake
     refine ⟨cut, {s with log := retained, term}, ?_, hvalue,
-      hasPrefix, rfl, rfl, rfl, hvalid, hkept⟩
+      hasPrefix, rfl, rfl, rfl, hvalid, hkept, rfl⟩
     simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
       history_head s prior head hframes valid, hcalc, hsmall, ← show i = UScalar.cast .Usize cut from rfl,
       hzero, lift, hrewind, massert]
-  · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl, valid, rfl⟩
+  · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl, valid, rfl, rfl⟩
     · simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
         history_head s prior head hframes valid, hcalc, hsmall]
     · symm
@@ -371,8 +372,9 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
         ∧ after.history.next_identity = s.history.next_identity
         ∧ after.history.term = term
         ∧ BranchValid after.history.log
-        ∧ after.history.log.frames = s.history.log.frames := by
-  obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht, hvalid, hkept⟩ :=
+        ∧ after.history.log.frames = s.history.log.frames
+        ∧ after.history.index = s.history.index := by
+  obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht, hvalid, hkept, hindexKept⟩ :=
     history_rollback s.history requested term prior head hframes hindex hzero hcut hterm valid
   have hmodelcut : cut.val = rollbackCut model requested.val := by
     simpa [rollbackCut, hglobal, hhead] using hvalue
@@ -388,7 +390,8 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
     hi,
     ht,
     hvalid,
-    hkept
+    hkept,
+    hindexKept
   ⟩
   · simp [Spike.engine.Store.execute, hrun]
   · have hfilter : s.history.activeFrames.filter

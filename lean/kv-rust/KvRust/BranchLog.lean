@@ -44,7 +44,8 @@ theorem branch_active_len {T : Type} (log : Spike.branch_log.BranchLog T)
 
 theorem branch_new_refines {T : Type} (base : T)
     : WP.spec (Spike.branch_log.BranchLog.new base)
-        (fun log => BranchValid log ∧ branchValues log = [base]) := by
+        (fun log =>
+          BranchValid log ∧ branchValues log = [base] ∧ log.frames.val = [base]) := by
   have room : 0 < Usize.max := by scalar_tac
   unfold Spike.branch_log.BranchLog.new
   apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new T) base room)
@@ -217,9 +218,9 @@ theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (f
           ∧ branchValues after = branchValues log ++ [frame]
           ∧ id.val = log.frames.val.length
           ∧ after.frames.val[id.val]? = some frame
-          ∧ ∀ previous,
-              previous < id.val
-              → after.frames.val[previous]? = log.frames.val[previous]?) := by
+          ∧ (∀ previous,
+              previous < id.val → after.frames.val[previous]? = log.frames.val[previous]?)
+          ∧ after.frames.val = log.frames.val ++ [frame]) := by
   unfold Spike.branch_log.BranchLog.append
   apply WP.spec_bind (alloc.vec.Vec.push_spec log.frames frame room)
   intro frames hf
@@ -235,7 +236,7 @@ theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (f
   have keep : ∀ i, i < id.val → frames.val[i]? = log.frames.val[i]? := by
     intro i hi
     rw [hf, List.getElem?_append_left (index ▸ hi)]
-  refine ⟨?_, ?_, index, newest, keep⟩
+  refine ⟨?_, ?_, index, newest, keep, hf⟩
   · change branch.val ≠ [] ∧ ∀ j ∈ branch.val, j.val < frames.val.length
     rw [hb]
     refine ⟨by simp, ?_⟩

@@ -228,6 +228,7 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
       : encodeImage encode (pinImage history m view.local)
         = image tx.data (encode (alloc.vec.Vec.val m)))
     (live : PinLive history view.local)
+    (indexed : HistoryIndexValid history) (space : PinScanRoom history view.local)
     (hWrites : pointWrites encode t = tx.normal.writes)
     (hDeps : pointDeps encode t = tx.normal.deps)
     (room : t.deps.val.length < Usize.max)
@@ -245,7 +246,7 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
           ∧ rows.val.length
             ≤ (pinImage history m view.local).length + t.pending.val.length) := by
   simp only [Spike.engine.Tx.scan, clone_bytes, Spike.engine.Assoc.new, bind_ok]
-  apply WP.spec_bind (pin_materialize_refines history m view.local live)
+  apply WP.spec_bind (pin_materialize_refines history m view.local live indexed space)
   intro cells hCells
   have localEq : encodeImage encode (byteImage cells) = image tx.data (encode m.val) :=
     (congrArg (encodeImage encode) hCells).trans hLocal
@@ -490,6 +491,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             + (scanAt tx.data tx.normal.writes (encode (alloc.vec.Vec.val m))).length
           ≤ Usize.max)
     (live : ViewsLive history t.views)
+    (indexed : HistoryIndexValid history) (space : HistoryScanRoom history)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
       WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
@@ -513,7 +515,8 @@ theorem operate_scan_matches_model (encode : List U8 → String)
       have hlen : (pinImage history m native.local).length = (image tx.data mapName).length := by
         simpa [encodeImage] using congrArg List.length hl
       have hscan :=
-        scan_matches_model encode inj history t m native tx hl (alive native rfl).1 hWrites hDeps room
+        scan_matches_model encode inj history t m native tx hl (alive native rfl).1 indexed
+          (space.pin native.local) hWrites hDeps room
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>

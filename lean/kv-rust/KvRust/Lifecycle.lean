@@ -18,10 +18,10 @@ private abbrev NativeResult :=
 
 private abbrev NativeStep := NativeResult × Spike.engine.Store
 
-private def emptyFrame : Spike.engine.Frame :=
+private def emptyFrame (root : Spike.radix.DualRoot) : Spike.engine.Frame :=
   {
     version := 0#u64
-    data := alloc.vec.Vec.new _
+    data := root
     revisions := alloc.vec.Vec.new _
     births := alloc.vec.Vec.new _
   }
@@ -32,22 +32,49 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
         (fun s =>
           ∃ head,
             s.history.activeFrames = [head]
-            ∧ modelFrame encode head = ({term := term.val} : Store).head
-            ∧ modelFrames s.history (modelFrame encode)
+            ∧ modelFrame encode s.history.index head = ({term := term.val} : Store).head
+            ∧ modelFrames s.history (modelFrame encode s.history.index)
               = ({term := term.val} : Store).history
             ∧ s.history.global.val = 0
             ∧ s.history.term = term
             ∧ s.history.next_identity.val = 1
             ∧ s.txs.val = []
-            ∧ BranchValid s.history.log) := by
+            ∧ BranchValid s.history.log
+            ∧ HistoryIndexValid s.history) := by
   simp only [Spike.engine.Store.new, Spike.engine.History.new, Spike.engine.Frame.empty,
     Spike.engine.Assoc.new, Aeneas.Std.bind_assoc, bind_ok]
-  apply WP.spec_bind (branch_new_refines emptyFrame)
-  intro log ⟨valid, hframes⟩
+  apply WP.spec_bind (index_new_refines Spike.engine.Cell)
+  intro index ⟨indexValid, empty⟩
+  apply WP.spec_bind empty
+  intro root view
+  apply WP.spec_bind (branch_new_refines (emptyFrame root))
+  intro log ⟨valid, hframes, saved⟩
   simp only [WP.spec_ok]
-  refine ⟨emptyFrame, hframes, rfl, ?_, by simp, by simp, by simp, by simp, valid⟩
-  simp [modelFrames, Spike.engine.History.activeFrames, hframes]
-  rfl
+  have zero : modelFrame encode index (emptyFrame root) = ({term := term.val} : Store).head := by
+    change {modelMetadata (encode ∘ alloc.vec.Vec.val) (emptyFrame root) with
+      data := encodeData encode (indexedCellData (indexRows index root))} = _
+    rw [index_rows_eq view]
+    rfl
+  refine ⟨
+    emptyFrame root,
+    hframes,
+    zero,
+    ?_,
+    by simp,
+    by simp,
+    by simp,
+    by simp,
+    valid,
+    ⟨indexValid, ?_⟩
+  ⟩
+  · simp [modelFrames, Spike.engine.History.activeFrames, hframes, zero]
+  · intro i frame h
+    change log.frames.val[i]? = some frame at h
+    rw [saved] at h
+    have same := List.mem_singleton.mp (List.mem_iff_getElem?.mpr ⟨i, h⟩)
+    subst frame
+    change IndexView index root (indexRows index root)
+    rwa [index_rows_eq view]
 
 /-- The exact native transaction installed by a fresh `Begin`. -/
 def lifecycleNewTx : Spike.engine.Tx :=
@@ -656,7 +683,7 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
       : Option.Rel
           (fun t (model, tx) =>
             LifecycleAttempt encode s.history t tx
-            ∧ model.head = modelFrame encode head
+            ∧ model.head = modelFrame encode s.history.index head
             ∧ model.global = s.history.global.val
             ∧ model.term = s.history.term.val)
           (find s.txs.val id) (lookupTx w sid id.val))
@@ -675,7 +702,7 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
       {tx with snapshot := some {current := store.head, term := store.term}})
   refine match_attempt_step encode s w sid id _ _ nStep mStep
     (fun t model tx => LifecycleAttempt encode s.history t tx
-      ∧ model.head = modelFrame encode head
+      ∧ model.head = modelFrame encode s.history.index head
       ∧ model.global = s.history.global.val ∧ model.term = s.history.term.val)
     lookup ?_ ?_ ?_ (execute_snapshot_lifecycle s id prior head hframes valid)
   · intro t store tx ⟨h, hh, hg, ht⟩

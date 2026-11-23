@@ -3,7 +3,8 @@
 
 module
 
-public import KvRust.Publication
+public import KvRust.History
+public import KvRust.IndexedPublication
 
 @[expose] public section
 
@@ -31,6 +32,15 @@ theorem data_lookup (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.C
   intro result hr
   rw [hr, byteData, find_projected db.val addr byteAddr byteCell (fun _ _ => byteAddr_inj)]
 
+theorem index_data_lookup (index : CellIndex) (root : Spike.radix.DualRoot)
+    (rows : CellRows) (view : IndexView index root rows) (addr : Spike.engine.Address)
+    (space : 8 + addr.map.val.length + addr.key.val.length ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.get index root addr)
+        (fun out => out.map byteCell = find (indexedCellData rows) (byteAddr addr)) := by
+  apply WP.spec_mono (index_get_refines index root rows view addr space)
+  intro out same
+  rw [same, indexedCellData, find_projected rows addr byteAddr byteCell (fun _ _ => byteAddr_inj)]
+
 /-- Cell comparison includes the version, so the same value written twice is not the same cell. -/
 theorem cell_same (a b : Spike.engine.Cell)
     : Spike.engine.Cell.same a b = .ok (decide (byteCell a = byteCell b)) := by
@@ -42,15 +52,17 @@ theorem cell_same (a b : Spike.engine.Cell)
 
 /-- Point dependencies accept exactly the unchanged cell or unchanged absence. -/
 theorem point_dependency_matches_model
-    (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
+    (index : CellIndex) (root : Spike.radix.DualRoot)
+    (rows : CellRows) (view : IndexView index root rows)
     (addr : Spike.engine.Address) (expected : Option Spike.engine.Cell)
-    : WP.spec (Spike.engine.Dependency.holds (.Key addr expected) db)
+    (space : 8 + addr.map.val.length + addr.key.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.Dependency.holds (.Key addr expected) index root)
         (fun r =>
           r
           = (Dependency.key (byteAddr addr) (expected.map byteCell)).holds
-              (byteData db)) := by
+              (indexedCellData rows)) := by
   unfold Spike.engine.Dependency.holds
-  apply WP.spec_bind (data_lookup db addr)
+  apply WP.spec_bind (index_data_lookup index root rows view addr space)
   intro lookup h
   cases lookup <;> cases expected <;> simp [Dependency.holds, ← h, cell_same]
 
@@ -143,59 +155,57 @@ theorem image_matches_model
     simpa [imageRows, byteData] using hr
 
 /-- The streaming check compares the ordered map image without constructing it. -/
-private theorem same_image_matches_model
-    (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
-    (m : Spike.engine.Bytes) (expected : Rows)
-    : WP.spec (Spike.engine.same_image db m expected)
-        (fun r => r = decide (imageRows db.val m = byteImage expected)) := by
-  unfold Spike.engine.same_image Spike.engine.same_image_loop
-  let agrees : Prop := imageRows db.val m = byteImage expected
+private theorem indexed_same_image_matches
+    (index : CellIndex) (root : Spike.radix.DualRoot) (db : CellRows)
+    (view : IndexView index root db) (valid : IndexValid index)
+    (space : 18 * db.length ≤ Usize.max) (m : Spike.engine.Bytes) (expected : Rows)
+    : WP.spec (Spike.engine.Dependency.holds (.Map m expected) index root)
+        (fun r => r = decide (imageRows db m = byteImage expected)) := by
+  unfold Spike.engine.Dependency.holds
+  apply WP.spec_bind (index_scan_refines index root db view valid space)
+  intro links ⟨len, load⟩
+  unfold Spike.engine.Dependency.holds_loop
+  let agrees : Prop := imageRows db m = byteImage expected
   apply loop.spec_decr_nat
-    (fun (_, _, i, _) => db.val.length - (i : Usize).val)
-    (fun (rows, exp, i, j) => rows = db ∧ exp = expected ∧ j.val ≤ expected.val.length
-      ∧ (agrees ↔ imageRows (db.val.drop i.val) m = (byteImage expected).drop j.val))
+    (fun (i, _) => db.length - (i : Usize).val)
+    (fun (i, j) => j.val ≤ expected.val.length
+      ∧ (agrees ↔ imageRows (db.drop i.val) m = (byteImage expected).drop j.val))
     _ _ _
-  · rintro ⟨rows, exp, i, j⟩ ⟨hr, he, hj, inv⟩
-    dsimp only at hr he hj inv ⊢
-    subst rows exp
-    unfold Spike.engine.same_image_loop.body
-    have hlen : (alloc.vec.Vec.len db).val = db.val.length := alloc.vec.Vec.len_val db
+  · rintro ⟨i, j⟩ ⟨hj, inv⟩
+    dsimp only at hj inv ⊢
+    unfold Spike.engine.Dependency.holds_loop.body
+    have hlen : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
     have elen : (alloc.vec.Vec.len expected).val = expected.val.length := alloc.vec.Vec.len_val expected
-    have hcap := alloc.vec.Vec.len_ineq db
+    have hcap := alloc.vec.Vec.len_ineq links
     have ecap := alloc.vec.Vec.len_ineq expected
     have one : (1#usize : Usize).val = 1 := rfl
-    by_cases run : i < alloc.vec.Vec.len db
-    · have inside : i.val < db.val.length := by rwa [← hlen]
+    by_cases run : i < alloc.vec.Vec.len links
+    · have linkBound : i.val < links.val.length := by rwa [← hlen]
+      have inside : i.val < db.length := by omega
       have inc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
       rw [ite_eq_left run, alloc.vec.Vec.index_slice_index]
-      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec db i inside)
-      rintro ⟨a, v⟩ read
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec links i linkBound)
+      intro leaf saved
+      obtain ⟨entry, atEntry, read⟩ := load i.val leaf
+        ((List.getElem?_eq_getElem linkBound).trans (congrArg some saved.symm))
+      apply WP.spec_bind read
+      rintro ⟨a, v⟩ eq
+      subst entry
       change WP.spec (do
-        let b ← Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a.map m
-        if b then
-          if j ≥ alloc.vec.Vec.len expected then
-            Result.ok (ControlFlow.done false)
-          else
-            let old ← alloc.vec.Vec.index
-              (core.slice.index.SliceIndexUsizeSlice _) expected j
-            let hit ← Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a.key old.1
-            if hit then
-              let equal ← Spike.engine.Cell.same v old.2
-              if equal then
-                let j' ← j + 1#usize
-                let i' ← i + 1#usize
-                Result.ok (ControlFlow.cont (db, expected, i', j'))
-              else Result.ok (ControlFlow.done false)
-            else Result.ok (ControlFlow.done false)
-        else
-          let i' ← i + 1#usize
-          Result.ok (ControlFlow.cont (db, expected, i', j))) _
-      have step : db.val.drop i.val = [(a, v)] ++ db.val.drop (i.val + 1) := by
-        rw [List.drop_eq_getElem_cons inside, ← read]
+        let next ← Spike.engine.match_indexed_row a v m expected j
+        match next with
+        | none => Result.ok (ControlFlow.done false)
+        | some j' =>
+            let i' ← i + 1#usize
+            Result.ok (ControlFlow.cont (i', j'))) _
+      unfold Spike.engine.match_indexed_row
+      rw [List.getElem?_eq_getElem inside, Option.some.injEq] at atEntry
+      have step : db.drop i.val = [(a, v)] ++ db.drop (i.val + 1) := by
+        rw [List.drop_eq_getElem_cons inside, atEntry]
         rfl
       by_cases onMap : alloc.vec.Vec.val a.map = alloc.vec.Vec.val m
-      · have suffix : imageRows (db.val.drop i.val) m =
-            (alloc.vec.Vec.val a.key, byteCell v) :: imageRows (db.val.drop (i.val + 1)) m := by
+      · have suffix : imageRows (db.drop i.val) m =
+            (alloc.vec.Vec.val a.key, byteCell v) :: imageRows (db.drop (i.val + 1)) m := by
           rw [step, image_append]
           simp [imageRows, image, byteAddr, onMap]
         simp only [bytes_same, bind_ok, decide_eq_true_eq]
@@ -211,54 +221,69 @@ private theorem same_image_matches_model
             have eq := inv.mp h
             rw [suffix, empty] at eq
             contradiction
-          rw [ite_eq_left exhausted, WP.spec_ok]
+          rw [ite_eq_left exhausted, bind_ok, WP.spec_ok]
           simp [agrees, different]
         · have bound : j.val < expected.val.length := by
             rw [← elen]
             exact Nat.lt_of_not_ge exhausted
-          rw [ite_eq_right exhausted, alloc.vec.Vec.index_slice_index]
+          rw [ite_eq_right exhausted, alloc.vec.Vec.index_slice_index, Aeneas.Std.bind_assoc]
           apply WP.spec_bind (alloc.vec.Vec.index_usize_spec expected j bound)
           rintro ⟨k, c⟩ got
-          dsimp only
+          change WP.spec (do
+            let next ←
+              if a.key.val = k.val then do
+                let b ← Spike.engine.Cell.same v c
+                if b then
+                  let j' ← j + 1#usize
+                  Result.ok (some j')
+                else Result.ok none
+              else Result.ok none
+            match next with
+            | none => Result.ok (ControlFlow.done false)
+            | some j' =>
+                let i' ← i + 1#usize
+                Result.ok (ControlFlow.cont (i', j'))) _
           have rest : (byteImage expected).drop j.val =
               (alloc.vec.Vec.val k, byteCell c) :: (byteImage expected).drop (j.val + 1) := by
             unfold byteImage
             rw [← List.map_drop, List.drop_eq_getElem_cons bound, ← got, List.map_cons, List.map_drop]
           have eq : agrees ↔ alloc.vec.Vec.val a.key = alloc.vec.Vec.val k
               ∧ byteCell v = byteCell c
-              ∧ imageRows (db.val.drop (i.val + 1)) m = (byteImage expected).drop (j.val + 1) := by
+              ∧ imageRows (db.drop (i.val + 1)) m = (byteImage expected).drop (j.val + 1) := by
             rw [inv, suffix, rest]
             simp [and_assoc]
           by_cases key : alloc.vec.Vec.val a.key = alloc.vec.Vec.val k
           · by_cases value : byteCell v = byteCell c
             · simp only [cell_same, bind_ok, decide_eq_true_eq, key, value, ite_true]
+              rw [Aeneas.Std.bind_assoc]
               apply WP.spec_bind (Usize.add_spec (x := j) (y := 1#usize) (by omega))
               intro j' nextJ
+              simp only [bind_ok]
               apply WP.spec_bind (Usize.add_spec inc)
               intro i' nextI
               have jEq : j'.val = j.val + 1 := by omega
               have iEq : i'.val = i.val + 1 := by omega
               rw [WP.spec_ok]
               dsimp only
-              refine ⟨⟨rfl, rfl, by omega, ?_⟩, by omega⟩
+              refine ⟨⟨by omega, ?_⟩, by omega⟩
               simpa [iEq, jEq, key, value] using eq
             · have different : ¬agrees := fun h => value (eq.mp h).2.1
               simp [cell_same, key, value, agrees, different]
           · have different : ¬agrees := fun h => key (eq.mp h).1
             simp [key, agrees, different]
-      · have suffix : imageRows (db.val.drop i.val) m = imageRows (db.val.drop (i.val + 1)) m := by
+      · have suffix : imageRows (db.drop i.val) m = imageRows (db.drop (i.val + 1)) m := by
           rw [step, image_append]
           simp [imageRows, image, byteAddr, onMap]
         simp only [bytes_same, bind_ok, decide_eq_true_eq]
-        rw [ite_eq_right onMap]
+        rw [ite_eq_right onMap, bind_ok]
         apply WP.spec_bind (Usize.add_spec inc)
         intro i' nextI
         have iEq : i'.val = i.val + 1 := by omega
         rw [WP.spec_ok]
         dsimp only
-        refine ⟨⟨rfl, rfl, hj, ?_⟩, by omega⟩
+        refine ⟨⟨hj, ?_⟩, by omega⟩
         simpa [iEq, suffix] using inv
-    · have off : db.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt run
+    · have off : db.length ≤ i.val := by rw [← len, ← hlen]; exact Nat.le_of_not_gt run
       rw [ite_eq_right run, WP.spec_ok]
       have remaining : agrees ↔ expected.val.length ≤ j.val := by
         rw [inv, List.drop_eq_nil_of_le off]
@@ -279,16 +304,18 @@ private theorem same_image_matches_model
 
 /-- Extracted whole-map dependencies detect inserts, deletions and version changes. -/
 theorem map_dependency_matches_model
-    (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
+    (index : CellIndex) (root : Spike.radix.DualRoot) (db : CellRows)
+    (view : IndexView index root db) (valid : IndexValid index)
+    (space : 18 * db.length ≤ Usize.max)
     (m : Spike.engine.Bytes)
     (expected : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Cell))
-    : WP.spec (Spike.engine.Dependency.holds (.Map m expected) db)
+    : WP.spec (Spike.engine.Dependency.holds (.Map m expected) index root)
         (fun r =>
           r
           = (Dependency.map (alloc.vec.Vec.val m) (byteImage expected)).holds
-              (byteData db)) := by
-  unfold Spike.engine.Dependency.holds
-  apply WP.spec_mono (same_image_matches_model db m expected)
+              (indexedCellData db)) := by
+  apply WP.spec_mono
+    (indexed_same_image_matches index root db view valid space m expected)
   intro result h
   rw [h, Dependency.holds]
   exact decide_eq_decide.mpr (by rfl)
@@ -298,23 +325,32 @@ def byteDependency : Spike.engine.Dependency → Dependency (List U8) (List U8) 
   | .Key addr expected => .key (byteAddr addr) (expected.map byteCell)
   | .Map m expected => .map (alloc.vec.Vec.val m) (byteImage expected)
 
-private theorem dependency_matches_model
-    (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
-    (d : Spike.engine.Dependency)
-    : WP.spec (Spike.engine.Dependency.holds d db)
+def DependencyRoom (db : CellRows) : Spike.engine.Dependency → Prop
+  | .Key a _ => 8 + a.map.val.length + a.key.val.length ≤ Usize.max
+  | .Map _ _ => 18 * db.length ≤ Usize.max
+
+private theorem dependency_matches_model (index : CellIndex) (root : Spike.radix.DualRoot)
+    (db : CellRows) (view : IndexView index root db) (valid : IndexValid index)
+    (d : Spike.engine.Dependency) (room : DependencyRoom db d)
+    : WP.spec (Spike.engine.Dependency.holds d index root)
         (fun r =>
-          r = (byteDependency d).holds (byteData db)) := by
+          r = (byteDependency d).holds (indexedCellData db)) := by
   cases d with
-  | Key a e => exact point_dependency_matches_model db a e
-  | Map m e => exact map_dependency_matches_model db m e
+  | Key a e => exact point_dependency_matches_model index root db view a e room
+  | Map m e => exact map_dependency_matches_model index root db view valid room m e
 
 /-- The extracted OCC read-set check accepts exactly the dependencies accepted by the model. -/
 theorem validate_dependencies_matches_model
-    (t : Spike.engine.Tx) (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
-    : WP.spec (Spike.engine.Tx.valid_dependencies t db)
-        (fun r => r = validates (byteData db) (t.deps.val.map byteDependency)) := by
+    (t : Spike.engine.Tx) (history : Spike.engine.History) (head : Spike.engine.Frame)
+    (db : CellRows) (view : IndexView history.index head.data db)
+    (valid : IndexValid history.index)
+    (read : WP.spec (Spike.engine.History.head history) (· = head))
+    (room : ∀ d ∈ t.deps.val, DependencyRoom db d)
+    : WP.spec (Spike.engine.Tx.valid_dependencies t history)
+        (fun r =>
+          r = validates (indexedCellData db) (t.deps.val.map byteDependency)) := by
   let checks := fun (deps : List Spike.engine.Dependency) =>
-    validates (byteData db) (deps.map byteDependency)
+    validates (indexedCellData db) (deps.map byteDependency)
   unfold Spike.engine.Tx.valid_dependencies Spike.engine.Tx.valid_dependencies_loop
   apply loop.spec_decr_nat (fun (i : Usize) => t.deps.val.length - i.val)
     (fun i => checks (t.deps.val.drop i.val) = checks t.deps.val) _ _ _
@@ -328,7 +364,11 @@ theorem validate_dependencies_matches_model
       rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec t.deps i hb)
       intro d hd
-      apply WP.spec_bind (dependency_matches_model db d)
+      apply WP.spec_bind read
+      intro actual ha
+      subst actual
+      apply WP.spec_bind (dependency_matches_model history.index head.data db view valid d
+        (room d (hd ▸ List.getElem_mem _)))
       intro result hresult
       have hp := hinv
       rw [List.drop_eq_getElem_cons hb, ← hd] at hp

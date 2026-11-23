@@ -62,17 +62,22 @@ structure ArenaKeeps {V : Type} (before after : Spike.radix.Arena V) : Prop wher
     : ∀ (i : Nat) row,
         before.rows.val[i]? = some (some row) → after.rows.val[i]? = some (some row)
 
-private theorem ArenaKeeps.refl {V : Type} (arena : Spike.radix.Arena V)
+theorem ArenaKeeps.refl {V : Type} (arena : Spike.radix.Arena V)
     : ArenaKeeps arena arena :=
   ⟨fun _ _ h => h, fun _ _ h => h⟩
 
-private theorem ArenaKeeps.trans {V : Type} {a b c : Spike.radix.Arena V}
+theorem ArenaKeeps.trans {V : Type} {a b c : Spike.radix.Arena V}
     (first : ArenaKeeps a b) (second : ArenaKeeps b c)
     : ArenaKeeps a c :=
   ⟨
     fun i d h => second.dirs i d (first.dirs i d h),
     fun i row h => second.rows i row (first.rows i row h)
   ⟩
+
+def ArenaGrowth {V : Type} (before after : Spike.radix.Arena V) (dirs rows : Nat)
+    : Prop :=
+  after.dirs.val.length ≤ before.dirs.val.length + dirs
+  ∧ after.rows.val.length ≤ before.rows.val.length + rows
 
 private theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
     (row : Spike.radix.RadixRow V) (height : Nat) (bindings : List (List U8 × U32))
@@ -87,6 +92,7 @@ private theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root
           ∧ ArenaKeeps arena after
           ∧ old = Kv.Model.find bindings row.key.val
           ∧ radixRow after.rows.val leaf = some row
+          ∧ ArenaGrowth arena after (height + 1) 1
           ∧ ∃ h,
               RadixTree after.dirs.val h next (Kv.Model.set bindings row.key.val leaf)
               ∧ RadixRows after.rows.val (Kv.Model.set bindings row.key.val leaf)
@@ -95,17 +101,28 @@ private theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root
                     row.value) := by
   unfold Spike.radix.Arena.put
   have knows := radix_compressed_of_knowledge arena.dirs _ valid.knowledge
-  apply WP.spec_bind (radix_put_refines arena.dirs arena.free_dirs arena.rows arena.free_rows
-    arena.path root row height bindings tree rows knows valid.directories valid.dirs valid.rows
-    room rowRoom keyRoom)
+  apply WP.spec_bind
+    (radix_put_refines arena.dirs arena.free_dirs arena.rows arena.free_rows arena.path
+      root row height bindings tree rows knows valid.directories valid.dirs valid.rows
+      room rowRoom keyRoom)
   rintro ⟨updates, dirs, freeDirs, values, freeRows, path⟩
-    ⟨keepDirs, vacantDirs, inv, knowledge, vacantRows, keepRows, eq, ins, h, ht, hr, hp⟩
+    ⟨keepDirs, vacantDirs, inv, knowledge, vacantRows, keepRows, eq, ins,
+      dirGrowth, rowGrowth, h, ht, hr, hp⟩
   change WP.spec (Result.ok (updates,
     ({ dirs, rows := values, free_dirs := freeDirs, free_rows := freeRows, path } : Spike.radix.Arena V))) _
   rw [WP.spec_ok]
   obtain ⟨next, leaf, old⟩ := updates
-  exact ⟨⟨vacantDirs, vacantRows, inv, knowledge valid.knowledge⟩,
-    ⟨keepDirs, keepRows⟩, eq, ins, h, ht, hr, hp⟩
+  exact ⟨
+    ⟨vacantDirs, vacantRows, inv, knowledge valid.knowledge⟩,
+    ⟨keepDirs, keepRows⟩,
+    eq,
+    ins,
+    ⟨by simpa only [Nat.add_assoc] using dirGrowth, rowGrowth⟩,
+    h,
+    ht,
+    hr,
+    hp
+  ⟩
 
 private theorem arena_remove_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
     (key : Slice U8) (height : Nat) (bindings : List (List U8 × U32))
@@ -272,6 +289,66 @@ private theorem stamp_links {V : Type}
       simp [dualStampBindings, saved] at tail ⊢
       exact tail
 
+private theorem radix_rows_from_links {V : Type}
+    (rows : List (Option (Spike.radix.RadixRow V))) (a b : List (List U8 × U32))
+    (liveA : RadixRows rows a) (liveB : RadixRows rows b)
+    (links : a.map Prod.snd = b.map Prod.snd)
+    : a = b := by
+  induction a generalizing b with
+  | nil => cases b <;> simp_all
+  | cons p tail ih =>
+      cases b with
+      | nil => simp at links
+      | cons q next =>
+          simp only [List.map_cons, List.cons.injEq] at links
+          obtain ⟨_, row, read, key⟩ := liveA p List.mem_cons_self
+          obtain ⟨_, row', read', key'⟩ := liveB q List.mem_cons_self
+          rw [links.1, read', Option.some.injEq] at read
+          have same : p = q := Prod.ext (key.symm.trans (read ▸ key')) links.1
+          exact congrArg₂ List.cons same (ih next
+            (fun e h => liveA e (List.mem_cons_of_mem _ h))
+            (fun e h => liveB e (List.mem_cons_of_mem _ h)) links.2)
+
+private theorem radix_key_asymm {a b : List U8 × U32}
+    (ab : radixKeyLt a b) (ba : radixKeyLt b a)
+    : False := by
+  have ltAB : a.1 < b.1 := (byteOrder_lt _ _).mp (by
+    unfold radixKeyLt at ab
+    rw [ab]
+    decide)
+  have ltBA : b.1 < a.1 := (byteOrder_lt _ _).mp (by
+    unfold radixKeyLt at ba
+    rw [ba]
+    decide)
+  exact (lt_asymm ltAB ltBA).elim
+
+/-- The two roots fix the ordered association list even without capacity assumptions. -/
+theorem dual_view_unique {V : Type} {arena : Spike.radix.DualRadix V}
+    {root : Spike.radix.DualRoot} {a b : List (List U8 × U32)}
+    (va : DualView arena root a) (vb : DualView arena root b)
+    : a = b := by
+  obtain ⟨ha, ka, ta, ra, pa, oa⟩ := va.order
+  obtain ⟨hb, kb, tb, rb, pb, ob⟩ := vb.order
+  have keys (rs : List (List U8 × U32)) (live : RadixRows arena.order.rows.val rs)
+      : ∀ row ∈ rs, radixKeyOf arena.order.rows.val row.2 = some row.1 := by
+    intro row hm
+    obtain ⟨_, item, read, same⟩ := live row hm
+    simp [radixKeyOf, read, same]
+  have mem := radix_projection_membership arena.order.dirs.val
+    (radixKeyOf arena.order.rows.val) root.order ha hb ka kb ta tb (keys ka ra) (keys kb rb)
+  have nodup (xs : List (List U8 × U32)) (ordered : xs.Pairwise radixKeyLt) : xs.Nodup := by
+    change xs.Pairwise (· ≠ ·)
+    apply List.Pairwise.imp _ ordered
+    intro x y h eq
+    subst y
+    exact radix_key_asymm h h
+  have perm := (List.perm_ext_iff_of_nodup (nodup ka oa) (nodup kb ob)).mpr mem
+  have same := List.Perm.eq_of_pairwise (le := radixKeyLt)
+    (fun _ _ _ _ ab ba => (radix_key_asymm ab ba).elim) oa ob perm
+  subst kb
+  apply radix_rows_from_links arena.values.rows.val a b va.values vb.values
+  rw [← stamp_links _ _ va.values, ← stamp_links _ _ vb.values, ← pa, ← pb]
+
 /-- The native stamp traversal and in-place resolution return precisely the
 lookup links in model order, without sorting or copying the lookup image. -/
 theorem dual_scan_refines {V : Type} (arena : Spike.radix.DualRadix V)
@@ -298,15 +375,7 @@ theorem dual_scan_refines {V : Type} (arena : Spike.radix.DualRadix V)
   have unique : ordered = keys := by
     apply List.Perm.eq_of_pairwise (le := radixKeyLt) _ sorted order perm
     intro a b _ _ left right
-    have earlier : a.1 < b.1 := (byteOrder_lt _ _).mp (by
-      unfold radixKeyLt at left
-      rw [left]
-      decide)
-    have later : b.1 < a.1 := (byteOrder_lt _ _).mp (by
-      unfold radixKeyLt at right
-      rw [right]
-      decide)
-    exact (lt_asymm earlier later).elim
+    exact (radix_key_asymm left right).elim
   subst ordered
   have live : ∀ link ∈ links.val, 2147483648 < link.val ∧
       ∃ row, radixRow arena.order.rows.val link = some row := by
@@ -376,18 +445,16 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (root : Spike.radix.DualRoot) (bindings : List (List U8 × U32)) (key : Slice U8)
     (view : DualView arena root bindings) (lookupOK : ArenaValid arena.values)
     (orderOK : ArenaValid arena.order)
-    (lookupRoom
-      : ∃ height,
-          RadixTree arena.values.dirs.val height root.lookup bindings
-          ∧ arena.values.dirs.val.length + height ≤ 2147483647)
-    (orderRoom
-      : ∃ (height : Nat) (keys : List (List U8 × U32)),
-          RadixTree arena.order.dirs.val height root.order keys
-          ∧ RadixRows arena.order.rows.val keys
-          ∧ radixBindings arena.order.rows.val keys
-            = dualStampBindings arena.values.rows.val bindings
-          ∧ keys.Pairwise radixKeyLt
-          ∧ arena.order.dirs.val.length + height ≤ 2147483647)
+    (height orderHeight : Nat) (keys : List (List U8 × U32))
+    (tree : RadixTree arena.values.dirs.val height root.lookup bindings)
+    (orderTree : RadixTree arena.order.dirs.val orderHeight root.order keys)
+    (orderRows : RadixRows arena.order.rows.val keys)
+    (pairing
+      : radixBindings arena.order.rows.val keys
+        = dualStampBindings arena.values.rows.val bindings)
+    (orderSorted : keys.Pairwise radixKeyLt)
+    (room : arena.values.dirs.val.length + height ≤ 2147483647)
+    (roomOrder : arena.order.dirs.val.length + orderHeight ≤ 2147483647)
     : WP.spec (Spike.radix.DualRadix.remove arena root key)
         (fun (next, after) =>
           DualView after next (Kv.Model.erase bindings key.val)
@@ -397,9 +464,9 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
           ∧ ArenaValid after.order
           ∧ ArenaKeeps arena.values after.values
           ∧ ArenaKeeps arena.order after.order
-          ∧ after.last = arena.last) := by
-  obtain ⟨height, tree, room⟩ := lookupRoom
-  obtain ⟨orderHeight, keys, orderTree, orderRows, pairing, orderSorted, roomOrder⟩ := orderRoom
+          ∧ after.last = arena.last
+          ∧ ArenaGrowth arena.values after.values height 0
+          ∧ ArenaGrowth arena.order after.order orderHeight 0) := by
   unfold Spike.radix.DualRadix.remove
   have live : RadixRows (alloc.vec.Vec.deref arena.values.rows).val bindings := by
     simpa [alloc.vec.Vec.deref] using view.values
@@ -423,7 +490,8 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
         simp [diff]
       have noValue : selected = none := by simpa [found] using resolved
       rw [noValue, WP.spec_ok]
-      refine ⟨unchanged.symm ▸ view, ?_, lookupOK, orderOK, .refl _, .refl _, rfl⟩
+      refine ⟨unchanged.symm ▸ view, ?_, lookupOK, orderOK, .refl _, .refl _, rfl,
+        ⟨Nat.le_add_right _ _, Nat.le_refl _⟩, ⟨Nat.le_add_right _ _, Nat.le_refl _⟩⟩
       rw [unchanged]
       unfold dualBindings
       rw [← dual_erase_value_projection]
@@ -441,11 +509,11 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
       apply WP.spec_bind
         (arena_remove_refines arena.order root.order bytes orderHeight keys
           orderTree orderRows orderOK roomOrder)
-      rintro ⟨order, orderAfter⟩ ⟨validOrder, keepsOrder, _, _, oh, ot, orows, op⟩
+      rintro ⟨order, orderAfter⟩ ⟨validOrder, keepsOrder, orderFixed, orderGrowth, oh, ot, orows, op⟩
       apply WP.spec_bind
         (arena_remove_refines arena.values root.lookup key height bindings tree
           view.values lookupOK room)
-      rintro ⟨value, valueAfter⟩ ⟨validValues, keepsValues, valuesUnchanged, _, vh, vt, vrows, vp⟩
+      rintro ⟨value, valueAfter⟩ ⟨validValues, keepsValues, valuesUnchanged, valueGrowth, vh, vt, vrows, vp⟩
       change WP.spec (Result.ok (({ lookup := value, order } : Spike.radix.DualRoot),
         { arena with values := valueAfter, order := orderAfter })) _
       rw [WP.spec_ok]
@@ -467,7 +535,9 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
         validOrder,
         keepsValues,
         keepsOrder,
-        rfl
+        rfl,
+        ⟨valueGrowth, by rw [valuesUnchanged, Nat.add_zero]⟩,
+        ⟨orderGrowth, by rw [orderFixed, Nat.add_zero]⟩
       ⟩
       · intro a ha b hb x y hx hy
         rw [valuesUnchanged] at hx hy
@@ -619,18 +689,16 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (root : Spike.radix.DualRoot) (bindings : List (List U8 × U32))
     (row : Spike.radix.RadixRow V) (view : DualView arena root bindings)
     (lookupOK : ArenaValid arena.values) (orderOK : ArenaValid arena.order)
-    (lookupRoom
-      : ∃ height,
-          RadixTree arena.values.dirs.val height root.lookup bindings
-          ∧ arena.values.dirs.val.length + height + 1 ≤ 2147483647)
-    (orderRoom
-      : ∃ (height : Nat) (keys : List (List U8 × U32)),
-          RadixTree arena.order.dirs.val height root.order keys
-          ∧ RadixRows arena.order.rows.val keys
-          ∧ radixBindings arena.order.rows.val keys
-            = dualStampBindings arena.values.rows.val bindings
-          ∧ keys.Pairwise radixKeyLt
-          ∧ arena.order.dirs.val.length + height + keys.length + 1 ≤ 2147483647)
+    (height orderHeight : Nat) (keys : List (List U8 × U32))
+    (tree : RadixTree arena.values.dirs.val height root.lookup bindings)
+    (orderTree : RadixTree arena.order.dirs.val orderHeight root.order keys)
+    (orderRows : RadixRows arena.order.rows.val keys)
+    (pairing
+      : radixBindings arena.order.rows.val keys
+        = dualStampBindings arena.values.rows.val bindings)
+    (orderSorted : keys.Pairwise radixKeyLt)
+    (room : arena.values.dirs.val.length + height + 1 ≤ 2147483647)
+    (roomOrder : arena.order.dirs.val.length + orderHeight + keys.length + 1 ≤ 2147483647)
     (valueRoom : arena.values.rows.val.length < 2147483647)
     (stampRoom : arena.order.rows.val.length < 2147483647)
     (keyRoom : 2 * row.key.val.length + 1 ≤ Usize.max)
@@ -645,9 +713,9 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
             ∧ ArenaValid after.order
             ∧ ArenaKeeps arena.values after.values
             ∧ ArenaKeeps arena.order after.order
-            ∧ after.last.val = arena.last.val + 1) := by
-  obtain ⟨height, tree, room⟩ := lookupRoom
-  obtain ⟨orderHeight, keys, orderTree, orderRows, pairing, orderSorted, roomOrder⟩ := orderRoom
+            ∧ after.last.val = arena.last.val + 1
+            ∧ ArenaGrowth arena.values after.values (height + 1) 1
+            ∧ ArenaGrowth arena.order after.order (orderHeight + keys.length + 1) 1) := by
   have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
   have fits : arena.last < core.num.U64.MAX := by
     change arena.last.val < core.num.U64.MAX.val
@@ -662,7 +730,8 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
     {key := row.key, value := {stamp, value := row.value}}
   apply WP.spec_bind (arena_put_refines arena.values root.lookup written height bindings
     tree view.values lookupOK room valueRoom keyRoom)
-  rintro ⟨⟨lookup, leaf, old⟩, values⟩ ⟨lookupValid, keptValues, found, inserted, vh, vt, vr, vp⟩
+  rintro ⟨⟨lookup, leaf, old⟩, values⟩
+    ⟨lookupValid, keptValues, found, inserted, valueGrowth, vh, vt, vr, vp⟩
   apply WP.spec_bind
     (prepare_order_before_insert arena root values bindings keys view orderOK orderHeight
       orderTree orderRows pairing orderSorted (by omega) keptValues row.key.val old found)
@@ -681,7 +750,8 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
       active.length active trimmedTree trimmedRows cleared.valid trimmedRoom
       (by rw [cleared.fixedRows]; exact stampRoom)
       (by rw [len]; scalar_tac))
-  rintro ⟨⟨order', orderLeaf, _⟩, orderAfter⟩ ⟨validOrder, keptOrder, _, _, oh, ot, orows, op⟩
+  rintro ⟨⟨order', orderLeaf, _⟩, orderAfter⟩
+    ⟨validOrder, keptOrder, _, _, orderGrowth, oh, ot, orows, op⟩
   let after : Spike.radix.DualRadix V := {values, order := orderAfter, last := stamp}
   change WP.spec (Result.ok (({lookup, order := order'} : Spike.radix.DualRoot), after)) _
   rw [WP.spec_ok]
@@ -744,7 +814,7 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
     exact reverse_stamp_order _ _ (by omega)
   refine ⟨leaf, ⟨⟨vh, vt⟩, vr, ⟨oh, Kv.Model.set active encoded.val orderLeaf, ot, orows,
     paired, ordered⟩, ?_, ?_⟩, ?_, lookupValid, validOrder, keptValues,
-    cleared.kept.trans keptOrder, fresh⟩
+    cleared.kept.trans keptOrder, fresh, valueGrowth, ?_⟩
   · intro a ha b hb x y hx hy
     change radixRow values.rows.val a.2 = some x at hx
     change radixRow values.rows.val b.2 = some y at hy
@@ -782,6 +852,11 @@ theorem dual_put_refines {V : Type} (arena : Spike.radix.DualRadix V)
     rw [vp]
     exact (set_projected _ row.key.val written.value id Spike.radix.Stamped.value
       (fun _ _ h => h)).symm
+  · have allocated := cleared.growth
+    have remaining := subset.length_le
+    obtain ⟨dirs, rows⟩ := orderGrowth
+    change ArenaGrowth arena.order orderAfter (orderHeight + keys.length + 1) 1
+    exact ⟨by omega, by rwa [cleared.fixedRows] at rows⟩
 
 /-- Both indices are empty at construction and satisfy the arena invariants. -/
 theorem dual_new_refines (V : Type)

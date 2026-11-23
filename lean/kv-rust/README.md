@@ -3,7 +3,8 @@
 This opt-in package checks [a Rust prototype](../../src/rust/kv-spike) against the existing [KV model](../kv/Kv/Model/Transitions.lean).
 It is not linked into production CCF and does not change the existing Lean specification.
 
-The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, ordered association lists, and owned, contiguous version frames.
+The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, associative transaction state, and an append-only archive of version frames.
+Each frame holds a pair of persistent radix roots: one for address lookup and one for the model's prepend-on-write scan order.
 Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
 Compaction advances the global frontier and changes which map views can be acquired; it does not yet reclaim old frames.
 The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
@@ -11,7 +12,9 @@ The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapsho
 The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
-The [publication proof](KvRust/Publication.lean) discharges equality and cloning for the actual publication types and checks the full write-set fold against `Kv.Model.publish` instantiated over byte lists.
+The [indexed publication proof](KvRust/IndexedPublication.lean) checks the extracted right-to-left write-set fold against `Kv.Model.publish`, with numeric bounds on packed keys, path copies, row slots, and the stamp counter.
+The [archive relation](KvRust/IndexedHistory.lean) ties every archived frame to its ordered index view, including frames no longer on the active branch after rollback.
+The indexed [materialization](KvRust/IndexedImage.lean) and [pin](KvRust/PinnedImage.lean) proofs relate selected maps and point reads to those views without reconstructing the whole store.
 The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
 The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
 The [lineage proofs](KvRust/Lineage.lean) compose the read-set check with captured terms, map birth and revision stamps, and acquisition failures to match the model's commit eligibility test on related states.
@@ -25,7 +28,7 @@ The [lifecycle proofs](KvRust/Lifecycle.lean) cover store initialization, attemp
 [`initialized_run_matches`](KvRust/Simulation.lean) composes these results from the actual model's empty state: every in-bounds finite trace over the native single-store action surface produces the same observations and ends in related states.
 A disabled model action maps to an unchanged native store with `Error::Disabled`; rollback below the compacted frontier is a separate observable result in both implementations.
 The proof uses an injective, order-preserving encoding of native byte strings into the model's string type.
-`FitsTrace` states the capacity requirements for the counters and vectors that the original, unbounded model does not have.
+`FitsTrace` states the capacity requirements for the counters, vectors, packed addresses, radix growth, and scan work that the original, unbounded model does not have.
 The proof does not cover allocation failure, a C++ adapter, or distributed execution.
 
 ## Reproduce
@@ -78,7 +81,8 @@ The same fuzzer schedules and assertions run on both backends, but the C++ trace
 The test adapter serializes commit submission and only fills reserved slots in order.
 It does not implement the full CCF store interface or production replication.
 The existing trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
-The extracted ordinary ledger replay proof shows that, after decoding, a successful replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
+The extracted ordinary ledger replay proof shows that, after decoding, a successful next-version replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
+Provisional replacement replay and snapshot import are tested, but not covered by that theorem.
 
 ## Performance
 
@@ -149,7 +153,7 @@ These are ranges of two run medians, not confidence intervals.
 The next change replaces a single existing binding in place while retaining the original path for deduplicating repeated bindings.
 Together the copy-removal changes cut a commit replacing 2,048 entries from 301-303 ms to 58.7-59.1 ms, versus 0.79-0.89 ms for C++ in the final pair of runs.
 Comparing the key bytes before the map name reduced Rust bulk commits to 35-41 ms in a separate pair of runs.
-The indexed batch path avoids applying the writes one at a time or cloning the input frame.
+The earlier vector engine's bucketed batch path avoided applying the writes one at a time or cloning the input frame.
 The extracted proof checks the ordered result against the original model fold, including puts, removals, and the fallback for repeated addresses or crowded buckets.
 With that path, the 2,048-write commit took **1.32-1.33 ms in Rust versus 0.87-0.88 ms in C++** across two paired runs.
 Rust point reads at that size took 3.91-4.86 us versus 0.63-0.64 us, and the logging mix took 49.7-57.5 us per transaction versus 1.06 us.
@@ -165,8 +169,21 @@ Matched timings did not establish a consistent gain from equality alone, and a s
 Pinning local and global frames by stable ID avoids copying a map when a transaction acquires it.
 In two paired runs, this reduced the 512-key logging mix from 28.7-31.5 us per Rust transaction to 4.40-5.31 us, versus 1.07-1.15 us for C++.
 At 2,048 keys, populated point reads were 3.75-3.90 us in Rust versus 0.69-0.71 us in C++, and a batch of 2,048 replacements took 1.20-1.39 ms versus 0.87-0.89 ms.
-The map contents are still vector-backed; the acquired-handle point-read benchmark excludes acquisition and therefore does not measure the cost that was removed.
+Those measurements were for the vector-backed engine; the acquired-handle point-read benchmark excludes acquisition and therefore does not measure the cost that was removed.
 This benchmark still does not cover replicated CCF.
+
+After switching committed frames to the verified dual index, two paired runs on the same host measured:
+
+| Workload                    | Rust               | C++                |
+| --------------------------- | ------------------ | ------------------ |
+| Point read, 2,048 entries   | 0.207-0.221 us     | 0.651-0.711 us     |
+| Logging mix, 512 entries    | 0.962-0.973 us/tx  | 1.159-1.212 us/tx  |
+| Governance mix, 64 entries  | 12.38-12.57 us/tx  | 7.45-8.22 us/tx    |
+| Commit 2,048 replacements   | 2.97-3.13 ms       | 0.81-0.98 ms       |
+
+These are ranges of run medians, not confidence intervals.
+The indexed engine wins on point reads and this logging mix, but not on the governance mix or bulk commits.
+These measurements do not establish p99 or retained-memory parity.
 
 ### Persistent storage experiment
 
@@ -243,9 +260,10 @@ In two reruns at 2,048 keys the actual native index took 0.42-0.44 us per pinned
 The regression covers retained roots, writes to earlier branches, and deletion.
 The second arena's allocation and reclamation costs are not qualified.
 These are component measurements, not matched transaction results.
-The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.
 The [address encoding proof](KvRust/RadixAddress.lean) covers the actual Rust packing code and shows that a shared radix can distinguish arbitrary map/key pairs, including empty and prefix-related byte strings.
 The extracted [`AddressIndex`](KvRust/KvIndex.lean) composes that encoding with the dual radix and relates its lookup, edits, ordered scans, and retained roots to the original address/value association lists.
+Committed frames in the engine now use that same `AddressIndex`.
+Both arenas and the frame archive still grow with history; the indexed trace theorem does not establish a bound on retained memory or cover slot retirement.
 
 The `storage -- retirement` mode compares the full arena sweep with a benchmark-only reference-counted variant.
 The variant counts explicit root pins and incoming directory edges, and retires at most 32 zero-reference slots per tick.
