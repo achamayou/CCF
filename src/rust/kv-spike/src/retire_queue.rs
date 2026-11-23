@@ -89,6 +89,21 @@ pub fn release_owner(count: &mut u32, retired: &mut RetireQueue, link: u32) {
     }
 }
 
+pub trait RetireStep {
+    fn retire_one(&mut self) -> bool;
+}
+
+pub fn retire_at_most<T: RetireStep>(worker: &mut T, budget: usize) -> usize {
+    let mut completed = 0;
+    while completed < budget {
+        if !worker.retire_one() {
+            break;
+        }
+        completed += 1;
+    }
+    completed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

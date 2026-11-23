@@ -381,4 +381,82 @@ theorem release_owner_schedules (count : U32) (queue : NativeRetireQueue)
     exact ⟨by simpa only [zero] using correct, valid⟩
   · simp [zero, correct, view]
 
+/-- A tick may schedule more work. The budget counts processed slots, not the
+change in queue length. -/
+def retirementSchedule {S : Type} (tick : S → Option S) : Nat → S → Nat × S
+  | 0, state => (0, state)
+  | fuel + 1, state =>
+      match tick state with
+      | none => (0, state)
+      | some next =>
+          let rest := retirementSchedule tick fuel next
+          (rest.1 + 1, rest.2)
+
+/-- The extracted driver performs the exact bounded schedule for any worker
+that refines one tick. This does not on its own establish a worker's accounting. -/
+theorem retire_at_most_refines {T S : Type} (worker : Spike.retire_queue.RetireStep T)
+    (initial : T) (project : T → S) (valid : T → Prop) (tick : S → Option S)
+    (initialValid : valid initial) (budget : Usize)
+    (step
+      : ∀ current,
+          valid current
+          → WP.spec (worker.retire_one current)
+              (fun (processed, next) =>
+                valid next
+                ∧ if processed then
+                    tick (project current) = some (project next)
+                  else
+                    tick (project current) = none ∧ project next = project current))
+    : WP.spec (Spike.retire_queue.retire_at_most worker initial budget)
+        (fun (completed, after) =>
+          valid after
+          ∧ completed.val ≤ budget.val
+          ∧ (completed.val, project after)
+            = retirementSchedule tick budget.val (project initial)) := by
+  let expected := retirementSchedule tick budget.val (project initial)
+  unfold Spike.retire_queue.retire_at_most Spike.retire_queue.retire_at_most_loop
+  apply loop.spec_decr_nat (fun (_, i) => budget.val - (i : Usize).val)
+    (fun (current, i) =>
+      valid current ∧ i.val ≤ budget.val
+      ∧ let rest := retirementSchedule tick (budget.val - i.val) (project current)
+        (i.val + rest.1, rest.2) = expected)
+    _ _ _
+  · rintro ⟨current, i⟩ ⟨ready, within, agrees⟩
+    dsimp only at ready within agrees ⊢
+    unfold Spike.retire_queue.retire_at_most_loop.body
+    have one : (1#usize : Usize).val = 1 := rfl
+    by_cases run : i < budget
+    · have h : i.val < budget.val := run
+      rw [ite_eq_left run]
+      apply WP.spec_bind (step current ready)
+      rintro ⟨processed, after⟩ ⟨afterValid, transition⟩
+      have fuel : budget.val - i.val = (budget.val - (i.val + 1)).succ := by omega
+      cases processed with
+      | false =>
+          change tick (project current) = none ∧ project after = project current at transition
+          change WP.spec (Result.ok (ControlFlow.done (i, after))) _
+          rw [WP.spec_ok]
+          simp only [fuel, retirementSchedule, transition.1, Nat.add_zero] at agrees
+          exact ⟨afterValid, within, by simpa only [transition.2] using agrees⟩
+      | true =>
+          change tick (project current) = some (project after) at transition
+          change WP.spec (do
+            let j ← i + 1#usize
+            Result.ok (ControlFlow.cont (after, j))) _
+          have capacity : budget.val ≤ Usize.max := by scalar_tac
+          apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+          intro j count
+          have next : j.val = i.val + 1 := by omega
+          rw [WP.spec_ok]
+          dsimp only
+          refine ⟨⟨afterValid, by omega, ?_⟩, by omega⟩
+          simp only [fuel, retirementSchedule, transition, ← Nat.add_assoc, ← next] at agrees
+          rw [Nat.add_right_comm, ← next] at agrees
+          exact agrees
+    · have no : ¬ i.val < budget.val := run
+      have ended : budget.val - i.val = 0 := by omega
+      rw [ite_eq_right run, WP.spec_ok]
+      exact ⟨ready, within, by simpa only [ended, retirementSchedule, Nat.add_zero] using agrees⟩
+  · simp [initialValid, expected]
+
 end KvRust

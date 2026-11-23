@@ -3,7 +3,7 @@
 
 use super::{ByteIndex, Link, NibbleRadix, Value};
 use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot, retain_reference};
-use ccf_kv_spike::retire_queue::{RetireQueue, release_owner};
+use ccf_kv_spike::retire_queue::{RetireQueue, RetireStep, release_owner, retire_at_most};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -78,25 +78,7 @@ impl Arena {
     }
 
     fn collect(&mut self, budget: usize) -> usize {
-        let mut freed = 0;
-        for _ in 0..budget {
-            let Some(raw) = self.retired.pop_front() else {
-                break;
-            };
-            let link = Link(raw);
-            assert_eq!(*self.count(link), 0);
-            let i = link.index();
-            if link.leaf() {
-                recycle_slot(&mut self.tree.rows.slots, &mut self.tree.rows.free, i);
-            } else {
-                let dir = recycle_slot(&mut self.tree.dirs.slots, &mut self.tree.dirs.free, i);
-                for child in children(dir) {
-                    self.drop_ref(child);
-                }
-            }
-            freed += 1;
-        }
-        freed
+        retire_at_most(self, budget)
     }
 
     fn get(&self, pin: &Pin, key: &[u8]) -> Option<&Value> {
@@ -111,6 +93,26 @@ impl Arena {
     fn remove(&mut self, pin: &Pin, key: &[u8]) -> Pin {
         let next = self.tree.remove(pin.0, key);
         self.retain(next)
+    }
+}
+
+impl RetireStep for Arena {
+    fn retire_one(&mut self) -> bool {
+        let Some(raw) = self.retired.pop_front() else {
+            return false;
+        };
+        let link = Link(raw);
+        assert_eq!(*self.count(link), 0);
+        let i = link.index();
+        if link.leaf() {
+            recycle_slot(&mut self.tree.rows.slots, &mut self.tree.rows.free, i);
+        } else {
+            let dir = recycle_slot(&mut self.tree.dirs.slots, &mut self.tree.dirs.free, i);
+            for child in children(dir) {
+                self.drop_ref(child);
+            }
+        }
+        true
     }
 }
 
