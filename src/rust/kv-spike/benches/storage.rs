@@ -6,6 +6,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[path = "storage/byte_radix.rs"]
+mod byte_radix;
 #[path = "storage/radix.rs"]
 mod radix;
 
@@ -129,6 +131,26 @@ impl Index for radix::Radix {
     }
 }
 
+impl Index for byte_radix::ByteRadix {
+    type Root = byte_radix::Root;
+
+    fn get<'a>(&'a self, root: &Self::Root, key: &Key) -> Option<&'a Value> {
+        self.get(*root, key)
+    }
+
+    fn put(&mut self, root: &mut Self::Root, key: Key, value: Value) {
+        *root = self.put(*root, &key, value);
+    }
+
+    fn range(&self, root: &Self::Root, first: &Key, last: &Key) -> usize {
+        let mut sum = 0;
+        self.range(*root, first, last, |_, value| {
+            sum += usize::from(black_box(value)[0]);
+        });
+        sum
+    }
+}
+
 fn seed<T: Index>(keys: &[Key]) -> (T, T::Root) {
     let mut index = T::default();
     let mut root = T::Root::default();
@@ -245,8 +267,12 @@ fn check_persistence<T: Index>() {
 fn main() {
     check_persistence::<Paged>();
     check_persistence::<radix::Radix>();
+    check_persistence::<byte_radix::ByteRadix>();
+    byte_radix::check();
     println!("backend,workload,entries,operations,median_ns_per_operation,min_ns,max_ns");
     suite::<WholeMap>("arc_btree");
     suite::<Paged>("paged");
     suite::<radix::Radix>("radix_arena");
+    suite::<byte_radix::ByteRadix>("byte_radix");
+    byte_radix::measure_churn();
 }

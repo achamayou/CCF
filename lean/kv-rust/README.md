@@ -174,3 +174,11 @@ Its eight-entry range takes 7.96 us because it filters a full CHAMP traversal.
 These are component measurements, not a win against C++ CHAMP.
 Neither candidate has been integrated or verified against the engine.
 The radix prototype uses fixed-width keys and does not reclaim arena nodes, so native adoption requires an arbitrary-byte index, accounting for observed scan and write-set order, and reclamation once snapshots are released.
+
+The `byte_radix` variant handles arbitrary byte keys, including empty keys and prefixes, and supports deletion, branching from a retained root, and reusing slots after tracing live roots.
+On the same 2,048-key workload it took 73-74 ns for a point read, 230-231 ns for a pinned-root update, and 417-418 ns for an eight-entry range.
+A CHAMP run took 36 ns, 180 ns, and 6.57 us respectively.
+With variable-length keys, one long-lived root, and 32 recent roots, a separate churn test alternating deletes and puts used 1.52-1.75 us per mutation including collection, with 55-96 us p99 collection pauses.
+The collector reused slots but did not shrink the backing vectors: at the end it held 8,624 live nodes in 9,697 slots and 4,111 live rows in 4,127 slots.
+These results exclude serialization and FFI, and lexicographic index traversal does not preserve the engine's observed scan order without a separate projection.
+This experiment is not used by the engine; its point performance and collection pauses do not justify integration.
