@@ -1284,7 +1284,7 @@ impl Store {
             }
             Action::End(tx) => {
                 self.tx_index(tx)?;
-                self.txs = self.txs.erase(&tx);
+                erase_attempt(&mut self.txs, tx);
                 Ok(Output::Unit)
             }
             Action::SetTerm(term) => {
@@ -1861,6 +1861,24 @@ impl Store {
         };
         t.phase = Phase::Finished;
         Ok(Output::Committed(outcome, assigned))
+    }
+}
+
+fn erase_attempt(rows: &mut Assoc<Attempt, Tx>, id: Attempt) {
+    let mut kept = Vec::with_capacity(rows.0.len());
+    let mut i = 0;
+    while i < rows.0.len() {
+        move_other_attempt(&mut kept, &mut rows.0[i], id);
+        i += 1;
+    }
+    rows.0 = kept;
+}
+
+fn move_other_attempt(kept: &mut Vec<(Attempt, Tx)>, row: &mut (Attempt, Tx), id: Attempt) {
+    if row.0 != id {
+        let mut tx = Tx::new();
+        core::mem::swap(&mut tx, &mut row.1);
+        kept.push((row.0, tx));
     }
 }
 

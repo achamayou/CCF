@@ -226,6 +226,21 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn ending_another_attempt_keeps_the_pinned_reader_and_its_dependency() {
+    let mut store = Store::new(0);
+    let map = b"public:map";
+    put(&mut store, 0, map, b"key", b"before", 1);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, map);
+    assert_read(&mut store, 1, map, b"key", false, Some(b"before"));
+    put(&mut store, 2, map, b"key", b"after", 2);
+
+    assert_read(&mut store, 1, map, b"key", false, Some(b"before"));
+    write(&mut store, 1, map, b"other", Some(b"new"));
+    expect_conflict(&mut store, 1);
+}
+
+#[test]
 fn a_shared_image_stays_pinned_when_later_acquisitions_pin_different_cuts() {
     let mut s = Store::new(7);
     let m = b"public:map";

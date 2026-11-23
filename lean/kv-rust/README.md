@@ -203,6 +203,10 @@ Changing lineage validation to search newest-first reduced Rust p99 at 65,536 co
 C++ p99 in the final pairs was 4.60-5.48 us.
 Peak RSS was 132-161 MiB for Rust versus 11.3-11.5 MiB for C++.
 The lineage improvement does not reclaim memory or establish latency parity.
+Ending an attempt now moves the remaining attempt rows instead of cloning their pinned views and read dependencies.
+At 65,536 commits, this reduced Rust median latency from 17.1-17.2 us to 1.42-1.46 us and p99 from 45.9-52.0 us to 6.29-6.73 us across three alternating Rust-to-Rust pairs.
+Matched C++ medians were 1.94-2.21 us and p99 was 3.23-4.17 us.
+Peak RSS remained 147-161 MiB for Rust versus about 11.5 MiB for C++.
 
 ### Persistent storage experiment
 

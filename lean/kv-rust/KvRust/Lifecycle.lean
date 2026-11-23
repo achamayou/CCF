@@ -149,6 +149,94 @@ theorem execute_begin_lifecycle (s : Spike.engine.Store) (id : U64)
       obtain ⟨t, _, ht⟩ := hi
       simp [core.option.Option.is_some, ht]
 
+private abbrev AttemptRows := alloc.vec.Vec (U64 × Spike.engine.Tx)
+
+private theorem drop_after_set {α : Type} (rows : List α) (i : Nat) (x : α)
+    : (rows.set i x).drop (i + 1) = rows.drop (i + 1) := by
+  induction rows generalizing i with
+  | nil => simp
+  | cons row rest ih =>
+      cases i with
+      | zero => rfl
+      | succ i => exact ih i
+
+private theorem move_other_attempt_matches (kept : AttemptRows)
+    (row : U64 × Spike.engine.Tx) (id : U64) (room : kept.val.length < Usize.max)
+    : WP.spec (Spike.engine.move_other_attempt kept row id)
+        (fun (next, _) =>
+          next.val = kept.val ++ erase [row] id
+          ∧ next.val.length ≤ kept.val.length + 1) := by
+  obtain ⟨key, tx⟩ := row
+  unfold Spike.engine.move_other_attempt
+  change WP.spec (if key != id then do
+      let tmp ← Spike.engine.Tx.new
+      let (moved, empty) := core.mem.swap tmp tx
+      let out ← alloc.vec.Vec.push kept (key, moved)
+      Result.ok (out, (key, empty))
+    else Result.ok (kept, (key, tx))) _
+  by_cases same : key = id
+  · simp [same, erase]
+  · rw [show (key != id) = true from bne_iff_ne.mpr same]
+    simp only [ite_true, tx_new_lifecycle, bind_ok, core.mem.swap]
+    apply WP.spec_bind (alloc.vec.Vec.push_spec kept (key, tx) room)
+    intro next he
+    rw [WP.spec_ok]
+    simp [he, erase, same]
+
+/-- Ending an attempt moves untouched rows without copying their observations or values. -/
+private theorem erase_attempt_matches (rows : AttemptRows) (id : U64)
+    : WP.spec (Spike.engine.erase_attempt rows id)
+        (fun next => next.val = erase rows.val id) := by
+  unfold Spike.engine.erase_attempt
+  apply WP.spec_bind (Pₘ := fun out => out.val = erase rows.val id)
+  · unfold Spike.engine.erase_attempt_loop
+    apply loop.spec_decr_nat (fun (_, _, i) => rows.val.length - (i : Usize).val)
+      (fun (working, kept, i) =>
+        working.val.length = rows.val.length
+        ∧ kept.val.length ≤ i.val
+        ∧ kept.val ++ erase (working.val.drop i.val) id = erase rows.val id)
+      _ _ _
+    · rintro ⟨working, kept, i⟩ ⟨size, keptBound, suffix⟩
+      dsimp only at size keptBound suffix ⊢
+      unfold Spike.engine.erase_attempt_loop.body
+      have len : (alloc.vec.Vec.len working).val = working.val.length :=
+        alloc.vec.Vec.len_val working
+      have space := alloc.vec.Vec.len_ineq working
+      have one : (1#usize : Usize).val = 1 := rfl
+      by_cases run : i < alloc.vec.Vec.len working
+      · have inside : i.val < working.val.length := by rwa [← len]
+        rw [ite_eq_left run, alloc.vec.Vec.index_mut_slice_index]
+        apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec working i inside)
+        rintro ⟨row, back⟩ ⟨read, update⟩
+        apply WP.spec_bind (move_other_attempt_matches kept row id (by omega))
+        rintro ⟨out, blank⟩ ⟨copied, growth⟩
+        change WP.spec (do
+          let j ← i + 1#usize
+          Result.ok (ControlFlow.cont (back blank, out, j))) _
+        apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+        intro j hj
+        have next : j.val = i.val + 1 := by omega
+        have set : (back blank).val = working.val.set i.val blank := by
+          rw [update]
+          exact alloc.vec.Vec.set_val_eq _ _ _
+        rw [WP.spec_ok]
+        dsimp only at copied growth ⊢
+        refine ⟨⟨by simpa [set] using size, by omega, ?_⟩, by omega⟩
+        have shifted : (back blank).val.drop j.val = working.val.drop (i.val + 1) := by
+          rw [set, next, drop_after_set]
+        have split : working.val.drop i.val = [row] ++ working.val.drop (i.val + 1) := by
+          rw [List.drop_eq_getElem_cons inside, ← read]
+          rfl
+        rw [copied, List.append_assoc, shifted]
+        rw [split] at suffix
+        simpa only [erase, List.filter_append] using suffix
+      · have beyond : working.val.length ≤ i.val := by rw [← len]; exact Nat.le_of_not_gt run
+        rw [ite_eq_right run, WP.spec_ok]
+        simpa [List.drop_eq_nil_of_le beyond, erase] using suffix
+    · simp [alloc.vec.Vec.with_capacity]
+  · intro out h
+    simpa using h
+
 /-- Enabled `End` erases the ID without changing history; missing IDs leave the store unchanged. -/
 theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
     : WP.spec (Spike.engine.Store.execute s (.End id))
@@ -170,9 +258,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
   | Ok i =>
       obtain ⟨t, _, ht⟩ := hi
       simp only [ht, core.result.Result.Insts.CoreOpsTry.branch, bind_ok]
-      apply WP.spec_bind (assoc_erase Spike.U64.Insts.Ccf_kv_spikeEngineKey
-        core.clone.CloneU64 Spike.engine.Tx.Insts.CoreCloneClone s.txs id
-        (fun _ => rfl) (fun _ => rfl) clone_tx)
+      apply WP.spec_bind (erase_attempt_matches s.txs id)
       intro next hn
       simp [hn]
 
