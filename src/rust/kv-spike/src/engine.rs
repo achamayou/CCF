@@ -13,13 +13,7 @@ pub struct Bytes(Vec<u8>);
 
 impl Bytes {
     pub fn copy_from(bytes: &[u8]) -> Self {
-        let mut result = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            result.push(bytes[i]);
-            i += 1;
-        }
-        Self(result)
+        Self(bytes.to_vec())
     }
 
     pub fn as_slice(&self) -> &[u8] {

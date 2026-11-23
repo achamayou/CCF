@@ -11,6 +11,17 @@ namespace KvRust
 
 open Aeneas.Std
 
+/-- Copying bytes at the native API boundary preserves their full contents. -/
+theorem bytes_copy_from (bytes : Slice U8)
+    : WP.spec (Spike.engine.Bytes.copy_from bytes)
+        (fun copy => copy.val = bytes.val) := by
+  unfold Spike.engine.Bytes.copy_from
+  apply WP.spec_bind (alloc.slice.Slice.to_vec_spec core.clone.CloneU8 bytes (fun _ _ => rfl))
+  intro copy hc
+  rw [WP.spec_ok]
+  change copy.slice.val = bytes.val
+  exact congrArg Slice.val hc.symm
+
 /-- Unsigned byte-list lexicographic order, encoded as Rust's three comparison results. -/
 def byteOrder : List U8 → List U8 → I8
   | [], [] => 0#i8
