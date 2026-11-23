@@ -571,20 +571,34 @@ theorem operate_scan_matches_model (encode : List U8 → String)
           let post := fun (out, after) => scanOutput encode out = some outRef.2 ∧
             pointWrites encode after = outRef.1.normal.writes ∧
             pointDeps encode after = outRef.1.normal.deps ∧ pointKeepsContext t after
-          let nonemptyScan
+          let fullScan
               : Result
                   (core.result.Result Spike.engine.Output Spike.engine.Error
                     × Spike.engine.Tx) := do
             let (rows, deps) ← Spike.engine.Tx.scan history t.pending t.deps m native
-            let filtered ← Spike.engine.ordered_range rows lower upper
+            let filtered ← Spike.engine.ordered_range
+              Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue rows lower upper
             Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
               {t with deps, phase := .Active})
-          have go
+          let committedRange
+              : Result
+                  (core.result.Result Spike.engine.Output Spike.engine.Error
+                    × Spike.engine.Tx) := do
+            let base ← Spike.engine.PinnedImage.materialize native.local history m
+            let rows ← Spike.engine.ordered_range
+              Spike.engine.Cell.Insts.Ccf_kv_spikeEngineRangeValue base lower upper
+            let deps ← alloc.vec.Vec.push t.deps (.Map m base)
+            Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries rows),
+              {t with deps, phase := .Active})
+          let nonemptyScan := do
+            let empty ← alloc.vec.Vec.is_empty t.pending
+            if empty then committedRange else fullScan
+          have withOverlay
               (hEmpty
                 : ¬emptyRange (encodeBound encode lower) (encodeBound encode upper)
                     = true)
-              : WP.spec nonemptyScan post := by
-            unfold nonemptyScan
+              : WP.spec fullScan post := by
+            unfold fullScan
             apply WP.spec_bind hscan
             rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
             have hUnique : Kv.Properties.Unique (encodeEntries encode rows) := by
@@ -592,7 +606,8 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               rw [hr]
               exact unique_scan tx.data tx.normal.writes mapName unique
             change WP.spec (do
-              let filtered ← Spike.engine.ordered_range rows lower upper
+              let filtered ← Spike.engine.ordered_range
+                Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue rows lower upper
               Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
                 {t with deps, phase := .Active})) post
             apply WP.spec_bind (ordered_range order rows lower upper hUnique)
@@ -604,6 +619,54 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             simp [post, outRef, executeOperation, hEmpty, scanOutput, hfiltered, recordOp,
               stage, needs, hw, hd, pointKeepsContext,
               visible, mapName]
+          have go
+              (hEmpty
+                : ¬emptyRange (encodeBound encode lower) (encodeBound encode upper)
+                    = true)
+              : WP.spec nonemptyScan post := by
+            have emptyTest : alloc.vec.Vec.is_empty t.pending
+                = .ok (decide (t.pending.val = [])) := by
+              change Result.ok (decide (t.pending.val.length = 0)) = _
+              exact congrArg Result.ok (decide_eq_decide.mpr List.length_eq_zero_iff)
+            by_cases clean : t.pending.val = []
+            · have noWrites : tx.normal.writes = [] := by
+                simpa [pointWrites, encodeWrites, byteWrites, clean] using hWrites.symm
+              simp only [nonemptyScan, emptyTest, clean, decide_true, bind_tc_ok, ite_true,
+                committedRange]
+              apply WP.spec_bind (pin_materialize_refines history m native.local
+                (alive native rfl).1 indexed (space.pin native.local))
+              intro base cells
+              have baseEq : encodeImage encode (byteImage base) = image tx.data mapName :=
+                (congrArg (encodeImage encode) cells).trans hl
+              have committed : encodeRangeEntries encode Spike.engine.Cell.value base.val =
+                  (image tx.data mapName).map (fun (k, c) => (k, c.value)) := by
+                rw [← baseEq]
+                simp [encodeRangeEntries, encodeImage, byteImage, List.map_map,
+                  Function.comp_def, encodeCell, byteCell]
+              have baseUnique :
+                  ((encodeRangeEntries encode Spike.engine.Cell.value base.val).map Prod.fst).Nodup := by
+                rw [committed]
+                simpa [List.map_map, Function.comp_def, Kv.Properties.Unique] using unique
+              have visibleEq : encodeRangeEntries encode Spike.engine.Cell.value base.val = visible := by
+                rw [committed]
+                simp [visible, scanAt, noWrites, writeValues]
+              apply WP.spec_bind
+                (ordered_range_projected order
+                  Spike.engine.Cell.Insts.Ccf_kv_spikeEngineRangeValue
+                  Spike.engine.Cell.value (fun _ => rfl) base lower upper baseUnique)
+              intro rows output
+              rw [visibleEq] at output
+              apply WP.spec_bind (deps_push encode t (.Map m base) room)
+              intro deps updated
+              have dep : pointDeps encode {t with deps} = .map mapName (image tx.data mapName)
+                  :: tx.normal.deps := by
+                simpa [byteDependency, encodeDependency, baseEq, mapName, hDeps]
+                  using updated
+              rw [← hPhase]
+              simp [post, outRef, executeOperation, hEmpty, scanOutput, recordOp,
+                stage, needs, dep, pointKeepsContext, modelEntries, mapName]
+              exact ⟨output, hWrites⟩
+            · simpa [nonemptyScan, emptyTest, clean] using withOverlay hEmpty
           change WP.spec _ post
           simp only [ScanOperation.rust]
           cases lower with

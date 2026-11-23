@@ -3,7 +3,7 @@
 
 module
 
-public import KvRust.Keys
+public import KvRust.Publication
 public import Kv.Model
 
 import all Aeneas.Std.Core.Core
@@ -257,11 +257,9 @@ private theorem insert_row {encode : List U8 → String}
         (do
           let pos ← Spike.engine.insertion_index out row.1
           if pos = alloc.vec.Vec.len out then
-            let p ← (BuiltinClone Row).clone row
-            alloc.vec.Vec.push out p
+            alloc.vec.Vec.push out row
           else
-            let p ← (BuiltinClone Row).clone row
-            alloc.vec.Vec.insert out pos p)
+            alloc.vec.Vec.insert out pos row)
         (fun result =>
           result.val.length = out.val.length + 1
           ∧ result.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b)
@@ -279,13 +277,11 @@ private theorem insert_row {encode : List U8 → String}
       insertIdx_sorted (rowKey encode) sorted hpos hbefore hnext, List.perm_insertIdx row _ hpos⟩
   by_cases heq : pos = alloc.vec.Vec.len out
   · rw [ite_eq_left heq]
-    simp only [BuiltinClone, bind_ok]
     apply WP.spec_mono (alloc.vec.Vec.push_spec out row hcap)
     intro result hr
     apply hpost result
     rwa [heq, hlen, List.insertIdx_length_self]
   · rw [ite_eq_right heq]
-    simp only [BuiltinClone, bind_ok]
     have hlt : pos.val < out.val.length := by
       apply Nat.lt_of_le_of_ne hpos
       intro he
@@ -308,7 +304,8 @@ private def upperAllows (encode : List U8 → String) (upper : Option Bytes) (ro
     : Bool :=
   (encodeBound encode upper).all (fun u => decide (rowKey encode row < u))
 
-private def checkLower (lower : Option Bytes) (row : Row) : Result (Row × Bool) :=
+private def checkLower {V : Type} (lower : Option Bytes) (row : Bytes × V)
+    : Result ((Bytes × V) × Bool) :=
   match lower with
   | none => Result.ok (row, true)
   | some l => do
@@ -316,7 +313,8 @@ private def checkLower (lower : Option Bytes) (row : Row) : Result (Row × Bool)
       let cmp ← Spike.engine.Bytes.compare l k
       Result.ok (row, decide (cmp ≤ 0#i8))
 
-private def checkUpper (upper : Option Bytes) (row : Row) : Result (Row × Bool) :=
+private def checkUpper {V : Type} (upper : Option Bytes) (row : Bytes × V)
+    : Result ((Bytes × V) × Bool) :=
   match upper with
   | none => Result.ok (row, true)
   | some u => do
@@ -324,9 +322,14 @@ private def checkUpper (upper : Option Bytes) (row : Row) : Result (Row × Bool)
       let cmp ← Spike.engine.Bytes.compare k u
       Result.ok (row, decide (cmp < 0#i8))
 
-private theorem lower_result {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (lower : Option Bytes) (row : Row)
-    : checkLower lower row = .ok (row, lowerAllows encode lower row) := by
+private def rangeRow {V : Type} (project : V → Bytes) (row : Bytes × V) : Row :=
+  (row.1, project row.2)
+
+private theorem lower_result {V : Type} {encode : List U8 → String}
+    (order : PreservesByteOrder encode) (project : V → Bytes)
+    (lower : Option Bytes) (row : Bytes × V)
+    : checkLower lower row
+      = .ok (row, lowerAllows encode lower (rangeRow project row)) := by
   obtain ⟨k, v⟩ := row
   cases lower with
   | none => rfl
@@ -335,9 +338,11 @@ private theorem lower_result {encode : List U8 → String}
       exact congrArg (fun b => Result.ok ((k, v), b))
         (Bool.decide_congr (byteOrder_le_encoded order l.val k.val))
 
-private theorem upper_result {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (upper : Option Bytes) (row : Row)
-    : checkUpper upper row = .ok (row, upperAllows encode upper row) := by
+private theorem upper_result {V : Type} {encode : List U8 → String}
+    (order : PreservesByteOrder encode) (project : V → Bytes)
+    (upper : Option Bytes) (row : Bytes × V)
+    : checkUpper upper row
+      = .ok (row, upperAllows encode upper (rangeRow project row)) := by
   obtain ⟨k, v⟩ := row
   cases upper with
   | none => rfl
@@ -346,26 +351,29 @@ private theorem upper_result {encode : List U8 → String}
       exact congrArg (fun b => Result.ok ((k, v), b))
         (Bool.decide_congr (byteOrder_lt_encoded order k.val u.val))
 
-private theorem ordered_range_perm {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (entries : Entries) (lower upper : Option Bytes)
-    : WP.spec (Spike.engine.ordered_range entries lower upper)
+private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
+    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
+    (project : V → Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
+    (entries : alloc.vec.Vec (Bytes × V)) (lower upper : Option Bytes)
+    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
         (fun out =>
           out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b)
           ∧ out.val.Perm
-              (entries.val.filter
+              ((entries.val.map (rangeRow project)).filter
                 fun row =>
                   inRange (encodeBound encode lower) (encodeBound encode upper)
                     (rowKey encode row))) := by
   let accepts := fun row : Row => lowerAllows encode lower row && upperAllows encode upper row
+  let projected := entries.val.map (rangeRow project)
   change WP.spec _ (fun out : Entries => out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b) ∧
-    out.val.Perm (entries.val.filter accepts))
+    out.val.Perm (projected.filter accepts))
   unfold Spike.engine.ordered_range Spike.engine.ordered_range_loop
   apply loop.spec_decr_nat (fun (p : Entries × Usize) => entries.val.length - p.2.val)
     (fun (out, i) =>
       out.val.length ≤ i.val
       ∧ out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b)
-      ∧ (out.val ++ (entries.val.drop i.val).filter accepts).Perm
-          (entries.val.filter accepts))
+      ∧ (out.val ++ (projected.drop i.val).filter accepts).Perm
+          (projected.filter accepts))
     _ _ _
   · rintro ⟨out, i⟩ ⟨hsize, hsorted, hperm⟩
     dsimp only at hsize hsorted hperm ⊢
@@ -379,43 +387,46 @@ private theorem ordered_range_perm {encode : List U8 → String}
       rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec entries i hb)
       intro row hrow
+      let projectedRow := rangeRow project row
       change WP.spec (do
         let lo ← checkLower lower row
         let hi ← checkUpper upper lo.1
         let result ← if lo.2 then
           if hi.2 then
             let pos ← Spike.engine.insertion_index out hi.1.1
+            let k ← Spike.engine.Bytes.Insts.CoreCloneClone.clone hi.1.1
+            let v ← inst.range_value hi.1.2
+            let v' ← Spike.engine.Bytes.Insts.CoreCloneClone.clone v
             if pos = alloc.vec.Vec.len out then
-              let p ← (BuiltinClone Row).clone hi.1
-              alloc.vec.Vec.push out p
+              alloc.vec.Vec.push out (k, v')
             else
-              let p ← (BuiltinClone Row).clone hi.1
-              alloc.vec.Vec.insert out pos p
+              alloc.vec.Vec.insert out pos (k, v')
           else Result.ok out
         else Result.ok out
         let j ← i + 1#usize
         Result.ok (ControlFlow.cont (result, j))) _
-      simp only [lower_result order, upper_result order, bind_ok]
-      have hdrop : entries.val.drop i.val = row :: entries.val.drop (i.val + 1) := by
-        rw [List.drop_eq_getElem_cons hb, ← hrow]
+      simp only [lower_result order project, upper_result order project, bind_ok, value, clone_bytes]
+      have hdrop : projected.drop i.val = projectedRow :: projected.drop (i.val + 1) := by
+        unfold projected
+        rw [← List.map_drop, List.drop_eq_getElem_cons hb, ← hrow, List.map_cons, List.map_drop]
       have hroom : out.val.length < Usize.max := by omega
       have hadd : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
-      have rejected (hno : ¬accepts row = true) :
-          (out.val ++ (entries.val.drop (i.val + 1)).filter accepts).Perm
-            (entries.val.filter accepts) := by
+      have rejected (hno : ¬accepts projectedRow = true) :
+          (out.val ++ (projected.drop (i.val + 1)).filter accepts).Perm
+            (projected.filter accepts) := by
         simpa only [hdrop, List.filter_cons, ite_eq_right hno] using hperm
       apply WP.spec_bind (Pₘ := fun result : Entries =>
         result.val.length ≤ i.val + 1 ∧
           result.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b) ∧
-          (result.val ++ (entries.val.drop (i.val + 1)).filter accepts).Perm
-            (entries.val.filter accepts))
-      · by_cases hl : lowerAllows encode lower row = true
+          (result.val ++ (projected.drop (i.val + 1)).filter accepts).Perm
+            (projected.filter accepts))
+      · by_cases hl : lowerAllows encode lower projectedRow = true
         · rw [ite_eq_left hl]
-          by_cases hu : upperAllows encode upper row = true
+          by_cases hu : upperAllows encode upper projectedRow = true
           · rw [ite_eq_left hu]
-            apply WP.spec_mono (insert_row order out row hroom hsorted)
+            apply WP.spec_mono (insert_row order out projectedRow hroom hsorted)
             intro result ⟨hresult, hsort, hp⟩
-            have hkeep : accepts row = true := by simp [accepts, hl, hu]
+            have hkeep : accepts projectedRow = true := by simp [accepts, hl, hu]
             rw [hdrop, List.filter_cons, ite_eq_left hkeep] at hperm
             exact ⟨by omega, hsort, ((hp.append_right _).trans List.perm_middle.symm).trans hperm⟩
           · rw [ite_eq_right hu, WP.spec_ok]
@@ -430,8 +441,9 @@ private theorem ordered_range_perm {encode : List U8 → String}
         dsimp only
         exact ⟨⟨by omega, hsort, by simpa only [hj'] using hp⟩, by omega⟩
     · have hb : entries.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+      have hp : projected.length ≤ i.val := by simpa [projected] using hb
       rw [ite_eq_right h, WP.spec_ok]
-      exact ⟨hsorted, by simpa [List.drop_eq_nil_of_le hb] using hperm⟩
+      exact ⟨hsorted, by simpa [List.drop_eq_nil_of_le hp] using hperm⟩
   · simp
 
 private theorem eq_of_unique_key {K V : Type} {rows : Assoc K V}
@@ -450,33 +462,42 @@ private theorem eq_of_unique_key {K V : Type} {rows : Assoc K V}
         · exact (unique.1 (heq ▸ List.mem_map_of_mem ha')).elim
         · exact ih unique.2 ha' hb'
 
-/-- The extracted ordered range returns exactly the model's half-open filter followed by
-ascending key sort, on inputs whose projected keys are unique. -/
-theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder encode)
-    (entries : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
+def encodeRangeEntries {V : Type} (encode : List U8 → String)
+    (project : V → Spike.engine.Bytes) (entries : List (Spike.engine.Bytes × V))
+    : Assoc String String :=
+  entries.map fun (k, v) => (encode k.val, encode (project v).val)
+
+/-- The extracted range projects values only for selected rows and returns them in exact key order. -/
+theorem ordered_range_projected {V : Type} {encode : List U8 → String}
+    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
+    (project : V → Spike.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
+    (entries : alloc.vec.Vec (Spike.engine.Bytes × V))
     (lower upper : Option Spike.engine.Bytes)
-    (unique : ((encodeEntries encode entries).map Prod.fst).Nodup)
-    : WP.spec (Spike.engine.ordered_range entries lower upper)
+    (unique : ((encodeRangeEntries encode project entries.val).map Prod.fst).Nodup)
+    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
         (fun out =>
           encodeEntries encode out
-          = ((encodeEntries encode entries).filter
+          = ((encodeRangeEntries encode project entries.val).filter
               (fun (k, _) =>
                 inRange (encodeBound encode lower) (encodeBound encode upper)
                   k)).mergeSort
               (fun a b => decide (a.1 ≤ b.1))) := by
-  let project : Row → String × String := fun (k, v) => (encode k.val, encode v.val)
-  let filtered := (encodeEntries encode entries).filter fun (k, _) =>
+  let encoded : Row → String × String := fun (k, v) => (encode k.val, encode v.val)
+  let filtered := (encodeRangeEntries encode project entries.val).filter fun (k, _) =>
     inRange (encodeBound encode lower) (encodeBound encode upper) k
   let cmp : (String × String) → (String × String) → Bool := fun a b => decide (a.1 ≤ b.1)
-  apply WP.spec_mono (ordered_range_perm order entries lower upper)
+  apply WP.spec_mono (ordered_range_perm order inst project value entries lower upper)
   intro out ⟨hsorted, hperm⟩
   change encodeEntries encode out = filtered.mergeSort cmp
   have hp : (encodeEntries encode out).Perm filtered := by
-    unfold filtered encodeEntries
-    rw [List.filter_map]
-    exact hperm.map project
+    have same : encodeRangeEntries encode project entries.val
+        = (entries.val.map (rangeRow project)).map encoded := by
+      simp [encodeRangeEntries, List.map_map, rangeRow, encoded]
+    unfold filtered
+    rw [same, List.filter_map]
+    exact hperm.map encoded
   have hsort : (encodeEntries encode out).Pairwise (fun a b => a.1 ≤ b.1) :=
-    hsorted.map project (fun _ _ h => h)
+    hsorted.map encoded (fun _ _ h => h)
   have hsort' : (filtered.mergeSort cmp).Pairwise (fun a b => a.1 ≤ b.1) := by
     apply List.Pairwise.imp (R := fun a b => cmp a b = true) (fun h => of_decide_eq_true h)
     apply List.pairwise_mergeSort
@@ -490,16 +511,40 @@ theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder 
   exact eq_of_unique_key unique (List.mem_of_mem_filter (hp.subset ha))
     (List.mem_of_mem_filter (hm.subset hb)) (_root_.Std.le_antisymm hab hba)
 
+theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder encode)
+    (entries : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
+    (lower upper : Option Spike.engine.Bytes)
+    (unique : ((encodeEntries encode entries).map Prod.fst).Nodup)
+    : WP.spec
+        (Spike.engine.ordered_range Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue
+          entries lower upper)
+        (fun out =>
+          encodeEntries encode out
+          = ((encodeEntries encode entries).filter
+              (fun (k, _) =>
+                inRange (encodeBound encode lower) (encodeBound encode upper)
+                  k)).mergeSort
+              (fun a b => decide (a.1 ≤ b.1))) :=
+  ordered_range_projected order _ id (fun _ => rfl) entries lower upper unique
+
 /-- Even without a uniqueness hypothesis, an empty model interval yields no extracted rows. -/
 theorem ordered_range_empty {encode : List U8 → String}
     (order : PreservesByteOrder encode)
     (entries : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
     (lower upper : Option Spike.engine.Bytes)
     (empty : emptyRange (encodeBound encode lower) (encodeBound encode upper) = true)
-    : WP.spec (Spike.engine.ordered_range entries lower upper)
+    : WP.spec
+        (Spike.engine.ordered_range Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue
+          entries lower upper)
         (fun out => out.val = []) := by
-  apply WP.spec_mono (ordered_range_perm order entries lower upper)
+  apply WP.spec_mono
+    (ordered_range_perm order Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue id
+      (fun _ => rfl) entries lower upper)
   intro out ⟨_, hp⟩
+  have identity : entries.val.map (rangeRow id) = entries.val := by
+    change entries.val.map id = entries.val
+    simp
+  rw [identity] at hp
   have hn : (entries.val.filter fun row =>
       inRange (encodeBound encode lower) (encodeBound encode upper) (rowKey encode row)) = [] :=
     List.filter_eq_nil_iff.mpr (fun row _ => by simp [inRange_of_emptyRange empty (rowKey encode row)])

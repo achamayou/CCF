@@ -210,6 +210,10 @@ Peak RSS remained 147-161 MiB for Rust versus about 11.5 MiB for C++.
 In three additional matched runs, Rust logging took 0.587-0.637 us/tx versus 0.812-0.840 us/tx for C++.
 Governance still took 8.38-9.41 us/tx versus 5.27-5.74 us/tx, and a 2,048-key replacement commit took 2.81-3.05 ms versus 0.79-0.97 ms.
 
+When a range has no staged writes, it now copies only the selected cells into its sorted output and still records the entire committed map as a dependency.
+Governance improved in each of four alternating Rust-to-Rust pairs, from 8.16-15.13 us/tx to 7.06-8.54 us/tx.
+In three subsequent Rust/C++ pairs the host was noisier and Rust still lagged on governance and large commits, while point reads and logging remained faster.
+
 ### Persistent storage experiment
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.

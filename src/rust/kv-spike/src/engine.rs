@@ -1010,6 +1010,12 @@ impl Tx {
                         return Ok(Output::Entries(Vec::new()));
                     }
                 }
+                if self.pending.0.is_empty() {
+                    let local = view.local.materialize(history, &map);
+                    let rows = ordered_range(&local.0, &lower, &upper);
+                    self.deps.push(Dependency::Map(map, local));
+                    return Ok(Output::Entries(rows));
+                }
                 Ok(Output::Entries(ordered_range(
                     &Self::scan(history, &self.pending, &mut self.deps, &map, view),
                     &lower,
@@ -1089,7 +1095,27 @@ fn insertion_index(entries: &Entries, key: &Bytes) -> usize {
     pos
 }
 
-fn ordered_range(entries: &Entries, lower: &Option<Bytes>, upper: &Option<Bytes>) -> Entries {
+trait RangeValue {
+    fn range_value(&self) -> &Bytes;
+}
+
+impl RangeValue for Bytes {
+    fn range_value(&self) -> &Bytes {
+        self
+    }
+}
+
+impl RangeValue for Cell {
+    fn range_value(&self) -> &Bytes {
+        &self.value
+    }
+}
+
+fn ordered_range<V: RangeValue>(
+    entries: &Vec<(Bytes, V)>,
+    lower: &Option<Bytes>,
+    upper: &Option<Bytes>,
+) -> Entries {
     let mut out: Entries = Vec::new();
     let mut i = 0;
     while i < entries.len() {
@@ -1104,11 +1130,12 @@ fn ordered_range(entries: &Entries, lower: &Option<Bytes>, upper: &Option<Bytes>
         };
         if above_lower && below_upper {
             let pos = insertion_index(&out, &row.0);
+            let selected = (row.0.clone(), row.1.range_value().clone());
             // The pinned Aeneas Vec model only supports insert below len.
             if pos == out.len() {
-                out.push(row.clone());
+                out.push(selected);
             } else {
-                out.insert(pos, row.clone());
+                out.insert(pos, selected);
             }
         }
         i += 1;

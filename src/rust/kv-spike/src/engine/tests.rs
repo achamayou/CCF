@@ -637,11 +637,23 @@ fn byte_ranges_are_ordered_and_take_whole_map_dependencies_except_when_empty() {
     applied(&mut s, 1, Outcome::Success, 1);
     begin(&mut s, 1);
     acquire(&mut s, 1, b"a");
-    op(
+    let Output::Entries(committed) = op(
         &mut s,
         1,
         b"a",
         Operation::Range(lower.clone(), upper.clone()),
+    ) else {
+        panic!("range over committed rows must return entries");
+    };
+    assert_eq!(
+        committed
+            .iter()
+            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+            .collect::<Vec<_>>(),
+        [
+            (b"\x00".as_slice(), b"value".as_slice()),
+            (b"\x00\x00", b"value")
+        ]
     );
     write(&mut s, 1, b"a", b"\x00", None);
     begin(&mut s, 2);
