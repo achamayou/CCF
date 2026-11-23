@@ -232,7 +232,8 @@ It checks the previous root and the new root for exact lookups and scan order.
 The explicit-stack builder added 275 directories for 2,048 sequential keys and 411 for shuffled keys, versus 11,264 and 11,496 with path copying.
 In one pinned run, the builder took 0.172 ms and 0.295 ms respectively, compared with 1.13 ms and 0.680 ms for path copying.
 These are storage-only timings.
-The [incremental proof](KvRust/RadixBatch.lean) covers split selection, exact interval partitioning, child attachment, and publishing a completed directory.
+The [extracted proof](KvRust/RadixBatch.lean) covers split selection, exact interval partitioning, child attachment, and termination of the explicit-stack builder.
+Under the stated size bounds, it constructs exactly the supplied sorted bindings, keeps the arenas valid, and preserves previous roots.
 The builder has not been enabled in transaction publication.
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
