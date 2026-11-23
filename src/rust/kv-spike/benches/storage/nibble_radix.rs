@@ -5,7 +5,7 @@ use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
 use ccf_kv_spike::radix::{
     RADIX_LEAF_TAG as LEAF, RadixDir, add_directory, first_difference, get, link_at, rebuild_path,
-    symbol,
+    record_path, remove, symbol,
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -106,17 +106,13 @@ impl ByteIndex for NibbleRadix {
         let old = &self.rows.get(self.closest(root, key).index()).key;
         let diff = first_difference(old, key);
         let old_sym = diff.map(|at| symbol(old, at));
-        self.path.clear();
-        let mut stem = root;
-        while !stem.leaf() {
-            let dir = self.dirs.get(stem.index());
-            if diff.is_some_and(|diff| dir.digit >= diff) {
-                break;
-            }
-            let sym = symbol(key, dir.digit);
-            self.path.push((stem.0, sym));
-            stem = dir.child(sym);
-        }
+        let stem = Link(record_path(
+            self.dirs.as_slice(),
+            &mut self.path,
+            root.0,
+            key,
+            diff,
+        ));
         let next = if let Some(at) = diff {
             let mut dir = if !stem.leaf() && self.dirs.get(stem.index()).digit == at {
                 *self.dirs.get(stem.index())
@@ -134,21 +130,14 @@ impl ByteIndex for NibbleRadix {
     }
 
     fn remove(&mut self, root: Link, key: &[u8]) -> Link {
-        self.path.clear();
-        let mut node = root;
-        while !node.empty() {
-            if node.leaf() {
-                if self.rows.get(node.index()).key.as_ref() == key {
-                    return self.rebuild(Link::default());
-                }
-                break;
-            }
-            let dir = self.dirs.get(node.index());
-            let sym = symbol(key, dir.digit);
-            self.path.push((node.0, sym));
-            node = dir.child(sym);
-        }
-        root
+        Link(remove(
+            &mut self.dirs.slots,
+            &mut self.dirs.free,
+            self.rows.as_slice(),
+            &mut self.path,
+            root.0,
+            key,
+        ))
     }
 
     fn range(&self, root: Link, first: &[u8], last: &[u8], mut visit: impl FnMut(&[u8], &Value)) {

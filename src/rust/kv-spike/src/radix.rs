@@ -174,6 +174,49 @@ pub fn rebuild_path(
     child
 }
 
+/// Record the traversed parent slots, stopping before a directory at `split`.
+#[inline]
+pub fn record_path(
+    dirs: &[Option<RadixDir>],
+    path: &mut Vec<(u32, usize)>,
+    root: u32,
+    key: &[u8],
+    split: Option<usize>,
+) -> u32 {
+    path.resize(0, (0, 0));
+    let mut node = root;
+    while node != 0 && node < RADIX_LEAF_TAG {
+        let dir = directory(dirs, node);
+        if let Some(digit) = split {
+            if dir.digit >= digit {
+                return node;
+            }
+        }
+        let slot = symbol(key, dir.digit);
+        path.push((node, slot));
+        node = dir.children[slot];
+    }
+    node
+}
+
+pub fn remove<V>(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free: &mut Vec<usize>,
+    rows: &[Option<RadixRow<V>>],
+    path: &mut Vec<(u32, usize)>,
+    root: u32,
+    key: &[u8],
+) -> u32 {
+    let leaf = record_path(dirs, path, root, key, None);
+    if leaf == 0 {
+        return root;
+    }
+    if check_leaf(rows, leaf, key).is_none() {
+        return root;
+    }
+    rebuild_path(dirs, free, path, 0)
+}
+
 /// Follow directory links until either a leaf or a missing child is reached.
 /// The caller owns the arena and keeps all directories reachable from `root` live.
 #[inline]
@@ -307,14 +350,18 @@ mod tests {
         high.set_child(symbol(&[0x20], 0), link_at(2, true));
         let old = add_directory(&mut dirs, &mut free, high);
         let key = &[0x10];
-        let path = [(old, symbol(key, 0)), (low_link, symbol(key, 1))];
-        let new = rebuild_path(&mut dirs, &mut free, &path, 0);
+        let mut path = vec![(u32::MAX, usize::MAX)];
+        let new = remove(&mut dirs, &mut free, &rows, &mut path, old, key);
 
         assert_eq!(dirs.len(), 3);
+        assert_eq!(path, [(old, symbol(key, 0)), (low_link, symbol(key, 1))]);
         assert_eq!(get(&dirs, &rows, old, key), Some(&1));
         assert_eq!(get(&dirs, &rows, new, key), None);
         assert_eq!(get(&dirs, &rows, old, &[0x11]), Some(&2));
         assert_eq!(get(&dirs, &rows, new, &[0x11]), Some(&2));
         assert_eq!(get(&dirs, &rows, new, &[0x20]), Some(&3));
+        let absent = remove(&mut dirs, &mut free, &rows, &mut path, new, &[0x12]);
+        assert_eq!(absent, new);
+        assert_eq!(dirs.len(), 3);
     }
 }
