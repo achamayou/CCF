@@ -3,6 +3,7 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
+use ccf_kv_spike::radix::symbol;
 
 // Compact benchmark arena links: zero is absent, and high bit tags leaf rows.
 const LEAF: u32 = 1 << 31;
@@ -59,13 +60,6 @@ impl Dir {
 
     fn first_child(&self) -> Link {
         self.children[self.mask.trailing_zeros() as usize]
-    }
-}
-
-fn symbol(key: &[u8], at: usize) -> usize {
-    match key.get(at >> 1) {
-        None => 0,
-        Some(b) => 1 + usize::from(if at & 1 == 0 { b >> 4 } else { b & 15 }),
     }
 }
 

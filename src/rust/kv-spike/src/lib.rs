@@ -4,6 +4,7 @@
 //! A Rust KV prototype, with the original fixed-size extraction spike retained for comparison.
 
 pub mod engine;
+pub mod radix;
 
 #[derive(Clone, Copy)]
 pub enum Map {
