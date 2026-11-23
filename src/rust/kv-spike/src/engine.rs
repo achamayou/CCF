@@ -87,7 +87,10 @@ impl<K, V> Assoc<K, V> {
 
 impl<K: Key, V> Assoc<K, V> {
     fn index(&self, key: &K) -> Option<usize> {
-        let mut i = 0;
+        self.index_from(key, 0)
+    }
+
+    fn index_from(&self, key: &K, mut i: usize) -> Option<usize> {
         while i < self.0.len() {
             if self.0[i].0.same(key) {
                 return Some(i);
@@ -95,6 +98,13 @@ impl<K: Key, V> Assoc<K, V> {
             i += 1;
         }
         None
+    }
+
+    fn get_ref(&self, key: &K) -> Option<&V> {
+        match self.index(key) {
+            Some(i) => Some(&self.0[i].1),
+            None => None,
+        }
     }
 }
 
@@ -121,12 +131,25 @@ impl<K: Key + Clone, V: Clone> Assoc<K, V> {
     }
 
     fn set(&mut self, key: K, value: V) {
-        if self.index(&key).is_some() {
-            self.replace_and_prepend(key, value);
+        if let Some(first) = self.index(&key) {
+            let end = first + 1;
+            if self.index_from(&key, end).is_some() {
+                self.replace_and_prepend(key, value);
+            } else {
+                self.rotate_replacement((key, value), end);
+            }
         } else if self.0.is_empty() {
             self.0.push((key, value));
         } else {
             self.0.insert(0, (key, value));
+        }
+    }
+
+    fn rotate_replacement(&mut self, mut carry: (K, V), end: usize) {
+        let mut i = 0;
+        while i < end {
+            core::mem::swap(&mut self.0[i], &mut carry);
+            i += 1;
         }
     }
 
@@ -549,11 +572,17 @@ impl Tx {
         Ok(Output::Acquired(revision.version, global_revision.version))
     }
 
-    fn observe(&mut self, a: &Address, view: &View, global: bool) -> Option<Bytes> {
+    fn observe(
+        pending: &Pending,
+        deps: &mut Vec<Dependency>,
+        a: &Address,
+        view: &View,
+        global: bool,
+    ) -> Option<Bytes> {
         if global {
             return cell_value(view.global.get(&a.key));
         }
-        if let Some(write) = self.pending.get(a) {
+        if let Some(write) = pending.get(a) {
             return match write {
                 Write::Put(v) => Some(v),
                 Write::Remove => None,
@@ -561,13 +590,12 @@ impl Tx {
         }
         let cell = view.local.get(&a.key);
         let value = cell_value(copy_cell(&cell));
-        self.deps.push(Dependency::Key(a.clone(), cell));
+        deps.push(Dependency::Key(a.clone(), cell));
         value
     }
 
-    fn scan(&mut self, map: &Bytes, view: &View) -> Entries {
-        self.deps
-            .push(Dependency::Map(map.clone(), view.local.clone()));
+    fn scan(pending: &Pending, deps: &mut Vec<Dependency>, map: &Bytes, view: &View) -> Entries {
+        deps.push(Dependency::Map(map.clone(), view.local.clone()));
         let mut rows = Assoc::new();
         let mut i = 0;
         while i < view.local.0.len() {
@@ -575,10 +603,10 @@ impl Tx {
             rows.0.push((row.0.clone(), row.1.value.clone()));
             i += 1;
         }
-        i = self.pending.0.len();
+        i = pending.0.len();
         while i > 0 {
             i -= 1;
-            let row = &self.pending.0[i];
+            let row = &pending.0[i];
             if row.0.map.same(map) {
                 match &row.1 {
                     Write::Put(v) => rows.set(row.0.key.clone(), v.clone()),
@@ -593,24 +621,30 @@ impl Tx {
         if !matches!(self.phase, Phase::Active) {
             return Err(Error::Disabled);
         }
-        let Some(view) = self.views.get(&map) else {
+        let Some(view) = self.views.get_ref(&map) else {
             return Err(Error::Disabled);
         };
         match op {
-            Operation::Get(key, global) => Ok(Output::Value(self.observe(
+            Operation::Get(key, global) => Ok(Output::Value(Self::observe(
+                &self.pending,
+                &mut self.deps,
                 &Address { map, key },
-                &view,
+                view,
                 global,
             ))),
             Operation::Has(key, global) => Ok(Output::Presence(
-                self.observe(&Address { map, key }, &view, global).is_some(),
+                Self::observe(
+                    &self.pending,
+                    &mut self.deps,
+                    &Address { map, key },
+                    view,
+                    global,
+                )
+                .is_some(),
             )),
             Operation::Previous(key) => {
                 let cell = view.local.get(&key);
-                let version = match &cell {
-                    Some(c) => Some(c.version),
-                    None => None,
-                };
+                let version = cell_version(&cell);
                 self.deps.push(Dependency::Key(Address { map, key }, cell));
                 Ok(Output::Previous(version))
             }
@@ -619,10 +653,17 @@ impl Tx {
                     .set(Address { map, key }, Write::from_option(value));
                 Ok(Output::Unit)
             }
-            Operation::Scan => Ok(Output::Entries(self.scan(&map, &view))),
-            Operation::Size => Ok(Output::Size(self.scan(&map, &view).len())),
+            Operation::Scan => Ok(Output::Entries(Self::scan(
+                &self.pending,
+                &mut self.deps,
+                &map,
+                view,
+            ))),
+            Operation::Size => Ok(Output::Size(
+                Self::scan(&self.pending, &mut self.deps, &map, view).len(),
+            )),
             Operation::Clear => {
-                let entries = self.scan(&map, &view);
+                let entries = Self::scan(&self.pending, &mut self.deps, &map, view);
                 let mut i = 0;
                 while i < entries.len() {
                     self.pending.set(
@@ -643,7 +684,7 @@ impl Tx {
                     }
                 }
                 Ok(Output::Entries(ordered_range(
-                    &self.scan(&map, &view),
+                    &Self::scan(&self.pending, &mut self.deps, &map, view),
                     &lower,
                     &upper,
                 )))
@@ -702,6 +743,13 @@ impl Tx {
 fn cell_value(cell: Option<Cell>) -> Option<Bytes> {
     match cell {
         Some(c) => Some(c.value),
+        None => None,
+    }
+}
+
+fn cell_version(cell: &Option<Cell>) -> Option<Version> {
+    match cell {
+        Some(c) => Some(c.version),
         None => None,
     }
 }

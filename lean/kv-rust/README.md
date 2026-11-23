@@ -127,3 +127,24 @@ The runs were ordered C++, Rust, Rust, C++.
 The C++ comparison harness times staging and reads through an acquired map handle; Rust goes through the public action dispatcher, which currently clones the pinned view per operation.
 The C++ local-apply path calls `apply_changes` with normal lock and version setup but without serialization or replication; Rust returns the full applied write set.
 These are microbenchmarks of the two current implementations and interfaces, not a measurement of replicated CCF throughput.
+
+### Matched CCF transaction interface
+
+The opt-in `kv_backend_bench` executable runs both backends through the same C++ transaction and map-handle workload with the same null encryptor and no consensus.
+Write commits include entry serialization.
+The logging mix performs seven reads per write, compacts after each write, and holds an older read snapshot.
+The governance mix performs a range read and updates two maps in each transaction.
+
+```sh
+cmake --build build --target kv_backend_bench
+taskset -c 2 build/kv_backend_bench cpp
+taskset -c 2 build/kv_backend_bench rust
+```
+
+On the host above, replacing the per-operation copy of the pinned view with a borrow reduced point reads in a 2,048-key map from 47.0-47.2 us to 3.72-4.17 us per read.
+C++ took 0.61-1.01 us per read across the matched runs.
+The logging mix improved from 75.4-90.3 us to 49.0-51.2 us per transaction, compared with 1.04-1.54 us in C++.
+These are ranges of two run medians, not confidence intervals.
+The next change replaces a single existing binding in place while retaining the original path for deduplicating repeated bindings.
+Together the copy-removal changes cut a commit replacing 2,048 entries from 301-303 ms to 58.7-59.1 ms, versus 0.79-0.89 ms for C++ in the final pair of runs.
+The remaining bulk cost includes linear lookup, moving vector rows, and copying the committed frame; the benchmark still does not cover replicated CCF.

@@ -51,3 +51,14 @@ target_link_libraries(
   PRIVATE "${KV_RUST_TEST_LIBRARY}" ${CMAKE_DL_LIBS} m ccf_kv http_parser
 )
 add_dependencies(kv_rust_interop_test cargo-build_kv_rust_test)
+
+add_test_bin(
+  kv_backend_bench
+  ${CCF_DIR}/src/kv/test/kv_backend_bench.cpp
+  ${CCF_DIR}/src/kv/test/rust_kv_commit.cpp
+)
+target_link_libraries(
+  kv_backend_bench
+  PRIVATE "${KV_RUST_TEST_LIBRARY}" ${CMAKE_DL_LIBS} m ccf_kv http_parser
+)
+add_dependencies(kv_backend_bench cargo-build_kv_rust_test)

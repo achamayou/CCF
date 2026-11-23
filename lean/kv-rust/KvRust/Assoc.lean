@@ -13,26 +13,35 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-/-- The extracted index search locates the same first binding as model lookup. -/
-theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
-    (rows : Spike.engine.Assoc K V) (key : K)
+private def AbsentBefore {K V : Type} (rows : List (K × V)) (key : K) (start stop : Nat)
+    : Prop :=
+  ∀ j (h : j < rows.length), start ≤ j → j < stop → rows[j].1 ≠ key
+
+private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+    (rows : Spike.engine.Assoc K V) (key : K) (start : Usize)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
-    : WP.spec (Spike.engine.Assoc.index eq rows key)
+    : WP.spec (Spike.engine.Assoc.index_from eq rows key start)
         (fun
-          | none => find rows.val key = none
+          | none => find (rows.val.drop start.val) key = none
           | some i =>
-              ∃ v, rows.val[i.val]? = some (key, v) ∧ find rows.val key = some v) := by
-  unfold Spike.engine.Assoc.index Spike.engine.Assoc.index_loop
+              ∃ v,
+                rows.val[i.val]? = some (key, v)
+                ∧ find (rows.val.drop start.val) key = some v
+                ∧ AbsentBefore rows.val key start.val i.val) := by
+  unfold Spike.engine.Assoc.index_from Spike.engine.Assoc.index_from_loop
   apply loop.spec_decr_nat
     (fun (p : Spike.engine.Assoc K V × Usize) => rows.val.length - p.2.val)
-    (fun p => p.1 = rows ∧ find (rows.val.drop p.2.val) key = find rows.val key)
+    (fun p =>
+      p.1 = rows
+      ∧ find (rows.val.drop p.2.val) key = find (rows.val.drop start.val) key
+      ∧ AbsentBefore rows.val key start.val p.2.val)
     _ _ _
-  · rintro ⟨xs, i⟩ ⟨hrows, hinv⟩
-    dsimp only at hrows hinv ⊢
+  · rintro ⟨xs, i⟩ ⟨hrows, hinv, habsent⟩
+    dsimp only at hrows hinv habsent ⊢
     subst xs
     have hlen := alloc.vec.Vec.len_ineq rows
     have hone : (1#usize : Usize).val = 1 := rfl
-    unfold Spike.engine.Assoc.index_loop.body
+    unfold Spike.engine.Assoc.index_from_loop.body
     have hlenval : (alloc.vec.Vec.len rows).val = rows.val.length :=
       alloc.vec.Vec.len_val rows
     by_cases h : i.val < rows.val.length
@@ -55,7 +64,7 @@ theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
       by_cases hk : k = key
       · subst k
         simp only [decide_true, ite_true, WP.spec_ok]
-        refine ⟨v, ?_, ?_⟩
+        refine ⟨v, ?_, ?_, habsent⟩
         · rw [List.getElem?_eq_getElem h, ← hrow]
         · rw [← hinv, hdrop, ← hrow]
           simp [find]
@@ -63,10 +72,18 @@ theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
         apply WP.spec_bind (Usize.add_spec hnext)
         intro next hnextval
         simp only [WP.spec_ok]
-        refine ⟨⟨True.intro, ?_⟩, ?_⟩
+        refine ⟨⟨True.intro, ?_, ?_⟩, ?_⟩
         · have hidx : next.val = i.val + 1 := by omega
           rw [hidx, ← hinv, hdrop, ← hrow]
           simp [find, hk]
+        · intro j hj hlo hhi
+          have hidx : next.val = i.val + 1 := by omega
+          by_cases hji : j < i.val
+          · exact habsent j hj hlo hji
+          · have he : j = i.val := by omega
+            subst j
+            rw [← hrow]
+            exact hk
         · omega
     · have hb : ¬i < alloc.vec.Vec.len rows := by
         change ¬i.val < (alloc.vec.Vec.len rows).val
@@ -74,7 +91,38 @@ theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
       rw [ite_eq_right hb, WP.spec_ok]
       rw [← hinv, List.drop_eq_nil_of_le (Nat.le_of_not_gt h)]
       rfl
-  · simp
+  · exact ⟨rfl, rfl, fun _ _ hlo hhi => False.elim (Nat.not_lt_of_ge hlo hhi)⟩
+
+/-- The extracted index search locates the same first binding as model lookup. -/
+theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+    (rows : Spike.engine.Assoc K V) (key : K)
+    (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
+    : WP.spec (Spike.engine.Assoc.index eq rows key)
+        (fun
+          | none => find rows.val key = none
+          | some i =>
+              ∃ v, rows.val[i.val]? = some (key, v) ∧ find rows.val key = some v) := by
+  unfold Spike.engine.Assoc.index
+  apply WP.spec_mono (assoc_index_from eq rows key 0#usize heq)
+  intro found h
+  cases found with
+  | none => simpa using h
+  | some i =>
+      obtain ⟨v, hrow, hfind, _⟩ := h
+      exact ⟨v, hrow, by simpa using hfind⟩
+
+/-- Borrowed lookup returns the first model binding without cloning it. -/
+theorem assoc_get_ref {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+    (rows : Spike.engine.Assoc K V) (key : K)
+    (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
+    : WP.spec (Spike.engine.Assoc.get_ref eq rows key)
+        (fun r => r = find rows.val key) := by
+  unfold Spike.engine.Assoc.get_ref
+  apply WP.spec_bind (assoc_index eq rows key heq)
+  rintro (_ | i) h
+  · simpa using h.symm
+  · obtain ⟨v, hget, hfind⟩ := h
+    simp [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize, hget, hfind]
 
 /-- An extracted lookup returns the first model binding for any finite association list. -/
 theorem assoc_get {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
@@ -217,6 +265,84 @@ private theorem erase_missing {K V : Type} [DecidableEq K]
         simp [erase, he] at hp ⊢
         exact hp
 
+private theorem erase_take {K V : Type} [DecidableEq K] (rows : List (K × V))
+    (key : K) (i : Nat) (absent : AbsentBefore rows key 0 i)
+    : erase (rows.take i) key = rows.take i := by
+  apply List.filter_eq_self.mpr
+  intro row hmem
+  obtain ⟨j, hj, hr⟩ := List.mem_take_iff_getElem.mp hmem
+  have hbound : j < rows.length := by omega
+  subst row
+  have hne := absent j hbound (Nat.zero_le _) (by omega)
+  simp [hne]
+
+private theorem rotate_replacement {K V : Type} (eq : Spike.engine.Key K)
+    (ck : core.clone.Clone K) (cv : core.clone.Clone V)
+    (rows : Spike.engine.Assoc K V) (row : K × V) (stop : Usize)
+    (hstop : stop.val ≤ rows.val.length)
+    : WP.spec (Spike.engine.Assoc.rotate_replacement eq ck cv rows row stop)
+        (fun r => r.val = (row :: rows.val).take stop.val ++ rows.val.drop stop.val) := by
+  unfold Spike.engine.Assoc.rotate_replacement Spike.engine.Assoc.rotate_replacement_loop
+  let seq := row :: rows.val
+  apply loop.spec_decr_nat
+    (fun (p : Spike.engine.Assoc K V × (K × V) × Usize) => stop.val - p.2.2.val)
+    (fun (cur, carried, i) =>
+      i.val ≤ stop.val
+      ∧ cur.val = seq.take i.val ++ rows.val.drop i.val
+      ∧ seq[i.val]? = some carried)
+    _ _ _
+  · rintro ⟨cur, carried, i⟩ ⟨hi, hcur, hcarry⟩
+    dsimp only at hi hcur hcarry ⊢
+    unfold Spike.engine.Assoc.rotate_replacement_loop.body
+    by_cases go : i < stop
+    · have go' : i.val < stop.val := go
+      have hb : i.val < rows.val.length := by omega
+      have hseq : i.val < seq.length := by simp [seq]; omega
+      have hlen : (seq.take i.val).length = i.val := by
+        simp [List.length_take, Nat.min_eq_left (by omega : i.val ≤ seq.length)]
+      have hdrop : rows.val.drop i.val = rows.val[i.val] :: rows.val.drop (i.val + 1) :=
+        List.drop_eq_getElem_cons hb
+      have hcurLen : i.val < cur.val.length := by
+        rw [hcur, List.length_append, hlen, hdrop]
+        simp [hb]
+      rw [ite_eq_left go, alloc.vec.Vec.index_mut_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec cur i hcurLen)
+      rintro ⟨item, back⟩ hback
+      have hpos : cur.val[i.val]? = some rows.val[i.val] := by
+        rw [hcur, List.getElem?_append_right (by omega), hlen, Nat.sub_self, hdrop]
+        rfl
+      have hitem : item = rows.val[i.val] := by
+        rw [List.getElem?_eq_getElem hcurLen] at hpos
+        exact hback.1.trans (Option.some.inj hpos)
+      have hcap := alloc.vec.Vec.len_ineq rows
+      have hone : (1#usize : Usize).val = 1 := rfl
+      have hplus : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
+      simp only [core.mem.swap]
+      apply WP.spec_bind (Usize.add_spec hplus)
+      intro j hj
+      have hj' : j.val = i.val + 1 := by omega
+      simp only [WP.spec_ok]
+      refine ⟨⟨by omega, ?_, ?_⟩, by omega⟩
+      · rw [hback.2, alloc.vec.Vec.set_val_eq, hcur, hj',
+          List.take_succ_eq_append_getElem hseq, List.set_append_right _ _ (by omega),
+          hlen, Nat.sub_self]
+        have hc : seq[i.val] = carried := by
+          simpa only [List.getElem?_eq_getElem hseq, Option.some.injEq] using hcarry
+        simp only [hc, List.append_assoc]
+        change (seq.take i.val) ++ (rows.val.drop i.val).set 0 carried =
+          (seq.take i.val) ++ carried :: rows.val.drop (i.val + 1)
+        rw (occs := .pos [1]) [hdrop]
+        rfl
+      · rw [hj', hitem]
+        simpa only [seq, List.getElem?_cons_succ]
+          using (List.getElem?_eq_getElem hb : rows.val[i.val]? = some rows.val[i.val])
+    · have he : i.val = stop.val := by
+        change ¬i.val < stop.val at go
+        omega
+      rw [ite_eq_right go, WP.spec_ok]
+      simpa only [he] using hcur
+  · simp [seq]
+
 /-- Set prepends the new binding and removes all older bindings for that key.
 A fresh key can be inserted without copying the existing values. -/
 theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
@@ -227,13 +353,50 @@ theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
     (hcap : rows.val.length < Usize.max)
     : WP.spec (Spike.engine.Assoc.set eq ck cv rows key value)
         (fun r => r.val = Kv.Model.set rows.val key value) := by
-  unfold Spike.engine.Assoc.set
-  apply WP.spec_bind (assoc_index eq rows key heq)
+  unfold Spike.engine.Assoc.set Spike.engine.Assoc.index
+  apply WP.spec_bind (assoc_index_from eq rows key 0#usize heq)
   intro found hf
   cases found with
-  | some i => exact assoc_replace eq ck cv rows key value heq hck hcv hcap
+  | some i =>
+      obtain ⟨old, hrow, _, hpre⟩ := hf
+      obtain ⟨hi, hget⟩ := List.getElem?_eq_some_iff.mp hrow
+      have hone : (1#usize : Usize).val = 1 := rfl
+      have hinc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
+      apply WP.spec_bind (Usize.add_spec hinc)
+      intro stop hs
+      have hstop : stop.val = i.val + 1 := by omega
+      apply WP.spec_bind (assoc_index_from eq rows key stop heq)
+      intro rest hr
+      cases rest with
+      | some _ =>
+          simpa [core.option.Option.is_some]
+            using assoc_replace eq ck cv rows key value heq hck hcv hcap
+      | none =>
+          simp only [core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true, ite_false]
+          apply WP.spec_mono
+            (rotate_replacement eq ck cv rows (key, value) stop (by omega))
+          intro out ho
+          have hp := erase_take rows.val key i.val hpre
+          have ht := erase_missing (rows.val.drop stop.val) key hr
+          have hsplit : rows.val = rows.val.take i.val ++ (key, old) :: rows.val.drop stop.val := by
+            have e := List.take_append_drop i.val rows.val
+            rw [List.drop_eq_getElem_cons hi, hget, ← hstop] at e
+            exact e.symm
+          have herase : erase rows.val key = rows.val.take i.val ++ rows.val.drop stop.val := by
+            calc
+              erase rows.val key
+                  = erase (rows.val.take i.val ++ (key, old) :: rows.val.drop stop.val)
+                      key :=
+                congrArg (fun rows => erase rows key) hsplit
+              _ = _ := by
+                unfold Kv.Model.erase
+                rw [List.filter_append]
+                simp only [List.filter_cons, bne_self_eq_false, Bool.false_eq_true, ite_false]
+                exact congrArg₂ List.append hp ht
+          rw [ho, hstop, List.take_succ_cons, ← hstop, Kv.Model.set, herase]
+          rfl
   | none =>
-      change find rows.val key = none at hf
+      have hf : find rows.val key = none := by simpa using hf
       have he := erase_missing rows.val key hf
       change WP.spec (do
         let b ← alloc.vec.Vec.is_empty rows

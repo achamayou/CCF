@@ -229,8 +229,9 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
     (hDeps : pointDeps encode t = tx.normal.deps)
     (room : t.deps.val.length < Usize.max)
     (rowsRoom : view.local.val.length + t.pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.scan t m view)
-        (fun (rows, next) =>
+    : WP.spec (Spike.engine.Tx.scan t.pending t.deps m view)
+        (fun (rows, deps) =>
+          let next := {t with deps}
           modelEntries encode rows
             = scanAt tx.data tx.normal.writes (encode (alloc.vec.Vec.val m))
           ∧ pointWrites encode next = tx.normal.writes
@@ -238,8 +239,6 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
             = .map (encode (alloc.vec.Vec.val m))
                 (image tx.data (encode (alloc.vec.Vec.val m)))
               :: tx.normal.deps
-          ∧ pointKeepsContext t next
-          ∧ next.pending = t.pending
           ∧ rows.val.length ≤ view.local.val.length + t.pending.val.length) := by
   simp only [Spike.engine.Tx.scan, clone_bytes, clone_assoc, Spike.engine.Assoc.new, bind_ok]
   apply WP.spec_bind (deps_push encode t (.Map m view.local) room)
@@ -263,8 +262,6 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
     by simpa [scanAt, hbase, map_writes_proj encode inj m t, hWrites] using ho.1,
     hWrites,
     hdep,
-    rfl,
-    rfl,
     by simpa [hlen] using ho.2
   ⟩
 
@@ -274,28 +271,27 @@ private def removeEntry (m : String) (ws : Pending) (row : String × String) : P
 private theorem clear_rows (encode : List U8 → String) (inj : Function.Injective encode)
     (t : Spike.engine.Tx) (m : Bytes) (entries : Entries)
     (room : t.pending.val.length + entries.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.operate_loop t m entries 0#usize)
+    : WP.spec (Spike.engine.Tx.operate_loop t.pending m entries 0#usize)
         (fun next =>
-          pointWrites encode next
-            = (modelEntries encode entries).foldl
-                (removeEntry (encode (alloc.vec.Vec.val m))) (pointWrites encode t)
-          ∧ next = {t with pending := next.pending}) := by
+          pointWrites encode {t with pending := next}
+          = (modelEntries encode entries).foldl
+              (removeEntry (encode (alloc.vec.Vec.val m))) (pointWrites encode t)) := by
   let project := fun (p : Bytes × Bytes) =>
     (encode (alloc.vec.Vec.val p.1), encode (alloc.vec.Vec.val p.2))
-  let remaining := fun (s : Spike.engine.Tx) (i : Nat) =>
+  let remaining := fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write)) (i : Nat) =>
     ((entries.val.drop i).map project).foldl (removeEntry (encode (alloc.vec.Vec.val m)))
-      (pointWrites encode s)
+      (pointWrites encode {t with pending := p})
   unfold Spike.engine.Tx.operate_loop
   apply loop.spec_decr_nat
-    (fun (p : Spike.engine.Tx × Usize) => entries.val.length - p.2.val)
+    (fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write) × Usize) =>
+      entries.val.length - p.2.val)
     (fun (s, i) =>
       i.val ≤ entries.val.length
-      ∧ s.pending.val.length + (entries.val.length - i.val) ≤ Usize.max
-      ∧ remaining s i.val = remaining t 0
-      ∧ s = {t with pending := s.pending})
+      ∧ s.val.length + (entries.val.length - i.val) ≤ Usize.max
+      ∧ remaining s i.val = remaining t.pending 0)
     _ _ _
-  · rintro ⟨s, i⟩ ⟨hi, hsize, hs, he⟩
-    dsimp only at hi hsize hs he ⊢
+  · rintro ⟨s, i⟩ ⟨hi, hsize, hs⟩
+    dsimp only at hi hsize hs ⊢
     unfold Spike.engine.Tx.operate_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq entries
@@ -309,34 +305,34 @@ private theorem clear_rows (encode : List U8 → String) (inj : Function.Injecti
         let key' ← Spike.engine.Bytes.Insts.CoreCloneClone.clone key
         let pending ← Spike.engine.Assoc.set Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey
           Spike.engine.Address.Insts.CoreCloneClone Spike.engine.Write.Insts.CoreCloneClone
-          s.pending {map := m, key := key'} .Remove
+          s {map := m, key := key'} .Remove
         let j ← i + 1#usize
-        Result.ok (ControlFlow.cont ({s with pending}, j))) _
+        Result.ok (ControlFlow.cont (pending, j))) _
       simp only [clone_bytes, bind_ok]
-      apply WP.spec_bind (stage_write_bounded encode inj s {map := m, key} .Remove (by omega))
+      have hroom : s.val.length < Usize.max := by omega
+      apply WP.spec_bind
+        (stage_write_bounded encode inj {t with pending := s} {map := m, key} .Remove hroom)
       intro pending hp
       apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
       intro j hj
       have hj' : j.val = i.val + 1 := by omega
       have hdrop : entries.val.drop i.val = (key, value) :: entries.val.drop j.val := by
         rw [hj', List.drop_eq_getElem_cons hb, ← hr]
-      have hpBound := hp.2
+      have hpBound : pending.val.length ≤ s.val.length + 1 := hp.2
       rw [WP.spec_ok]
-      have hFold : remaining {s with pending} j.val = remaining t 0 := by
+      have hFold : remaining pending j.val = remaining t.pending 0 := by
         simp only [remaining, hdrop, List.map_cons, List.foldl_cons] at hs
         unfold remaining
-        rw [hp.1]
+        rw [show ({t with pending} : Spike.engine.Tx) =
+          {({t with pending := s} : Spike.engine.Tx) with pending} from rfl, hp.1]
         exact hs
-      have hctx : {s with pending} = {t with pending} :=
-        congrArg (fun old : Spike.engine.Tx => {old with pending}) he
       exact ⟨⟨show j.val ≤ entries.val.length by omega,
         show pending.val.length + (entries.val.length - j.val) ≤ Usize.max by omega,
-        hFold, hctx⟩, show entries.val.length - j.val < entries.val.length - i.val by omega⟩
+        hFold⟩, show entries.val.length - j.val < entries.val.length - i.val by omega⟩
     · have hb : entries.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
       rw [ite_eq_right h, WP.spec_ok]
-      exact ⟨by
-        simpa only [remaining, modelEntries, project, List.drop_zero, List.drop_eq_nil_of_le hb,
-          List.map_nil, List.foldl_nil] using hs, he⟩
+      simpa only [remaining, modelEntries, project, List.drop_zero, List.drop_eq_nil_of_le hb,
+        List.map_nil, List.foldl_nil] using hs
   · simp [room]
 
 private theorem clear_reference (entries : Assoc String String) (t : Tx) (m : String)
@@ -508,48 +504,49 @@ theorem operate_scan_matches_model (encode : List U8 → String)
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>
-          simp only [ScanOperation.rust, hActive]
+          simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, next⟩ ⟨hr, hw, hd, hc, _, _⟩
-          simp [executeOperation, ScanOperation.model, recordOp, stage, needs, scanOutput, hr, hw, hd, hc]
+          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
+          rw [← hPhase]
+          simp [executeOperation, ScanOperation.model, recordOp, stage, needs, scanOutput,
+            hr, hw, hd, pointKeepsContext]
       | size =>
-          simp only [ScanOperation.rust, hActive]
+          simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, next⟩ ⟨hr, hw, hd, hc, _, _⟩
+          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
           have hcount : rows.val.length = visible.length := by
             simpa [modelEntries] using congrArg List.length hr
+          rw [← hPhase]
           simp [executeOperation, ScanOperation.model, recordOp, stage, needs, scanOutput, hcount,
-            visible, mapName, hw, hd, hc]
+            visible, mapName, hw, hd, pointKeepsContext]
       | clear =>
-          simp only [ScanOperation.rust, hActive]
+          simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, next⟩ ⟨hr, hw, hd, hc, hPending, _⟩
+          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
           have hcount : rows.val.length = visible.length := by
             simpa [modelEntries] using congrArg List.length hr
-          have hspace : next.pending.val.length + rows.val.length ≤ Usize.max := by
-            rw [hPending, hcount]
+          have hspace : t.pending.val.length + rows.val.length ≤ Usize.max := by
+            rw [hcount]
             exact clearRoom rfl
           change WP.spec (do
-            let out ← Spike.engine.Tx.operate_loop next m rows 0#usize
-            Result.ok (core.result.Result.Ok Spike.engine.Output.Unit, out)) _
-          apply WP.spec_bind (clear_rows encode inj next m rows hspace)
-          intro out ho
+            let pending ← Spike.engine.Tx.operate_loop t.pending m rows 0#usize
+            Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
+              {t with pending, deps, phase := .Active})) _
+          apply WP.spec_bind (clear_rows encode inj t m rows hspace)
+          intro pending ho
+          let out : Spike.engine.Tx := {t with pending, deps, phase := .Active}
           have hcontext : pointKeepsContext t out := by
-            unfold pointKeepsContext at hc ⊢
-            rw [ho.2]
-            exact hc
-          have hRead : pointDeps encode out = pointDeps encode next := by
-            rw [ho.2]
-            rfl
+            simp [out, pointKeepsContext, ← hPhase]
           have hclear := clear_reference visible
             {tx with normal := recordOp tx.data tx.normal (.scan mapName visible)} mapName
           have hw'
               : pointWrites encode out
                 = visible.foldl (removeEntry mapName) tx.normal.writes := by
-            rw [ho.1, hw]
+            change pointWrites encode {t with pending} = _
+            rw [ho, show pointWrites encode t = tx.normal.writes from hw]
             exact congrArg
               (fun entries => entries.foldl (removeEntry mapName) tx.normal.writes) hr
-          have hd' := hRead.trans hd
+          have hd' : pointDeps encode out = _ := hd
           rw [WP.spec_ok]
           exact ⟨rfl, hw'.trans hclear.1.symm, hd'.trans hclear.2.symm, hcontext⟩
       | range lower upper =>
@@ -562,9 +559,10 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               : Result
                   (core.result.Result Spike.engine.Output Spike.engine.Error
                     × Spike.engine.Tx) := do
-            let (rows, next) ← Spike.engine.Tx.scan t m native
+            let (rows, deps) ← Spike.engine.Tx.scan t.pending t.deps m native
             let filtered ← Spike.engine.ordered_range rows lower upper
-            Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered), next)
+            Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
+              {t with deps, phase := .Active})
           have go
               (hEmpty
                 : ¬emptyRange (encodeBound encode lower) (encodeBound encode upper)
@@ -572,23 +570,26 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               : WP.spec nonemptyScan post := by
             unfold nonemptyScan
             apply WP.spec_bind hscan
-            rintro ⟨rows, next⟩ ⟨hr, hw, hd, hc, _, _⟩
+            rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
             have hUnique : Kv.Properties.Unique (encodeEntries encode rows) := by
               change Kv.Properties.Unique (modelEntries encode rows)
               rw [hr]
               exact unique_scan tx.data tx.normal.writes mapName unique
             change WP.spec (do
               let filtered ← Spike.engine.ordered_range rows lower upper
-              Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered), next)) post
+              Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
+                {t with deps, phase := .Active})) post
             apply WP.spec_bind (ordered_range order rows lower upper hUnique)
             intro filtered hfiltered
             change modelEntries encode filtered = _ at hfiltered
             have hf : encodeEntries encode rows = visible := hr
             rw [hf] at hfiltered
+            rw [← hPhase]
             simp [post, outRef, executeOperation, hEmpty, scanOutput, hfiltered, recordOp,
-              stage, needs, hw, hd, hc, visible, mapName]
+              stage, needs, hw, hd, pointKeepsContext,
+              visible, mapName]
           change WP.spec _ post
-          simp only [ScanOperation.rust, hActive]
+          simp only [ScanOperation.rust]
           cases lower with
           | none =>
               exact go (by simp [encodeBound, emptyRange])
@@ -603,6 +604,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
                       (encodeBound encode (some hi))
                     = true
                   · have hp : cmp ≥ 0#i8 := of_decide_eq_true (hcmp.trans he)
+                    rw [← hPhase]
                     simp [hp, post, outRef, executeOperation, he, scanOutput, modelEntries, hWrites,
                       hDeps, pointKeepsContext]
                   · have hp : ¬cmp ≥ 0#i8 :=
