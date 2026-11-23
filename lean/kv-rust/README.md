@@ -232,4 +232,6 @@ With 2,048 variable-length keys, one old root, and a 32-root recent window, four
 The p99 of a complete mutation fell from 19.7-20.6 us to 1.63-1.89 us in those runs.
 The count-based variant used 914 allocated directory slots versus 1,472, and 4,112 allocated row slots versus 4,127, excluding its count arrays and scratch storage.
 The budget limits slots processed, not wall-clock latency or queue growth for all traces.
-This prototype does not yet have an extracted liveness proof and is not used by the transaction backend.
+The benchmark uses the extracted `recycle_slot` primitive.
+[`RadixLiveness`](KvRust/RadixLiveness.lean) proves that recycling preserves every retained root and its values when the selected slot has no incoming links or pins.
+The proof of reference accounting and the retirement queue is still open, and retirement is not used by the transaction backend.

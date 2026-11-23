@@ -118,6 +118,18 @@ pub fn allocate<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<usize>, value: T) 
     }
 }
 
+/// Return an unreachable live slot to the free list. The caller must establish
+/// that no retained root or other live slot refers to this slot.
+#[inline]
+pub fn recycle_slot<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<usize>, index: usize) -> T {
+    let value = match slots[index].take() {
+        Some(value) => value,
+        None => panic!("recycling a vacant radix slot"),
+    };
+    free.push(index);
+    value
+}
+
 fn directory(dirs: &[Option<RadixDir>], link: u32) -> &RadixDir {
     let index = (link - 1) as usize;
     match &dirs[index] {

@@ -546,6 +546,56 @@ theorem radix_allocate_matches {T : Type} (slots : alloc.vec.Vec (Option T))
       rwa [alloc.vec.Vec.set_val_eq, List.getElem?_set_ne hne]
     · exact fun _ different => List.getElem?_set_ne (Ne.symm different)
 
+/-- Recycling clears exactly the selected slot and adds it to the free list.
+The caller establishes liveness separately. -/
+theorem radix_recycle_slot_matches {T : Type} (slots : alloc.vec.Vec (Option T))
+    (free : alloc.vec.Vec Usize) (index : Usize) (old : T)
+    (live : slots.val[index.val]? = some (some old)) (vacant : RadixFree slots free)
+    (room : free.val.length < Usize.max)
+    : WP.spec (Spike.radix.recycle_slot slots free index)
+        (fun (removed, next, avail) =>
+          removed = old
+          ∧ next.val[index.val]? = some none
+          ∧ avail.val = free.val ++ [index]
+          ∧ RadixFree next avail
+          ∧ ∀ j : Nat, j ≠ index.val → next.val[j]? = slots.val[j]?) := by
+  have hb : index.val < slots.val.length := by
+    by_contra hn
+    simp [Nat.le_of_not_gt hn] at live
+  have notFree : index ∉ free.val := by
+    intro hm
+    have bad := vacant.2 index hm
+    rw [live] at bad
+    cases bad
+  unfold Spike.radix.recycle_slot
+  rw [alloc.vec.Vec.index_mut_slice_index]
+  apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec slots index hb)
+  rintro ⟨entry, back⟩ ⟨he, hback⟩
+  rw [List.getElem?_eq_getElem hb, ← he, Option.some.injEq] at live
+  subst entry
+  simp only [core.option.Option.take]
+  apply WP.spec_bind (alloc.vec.Vec.push_spec free index room)
+  intro avail appended
+  simp only [WP.spec_ok, hback, alloc.vec.Vec.set_val_eq]
+  refine ⟨trivial, List.getElem?_set_self hb, appended, ?_, ?_⟩
+  · rw [RadixFree, appended]
+    constructor
+    · rw [List.nodup_append]
+      refine ⟨vacant.1, List.nodup_singleton _, ?_⟩
+      intro i hi j hj same
+      exact notFree ((same.trans (List.mem_singleton.mp hj)) ▸ hi)
+    · intro i hi
+      rcases List.mem_append.mp hi with previous | newest
+      · have hne : index.val ≠ i.val :=
+          fun eq => notFree (UScalar.eq_of_val_eq eq ▸ previous)
+        rw [alloc.vec.Vec.set_val_eq, List.getElem?_set_ne hne]
+        exact vacant.2 i previous
+      · have eq := List.mem_singleton.mp newest
+        subst i
+        rw [alloc.vec.Vec.set_val_eq]
+        exact List.getElem?_set_self hb
+  · exact fun _ different => List.getElem?_set_ne (Ne.symm different)
+
 /-- Allocating new directories cannot invalidate an existing root whose live
 slots are preserved. The new root is verified separately. -/
 theorem radix_tree_preserved

@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 License.
 
 use super::{ByteIndex, Link, NibbleRadix, Value};
-use ccf_kv_spike::radix::{RadixDir, link_at};
+use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -86,13 +86,9 @@ impl Arena {
             assert_eq!(*self.count(link), 0);
             let i = link.index();
             if link.leaf() {
-                self.tree.rows.slots[i].take().expect("live retired row");
-                self.tree.rows.free.push(i);
+                recycle_slot(&mut self.tree.rows.slots, &mut self.tree.rows.free, i);
             } else {
-                let dir = self.tree.dirs.slots[i]
-                    .take()
-                    .expect("live retired directory");
-                self.tree.dirs.free.push(i);
+                let dir = recycle_slot(&mut self.tree.dirs.slots, &mut self.tree.dirs.free, i);
                 for child in children(dir) {
                     self.drop_ref(child);
                 }
