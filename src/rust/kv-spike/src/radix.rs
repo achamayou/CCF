@@ -217,6 +217,82 @@ pub fn remove<V>(
     rebuild_path(dirs, free, path, 0)
 }
 
+fn representative(dirs: &[Option<RadixDir>], mut node: u32, key: &[u8]) -> u32 {
+    while node < RADIX_LEAF_TAG {
+        let dir = directory(dirs, node);
+        let child = dir.children[symbol(key, dir.digit)];
+        if child == 0 {
+            return dir.first;
+        }
+        node = child;
+    }
+    node
+}
+
+struct InsertionSplit {
+    digit: usize,
+    old_slot: usize,
+    new_slot: usize,
+}
+
+fn prepare_insert<V>(
+    dirs: &[Option<RadixDir>],
+    rows: &[Option<RadixRow<V>>],
+    path: &mut Vec<(u32, usize)>,
+    root: u32,
+    key: &[u8],
+) -> (u32, Option<InsertionSplit>) {
+    let previous = row_at(rows, representative(dirs, root, key));
+    let difference = first_difference(&previous.key, key);
+    let stem = record_path(dirs, path, root, key, difference);
+    let split = match difference {
+        None => None,
+        Some(digit) => Some(InsertionSplit {
+            digit,
+            old_slot: symbol(&previous.key, digit),
+            new_slot: symbol(key, digit),
+        }),
+    };
+    (stem, split)
+}
+
+fn split_directory(dirs: &[Option<RadixDir>], stem: u32, split: &InsertionSplit) -> RadixDir {
+    if stem < RADIX_LEAF_TAG {
+        let existing = directory(dirs, stem);
+        if existing.digit == split.digit {
+            return *existing;
+        }
+    }
+    let mut dir = RadixDir::empty(split.digit);
+    dir.set_child(split.old_slot, stem);
+    dir
+}
+
+pub fn put<V>(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free_dirs: &mut Vec<usize>,
+    rows: &mut Vec<Option<RadixRow<V>>>,
+    free_rows: &mut Vec<usize>,
+    path: &mut Vec<(u32, usize)>,
+    root: u32,
+    row: RadixRow<V>,
+) -> u32 {
+    if root == 0 {
+        return link_at(allocate(rows, free_rows, row), true);
+    }
+    let (stem, split) = prepare_insert(dirs, rows, path, root, &row.key);
+    let leaf = link_at(allocate(rows, free_rows, row), true);
+    let child = match split {
+        None => leaf,
+        Some(split) => {
+            let mut dir = split_directory(dirs, stem, &split);
+            dir.set_child(split.new_slot, leaf);
+            add_directory(dirs, free_dirs, dir)
+        }
+    };
+    rebuild_path(dirs, free_dirs, path, child)
+}
+
 /// Follow directory links until either a leaf or a missing child is reached.
 /// The caller owns the arena and keeps all directories reachable from `root` live.
 #[inline]
@@ -245,12 +321,16 @@ pub fn get<'a, V>(
     check_leaf(rows, leaf, key)
 }
 
-fn check_leaf<'a, V>(rows: &'a [Option<RadixRow<V>>], leaf: u32, key: &[u8]) -> Option<&'a V> {
+fn row_at<V>(rows: &[Option<RadixRow<V>>], leaf: u32) -> &RadixRow<V> {
     let index = (leaf - RADIX_LEAF_TAG - 1) as usize;
-    let row = match &rows[index] {
+    match &rows[index] {
         Some(row) => row,
         None => panic!("missing radix row"),
-    };
+    }
+}
+
+fn check_leaf<'a, V>(rows: &'a [Option<RadixRow<V>>], leaf: u32, key: &[u8]) -> Option<&'a V> {
+    let row = row_at(rows, leaf);
     if <[u8]>::eq(&row.key, key) {
         Some(&row.value)
     } else {
@@ -363,5 +443,42 @@ mod tests {
         let absent = remove(&mut dirs, &mut free, &rows, &mut path, new, &[0x12]);
         assert_eq!(absent, new);
         assert_eq!(dirs.len(), 3);
+    }
+
+    #[test]
+    fn insertion_preserves_empty_prefixes_and_branches() {
+        let mut dirs = Vec::new();
+        let mut free_dirs = Vec::new();
+        let mut rows = Vec::new();
+        let mut free_rows = Vec::new();
+        let mut path = Vec::new();
+        let mut insert = |root, key: &[u8], value| {
+            put(
+                &mut dirs,
+                &mut free_dirs,
+                &mut rows,
+                &mut free_rows,
+                &mut path,
+                root,
+                RadixRow {
+                    key: key.into(),
+                    value,
+                },
+            )
+        };
+        let empty = insert(0, &[], 1);
+        let prefix = insert(empty, &[0], 2);
+        let extended = insert(prefix, &[0, 0], 3);
+        let wide = insert(extended, &[255], 4);
+        let newer = insert(wide, &[0], 5);
+        let fork = insert(prefix, &[0, 255], 6);
+        assert_eq!(get(&dirs, &rows, empty, &[0]), None);
+        assert_eq!(get(&dirs, &rows, wide, &[]), Some(&1));
+        assert_eq!(get(&dirs, &rows, wide, &[0]), Some(&2));
+        assert_eq!(get(&dirs, &rows, newer, &[0]), Some(&5));
+        assert_eq!(get(&dirs, &rows, newer, &[0, 0]), Some(&3));
+        assert_eq!(get(&dirs, &rows, fork, &[0, 0]), None);
+        assert_eq!(get(&dirs, &rows, fork, &[0, 255]), Some(&6));
+        assert_eq!(get(&dirs, &rows, fork, &[255]), None);
     }
 }

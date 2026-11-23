@@ -3,19 +3,12 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{
-    RADIX_LEAF_TAG as LEAF, RadixDir, add_directory, first_difference, get, link_at, rebuild_path,
-    record_path, remove, symbol,
-};
+use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, get, put, remove};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
 
 impl Link {
-    fn new(index: usize, leaf: bool) -> Self {
-        Self(link_at(index, leaf))
-    }
-
     fn empty(self) -> bool {
         self.0 == 0
     }
@@ -54,35 +47,6 @@ impl NibbleRadix {
             Link(self.dirs.get(node.index()).first)
         }
     }
-
-    fn closest(&self, mut node: Link, key: &[u8]) -> Link {
-        while !node.leaf() {
-            let dir = self.dirs.get(node.index());
-            let child = dir.child(symbol(key, dir.digit));
-            if child.empty() {
-                return Link(dir.first);
-            }
-            node = child;
-        }
-        node
-    }
-
-    fn add_dir(&mut self, dir: RadixDir) -> Link {
-        Link(add_directory(
-            &mut self.dirs.slots,
-            &mut self.dirs.free,
-            dir,
-        ))
-    }
-
-    fn rebuild(&mut self, child: Link) -> Link {
-        Link(rebuild_path(
-            &mut self.dirs.slots,
-            &mut self.dirs.free,
-            &self.path,
-            child.0,
-        ))
-    }
 }
 
 impl ByteIndex for NibbleRadix {
@@ -93,40 +57,18 @@ impl ByteIndex for NibbleRadix {
     }
 
     fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
-        let leaf = Link::new(
-            self.rows.add(Row {
-                key: key.into(),
-                value,
-            }),
-            true,
-        );
-        if root.empty() {
-            return leaf;
-        }
-        let old = &self.rows.get(self.closest(root, key).index()).key;
-        let diff = first_difference(old, key);
-        let old_sym = diff.map(|at| symbol(old, at));
-        let stem = Link(record_path(
-            self.dirs.as_slice(),
+        Link(put(
+            &mut self.dirs.slots,
+            &mut self.dirs.free,
+            &mut self.rows.slots,
+            &mut self.rows.free,
             &mut self.path,
             root.0,
-            key,
-            diff,
-        ));
-        let next = if let Some(at) = diff {
-            let mut dir = if !stem.leaf() && self.dirs.get(stem.index()).digit == at {
-                *self.dirs.get(stem.index())
-            } else {
-                let mut dir = RadixDir::empty(at);
-                dir.set_child(old_sym.unwrap(), stem.0);
-                dir
-            };
-            dir.set_child(symbol(key, at), leaf.0);
-            self.add_dir(dir)
-        } else {
-            leaf
-        };
-        self.rebuild(next)
+            Row {
+                key: key.into(),
+                value,
+            },
+        ))
     }
 
     fn remove(&mut self, root: Link, key: &[u8]) -> Link {

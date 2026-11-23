@@ -196,4 +196,7 @@ With these extracted functions the two-run medians at 2,048 keys were 8.3-9.5 ns
 The extracted path rebuild now proves both preservation of old roots and the exact bindings of its result, given a prepared path with correct sibling partitions.
 The changed native path copy uses a short scan in place of the benchmark's original trailing-zero intrinsic; its update measurements are now close to CHAMP, not a consistent win.
 The extracted delete constructs its rebuild path and proves that it removes exactly the requested key without changing old roots, given a well-formed starting arena.
-The candidate is not integrated; insertion, arena invariant preservation across successive mutations, scan-order refinement, bounded reclamation latency, and transaction qualification remain required.
+Native insertion shares the extracted implementation with the benchmark.
+The proof covers an empty root and replacing an existing key, including the ordered projection and the preservation of old rows and directories.
+With the native put and remove functions, the two-run component medians at 2,048 keys were 9.6-9.9 ns for point reads and 151-160 ns for pinned-root updates across the two key distributions.
+The candidate is not integrated; inserting a fresh key into a nonempty radix, preserving arena invariants across successive mutations, preserving scan order, bounding reclamation latency, and qualifying transaction performance remain open.
