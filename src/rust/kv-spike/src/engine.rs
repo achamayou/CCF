@@ -28,6 +28,20 @@ impl Bytes {
         <[u8]>::eq(self.as_slice(), other.as_slice())
     }
 
+    fn same_key(&self, other: &Self) -> bool {
+        let len = self.0.len();
+        if len != other.0.len() {
+            return false;
+        }
+        if len == 0 {
+            return true;
+        }
+        if self.0[len - 1] != other.0[len - 1] {
+            return false;
+        }
+        self.same_slice(other)
+    }
+
     fn compare(&self, other: &Self) -> i8 {
         let mut i = 0;
         while i < self.0.len() && i < other.0.len() {
@@ -74,7 +88,7 @@ pub struct Address {
 
 impl Key for Address {
     fn same(&self, other: &Self) -> bool {
-        self.key.same_slice(&other.key) && self.map.same_slice(&other.map)
+        self.key.same_key(&other.key) && self.map.same_slice(&other.map)
     }
 }
 

@@ -185,6 +185,10 @@ These are ranges of run medians, not confidence intervals.
 The indexed engine wins on point reads and this logging mix, but not on the governance mix or bulk commits.
 These measurements do not establish p99 or retained-memory parity.
 
+Checking address-key length and the last byte before the full comparison reduced 2,048-key staged replacements from 12.40-12.87 us/key to 8.12-8.67 us/key across four alternating Rust-to-Rust pairs.
+It preserves full byte equality, including keys with the same last byte.
+The commit and mixed-workload timings did not establish a comparable improvement.
+
 ### Persistent storage experiment
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.

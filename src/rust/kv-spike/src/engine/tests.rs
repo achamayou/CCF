@@ -4,6 +4,22 @@
 use super::*;
 
 #[test]
+fn address_comparison_checks_full_key_and_map_after_matching_last_byte() {
+    let address = |map, key| Address {
+        map: Bytes::copy_from(map),
+        key: Bytes::copy_from(key),
+    };
+    let a = address(b"map", b"xa");
+    assert!(a.same(&address(b"map", b"xa")));
+    assert!(!a.same(&address(b"map", b"ya")));
+    assert!(!a.same(&address(b"map", b"xb")));
+    assert!(!a.same(&address(b"map", b"a")));
+    assert!(!a.same(&address(b"other", b"xa")));
+    assert!(address(b"map", b"").same(&address(b"map", b"")));
+    assert!(!address(b"map", b"").same(&address(b"other", b"")));
+}
+
+#[test]
 fn set_prepends_new_and_existing_keys_without_reordering_other_entries() {
     let mut rows = Assoc::<u64, u64>::new();
     rows.set(1, 10);

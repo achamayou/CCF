@@ -158,6 +158,65 @@ theorem bytes_same (a b : Spike.engine.Bytes)
   simpa only [Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same]
     using bytes_same_slice a b
 
+private theorem bytes_same_key (a b : Spike.engine.Bytes)
+    : Spike.engine.Bytes.same_key a b = .ok (decide (a.val = b.val)) := by
+  have proved : WP.spec (Spike.engine.Bytes.same_key a b)
+      (· = decide (a.val = b.val)) := by
+    unfold Spike.engine.Bytes.same_key
+    let lenA := alloc.vec.Vec.len a
+    let lenB := alloc.vec.Vec.len b
+    have hlenA : lenA.val = a.val.length := alloc.vec.Vec.len_val a
+    have hlenB : lenB.val = b.val.length := alloc.vec.Vec.len_val b
+    have lengths : lenA = lenB ↔ a.val.length = b.val.length := by
+      constructor
+      · intro same
+        rw [← hlenA, ← hlenB, same]
+      · intro same
+        apply UScalar.eq_of_val_eq
+        rw [hlenA, hlenB, same]
+    have zero : (0#usize : Usize).val = 0 := rfl
+    have one : (1#usize : Usize).val = 1 := rfl
+    by_cases sameSize : lenA = lenB
+    · have lengthEq := lengths.mp sameSize
+      simp only [show alloc.vec.Vec.len a = alloc.vec.Vec.len b from sameSize,
+        bne_self_eq_false, Bool.false_eq_true, ite_false]
+      by_cases empty : lenB = 0#usize
+      · have bl : b.val.length = 0 := by rw [← hlenB, empty, zero]
+        have al : a.val.length = 0 := lengthEq.trans bl
+        rw [ite_eq_left empty, WP.spec_ok]
+        simp [List.length_eq_zero_iff.mp al, List.length_eq_zero_iff.mp bl]
+      · have pos : 0 < lenB.val := by
+          by_contra no
+          apply empty
+          exact UScalar.eq_of_val_eq (by omega)
+        rw [ite_eq_right empty]
+        apply WP.spec_bind (Usize.sub_spec (x := lenB) (y := 1#usize) (by omega))
+        intro i hi
+        have insideB : i.val < b.val.length := by omega
+        have insideA : i.val < a.val.length := by omega
+        simp only [alloc.vec.Vec.index_slice_index]
+        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec a i insideA)
+        intro x hx
+        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec b i insideB)
+        intro y hy
+        by_cases same : x = y
+        · simp [same, bytes_same_slice]
+        · have distinct : a.val ≠ b.val := by
+            intro eq
+            apply same
+            have he := congrArg (fun (l : List U8) => l[i.val]?) eq
+            rw [List.getElem?_eq_getElem insideA, List.getElem?_eq_getElem insideB, ← hx, ← hy]
+              at he
+            exact Option.some.inj he
+          simp [same, distinct]
+    · have different : a.val ≠ b.val := fun h =>
+        sameSize (lengths.mpr (congrArg List.length h))
+      simp [show alloc.vec.Vec.len a ≠ alloc.vec.Vec.len b from sameSize, different]
+  cases hr : Spike.engine.Bytes.same_key a b using Result.cases with
+  | ret result => simpa [hr, Result.ok.injEq] using proved
+  | vis _ _ => simp [hr] at proved
+  | div => simp [hr] at proved
+
 /-- Both components of an address use byte-content equality. -/
 theorem address_same (a b : Spike.engine.Address)
     : Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same a b
@@ -167,7 +226,7 @@ theorem address_same (a b : Spike.engine.Address)
               ∧ alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key)) := by
   unfold Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same
   by_cases h : alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key
-  · simp [bytes_same_slice, h]
-  · simp [bytes_same_slice, h]
+  · simp [bytes_same_key, bytes_same_slice, h]
+  · simp [bytes_same_key, h]
 
 end KvRust
