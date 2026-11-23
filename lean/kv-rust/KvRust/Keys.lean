@@ -151,6 +151,26 @@ theorem bytes_same (a b : Spike.engine.Bytes)
   | vis _ _ => simp [hr] at h
   | div => simp [hr] at h
 
+private theorem bytes_same_slice (a b : Spike.engine.Bytes)
+    : Spike.engine.Bytes.same_slice a b
+      = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
+  simp only [Spike.engine.Bytes.same_slice,
+    Spike.engine.Bytes.as_slice, bind_ok]
+  let result := core.slice.cmp.PartialEqSlice.eq core.cmp.PartialEqU8
+    (alloc.vec.Vec.deref a) (alloc.vec.Vec.deref b)
+  have h := core.slice.cmp.PartialEqSlice.eq_homo_spec core.cmp.PartialEqU8
+    (alloc.vec.Vec.deref a) (alloc.vec.Vec.deref b) (by
+      intro x y
+      simp)
+  change WP.spec result _ at h
+  change result = _
+  cases hr : result using Result.cases with
+  | ret eq =>
+      simp only [hr, WP.spec_ok, Slice.eq_iff] at h
+      cases eq <;> simp_all [alloc.vec.Vec.deref]
+  | vis _ _ => simp [hr] at h
+  | div => simp [hr] at h
+
 /-- Both components of an address use byte-content equality. -/
 theorem address_same (a b : Spike.engine.Address)
     : Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same a b
@@ -159,8 +179,8 @@ theorem address_same (a b : Spike.engine.Address)
             (alloc.vec.Vec.val a.map = alloc.vec.Vec.val b.map
               ∧ alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key)) := by
   unfold Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same
-  by_cases h : alloc.vec.Vec.val a.map = alloc.vec.Vec.val b.map
-  · simp [bytes_same, h]
-  · simp [bytes_same, h]
+  by_cases h : alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key
+  · simp [bytes_same_slice, h]
+  · simp [bytes_same_slice, h]
 
 end KvRust

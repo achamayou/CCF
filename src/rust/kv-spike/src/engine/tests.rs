@@ -18,6 +18,84 @@ fn set_prepends_new_and_existing_keys_without_reordering_other_entries() {
     assert_eq!(duplicate.0, [(3, 32), (1, 10), (2, 20)]);
 }
 
+#[test]
+fn bulk_publication_matches_the_general_fold_in_order() {
+    fn address(i: u8) -> Address {
+        let key = [i / 2, i % 5];
+        Address {
+            map: Bytes::copy_from(&[i % 2]),
+            key: Bytes::copy_from(if i < 2 { &[] } else { &key }),
+        }
+    }
+
+    fn assert_same(actual: Data, expected: &Data) {
+        assert_eq!(actual.0.len(), expected.0.len());
+        for ((a, c), (want_a, want_c)) in actual.0.iter().zip(&expected.0) {
+            assert_eq!(a.map.as_slice(), want_a.map.as_slice());
+            assert_eq!(a.key.as_slice(), want_a.key.as_slice());
+            assert_eq!(c.value.as_slice(), want_c.value.as_slice());
+            assert_eq!(c.version, want_c.version);
+        }
+    }
+
+    let cell = |i| Cell {
+        value: Bytes::copy_from(&[i]),
+        version: u64::from(i) + 3,
+    };
+    let base = Assoc(
+        (0..90)
+            .rev()
+            .map(|i| (address(i), cell(i)))
+            .chain([(address(1), cell(97)), (address(80), cell(98))])
+            .collect(),
+    );
+    let mut writes = Assoc(
+        (0..64)
+            .map(|i| {
+                let write = match i % 3 {
+                    0 => Write::Remove,
+                    1 => Write::Put(Bytes::copy_from(&[])),
+                    _ => Write::Put(Bytes::copy_from(&[i])),
+                };
+                (address(i), write)
+            })
+            .collect(),
+    );
+    for len in [63, 64] {
+        let prefix = Assoc(writes.0[..len].to_vec());
+        let expected = publish_sequential(base.clone(), &prefix, 100);
+        assert_same(publish(&base, &prefix, 100), &expected);
+        assert_same(publish_batch(&base, &prefix, 100).unwrap(), &expected);
+    }
+    writes
+        .0
+        .push((address(0), Write::Put(Bytes::copy_from(b"repeat"))));
+    assert!(publish_batch(&base, &writes, 100).is_none());
+    assert_same(
+        publish(&base, &writes, 100),
+        &publish_sequential(base.clone(), &writes, 100),
+    );
+
+    let collisions = Assoc(
+        (0..65)
+            .map(|i| {
+                (
+                    Address {
+                        map: Bytes::copy_from(&[i]),
+                        key: Bytes::copy_from(&[]),
+                    },
+                    Write::Put(Bytes::copy_from(&[i])),
+                )
+            })
+            .collect(),
+    );
+    assert!(publish_batch(&base, &collisions, 100).is_none());
+    assert_same(
+        publish(&base, &collisions, 100),
+        &publish_sequential(base.clone(), &collisions, 100),
+    );
+}
+
 fn run(s: &mut Store, action: Action) -> Output {
     s.execute(action).unwrap()
 }

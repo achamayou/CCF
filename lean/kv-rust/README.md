@@ -147,7 +147,12 @@ The logging mix improved from 75.4-90.3 us to 49.0-51.2 us per transaction, comp
 These are ranges of two run medians, not confidence intervals.
 The next change replaces a single existing binding in place while retaining the original path for deduplicating repeated bindings.
 Together the copy-removal changes cut a commit replacing 2,048 entries from 301-303 ms to 58.7-59.1 ms, versus 0.79-0.89 ms for C++ in the final pair of runs.
-The remaining bulk cost includes linear lookup, moving vector rows, and copying the committed frame; the benchmark still does not cover replicated CCF.
+Comparing the key bytes before the map name reduced Rust bulk commits to 35-41 ms in a separate pair of runs.
+The indexed batch path avoids applying the writes one at a time or cloning the input frame.
+The extracted proof checks the ordered result against the original model fold, including puts, removals, and the fallback for repeated addresses or crowded buckets.
+With that path, the 2,048-write commit took **1.32-1.33 ms in Rust versus 0.87-0.88 ms in C++** across two paired runs.
+Rust point reads at that size took 3.91-4.86 us versus 0.63-0.64 us, and the logging mix took 49.7-57.5 us per transaction versus 1.06 us.
+This benchmark still does not cover replicated CCF.
 
 ### Persistent storage experiment
 

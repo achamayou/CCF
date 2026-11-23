@@ -26,6 +26,10 @@ impl Bytes {
         &self.0
     }
 
+    fn same_slice(&self, other: &Self) -> bool {
+        <[u8]>::eq(self.as_slice(), other.as_slice())
+    }
+
     fn compare(&self, other: &Self) -> i8 {
         let mut i = 0;
         while i < self.0.len() && i < other.0.len() {
@@ -72,7 +76,7 @@ pub struct Address {
 
 impl Key for Address {
     fn same(&self, other: &Self) -> bool {
-        self.map.same(&other.map) && self.key.same(&other.key)
+        self.key.same_slice(&other.key) && self.map.same_slice(&other.map)
     }
 }
 
@@ -218,7 +222,16 @@ type Pending = Assoc<Address, Write>;
 type Image = Assoc<Bytes, Cell>;
 pub type Entries = Vec<(Bytes, Bytes)>;
 
-fn publish(mut data: Data, pending: &Pending, version: Version) -> Data {
+fn publish(data: &Data, pending: &Pending, version: Version) -> Data {
+    if pending.0.len() >= 64 {
+        if let Some(next) = publish_batch(data, pending, version) {
+            return next;
+        }
+    }
+    publish_sequential(data.clone(), pending, version)
+}
+
+fn publish_sequential(mut data: Data, pending: &Pending, version: Version) -> Data {
     // The reference model folds the ordered write list right-to-left.
     let mut i = pending.0.len();
     while i > 0 {
@@ -236,6 +249,90 @@ fn publish(mut data: Data, pending: &Pending, version: Version) -> Data {
         }
     }
     data
+}
+
+type Buckets = Vec<Vec<usize>>;
+
+fn empty_buckets() -> Buckets {
+    let mut buckets = Vec::new();
+    let mut i = 0_usize;
+    while i < 256 {
+        buckets.push(Vec::new());
+        i += 1;
+    }
+    buckets
+}
+
+fn bucket_for(address: &Address) -> usize {
+    let key = &address.key.0;
+    if key.is_empty() {
+        0
+    } else {
+        key[key.len() - 1] as usize
+    }
+}
+
+fn bucket_contains(bucket: &Vec<usize>, pending: &Pending, address: &Address) -> bool {
+    let mut i = 0;
+    while i < bucket.len() {
+        if pending.0[bucket[i]].0.same(address) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn stage_batch(pending: &Pending, version: Version) -> Option<(Data, Buckets)> {
+    let mut buckets = empty_buckets();
+    let mut data = Assoc::new();
+    let mut i = 0;
+    while i < pending.0.len() {
+        let row = &pending.0[i];
+        let bucket = &mut buckets[bucket_for(&row.0)];
+        if bucket.len() >= 64 {
+            return None;
+        }
+        if bucket_contains(bucket, pending, &row.0) {
+            // The general fold supports repeats; only the unique write set
+            // can be assembled directly in observation order.
+            return None;
+        }
+        bucket.push(i);
+        append_batch_put(&mut data, row, version);
+        i += 1;
+    }
+    Some((data, buckets))
+}
+
+fn append_batch_put(data: &mut Data, row: &(Address, Write), version: Version) {
+    if let Write::Put(value) = &row.1 {
+        data.0.push((
+            row.0.clone(),
+            Cell {
+                value: value.clone(),
+                version,
+            },
+        ));
+    }
+}
+
+fn append_untouched(data: &mut Data, row: &(Address, Cell), pending: &Pending, buckets: &Buckets) {
+    if !bucket_contains(&buckets[bucket_for(&row.0)], pending, &row.0) {
+        data.0.push((row.0.clone(), row.1.clone()));
+    }
+}
+
+fn publish_batch(data: &Data, pending: &Pending, version: Version) -> Option<Data> {
+    let Some((mut next, buckets)) = stage_batch(pending, version) else {
+        return None;
+    };
+    let mut i = 0;
+    while i < data.0.len() {
+        append_untouched(&mut next, &data.0[i], pending, &buckets);
+        i += 1;
+    }
+    Some(next)
 }
 
 fn image(data: &Data, map: &Bytes) -> Image {
@@ -315,7 +412,7 @@ impl Frame {
         }
         Self {
             version,
-            data: publish(self.data.clone(), pending, version),
+            data: publish(&self.data, pending, version),
             revisions,
             births,
         }
