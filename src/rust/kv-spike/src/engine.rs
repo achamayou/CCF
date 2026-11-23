@@ -439,9 +439,10 @@ impl Frame {
             );
             i += 1;
         }
+        let base = publication_base(index, self.data, pending);
         Self {
             version,
-            data: publish_indexed(index, self.data, pending, version),
+            data: publish_indexed(index, base, pending, version),
             revisions,
             births,
         }
@@ -461,6 +462,27 @@ fn advance_stamps(
         revisions.set(a.map.clone(), stamp);
     }
     update_birth(births, &a.map, stamp);
+}
+
+fn publication_base(index: &AddressIndex<Cell>, root: DualRoot, pending: &Pending) -> DualRoot {
+    let count = pending.0.len();
+    if count < 256 || count == usize::MAX {
+        return root;
+    }
+    // Fail cheaply on sparse batches, without scanning the rest of the store.
+    let links = index.scan_links_up_to(root, count + 1);
+    if links.len() != count {
+        return root;
+    }
+    let mut i = 0;
+    while i < count {
+        let row = index.scan_row(links[i]);
+        if !row.0.same(&pending.0[i].0) {
+            return root;
+        }
+        i += 1;
+    }
+    index.empty_root()
 }
 
 fn publish_indexed(

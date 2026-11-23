@@ -201,10 +201,10 @@ private theorem scan_links_remap
     (live
       : ∀ link ∈ input.val,
           2147483648 < link.val ∧ ∃ row, radixRow rows.val link = some row)
-    : WP.spec (Spike.radix.DualRadix.scan_links_loop rows input 0#usize)
+    : WP.spec (Spike.radix.DualRadix.scan_links_up_to_loop rows input 0#usize)
         (fun out => out.val = input.val.map (orderTarget rows.val)) := by
   let project := orderTarget rows.val
-  unfold Spike.radix.DualRadix.scan_links_loop
+  unfold Spike.radix.DualRadix.scan_links_up_to_loop
   apply loop.spec_decr_nat
     (fun (p : alloc.vec.Vec U32 × Usize) => input.val.length - p.2.val)
     (fun (links, i) =>
@@ -214,7 +214,7 @@ private theorem scan_links_remap
     _ _ _
   · rintro ⟨links, i⟩ ⟨sameLen, mapping⟩
     dsimp only at sameLen mapping ⊢
-    unfold Spike.radix.DualRadix.scan_links_loop.body
+    unfold Spike.radix.DualRadix.scan_links_up_to_loop.body
     have len : (alloc.vec.Vec.len links).val = input.val.length :=
       (alloc.vec.Vec.len_val links).trans sameLen
     have cap := alloc.vec.Vec.len_ineq input
@@ -351,8 +351,8 @@ theorem dual_view_unique {V : Type} {arena : Spike.radix.DualRadix V}
 
 /-- The native stamp traversal and in-place resolution return precisely the
 lookup links in model order, without sorting or copying the lookup image. -/
-theorem dual_scan_refines {V : Type} (arena : Spike.radix.DualRadix V)
-    (root : Spike.radix.DualRoot) (bindings : List (List U8 × U32))
+theorem dual_scan_up_to_refines {V : Type} (arena : Spike.radix.DualRadix V)
+    (root : Spike.radix.DualRoot) (limit : Usize) (bindings : List (List U8 × U32))
     (view : DualView arena root bindings)
     (compressed : RadixCompressed arena.order.dirs.val (radixKeyOf arena.order.rows.val))
     (room
@@ -360,13 +360,13 @@ theorem dual_scan_refines {V : Type} (arena : Spike.radix.DualRadix V)
           RadixScanPlan arena.order.dirs.val ([root.order].filter (· != 0#u32)) fuel
             leaves
           ∧ fuel ≤ Usize.max)
-    : WP.spec (Spike.radix.DualRadix.scan_links arena root)
-        (fun links => links.val = bindings.map Prod.snd) := by
+    : WP.spec (Spike.radix.DualRadix.scan_links_up_to arena root limit)
+        (fun links => links.val = (bindings.map Prod.snd).take limit.val) := by
   obtain ⟨height, keys, tree, valid, pairing, order⟩ := view.order
-  unfold Spike.radix.DualRadix.scan_links
+  unfold Spike.radix.DualRadix.scan_links_up_to
   apply WP.spec_bind
-    (radix_scan_leaves_lex_refines (alloc.vec.Vec.deref arena.order.dirs)
-      (alloc.vec.Vec.deref arena.order.rows) height root.order keys
+    (radix_scan_leaves_lex_up_to_refines (alloc.vec.Vec.deref arena.order.dirs)
+      (alloc.vec.Vec.deref arena.order.rows) height root.order limit keys
       (by simpa [alloc.vec.Vec.deref] using tree)
       (by simpa [alloc.vec.Vec.deref] using valid)
       (by simpa [alloc.vec.Vec.deref] using compressed)
@@ -381,12 +381,13 @@ theorem dual_scan_refines {V : Type} (arena : Spike.radix.DualRadix V)
       ∃ row, radixRow arena.order.rows.val link = some row := by
     intro link mem
     rw [walked] at mem
-    obtain ⟨e, hm, linkEq⟩ := List.mem_map.mp mem
+    obtain ⟨e, hm, linkEq⟩ := List.mem_map.mp (List.mem_of_mem_take mem)
     obtain ⟨tag, row, read, _⟩ := valid e hm
     exact linkEq ▸ ⟨tag, row, read⟩
   apply WP.spec_mono (scan_links_remap arena.order.rows links live)
   intro out remapped
-  rw [remapped, walked, order_link_projection _ _ valid, pairing, stamp_links _ _ view.values]
+  rw [remapped, walked, List.map_take, order_link_projection _ _ valid, pairing,
+    stamp_links _ _ view.values]
 
 theorem dual_scan_row_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (root : Spike.radix.DualRoot) (bindings : List (List U8 × U32))

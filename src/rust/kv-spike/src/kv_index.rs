@@ -50,6 +50,10 @@ impl<V> AddressIndex<V> {
         self.0.scan_links(root)
     }
 
+    pub fn scan_links_up_to(&self, root: DualRoot, limit: usize) -> Vec<u32> {
+        self.0.scan_links_up_to(root, limit)
+    }
+
     pub fn scan_row(&self, link: u32) -> (&Address, &V) {
         let (_, binding) = self.0.scan_row(link);
         (&binding.address, &binding.value)

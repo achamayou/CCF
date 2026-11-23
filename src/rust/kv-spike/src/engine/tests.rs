@@ -226,6 +226,76 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn bulk_replacement_requires_full_coverage_and_preserves_a_pinned_cut() {
+    let mut store = Store::new(0);
+    let map = b"public:batch";
+    begin(&mut store, 0);
+    acquire(&mut store, 0, map);
+    for key in 0..257_u16 {
+        write(&mut store, 0, map, &key.to_be_bytes(), Some(b"old"));
+    }
+    applied(&mut store, 0, Outcome::Success, 1);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, map);
+    begin(&mut store, 2);
+    acquire(&mut store, 2, map);
+    for key in 0..257_u16 {
+        let value = if key == 1 {
+            None
+        } else {
+            Some(b"new".as_slice())
+        };
+        write(&mut store, 2, map, &key.to_be_bytes(), value);
+    }
+    let index = &store.history.index;
+    let root = store.history.head().data;
+    let pending = &store.txs.0[store.tx_index(2).unwrap()].1.pending;
+    assert!(
+        index
+            .scan_links(publication_base(index, root, pending))
+            .is_empty()
+    );
+
+    let mut partial = pending.clone();
+    partial.0.pop();
+    assert_eq!(
+        index
+            .scan_links(publication_base(index, root, &partial))
+            .len(),
+        257
+    );
+    let mut reordered = pending.clone();
+    reordered.0.swap(0, 1);
+    assert_eq!(
+        index
+            .scan_links(publication_base(index, root, &reordered))
+            .len(),
+        257
+    );
+
+    applied(&mut store, 2, Outcome::Success, 2);
+    assert_read(
+        &mut store,
+        1,
+        map,
+        &1_u16.to_be_bytes(),
+        false,
+        Some(b"old"),
+    );
+    begin(&mut store, 3);
+    acquire(&mut store, 3, map);
+    let Output::Entries(rows) = op(&mut store, 3, map, Operation::Scan) else {
+        panic!("scan must return the replaced rows");
+    };
+    let keys = (0..257_u16).rev().filter(|&key| key != 1);
+    assert_eq!(rows.len(), 256);
+    for ((key, value), expected) in rows.iter().zip(keys) {
+        assert_eq!(key.as_slice(), expected.to_be_bytes());
+        assert_eq!(value.as_slice(), b"new");
+    }
+}
+
+#[test]
 fn ending_another_attempt_keeps_the_pinned_reader_and_its_dependency() {
     let mut store = Store::new(0);
     let map = b"public:map";

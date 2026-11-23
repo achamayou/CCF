@@ -365,13 +365,17 @@ fn push_children(stack: &mut Vec<u32>, dir: &RadixDir) {
 /// Enumerate a compressed root's leaf links in byte-key order.
 /// Transaction scans still need the model's write order.
 pub fn scan_leaves(dirs: &[Option<RadixDir>], root: u32) -> Vec<u32> {
+    scan_leaves_up_to(dirs, root, usize::MAX)
+}
+
+fn scan_leaves_up_to(dirs: &[Option<RadixDir>], root: u32, limit: usize) -> Vec<u32> {
     let mut leaves = Vec::new();
     if root == 0 {
         return leaves;
     }
     let mut stack = Vec::new();
     stack.push(root);
-    while stack.len() > 0 {
+    while stack.len() > 0 && leaves.len() < limit {
         let last = stack.len() - 1;
         let node = stack[last];
         stack.resize(last, 0);
@@ -679,7 +683,11 @@ impl<V> DualRadix<V> {
     }
 
     pub fn scan_links(&self, root: DualRoot) -> Vec<u32> {
-        let mut links = scan_leaves(&self.order.dirs, root.order);
+        self.scan_links_up_to(root, usize::MAX)
+    }
+
+    pub fn scan_links_up_to(&self, root: DualRoot, limit: usize) -> Vec<u32> {
+        let mut links = scan_leaves_up_to(&self.order.dirs, root.order, limit);
         let mut i = 0;
         while i < links.len() {
             links[i] = row_at(&self.order.rows, links[i]).value;

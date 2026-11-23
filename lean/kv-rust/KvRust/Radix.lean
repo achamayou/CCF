@@ -3929,14 +3929,14 @@ private theorem scan_plan_tree (dirs : List (Option Spike.radix.RadixDir))
           live (by simpa using plan)
 
 private theorem scan_step {dirs : Slice (Option Spike.radix.RadixDir)}
-    (out stack : alloc.vec.Vec U32) (node : U32) (rest : List U32)
+    (limit : Usize) (out stack : alloc.vec.Vec U32) (node : U32) (rest : List U32)
     (hstack : stack.val.reverse = node :: rest)
     (hs : node < 2147483648#u32 → rest.length + 17 ≤ Usize.max)
-    (ho : out.val.length < Usize.max)
+    (ho : out.val.length < limit.val)
     (live
       : node < 2147483648#u32
         → ∃ dir, 0 < node.val ∧ dirs.val[node.val - 1]? = some (some dir))
-    : WP.spec (Spike.radix.scan_leaves_loop.body dirs out stack)
+    : WP.spec (Spike.radix.scan_leaves_up_to_loop.body dirs limit out stack)
         (fun result =>
           ∃ next todo,
             result = .cont (next, todo)
@@ -3956,8 +3956,14 @@ private theorem scan_step {dirs : Slice (Option Spike.radix.RadixDir)}
   have go : 0#usize < alloc.vec.Vec.len stack := by
     change 0 < (alloc.vec.Vec.len stack).val
     omega
-  unfold Spike.radix.scan_leaves_loop.body
-  simp only [go, ite_true, alloc.vec.Vec.index_slice_index, radix_tag]
+  have more : alloc.vec.Vec.len out < limit := by
+    change (alloc.vec.Vec.len out).val < limit.val
+    simpa only [alloc.vec.Vec.len_val] using ho
+  have space : out.val.length < Usize.max := by
+    have h : limit.val ≤ Usize.max := by scalar_tac
+    omega
+  unfold Spike.radix.scan_leaves_up_to_loop.body
+  simp only [go, more, ite_true, alloc.vec.Vec.index_slice_index, radix_tag]
   apply WP.spec_bind
     (Usize.sub_spec (by omega : (1#usize : Usize).val ≤ (alloc.vec.Vec.len stack).val))
   intro index hi
@@ -3990,80 +3996,103 @@ private theorem scan_step {dirs : Slice (Option Spike.radix.RadixDir)}
     simp only [WP.spec_ok]
     exact ⟨out, next, rfl, dir, existsDir, rfl, by simp [hn, remaining]⟩
   · simp only [tagged, ite_false]
-    apply WP.spec_bind (alloc.vec.Vec.push_spec out node ho)
+    apply WP.spec_bind (alloc.vec.Vec.push_spec out node space)
     intro next hn
     simp only [WP.spec_ok]
     exact ⟨next, popped, rfl, hn, by simp [remaining]⟩
 
+private theorem scan_loop_limit (dirs : Slice (Option Spike.radix.RadixDir))
+    (limit : Usize) (out stack : alloc.vec.Vec U32) (full : limit.val ≤ out.val.length)
+    : WP.spec (Spike.radix.scan_leaves_up_to_loop dirs limit out stack) (· = out) := by
+  unfold Spike.radix.scan_leaves_up_to_loop loop Spike.radix.scan_leaves_up_to_loop.body
+  have stop : ¬ alloc.vec.Vec.len out < limit := by
+    change ¬ (alloc.vec.Vec.len out).val < limit.val
+    rw [alloc.vec.Vec.len_val]
+    exact Nat.not_lt_of_ge full
+  by_cases more : 0#usize < alloc.vec.Vec.len stack <;> simp [more, stop]
+
 private theorem scan_loop_refines (dirs : Slice (Option Spike.radix.RadixDir))
-    (todo : List U32) (fuel : Nat) (leaves : List U32)
-    (plan : RadixScanPlan dirs.val todo fuel leaves)
-    (out stack : alloc.vec.Vec U32)
+    (limit : Usize) (todo : List U32) (fuel : Nat) (leaves : List U32)
+    (plan : RadixScanPlan dirs.val todo fuel leaves) (out stack : alloc.vec.Vec U32)
     (hstack : stack.val.reverse = todo) (room : out.val.length + fuel ≤ Usize.max)
-    : WP.spec (Spike.radix.scan_leaves_loop dirs out stack)
+    : WP.spec (Spike.radix.scan_leaves_up_to_loop dirs limit out stack)
         (fun result =>
-          result.val = out.val ++ leaves) := by
+          result.val = out.val ++ leaves.take (limit.val - out.val.length)) := by
   induction plan generalizing out stack with
   | done =>
       have empty : stack.val = [] := by simpa using congrArg List.reverse hstack
-      unfold Spike.radix.scan_leaves_loop loop Spike.radix.scan_leaves_loop.body
+      unfold Spike.radix.scan_leaves_up_to_loop loop Spike.radix.scan_leaves_up_to_loop.body
       have zero : ¬0#usize < alloc.vec.Vec.len stack := by
         change ¬0 < (alloc.vec.Vec.len stack).val
         simp [empty]
       simp [zero]
   | leaf node rest fuel leaves tagged tail ih =>
-      have small : ¬node < 2147483648#u32 := not_lt_of_ge tagged
-      unfold Spike.radix.scan_leaves_loop loop
-      have step
-          : WP.spec (Spike.radix.scan_leaves_loop.body dirs out stack)
-              (fun result =>
-                ∃ next todo,
-                  result = .cont (next, todo)
-                  ∧ next.val = out.val ++ [node]
-                  ∧ todo.val.reverse = rest) := by
-        -- No directory children are pushed in this case.
-        apply WP.spec_mono
-          (scan_step out stack node rest hstack
-            (fun low => (small low).elim) (by omega) (fun low => (small low).elim))
-        rintro r ⟨next, todo, hr, post⟩
-        exact ⟨next, todo, hr, by simpa only [small, ite_false] using post⟩
-      apply WP.spec_bind step
-      rintro result ⟨next, todo, he, hn, ht⟩
-      subst result
-      apply WP.spec_mono (ih next todo ht (by simp [hn]; omega))
-      intro r hr
-      simp [hr, hn, List.append_assoc]
+      by_cases run : out.val.length < limit.val
+      ·
+        have small : ¬node < 2147483648#u32 := not_lt_of_ge tagged
+        unfold Spike.radix.scan_leaves_up_to_loop loop
+        have step
+            : WP.spec (Spike.radix.scan_leaves_up_to_loop.body dirs limit out stack)
+                (fun result =>
+                  ∃ next todo,
+                    result = .cont (next, todo)
+                    ∧ next.val = out.val ++ [node]
+                    ∧ todo.val.reverse = rest) := by
+          apply WP.spec_mono
+            (scan_step limit out stack node rest hstack
+              (fun low => (small low).elim) run (fun low => (small low).elim))
+          rintro r ⟨next, todo, hr, post⟩
+          exact ⟨next, todo, hr, by simpa only [small, ite_false] using post⟩
+        apply WP.spec_bind step
+        rintro result ⟨next, todo, he, hn, ht⟩
+        subst result
+        apply WP.spec_mono (ih next todo ht (by simp [hn]; omega))
+        intro r hr
+        have count : limit.val - out.val.length = (limit.val - next.val.length).succ := by
+          simp only [hn, List.length_append, List.length_singleton]
+          omega
+        rw [hr, count, List.take_succ_cons, hn, List.append_assoc]
+        rfl
+      · have full := Nat.le_of_not_gt run
+        exact WP.spec_mono (scan_loop_limit dirs limit out stack full) (by
+          intro result eq
+          simp [eq, Nat.sub_eq_zero_of_le full])
   | branch node dir rest fuel leaves positive low live tail ih =>
-      have hrest := scan_plan_room tail
-      have hsize : rest.length ≤ fuel := by simp only [List.length_append] at hrest; omega
-      unfold Spike.radix.scan_leaves_loop loop
-      apply WP.spec_bind
-        (scan_step out stack node rest hstack
-          (fun _ => by omega) (by omega) (fun _ => ⟨dir, positive, live⟩))
-      rintro result ⟨next, todo, he, post⟩
-      subst result
-      rw [ite_eq_left low] at post
-      obtain ⟨actual, existsDir, equal, ht⟩ := post
-      have eq : actual = dir :=
-        Option.some.inj (Option.some.inj (existsDir.symm.trans live))
-      subst actual next
-      exact ih out todo ht (by omega)
+      by_cases run : out.val.length < limit.val
+      · have hrest := scan_plan_room tail
+        have hsize : rest.length ≤ fuel := by simp only [List.length_append] at hrest; omega
+        unfold Spike.radix.scan_leaves_up_to_loop loop
+        apply WP.spec_bind
+          (scan_step limit out stack node rest hstack
+            (fun _ => by omega) run (fun _ => ⟨dir, positive, live⟩))
+        rintro result ⟨next, todo, he, post⟩
+        subst result
+        rw [ite_eq_left low] at post
+        obtain ⟨actual, existsDir, equal, ht⟩ := post
+        have eq : actual = dir :=
+          Option.some.inj (Option.some.inj (existsDir.symm.trans live))
+        subst actual next
+        exact ih out todo ht (by omega)
+      · have full := Nat.le_of_not_gt run
+        exact WP.spec_mono (scan_loop_limit dirs limit out stack full) (by
+          intro result eq
+          simp [eq, Nat.sub_eq_zero_of_le full])
 
 /-- With room for the traversal, the native scan visits the planned leaves in
 directory order, without consulting rows outside the root. -/
-theorem radix_scan_plan_matches (dirs : Slice (Option Spike.radix.RadixDir))
-    (root : U32) (fuel : Nat) (leaves : List U32)
+theorem radix_scan_plan_up_to_matches (dirs : Slice (Option Spike.radix.RadixDir))
+    (root : U32) (limit : Usize) (fuel : Nat) (leaves : List U32)
     (plan : RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves)
     (room : fuel ≤ Usize.max)
-    : WP.spec (Spike.radix.scan_leaves dirs root)
-        (fun result => result.val = leaves) := by
-  unfold Spike.radix.scan_leaves
+    : WP.spec (Spike.radix.scan_leaves_up_to dirs root limit)
+        (fun result => result.val = leaves.take limit.val) := by
+  unfold Spike.radix.scan_leaves_up_to
   by_cases zero : root = 0#u32
   · subst root
     rw [ite_eq_left rfl, WP.spec_ok]
     have empty : RadixScanPlan dirs.val [] fuel leaves := by simpa using plan
     cases empty
-    rfl
+    simp
   · rw [ite_eq_right zero]
     have hroom : (alloc.vec.Vec.new U32).val.length < Usize.max := by
       change 0 < Usize.max
@@ -4072,7 +4101,25 @@ theorem radix_scan_plan_matches (dirs : Slice (Option Spike.radix.RadixDir))
     intro stack hs
     have top : stack.val.reverse = ([root].filter (· != 0#u32)) := by
       simp [hs, bne_iff_ne.mpr zero]
-    simpa using scan_loop_refines dirs _ fuel leaves plan (alloc.vec.Vec.new U32) stack top (by simpa using room)
+    simpa using scan_loop_refines dirs limit _ fuel leaves plan (alloc.vec.Vec.new U32) stack top (by simpa using room)
+
+theorem radix_scan_plan_matches (dirs : Slice (Option Spike.radix.RadixDir))
+    (root : U32) (fuel : Nat) (leaves : List U32)
+    (plan : RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves)
+    (room : fuel ≤ Usize.max)
+    : WP.spec (Spike.radix.scan_leaves dirs root)
+        (fun result => result.val = leaves) := by
+  have enough (todo : List U32) (n : Nat) (xs : List U32) (h : RadixScanPlan dirs.val todo n xs) :
+      xs.length ≤ n := by
+    induction h with
+    | done => exact Nat.le_refl _
+    | leaf _ _ _ _ _ _ ih => simpa using Nat.succ_le_succ ih
+    | branch _ _ _ _ _ _ _ _ _ ih => omega
+  have max : core.num.Usize.MAX.val = Usize.max := rfl
+  have fits : leaves.length ≤ core.num.Usize.MAX.val := by rw [max]; exact (enough _ _ _ plan).trans room
+  unfold Spike.radix.scan_leaves
+  exact WP.spec_mono (radix_scan_plan_up_to_matches dirs root _ fuel leaves plan room)
+    (fun _ eq => eq.trans (List.take_of_length_le fits))
 
 /-- Every finite root admits a scan plan with exactly the projected leaf
 links. The plan's fuel bounds the native stack and result vectors. -/
@@ -4127,6 +4174,29 @@ theorem radix_scan_leaves_lex_refines {V : Type}
     radix_scan_lex_plan_exists dirs rows height root bindings tree valid compressed
   have size := (scan_plan_unique plan ordinary).1
   exact WP.spec_mono (radix_scan_plan_matches dirs root fuel _ plan (size.symm ▸ room))
+    (fun _ eq => ⟨ordered, eq, perm, sort⟩)
+
+theorem radix_scan_leaves_lex_up_to_refines {V : Type}
+    (dirs : Slice (Option Spike.radix.RadixDir))
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (height : Nat) (root : U32)
+    (limit : Usize) (bindings : List (List U8 × U32))
+    (tree : RadixTree dirs.val height root bindings) (valid : RadixRows rows.val bindings)
+    (compressed : RadixCompressed dirs.val (radixKeyOf rows.val))
+    (fits
+      : ∃ fuel leaves,
+          RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves
+          ∧ fuel ≤ Usize.max)
+    : WP.spec (Spike.radix.scan_leaves_up_to dirs root limit)
+        (fun result =>
+          ∃ ordered,
+            result.val = (ordered.map Prod.snd).take limit.val
+            ∧ List.Perm ordered bindings
+            ∧ ordered.Pairwise radixKeyLt) := by
+  obtain ⟨bounded, leaves, ordinary, room⟩ := fits
+  obtain ⟨fuel, ordered, plan, perm, sort⟩ :=
+    radix_scan_lex_plan_exists dirs rows height root bindings tree valid compressed
+  have size := (scan_plan_unique plan ordinary).1
+  exact WP.spec_mono (radix_scan_plan_up_to_matches dirs root limit fuel _ plan (size.symm ▸ room))
     (fun _ eq => ⟨ordered, eq, perm, sort⟩)
 
 /-- The native traversal returns every projected leaf link with exactly its

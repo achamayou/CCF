@@ -105,6 +105,14 @@ theorem index_new_refines (V : Type)
   refine ⟨⟨validValues, validOrder⟩, ?_⟩
   exact WP.spec_mono empty (fun _ view => ⟨[], view, rfl⟩)
 
+theorem index_empty_root_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    : WP.spec (Spike.kv_index.AddressIndex.empty_root index)
+        (fun root => IndexView index root []) := by
+  unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.DualRadix.empty_root
+  rw [WP.spec_ok]
+  refine ⟨[], ⟨⟨0, .empty 0⟩, ?_, ⟨0, [], .empty 0, ?_, rfl, List.Pairwise.nil⟩,
+    ?_, ?_⟩, rfl⟩ <;> simp [RadixRows]
+
 private theorem address_key_matches (a : Spike.engine.Address)
     (capacity : 8 + a.map.val.length + a.key.val.length ≤ Usize.max)
     : WP.spec
@@ -304,13 +312,13 @@ theorem index_remove_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
 
 /- The scan result contains links only; each actual Rust row read is related
 to the pair at the same position of the original association list. -/
-theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+theorem index_scan_up_to_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (root : Spike.radix.DualRoot) (limit : Usize) (rows : List (Spike.engine.Address × V))
     (view : IndexView index root rows) (valid : IndexValid index)
     (room : 18 * rows.length ≤ Usize.max)
-    : WP.spec (Spike.kv_index.AddressIndex.scan_links index root)
+    : WP.spec (Spike.kv_index.AddressIndex.scan_links_up_to index root limit)
         (fun links =>
-          links.val.length = rows.length
+          links.val.length = min limit.val rows.length
           ∧ ∀ (i : Nat) link,
               links.val[i]? = some link
               → ∃ entry,
@@ -328,15 +336,20 @@ theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   have count : leaves.length = keys.length := by simpa using perm.length_eq
   have bound := radix_scan_plan_bound index.order.dirs valid.2.directories
     (by simpa [dirs, alloc.vec.Vec.deref] using plan)
-  unfold Spike.kv_index.AddressIndex.scan_links
+  unfold Spike.kv_index.AddressIndex.scan_links_up_to
   apply WP.spec_mono
-    (dual_scan_refines index root bindings related
+    (dual_scan_up_to_refines index root limit bindings related
       (radix_compressed_of_knowledge _ _ valid.2.knowledge)
       ⟨fuel, leaves, by simpa [dirs, alloc.vec.Vec.deref] using plan, by omega⟩)
   intro links scanned
-  refine ⟨by simpa [scanned] using size, ?_⟩
+  have sizePrefix : links.val.length = min limit.val rows.length := by
+    simp [scanned, size]
+  refine ⟨sizePrefix, ?_⟩
   intro i link selected
-  rw [scanned, List.getElem?_map] at selected
+  have insideLimit : i < limit.val := by
+    have inside := (List.getElem?_eq_some_iff.mp selected).1
+    omega
+  rw [scanned, List.getElem?_take_of_lt insideLimit, List.getElem?_map] at selected
   cases atLink : bindings[i]? with
   | none => simp [atLink] at selected
   | some entry =>
@@ -363,5 +376,27 @@ theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
       subst row
       change WP.spec (Result.ok (value.address, value.value)) _
       rw [WP.spec_ok, read, payload]
+
+theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (view : IndexView index root rows) (valid : IndexValid index)
+    (room : 18 * rows.length ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.scan_links index root)
+        (fun links =>
+          links.val.length = rows.length
+          ∧ ∀ (i : Nat) link,
+              links.val[i]? = some link
+              → ∃ entry,
+                  rows[i]? = some entry
+                  ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link)
+                      (· = entry)) := by
+  change WP.spec (Spike.kv_index.AddressIndex.scan_links_up_to index root core.num.Usize.MAX) _
+  apply WP.spec_mono
+    (index_scan_up_to_refines index root core.num.Usize.MAX rows view valid room)
+  intro links ⟨count, read⟩
+  have enough : rows.length ≤ core.num.Usize.MAX.val := by
+    change rows.length ≤ Usize.max
+    omega
+  exact ⟨count.trans (Nat.min_eq_right enough), read⟩
 
 end KvRust

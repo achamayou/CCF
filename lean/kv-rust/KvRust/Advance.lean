@@ -318,12 +318,16 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   rintro ⟨actualPending, rev, birth⟩ ⟨hp, hr, hb⟩
   subst actualPending
   change WP.spec (do
-    let (root, after) ← Spike.engine.publish_indexed index before.data pending version
+    let base ← Spike.engine.publication_base index before.data pending
+    let (root, after) ← Spike.engine.publish_indexed index base pending version
     Result.ok (({version, data := root, revisions := rev, births := birth} : Spike.engine.Frame),
       after)) _
-  apply WP.spec_bind (indexed_publication_refines index before.data data pending version
-    view valid space addresses)
-  rintro ⟨root, after⟩ ⟨updated, arenaValid, kept, _⟩
+  apply WP.spec_bind
+    (publication_base_refines index before.data data pending view valid space)
+  intro base chosen
+  apply WP.spec_bind (indexed_publish_selected index before.data base data pending version
+    view valid space addresses chosen)
+  rintro ⟨root, after⟩ ⟨updated, arenaValid, kept⟩
   have hw : encodeWrites encode (byteWrites pending.val) = pending.val.map (encodeRow encode) := by
     simp only [encodeWrites, byteWrites, List.map_map, Function.comp_def]
     apply List.map_congr_left

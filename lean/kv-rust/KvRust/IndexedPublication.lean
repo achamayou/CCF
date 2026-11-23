@@ -49,6 +49,46 @@ abbrev CellIndex := Spike.kv_index.AddressIndex Spike.engine.Cell
 def IndexKeyRoom (row : IndexWrite) : Prop :=
   2 * (8 + row.1.map.val.length + row.1.key.val.length) + 1 ≤ Usize.max
 
+private def untouchedCells (writes : List IndexWrite) (data : CellRows) : CellRows :=
+  writes.foldr (fun row rest => Kv.Model.erase rest row.1) data
+
+private theorem indexed_fold_suffix (rows : CellRows) (writes : List IndexWrite)
+    (version : U64)
+    : writes.foldr (applyIndexedWrite version) rows
+      = writes.foldr (applyIndexedWrite version) [] ++ untouchedCells writes rows := by
+  induction writes with
+  | nil => rfl
+  | cons row rest ih =>
+      obtain ⟨addr, write⟩ := row
+      cases write <;>
+        simp only [List.foldr_cons, applyIndexedWrite, ih, untouchedCells,
+          Kv.Model.set, Kv.Model.erase, List.filter_append, List.cons_append]
+
+private theorem untouched_cells_spec (writes : List IndexWrite) (rows : CellRows)
+    (entry : Spike.engine.Address × Spike.engine.Cell)
+    (member : entry ∈ untouchedCells writes rows)
+    : entry ∈ rows ∧ entry.1 ∉ writes.map Prod.fst := by
+  induction writes with
+  | nil => exact ⟨member, List.not_mem_nil⟩
+  | cons row rest ih =>
+      obtain ⟨kept, different⟩ := List.mem_filter.mp member
+      obtain ⟨before, notWritten⟩ := ih kept
+      have ne : entry.1 ≠ row.1 := bne_iff_ne.mp different
+      exact ⟨before, by simpa [List.mem_cons, ne] using notWritten⟩
+
+theorem indexed_fold_cover (rows : CellRows) (writes : List IndexWrite) (version : U64)
+    (covers : ∀ entry ∈ rows, entry.1 ∈ writes.map Prod.fst)
+    : writes.foldr (applyIndexedWrite version) rows
+      = writes.foldr (applyIndexedWrite version) [] := by
+  have cleared : untouchedCells writes rows = [] := by
+    cases h : untouchedCells writes rows with
+    | nil => rfl
+    | cons entry rest =>
+        have hm : entry ∈ untouchedCells writes rows := h.symm ▸ List.mem_cons_self
+        have ⟨old, absent⟩ := untouched_cells_spec writes rows entry hm
+        exact (absent (covers entry old)).elim
+  simp [indexed_fold_suffix rows writes version, cleared]
+
 /-- Conservative headroom for every edit in the batch, including removal and reinsertion
 of a stamp on replacement. The bound is computed from the input sizes alone. -/
 structure IndexBatchRoom (index : CellIndex) (peak writes : Nat) : Prop where
@@ -57,6 +97,151 @@ structure IndexBatchRoom (index : CellIndex) (peak writes : Nat) : Prop where
   values : index.values.rows.val.length + writes ≤ 2147483647
   stamps : index.order.rows.val.length + writes ≤ 2147483647
   clock : index.last.val + writes ≤ U64.max
+
+theorem IndexBatchRoom.shrink {index : CellIndex} {peak smaller writes : Nat}
+    (room : IndexBatchRoom index peak writes) (fits : smaller ≤ peak)
+    : IndexBatchRoom index smaller writes := by
+  refine ⟨?_, ?_, room.values, room.stamps, room.clock⟩
+  · have bound := Nat.mul_le_mul_left writes (show smaller + 1 ≤ peak + 1 by omega)
+    have total := room.lookup
+    omega
+  · have bound := Nat.mul_le_mul_left writes (show 2 * smaller + 1 ≤ 2 * peak + 1 by omega)
+    have total := room.order
+    omega
+
+private def Covers (rows : CellRows) (pending : List IndexWrite) : Prop :=
+  ∀ entry ∈ rows, entry.1 ∈ pending.map Prod.fst
+
+private theorem publication_compare (index : CellIndex) (root : Spike.radix.DualRoot)
+    (rows : CellRows) (pending : alloc.vec.Vec IndexWrite)
+    (count : Usize) (links : alloc.vec.Vec U32)
+    (rowsSize : rows.length = count.val) (pendingSize : pending.val.length = count.val)
+    (linksSize : links.val.length = count.val)
+    (load
+      : ∀ (i : Nat) link,
+          links.val[i]? = some link
+          → ∃ entry,
+              rows[i]? = some entry
+              ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry))
+    : WP.spec (Spike.engine.publication_base_loop index root pending count links 0#usize)
+        (fun base =>
+          base = root ∨ (IndexView index base [] ∧ Covers rows pending.val)) := by
+  unfold Spike.engine.publication_base_loop
+  apply loop.spec_decr_nat (fun (i : Usize) => count.val - i.val)
+    (fun i => ∀ j, j < i.val →
+      rows[j]?.map Prod.fst = pending.val[j]?.map Prod.fst)
+    _ _ _
+  · intro i same
+    unfold Spike.engine.publication_base_loop.body
+    by_cases run : i < count
+    · have h : i.val < count.val := run
+      have inside : i.val < links.val.length := by omega
+      have staged : i.val < pending.val.length := by omega
+      rw [ite_eq_left run, alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec links i inside)
+      intro leaf read
+      obtain ⟨entry, loaded, get⟩ := load i.val leaf
+        ((List.getElem?_eq_getElem inside).trans (congrArg some read.symm))
+      apply WP.spec_bind get
+      rintro ⟨address, cell⟩ eq
+      subst entry
+      change WP.spec (do
+        let row ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice IndexWrite) pending i
+        let agrees ← Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same address row.1
+        if agrees then
+          let j ← i + 1#usize
+          Result.ok (ControlFlow.cont j)
+        else Result.ok (ControlFlow.done root)) _
+      rw [alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec pending i staged)
+      intro write saved
+      have incoming : pending.val[i.val]? = some write := by
+        rw [List.getElem?_eq_getElem staged, ← saved]
+      simp only [compare_address, bind_ok, decide_eq_true_eq]
+      by_cases equal : address = write.1
+      · rw [ite_eq_left equal]
+        have one : (1#usize : Usize).val = 1 := rfl
+        have room : count.val ≤ Usize.max := by scalar_tac
+        apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+        intro j advance
+        rw [WP.spec_ok]
+        refine ⟨?_, by omega⟩
+        intro n earlier
+        by_cases earlierThan : n < i.val
+        · exact same n earlierThan
+        · have atEnd : n = i.val := by omega
+          rw [atEnd, loaded, incoming]
+          simp [equal]
+      · rw [ite_eq_right equal, WP.spec_ok]
+        exact Or.inl rfl
+    · rw [ite_eq_right run]
+      apply WP.spec_bind (index_empty_root_refines index)
+      intro fresh empty
+      rw [WP.spec_ok]
+      refine Or.inr ⟨empty, ?_⟩
+      intro entry present
+      obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp present
+      have bound := (List.getElem?_eq_some_iff.mp hj).1
+      have off : count.val ≤ i.val := Nat.le_of_not_gt run
+      have found := same j (by omega)
+      rw [hj, ← List.getElem?_map] at found
+      exact List.mem_iff_getElem?.mpr ⟨j, found.symm⟩
+  · simp
+
+/-- The fast path starts from empty only after matching every original address. -/
+theorem publication_base_refines (index : CellIndex) (root : Spike.radix.DualRoot)
+    (rows : CellRows)
+    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
+    (view : IndexView index root rows) (valid : IndexValid index)
+    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    : WP.spec (Spike.engine.publication_base index root pending)
+        (fun base =>
+          base = root
+          ∨ (IndexView index base []
+              ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst)) := by
+  unfold Spike.engine.publication_base
+  let count := alloc.vec.Vec.len pending
+  have size : count.val = pending.val.length := alloc.vec.Vec.len_val _
+  have threshold : (256#usize : Usize).val = 256 := rfl
+  have max : core.num.Usize.MAX.val = Usize.max := rfl
+  by_cases small : count < 256#usize
+  · rw [ite_eq_left small, WP.spec_ok]
+    exact Or.inl rfl
+  · rw [ite_eq_right small]
+    by_cases full : count = core.num.Usize.MAX
+    · rw [ite_eq_left full, WP.spec_ok]
+      exact Or.inl rfl
+    · rw [ite_eq_right full]
+      have one : (1#usize : Usize).val = 1 := rfl
+      have nmax : count.val < Usize.max := by
+        have upper : count.val ≤ Usize.max := by scalar_tac
+        have different : count.val ≠ Usize.max := fun eq =>
+          full (UScalar.eq_of_val_eq (eq.trans max.symm))
+        omega
+      apply WP.spec_bind (Usize.add_spec (x := count) (y := 1#usize) (by omega))
+      intro limit increased
+      have enough : 18 * rows.length ≤ Usize.max := by
+        have large : (256#usize : Usize).val ≤ count.val := Nat.le_of_not_gt small
+        have slots := space.order
+        have cap : 2147483647 ≤ Usize.max := by scalar_tac
+        have bound := Nat.mul_le_mul_right (2 * (rows.length + pending.val.length) + 1)
+          (show 9 ≤ pending.val.length by omega)
+        omega
+      apply WP.spec_bind (index_scan_up_to_refines index root limit rows view valid enough)
+      intro links ⟨scanSize, load⟩
+      change WP.spec (if alloc.vec.Vec.len links != count then Result.ok root
+        else Spike.engine.publication_base_loop index root pending count links 0#usize) _
+      have actual : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val _
+      by_cases sameSize : alloc.vec.Vec.len links = count
+      · have checked : links.val.length = count.val := by rw [← actual, sameSize]
+        have complete : rows.length = count.val := by
+          rw [checked, Nat.min_def] at scanSize
+          split at scanSize <;> omega
+        rw [ite_eq_right (show ¬ (alloc.vec.Vec.len links != count) = true from by simp [sameSize])]
+        exact publication_compare index root rows pending count links complete size.symm checked load
+      · have diff : (alloc.vec.Vec.len links != count) = true := bne_iff_ne.mpr sameSize
+        rw [diff, ite_eq_left (show true = true from rfl), WP.spec_ok]
+        exact Or.inl rfl
 
 private theorem indexed_row_refines (index : CellIndex) (root : Spike.radix.DualRoot)
     (rows : CellRows) (write : IndexWrite) (version : U64)
@@ -192,5 +377,32 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Dual
     exact ⟨valid, .refl _, ⟨⟨Nat.le_refl _, Nat.le_refl _⟩,
       ⟨Nat.le_refl _, Nat.le_refl _⟩, Nat.le_refl _⟩, rows, view, Nat.le_refl _,
       by simp [total, expected]⟩
+
+theorem indexed_publish_selected (index : CellIndex) (root base : Spike.radix.DualRoot)
+    (rows : CellRows)
+    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (view : IndexView index root rows) (valid : IndexValid index)
+    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
+    (chosen
+      : base = root
+        ∨ (IndexView index base [] ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
+    : WP.spec (Spike.engine.publish_indexed index base pending version)
+        (fun (next, after) =>
+          IndexView after next (pending.val.foldr (applyIndexedWrite version) rows)
+          ∧ IndexValid after
+          ∧ IndexKeeps index after) := by
+  rcases chosen with rfl | ⟨empty, covers⟩
+  · apply WP.spec_mono (indexed_publication_refines index base rows pending version
+      view valid space addresses)
+    rintro ⟨_, _⟩ ⟨refined, good, kept, _⟩
+    exact ⟨refined, good, kept⟩
+  · rw [indexed_fold_cover rows pending.val version covers]
+    have fits : IndexBatchRoom index (([] : CellRows).length + pending.val.length) pending.val.length :=
+      space.shrink (by simp)
+    apply WP.spec_mono (indexed_publication_refines index base [] pending version
+      empty valid fits addresses)
+    rintro ⟨_, _⟩ ⟨refined, good, kept, _⟩
+    exact ⟨refined, good, kept⟩
 
 end KvRust

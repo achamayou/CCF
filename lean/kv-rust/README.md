@@ -217,6 +217,12 @@ When a range has no staged writes, it now copies only the selected cells into it
 Governance improved in each of four alternating Rust-to-Rust pairs, from 8.16-15.13 us/tx to 7.06-8.54 us/tx.
 In three subsequent Rust/C++ pairs the host was noisier and Rust still lagged on governance and large commits, while point reads and logging remained faster.
 
+For batches of at least 256 writes, publication now checks a bounded prefix in scan order to see whether the writes cover every committed address in the same order.
+When they do, publication starts from an empty root in the existing arena, avoiding replacement of bindings that none of the new frames needs to retain.
+The [extracted proof](KvRust/IndexedPublication.lean) covers puts and removals, retains existing pins, and requires complete coverage before dropping old bindings from the new root.
+The 2,048-key replacement benchmark took 1.89-2.47 ms with this path versus 2.50-3.86 ms in four alternating Rust-to-Rust pairs.
+Partial or reordered replacements still take the original edit path; the guard visits at most one more leaf than the batch length.
+
 ### Persistent storage experiment
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
