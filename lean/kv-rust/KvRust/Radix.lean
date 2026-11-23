@@ -463,7 +463,7 @@ theorem radix_set_child_matches (dir : Spike.radix.RadixDir) (slot : Usize) (chi
     rw [BitVec.getLsbD_or, hset]
     by_cases same : i = slot.val <;> simp [same, nz, old]
 
-private theorem radix_updated_mask (dir next : Spike.radix.RadixDir) (slot : Usize)
+theorem radix_updated_mask (dir next : Spike.radix.RadixDir) (slot : Usize)
     (child : U32) (bound : slot.val < 17) (mask : RadixMask dir)
     (hstep : next.children.val = dir.children.val.set slot.val child)
     (hmask
@@ -1218,7 +1218,7 @@ theorem radix_rebuild_preserves
       exact ⟨keep, by omega, hf, hfound⟩
   · exact ⟨Nat.le_refl _, room, Nat.le_refl _, fun _ _ h => h, vacant, live⟩
 
-private theorem radix_tree_zero {dirs : List (Option Spike.radix.RadixDir)}
+theorem radix_tree_zero {dirs : List (Option Spike.radix.RadixDir)}
     {height : Nat} {link : U32} {bindings : List (List U8 × U32)}
     (tree : RadixTree dirs height link bindings) (zero : link = 0#u32)
     : bindings = [] := by
@@ -1364,7 +1364,7 @@ theorem radix_copy_parent_matches (dirs : alloc.vec.Vec (Option Spike.radix.Radi
     intro i current entry earlier
     exact (earlier (by simpa only [sameArena] using entry)).elim
 
-private theorem radix_tree_height {dirs : List (Option Spike.radix.RadixDir)}
+theorem radix_tree_height {dirs : List (Option Spike.radix.RadixDir)}
     {height depth : Nat} {root : U32} {bindings : List (List U8 × U32)}
     (tree : RadixTree dirs height root bindings) (bound : height ≤ depth)
     : RadixTree dirs depth root bindings := by
@@ -1432,6 +1432,60 @@ private theorem radix_tree_live {dirs : DirArena} {height : Nat} {node : U32}
   | empty => exact (nz rfl).elim
   | leaf _ _ _ tagged => exact (not_lt_of_ge tagged low).elim
   | branch _ _ dir _ _ _ live _ _ _ => exact ⟨dir, live⟩
+
+/-- Publishing a complete partition allocates one directory and preserves the
+previous forest and its compressed-prefix witnesses. -/
+theorem radix_publish_partition (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (free : alloc.vec.Vec Usize)
+    (dir : Spike.radix.RadixDir) (height : Nat) (bindings : List (List U8 × U32))
+    (parts : RadixPartition dirs.val height dir.digit dir.children.val bindings)
+    (mask : RadixMask dir) (occupied : ∃ a b, a ≠ b ∧ Occupied dir a ∧ Occupied dir b)
+    (valid : RadixDirectoryInvariant dirs) (available : RadixFree dirs free)
+    (room : dirs.val.length < 2147483647)
+    : WP.spec (Spike.radix.add_directory dirs free dir)
+        (fun (root, after, left) =>
+          preservesSlots dirs after
+          ∧ RadixFree after left
+          ∧ after.val.length ≤ dirs.val.length + 1
+          ∧ RadixDirectoryInvariant after
+          ∧ RadixTree after.val (height + 1) root bindings
+          ∧ RadixAdds dirs after
+              (fun digit rows => digit = dir.digit ∧ rows = bindings)) := by
+  have nonempty : radixFirst dir ≠ 0#u32 := by
+    obtain ⟨a, _, _, ⟨link, found, nz⟩, _⟩ := occupied
+    exact radix_first_nonzero dir ⟨link, List.mem_of_getElem? found, nz⟩
+  have children : ∀ child ∈ dir.children.val, RadixDirLive dirs child := by
+    intro child member
+    obtain ⟨i, hi⟩ := List.mem_iff_getElem?.mp member
+    have bound := (List.getElem?_eq_some_iff.mp hi).1
+    rw [Array.length_eq] at bound
+    obtain ⟨link, saved, tree⟩ := parts i bound
+    have eq := Option.some.inj (saved.symm.trans hi)
+    exact eq ▸ radix_tree_live tree
+  apply WP.spec_mono (radix_add_directory_matches dirs free dir available room nonempty
+    (children _ (radix_first_mem dir nonempty) nonempty))
+  rintro ⟨root, after, left⟩
+    ⟨positive, low, ⟨published, entry, digit, links, bitmap, cache⟩, kept, growth, vacant, others⟩
+  have publishedParts : RadixPartition after.val height published.digit published.children.val bindings := by
+    intro i hi
+    obtain ⟨child, saved, tree⟩ := parts i hi
+    exact ⟨child, by simpa only [links] using saved, by
+      simpa only [digit] using radix_tree_preserved dirs.val after.val kept tree⟩
+  have tree := radix_partition_tree after.val root published height bindings positive low entry publishedParts
+  refine ⟨kept, vacant, growth, ?_, tree, ?_⟩
+  · apply radix_extend_invariant valid kept _ published entry others
+    · simpa only [RadixMask, links, bitmap] using mask
+    · simpa only [links] using children
+    · exact cache
+    · simpa only [Occupied, links] using occupied
+  · intro j actual present absent
+    have eq : j = root.val - 1 := by
+      by_contra no
+      exact absent ((others j no).symm.trans present)
+    subst j
+    have same := Option.some.inj (Option.some.inj (present.symm.trans entry))
+    subst actual
+    exact ⟨root, height + 1, bindings, by omega, low, tree, digit, rfl⟩
 
 /-- One step of a prepared path. The replacement subtree represents the desired
 bindings for this slot, and every sibling already represents its desired partition. -/

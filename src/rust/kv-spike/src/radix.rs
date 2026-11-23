@@ -339,6 +339,96 @@ pub fn put<V>(
     (rebuild_path(dirs, free_dirs, path, child), leaf, replaced)
 }
 
+#[derive(Clone, Copy)]
+struct BuildFrame {
+    end: usize,
+    cursor: usize,
+    dir: RadixDir,
+    parent_slot: usize,
+}
+
+fn sorted_frame<V>(
+    rows: &[Option<RadixRow<V>>],
+    sorted: &[u32],
+    begin: usize,
+    end: usize,
+    parent_slot: usize,
+) -> BuildFrame {
+    let first = row_at(rows, sorted[begin]);
+    let last = row_at(rows, sorted[end - 1]);
+    let digit = match first_difference(&first.key, &last.key) {
+        Some(digit) => digit,
+        None => panic!("bulk radix input must have distinct keys"),
+    };
+    BuildFrame {
+        end,
+        cursor: begin,
+        dir: RadixDir::empty(digit),
+        parent_slot,
+    }
+}
+
+fn sorted_group_end<V>(
+    rows: &[Option<RadixRow<V>>],
+    sorted: &[u32],
+    begin: usize,
+    end: usize,
+    digit: usize,
+    slot: usize,
+) -> usize {
+    let mut next = begin + 1;
+    while next < end {
+        if symbol(&row_at(rows, sorted[next]).key, digit) != slot {
+            break;
+        }
+        next += 1;
+    }
+    next
+}
+
+/// Build one radix from live leaf links in strictly increasing key order.
+/// The explicit stack keeps key depth from limiting the native call stack.
+pub fn build_sorted<V>(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free: &mut Vec<usize>,
+    rows: &[Option<RadixRow<V>>],
+    sorted: &[u32],
+) -> u32 {
+    let end = sorted.len();
+    if end == 0 {
+        return 0;
+    }
+    if end == 1 {
+        return sorted[0];
+    }
+    let mut parents = Vec::new();
+    let mut frame = sorted_frame(rows, sorted, 0, end, 0);
+    loop {
+        if frame.cursor == frame.end {
+            let completed = add_directory(dirs, free, frame.dir);
+            if parents.is_empty() {
+                return completed;
+            }
+            let depth = parents.len() - 1;
+            let mut parent: BuildFrame = parents[depth];
+            parents.resize(depth, frame);
+            parent.dir.set_child(frame.parent_slot, completed);
+            frame = parent;
+        } else {
+            let begin = frame.cursor;
+            let slot = symbol(&row_at(rows, sorted[begin]).key, frame.dir.digit);
+            let end = sorted_group_end(rows, sorted, begin, frame.end, frame.dir.digit, slot);
+            frame.cursor = end;
+            if end == begin + 1 {
+                frame.dir.set_child(slot, sorted[begin]);
+            } else {
+                parents.push(frame);
+                frame = sorted_frame(rows, sorted, begin, end, slot);
+            }
+        }
+    }
+}
+
 /// Follow directory links until either a leaf or a missing child is reached.
 /// The caller owns the arena and keeps all directories reachable from `root` live.
 #[inline]
@@ -712,6 +802,48 @@ impl<V> Default for DualRadix<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_batch_handles_prefixes_and_keeps_the_old_root() {
+        let mut arena = Arena::new();
+        let (old, _, _) = arena.put(
+            0,
+            RadixRow {
+                key: b"a".to_vec(),
+                value: 10,
+            },
+        );
+        let keys: [&[u8]; 6] = [b"", b"\0", b"a", b"a\0", b"aa", b"\xff"];
+        let links = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let link = link_at(arena.rows.len(), true);
+                arena.rows.push(Some(RadixRow {
+                    key: key.to_vec(),
+                    value: i,
+                }));
+                link
+            })
+            .collect::<Vec<_>>();
+        let empty = build_sorted(&mut arena.dirs, &mut arena.free_dirs, &arena.rows, &[]);
+        assert_eq!(empty, 0);
+        let singleton = build_sorted(
+            &mut arena.dirs,
+            &mut arena.free_dirs,
+            &arena.rows,
+            &links[..1],
+        );
+        assert_eq!(singleton, links[0]);
+        let root = build_sorted(&mut arena.dirs, &mut arena.free_dirs, &arena.rows, &links);
+        assert_eq!(scan_leaves(&arena.dirs, root), links);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(get(&arena.dirs, &arena.rows, root, key), Some(&i));
+        }
+        assert_eq!(get(&arena.dirs, &arena.rows, root, b"ab"), None);
+        assert_eq!(get(&arena.dirs, &arena.rows, old, b"a"), Some(&10));
+        assert_eq!(get(&arena.dirs, &arena.rows, old, b""), None);
+    }
 
     #[test]
     fn dual_radix_keeps_write_order_after_fork_and_removal() {

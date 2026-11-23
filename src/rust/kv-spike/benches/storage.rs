@@ -7,6 +7,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[path = "storage/batch_build.rs"]
+mod batch_build;
 #[path = "storage/byte_radix.rs"]
 mod byte_radix;
 #[path = "storage/nibble_radix.rs"]
@@ -470,6 +472,10 @@ fn ordered_suite<T: OrderedIndex>(name: &str, scrambled: bool) {
 
 fn main() {
     let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("batch-build") {
+        batch_build::measure();
+        return;
+    }
     if mode.as_deref() == Some("retirement") {
         nibble_radix::retirement::check();
         for i in 0..4 {
