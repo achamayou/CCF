@@ -51,7 +51,7 @@ trait Key {
 
 impl Key for Bytes {
     fn same(&self, other: &Self) -> bool {
-        self.compare(other) == 0
+        self.same_slice(other)
     }
 }
 

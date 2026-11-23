@@ -30,24 +30,6 @@ def byteOrder : List U8 → List U8 → I8
   | a :: xs, b :: ys =>
       if a < b then (-1)#i8 else if b < a then 1#i8 else byteOrder xs ys
 
-private theorem order_zero (a b : List U8) : byteOrder a b = 0#i8 ↔ a = b := by
-  have hneg : (-1)#i8 ≠ 0#i8 := by decide
-  have hpos : 1#i8 ≠ 0#i8 := by decide
-  induction a generalizing b with
-  | nil => cases b <;> simp [byteOrder, hneg]
-  | cons a xs ih =>
-      cases b with
-      | nil => simp [byteOrder, hpos]
-      | cons b bs =>
-          by_cases hab : a < b
-          · have hne : a ≠ b := fun eq => (lt_irrefl b) (eq ▸ hab)
-            simp [byteOrder, hab, hneg, hne]
-          · by_cases hba : b < a
-            · have hne : a ≠ b := fun eq => (lt_irrefl b) (eq ▸ hba)
-              simp [byteOrder, hab, hba, hpos, hne]
-            · have heq : a = b := le_antisymm (le_of_not_gt hba) (le_of_not_gt hab)
-              simp [byteOrder, heq, ih]
-
 private theorem order_at_end (a b : List U8) (i : Nat)
     (ha : i ≤ a.length) (hb : i ≤ b.length) (h : a.length ≤ i ∨ b.length ≤ i)
     : byteOrder (a.drop i) (b.drop i)
@@ -149,19 +131,6 @@ theorem bytes_compare (a b : Spike.engine.Bytes)
           simp [hlt, hgt, show 0#i8 = byteOrder xs ys by simpa [hl, hg] using hend]; rfl
   · simp
 
-/-- Equality used by extracted lookups is equality of byte contents. -/
-theorem bytes_same (a b : Spike.engine.Bytes)
-    : Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a b
-      = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
-  have h := bytes_compare a b
-  unfold Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same
-  cases hr : Spike.engine.Bytes.compare a b using Result.cases with
-  | ret r =>
-      simp only [hr, WP.spec_ok] at h
-      simp [h, order_zero]
-  | vis _ _ => simp [hr] at h
-  | div => simp [hr] at h
-
 private theorem bytes_same_slice (a b : Spike.engine.Bytes)
     : Spike.engine.Bytes.same_slice a b
       = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
@@ -181,6 +150,13 @@ private theorem bytes_same_slice (a b : Spike.engine.Bytes)
       cases eq <;> simp_all [alloc.vec.Vec.deref]
   | vis _ _ => simp [hr] at h
   | div => simp [hr] at h
+
+/-- Equality used by extracted lookups is equality of byte contents. -/
+theorem bytes_same (a b : Spike.engine.Bytes)
+    : Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a b
+      = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
+  simpa only [Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same]
+    using bytes_same_slice a b
 
 /-- Both components of an address use byte-content equality. -/
 theorem address_same (a b : Spike.engine.Address)
