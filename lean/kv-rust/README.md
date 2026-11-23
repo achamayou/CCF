@@ -73,4 +73,28 @@ The ranges are the two run medians on the same logical CPU, with the baseline an
 
 The change prepends a fresh binding in place instead of cloning the existing bindings, while retaining the original replacement path for existing keys.
 Replacement and point-read measurements varied across runs and do not establish a speedup for those workloads.
-These measurements compare two versions of the Rust prototype, not the C++ backend or replicated CCF.
+These measurements compare two versions of the Rust prototype.
+
+### Comparison with C++
+
+The table compares the optimized Rust engine at `aefa09111` with the C++ KV engine from the same checkout.
+Both used release builds (Rust 1.90.0 and Clang 21.1.8 with CCF's default snmalloc), the same pinned logical CPU on the host above, a single map, eight-byte big-endian keys, and 64-byte values.
+Each value is a range of two run medians, with nine samples after warmup per run and setup and map acquisition outside the timer.
+The runs were ordered C++, Rust, Rust, C++.
+
+| Workload                  | C++               | Rust             |
+| ------------------------- | ----------------- | ---------------- |
+| Stage 64 distinct keys    | 1.43-1.60 us/op   | 0.39-0.56 us/op  |
+| Stage 512 distinct keys   | 1.57-2.55 us/op   | 2.37-2.63 us/op  |
+| Stage 2048 distinct keys  | 1.56-2.26 us/op   | 9.41-9.63 us/op  |
+| Replace 64 staged keys    | 1.43-1.55 us/op   | 7.03-14.65 us/op |
+| Replace 512 staged keys   | 1.57-1.58 us/op   | 50.3-51.9 us/op  |
+| Replace 2048 staged keys  | 1.52-1.87 us/op   | 212-287 us/op    |
+| Locally apply 64 writes   | 10.1-11.8 us/tx   | 34.4-34.9 us/tx  |
+| Locally apply 512 writes  | 0.125-0.150 ms/tx | 1.50-1.54 ms/tx  |
+| Locally apply 2048 writes | 0.813-1.04 ms/tx  | 23.7-30.0 ms/tx  |
+| Point read, 512-key map   | 0.602-0.669 us/op | 28.5-34.9 us/op  |
+
+The C++ comparison harness times staging and reads through an acquired map handle; Rust goes through the public action dispatcher, which currently clones the pinned view per operation.
+The C++ local-apply path calls `apply_changes` with normal lock and version setup but without serialization or replication; Rust returns the full applied write set.
+These are microbenchmarks of the two current implementations and interfaces, not a measurement of replicated CCF throughput.
