@@ -19,6 +19,49 @@ fn set_prepends_new_and_existing_keys_without_reordering_other_entries() {
 }
 
 #[test]
+fn map_validation_compares_only_the_selected_ordered_key_cell_pairs() {
+    let m = Bytes::copy_from(b"m");
+    let other = Bytes::copy_from(b"other");
+    let row = |map: &Bytes, key, version| {
+        (
+            Address {
+                map: map.clone(),
+                key: Bytes::copy_from(key),
+            },
+            Cell {
+                value: Bytes::copy_from(b""),
+                version,
+            },
+        )
+    };
+    let db = Assoc(vec![
+        row(&m, b"b", 2),
+        row(&other, b"a", 1),
+        row(&m, b"a", 1),
+    ]);
+    let expected = image(&db, &m);
+    assert!(same_image(&db, &m, &expected));
+    assert!(same_image(
+        &db,
+        &Bytes::copy_from(b"missing"),
+        &Assoc::new()
+    ));
+    assert!(!same_image(&db, &m, &Assoc::new()));
+
+    let mut changed = db.clone();
+    changed.0[1].1.version += 1;
+    assert!(same_image(&changed, &m, &expected));
+    changed.0[2].1.version += 1;
+    assert!(!same_image(&changed, &m, &expected));
+    let mut changed = db.clone();
+    changed.0.pop();
+    assert!(!same_image(&changed, &m, &expected));
+    let mut changed = db;
+    changed.0.swap(0, 2);
+    assert!(!same_image(&changed, &m, &expected));
+}
+
+#[test]
 fn bulk_publication_matches_the_general_fold_in_order() {
     fn address(i: u8) -> Address {
         let key = [i / 2, i % 5];

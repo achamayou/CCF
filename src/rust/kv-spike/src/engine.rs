@@ -345,18 +345,24 @@ fn copy_if_on_map(out: &mut Vec<(Bytes, Cell)>, row: &(Address, Cell), map: &Byt
     }
 }
 
-fn same_image(a: &Image, b: &Image) -> bool {
-    if a.0.len() != b.0.len() {
-        return false;
-    }
+fn same_image(data: &Data, map: &Bytes, expected: &Image) -> bool {
     let mut i = 0;
-    while i < a.0.len() {
-        if !a.0[i].0.same(&b.0[i].0) || !a.0[i].1.same(&b.0[i].1) {
-            return false;
+    let mut matched = 0;
+    while i < data.0.len() {
+        let row = &data.0[i];
+        if row.0.map.same(map) {
+            if matched >= expected.0.len() {
+                return false;
+            }
+            let old = &expected.0[matched];
+            if !row.0.key.same(&old.0) || !row.1.same(&old.1) {
+                return false;
+            }
+            matched += 1;
         }
         i += 1;
     }
-    true
+    matched == expected.0.len()
 }
 
 #[derive(Clone)]
@@ -603,7 +609,7 @@ impl Dependency {
                 (Some(current), Some(old)) => current.same(old),
                 _ => false,
             },
-            Self::Map(map, expected) => same_image(&image(db, map), expected),
+            Self::Map(map, expected) => same_image(db, map, expected),
         }
     }
 }

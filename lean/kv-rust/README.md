@@ -154,6 +154,10 @@ With that path, the 2,048-write commit took **1.32-1.33 ms in Rust versus 0.87-0
 Rust point reads at that size took 3.91-4.86 us versus 0.63-0.64 us, and the logging mix took 49.7-57.5 us per transaction versus 1.06 us.
 Sharing the already-pinned image when the local and global cuts are identical reduced the logging mix to 33.0-37.1 us in Rust versus 1.02-1.07 us in C++ in two subsequent pairs.
 The unchanged extracted trace theorem covers this sharing, and acquisitions at different cuts still pin independent images.
+Whole-map dependency validation now streams the committed rows instead of cloning an image just to compare it.
+The extracted comparison checks the same ordered key, value, and version pairs, including insertions and deletions.
+Two matched governance runs measured 24.7-26.0 us per Rust transaction before the change, 24.4-25.1 us after it, and 7.31-7.59 us for C++.
+Removing the temporary image eliminates its allocations, but these timings do not establish a consistent transaction speedup.
 This benchmark still does not cover replicated CCF.
 
 ### Persistent storage experiment
