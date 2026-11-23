@@ -3,15 +3,17 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, first_difference, get, symbol};
+use ccf_kv_spike::radix::{
+    RADIX_LEAF_TAG as LEAF, RadixDir, add_directory, first_difference, get, link_at, rebuild_path,
+    symbol,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
 
 impl Link {
     fn new(index: usize, leaf: bool) -> Self {
-        assert!(index < LEAF as usize - 1, "benchmark arena capacity");
-        Self((index as u32 + 1) | if leaf { LEAF } else { 0 })
+        Self(link_at(index, leaf))
     }
 
     fn empty(self) -> bool {
@@ -29,16 +31,11 @@ impl Link {
 
 trait DirectoryOps {
     fn child(&self, symbol: usize) -> Link;
-    fn first_child(&self) -> Link;
 }
 
 impl DirectoryOps for RadixDir {
     fn child(&self, symbol: usize) -> Link {
         Link(self.children[symbol])
-    }
-
-    fn first_child(&self) -> Link {
-        self.child(self.mask.trailing_zeros() as usize)
     }
 }
 
@@ -46,7 +43,7 @@ impl DirectoryOps for RadixDir {
 pub struct NibbleRadix {
     dirs: Pool<RadixDir>,
     rows: Pool<Row>,
-    path: Vec<(Link, usize)>,
+    path: Vec<(u32, usize)>,
 }
 
 impl NibbleRadix {
@@ -70,22 +67,21 @@ impl NibbleRadix {
         node
     }
 
-    fn add_dir(&mut self, mut dir: RadixDir) -> Link {
-        dir.first = self.first_leaf(dir.first_child()).0;
-        Link::new(self.dirs.add(dir), false)
+    fn add_dir(&mut self, dir: RadixDir) -> Link {
+        Link(add_directory(
+            &mut self.dirs.slots,
+            &mut self.dirs.free,
+            dir,
+        ))
     }
 
-    fn rebuild(&mut self, mut child: Link) -> Link {
-        while let Some((node, sym)) = self.path.pop() {
-            let mut dir = *self.dirs.get(node.index());
-            dir.set_child(sym, child.0);
-            child = if dir.mask.is_power_of_two() {
-                dir.first_child()
-            } else {
-                self.add_dir(dir)
-            };
-        }
-        child
+    fn rebuild(&mut self, child: Link) -> Link {
+        Link(rebuild_path(
+            &mut self.dirs.slots,
+            &mut self.dirs.free,
+            &self.path,
+            child.0,
+        ))
     }
 }
 
@@ -118,7 +114,7 @@ impl ByteIndex for NibbleRadix {
                 break;
             }
             let sym = symbol(key, dir.digit);
-            self.path.push((stem, sym));
+            self.path.push((stem.0, sym));
             stem = dir.child(sym);
         }
         let next = if let Some(at) = diff {
@@ -149,7 +145,7 @@ impl ByteIndex for NibbleRadix {
             }
             let dir = self.dirs.get(node.index());
             let sym = symbol(key, dir.digit);
-            self.path.push((node, sym));
+            self.path.push((node.0, sym));
             node = dir.child(sym);
         }
         root

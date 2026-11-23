@@ -70,8 +70,8 @@ impl Node {
 }
 
 pub(super) struct Pool<T> {
-    slots: Vec<Option<T>>,
-    free: Vec<usize>,
+    pub(super) slots: Vec<Option<T>>,
+    pub(super) free: Vec<usize>,
 }
 
 impl<T> Default for Pool<T> {

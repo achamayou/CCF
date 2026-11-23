@@ -46,6 +46,13 @@ pub fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
 pub const RADIX_FANOUT: usize = 17;
 pub const RADIX_LEAF_TAG: u32 = 0x8000_0000;
 
+#[inline]
+pub fn link_at(index: usize, leaf: bool) -> u32 {
+    assert!(index < 0x7fff_ffff, "radix arena capacity");
+    let slot = index as u32 + 1;
+    if leaf { RADIX_LEAF_TAG + slot } else { slot }
+}
+
 #[derive(Clone, Copy)]
 pub struct RadixDir {
     pub digit: usize,
@@ -73,6 +80,19 @@ impl RadixDir {
             self.mask |= 1_u32 << slot;
         }
     }
+
+    #[inline]
+    pub fn first_child(&self) -> u32 {
+        let mut i = 0;
+        while i < RADIX_FANOUT {
+            let child = self.children[i];
+            if child != 0 {
+                return child;
+            }
+            i += 1;
+        }
+        0
+    }
 }
 
 pub struct RadixRow<V> {
@@ -98,17 +118,69 @@ pub fn allocate<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<usize>, value: T) 
     }
 }
 
+fn directory(dirs: &[Option<RadixDir>], link: u32) -> &RadixDir {
+    let index = (link - 1) as usize;
+    match &dirs[index] {
+        Some(dir) => dir,
+        None => panic!("missing radix directory"),
+    }
+}
+
+pub fn add_directory(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free: &mut Vec<usize>,
+    mut dir: RadixDir,
+) -> u32 {
+    let first = dir.first_child();
+    assert!(first != 0, "cannot publish an empty radix directory");
+    dir.first = if first >= RADIX_LEAF_TAG {
+        first
+    } else {
+        directory(dirs, first).first
+    };
+    link_at(allocate(dirs, free, dir), false)
+}
+
+fn copy_parent(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free: &mut Vec<usize>,
+    parent: u32,
+    slot: usize,
+    child: u32,
+) -> u32 {
+    let mut dir = *directory(dirs, parent);
+    dir.set_child(slot, child);
+    if dir.mask.is_power_of_two() {
+        dir.first_child()
+    } else {
+        add_directory(dirs, free, dir)
+    }
+}
+
+/// Replace the chosen child at each directory, from the innermost one out.
+/// The original directories and their links remain in the arena.
+pub fn rebuild_path(
+    dirs: &mut Vec<Option<RadixDir>>,
+    free: &mut Vec<usize>,
+    path: &[(u32, usize)],
+    mut child: u32,
+) -> u32 {
+    let mut end = path.len();
+    while end > 0 {
+        end -= 1;
+        let (parent, slot) = path[end];
+        child = copy_parent(dirs, free, parent, slot, child);
+    }
+    child
+}
+
 /// Follow directory links until either a leaf or a missing child is reached.
 /// The caller owns the arena and keeps all directories reachable from `root` live.
 #[inline]
 pub fn find_leaf(dirs: &[Option<RadixDir>], root: u32, key: &[u8]) -> u32 {
     let mut node = root;
     while node != 0 && node < RADIX_LEAF_TAG {
-        let index = (node - 1) as usize;
-        let dir = match &dirs[index] {
-            Some(dir) => dir,
-            None => panic!("missing radix directory"),
-        };
+        let dir = directory(dirs, node);
         node = dir.children[symbol(key, dir.digit)];
     }
     node
@@ -206,5 +278,43 @@ mod tests {
         assert_eq!(allocate(&mut slots, &mut free, 5), 4);
         assert_eq!(slots, [Some(1), Some(2), Some(3), Some(4), Some(5)]);
         assert!(free.is_empty());
+    }
+
+    #[test]
+    fn path_copy_can_collapse_a_child_without_changing_the_old_root() {
+        let rows = [
+            Some(RadixRow {
+                key: Box::new([0x10]),
+                value: 1,
+            }),
+            Some(RadixRow {
+                key: Box::new([0x11]),
+                value: 2,
+            }),
+            Some(RadixRow {
+                key: Box::new([0x20]),
+                value: 3,
+            }),
+        ];
+        let mut dirs = vec![None];
+        let mut free = vec![0];
+        let mut low = RadixDir::empty(1);
+        low.set_child(symbol(&[0x10], 1), link_at(0, true));
+        low.set_child(symbol(&[0x11], 1), link_at(1, true));
+        let low_link = add_directory(&mut dirs, &mut free, low);
+        let mut high = RadixDir::empty(0);
+        high.set_child(symbol(&[0x10], 0), low_link);
+        high.set_child(symbol(&[0x20], 0), link_at(2, true));
+        let old = add_directory(&mut dirs, &mut free, high);
+        let key = &[0x10];
+        let path = [(old, symbol(key, 0)), (low_link, symbol(key, 1))];
+        let new = rebuild_path(&mut dirs, &mut free, &path, 0);
+
+        assert_eq!(dirs.len(), 3);
+        assert_eq!(get(&dirs, &rows, old, key), Some(&1));
+        assert_eq!(get(&dirs, &rows, new, key), None);
+        assert_eq!(get(&dirs, &rows, old, &[0x11]), Some(&2));
+        assert_eq!(get(&dirs, &rows, new, &[0x11]), Some(&2));
+        assert_eq!(get(&dirs, &rows, new, &[0x20]), Some(&3));
     }
 }

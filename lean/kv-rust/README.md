@@ -193,4 +193,6 @@ These are storage-component measurements, not a CCF transaction-throughput win.
 `KvRust.Radix` proves the exact Rust digit selection, earliest split, and borrowed point lookup used by this benchmark.
 The lookup theorem assumes that directory links partition the projected bindings and that each leaf refers to the correct live row.
 With these extracted functions the two-run medians at 2,048 keys were 8.3-9.5 ns for point reads and 132-148 ns for pinned-root updates across both distributions.
-The candidate is not integrated; updates must preserve those invariants and past roots, and scan-order refinement, bounded reclamation latency, and transaction qualification remain required.
+The extracted path rebuild now proves both preservation of old roots and the exact bindings of its result, given a prepared path with correct sibling partitions.
+The changed native path copy uses a short scan in place of the benchmark's original trailing-zero intrinsic; its update measurements are now close to CHAMP, not a consistent win.
+The candidate is not integrated; the Rust insert and delete entry points still need to establish the path premises, and scan-order refinement, bounded reclamation latency, and transaction qualification remain required.
