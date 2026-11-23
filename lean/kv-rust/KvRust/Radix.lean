@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Extracted.Funs
+public import KvRust.Keys
 public import Kv.Model.Types
 
 import all Aeneas.Data.List.List
@@ -40,6 +41,55 @@ theorem radixSymbol_terminal (key : List U8) (digit : Nat)
     omega
   · have h' : key.length ≤ digit / 2 := by omega
     simp [radixSymbol, h']
+
+private theorem radixSymbol_cons_shift (head : U8) (tail : List U8) (digit : Nat)
+    : radixSymbol (head :: tail) (digit + 2) = radixSymbol tail digit := by
+  have index : (digit + 2) / 2 = digit / 2 + 1 := by omega
+  have parity : (digit + 2) % 2 = digit % 2 := by omega
+  simp [radixSymbol, index, parity, List.getElem?_cons_succ]
+
+/-- At the first differing routing digit, slot order agrees with unsigned byte order. -/
+theorem radix_first_symbol_lt (a b : List U8) (digit : Nat)
+    (same : ∀ i < digit, radixSymbol a i = radixSymbol b i)
+    (lower : radixSymbol a digit < radixSymbol b digit)
+    : byteOrder a b = (-1)#i8 := by
+  induction a generalizing b digit with
+  | nil =>
+      cases b with
+      | nil => exact (Nat.lt_irrefl _ lower).elim
+      | cons b tail => rfl
+  | cons a xs ih =>
+      cases b with
+      | nil => simp [radixSymbol] at lower
+      | cons b ys =>
+          have high (x : U8) (tail : List U8) : radixSymbol (x :: tail) 0 = 1 + x.val / 16 := rfl
+          have low (x : U8) (tail : List U8) : radixSymbol (x :: tail) 1 = 1 + x.val % 16 := rfl
+          have cmp (lt : a.val < b.val) : byteOrder (a :: xs) (b :: ys) = (-1)#i8 := by
+            have smaller : a < b := lt
+            simp [byteOrder, smaller]
+          by_cases first : digit = 0
+          · subst digit
+            rw [high, high] at lower
+            exact cmp (by omega)
+          · have hEq := same 0 (by omega)
+            rw [high, high] at hEq
+            by_cases second : digit = 1
+            · subst digit
+              rw [low, low] at lower
+              exact cmp (by omega)
+            · have lEq := same 1 (by omega)
+              rw [low, low] at lEq
+              have byteEq : a = b := UScalar.eq_of_val_eq (by omega)
+              subst b
+              let rest := digit - 2
+              have shifted : rest + 2 = digit := by dsimp [rest]; omega
+              have sameTail : ∀ i < rest, radixSymbol xs i = radixSymbol ys i := by
+                intro i hi
+                have eq := same (i + 2) (by omega)
+                simpa only [radixSymbol_cons_shift] using eq
+              have lowerTail : radixSymbol xs rest < radixSymbol ys rest := by
+                simpa only [← shifted, radixSymbol_cons_shift] using lower
+              simpa [byteOrder] using ih ys rest sameTail lowerTail
 
 /-- Routing digits distinguish keys even when one key ends at a prefix of another. -/
 theorem radixSymbol_injective : Function.Injective radixSymbol := by
@@ -3529,6 +3579,31 @@ inductive RadixScanPlan (dirs : List (Option Spike.radix.RadixDir))
     (tail : RadixScanPlan dirs (dir.children.val.filter (· != 0#u32) ++ rest) fuel leaves)
     : RadixScanPlan dirs (node :: rest) (fuel + 17) leaves
 
+private theorem scan_plan_unique {dirs : List (Option Spike.radix.RadixDir)}
+    {stack : List U32} {f g : Nat} {xs ys : List U32}
+    (first : RadixScanPlan dirs stack f xs) (second : RadixScanPlan dirs stack g ys)
+    : f = g ∧ xs = ys := by
+  induction first generalizing g ys with
+  | done =>
+      cases second
+      exact ⟨rfl, rfl⟩
+  | leaf node rest fuel leaves tagged _ ih =>
+      cases second with
+      | leaf _ _ other out _ tail =>
+          obtain ⟨same, eq⟩ := ih tail
+          exact ⟨congrArg (· + 1) same, congrArg (node :: ·) eq⟩
+      | branch _ _ _ _ _ _ untagged _ _ =>
+          exact (not_lt_of_ge tagged untagged).elim
+  | branch node dir rest fuel leaves positive untagged live _ ih =>
+      cases second with
+      | leaf _ _ _ _ tagged _ =>
+          exact (not_lt_of_ge tagged untagged).elim
+      | branch _ other _ _ _ _ _ saved tail =>
+          have eq := Option.some.inj (Option.some.inj (live.symm.trans saved))
+          subst other
+          obtain ⟨same, eq⟩ := ih tail
+          exact ⟨congrArg (· + 17) same, eq⟩
+
 private theorem scan_plan_room {dirs : List (Option Spike.radix.RadixDir)}
     {stack : List U32} {fuel : Nat} {leaves : List U32}
     (plan : RadixScanPlan dirs stack fuel leaves)
@@ -3555,34 +3630,61 @@ private theorem scan_plan_append {dirs : List (Option Spike.radix.RadixDir)}
         using RadixScanPlan.branch node dir (rest ++ b) (fuel + n) (leaves ++ ys)
           positive untagged live (by simpa only [List.append_assoc] using ih)
 
+def radixKeyLt (a b : List U8 × U32) : Prop :=
+  byteOrder a.1 b.1 = (-1)#i8
+
 private theorem scan_plan_slots (dirs : List (Option Spike.radix.RadixDir))
     (slots : List Nat) (child : Nat → U32) (bindings : Nat → Bindings)
+    (sortedSlots : slots.Pairwise (· < ·)) (ordered : Prop)
+    (separated
+      : ordered → ∀ i j, i < j → ∀ a ∈ bindings i, ∀ b ∈ bindings j, radixKeyLt a b)
     (available
       : ∀ i ∈ slots,
-          ∃ fuel leaves,
-            RadixScanPlan dirs ([child i].filter (· != 0#u32)) fuel leaves
-            ∧ List.Perm leaves ((bindings i).map Prod.snd))
-    : ∃ fuel leaves,
-        RadixScanPlan dirs ((slots.map child).filter (· != 0#u32)) fuel leaves
-        ∧ List.Perm leaves ((slots.flatMap bindings).map Prod.snd) := by
+          ∃ fuel rows,
+            RadixScanPlan dirs ([child i].filter (· != 0#u32)) fuel (rows.map Prod.snd)
+            ∧ List.Perm rows (bindings i)
+            ∧ (ordered → rows.Pairwise radixKeyLt))
+    : ∃ fuel rows,
+        RadixScanPlan dirs ((slots.map child).filter (· != 0#u32)) fuel
+          (rows.map Prod.snd)
+        ∧ List.Perm rows (slots.flatMap bindings)
+        ∧ (ordered → rows.Pairwise radixKeyLt) := by
   induction slots with
-  | nil => exact ⟨0, [], .done, .nil⟩
+  | nil => exact ⟨0, [], .done, .nil, fun _ => .nil⟩
   | cons i rest ih =>
-      obtain ⟨m, xs, ha, hp⟩ := available i List.mem_cons_self
-      obtain ⟨n, ys, hb, hq⟩ := ih (fun j hj => available j (List.mem_cons_of_mem _ hj))
-      refine ⟨m + n, xs ++ ys, ?_, ?_⟩
-      · rw [List.map_cons, ← List.singleton_append, List.filter_append]
+      obtain ⟨m, xs, ha, hp, sp⟩ := available i List.mem_cons_self
+      obtain ⟨earlier, sortedRest⟩ := List.pairwise_cons.mp sortedSlots
+      obtain ⟨n, ys, hb, hq, sq⟩ := ih sortedRest (fun j hj => available j (List.mem_cons_of_mem _ hj))
+      refine ⟨m + n, xs ++ ys, ?_, ?_, ?_⟩
+      · rw [List.map_append, List.map_cons, ← List.singleton_append, List.filter_append]
         exact scan_plan_append ha hb
-      · simpa only [List.flatMap_cons, List.map_append] using hp.append hq
+      · exact hp.append hq
+      · intro sort
+        apply List.pairwise_append.mpr
+        refine ⟨sp sort, sq sort, ?_⟩
+        intro a ha b hb
+        obtain ⟨j, hj, hb'⟩ := List.mem_flatMap.mp (hq.mem_iff.mp hb)
+        exact separated sort i j (earlier j hj) a (hp.mem_iff.mp ha) b hb'
 
 private theorem scan_plan_tree (dirs : List (Option Spike.radix.RadixDir))
     (height : Nat) (root : U32) (bindings : Bindings)
+    (keyOf : U32 → Option (List U8))
     (tree : RadixTree dirs height root bindings)
-    : ∃ fuel leaves,
-        RadixScanPlan dirs ([root].filter (· != 0#u32)) fuel leaves
-        ∧ List.Perm leaves (bindings.map Prod.snd) := by
+    : ∃ fuel rows,
+        RadixScanPlan dirs ([root].filter (· != 0#u32)) fuel (rows.map Prod.snd)
+        ∧ List.Perm rows bindings
+        ∧ (RadixCompressed dirs keyOf
+            → (∀ e ∈ bindings, keyOf e.2 = some e.1)
+            → rows.Pairwise radixKeyLt) := by
   induction tree with
-  | empty => exact ⟨0, [], by simpa using (RadixScanPlan.done (dirs := dirs)), .nil⟩
+  | empty =>
+      exact ⟨
+        0,
+        [],
+        by simpa using (RadixScanPlan.done (dirs := dirs)),
+        .nil,
+        fun _ _ => .nil
+      ⟩
   | leaf _ node key tagged =>
       have nz : node ≠ 0#u32 := by
         intro hz
@@ -3591,17 +3693,39 @@ private theorem scan_plan_tree (dirs : List (Option Spike.radix.RadixDir))
       have test : (node != 0#u32) = true := bne_iff_ne.mpr nz
       exact ⟨
         1,
-        [node],
+        [(key, node)],
         by
-          simpa only [List.filter_cons, List.filter_nil, test, ite_true]
+          simpa only [List.map_cons, List.map_nil, List.filter_cons, List.filter_nil,
+            test, ite_true]
             using RadixScanPlan.leaf node [] 0 [] tagged (.done (dirs := dirs)),
-        .refl _
+        .refl _,
+        fun _ _ => List.pairwise_singleton _ _
       ⟩
   | branch h node dir bindings positive low live child links children ih =>
       let rows :=
         fun i => bindings.filter (fun row => radixSymbol row.1 dir.digit.val == i)
-      obtain ⟨fuel, leaves, plan, perm⟩ := scan_plan_slots dirs (List.range 17) child rows
-        (fun i hi => ih i (List.mem_range.mp hi))
+      let good := RadixCompressed dirs keyOf ∧ ∀ e ∈ bindings, keyOf e.2 = some e.1
+      have sorted : (List.range 17).Pairwise (· < ·) := by decide
+      have separated : good → ∀ i j, i < j → ∀ a ∈ rows i, ∀ b ∈ rows j, radixKeyLt a b := by
+        intro hGood i j lt a ha b hb
+        have left := List.mem_filter.mp ha
+        have right := List.mem_filter.mp hb
+        have common := hGood.1 (h + 1) node bindings dir
+          (.branch h node dir bindings positive low live child links children)
+          positive low live hGood.2
+        apply radix_first_symbol_lt a.1 b.1 dir.digit.val
+          (common a left.1 b right.1)
+        rwa [beq_iff_eq.mp left.2, beq_iff_eq.mp right.2]
+      have available : ∀ i ∈ List.range 17, ∃ fuel output,
+          RadixScanPlan dirs ([child i].filter (· != 0#u32)) fuel (output.map Prod.snd)
+          ∧ List.Perm output (rows i) ∧ (good → output.Pairwise radixKeyLt) := by
+        intro i hi
+        obtain ⟨fuel, output, plan, perm, order⟩ := ih i (List.mem_range.mp hi)
+        refine ⟨fuel, output, plan, perm, fun cfg => order cfg.1 ?_⟩
+        intro e hm
+        exact cfg.2 e (List.mem_filter.mp hm).1
+      obtain ⟨fuel, leaves, plan, perm, order⟩ :=
+        scan_plan_slots dirs (List.range 17) child rows sorted good separated available
       have pointers : (List.range 17).map child = dir.children.val := by
         apply List.ext_getElem?
         intro i
@@ -3621,11 +3745,17 @@ private theorem scan_plan_tree (dirs : List (Option Spike.radix.RadixDir))
         radix_group_slots bindings (fun row => radixSymbol row.1 dir.digit.val) 17
       rw [hfilter] at partition
       have nz : node ≠ 0#u32 := fun hz => by subst node; contradiction
-      refine ⟨fuel + 17, leaves, ?_, perm.trans (partition.map Prod.snd)⟩
+      refine ⟨
+        fuel + 17,
+        leaves,
+        ?_,
+        perm.trans partition,
+        fun comp actual => order ⟨comp, actual⟩
+      ⟩
       simpa only [List.filter_cons, List.filter_nil, bne_iff_ne.mpr nz, ite_true,
         List.append_nil]
-        using RadixScanPlan.branch node dir [] fuel leaves positive low live
-          (by simpa using plan)
+        using RadixScanPlan.branch node dir [] fuel (leaves.map Prod.snd) positive low
+          live (by simpa using plan)
 
 private theorem scan_step {dirs : Slice (Option Spike.radix.RadixDir)}
     (out stack : alloc.vec.Vec U32) (node : U32) (rest : List U32)
@@ -3780,8 +3910,53 @@ theorem radix_scan_plan_exists (dirs : Slice (Option Spike.radix.RadixDir))
     (tree : RadixTree dirs.val height root bindings)
     : ∃ fuel leaves,
         RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves
-        ∧ List.Perm leaves (bindings.map Prod.snd) :=
-  scan_plan_tree dirs.val height root bindings tree
+        ∧ List.Perm leaves (bindings.map Prod.snd) := by
+  obtain ⟨fuel, rows, plan, perm, _⟩ :=
+    scan_plan_tree dirs.val height root bindings (fun _ => none) tree
+  exact ⟨fuel, rows.map Prod.snd, plan, perm.map Prod.snd⟩
+
+/-- A compressed tree's native scan plan enumerates the real keys in strictly
+increasing byte order, independently of the model's write order. -/
+theorem radix_scan_lex_plan_exists {V : Type} (dirs : Slice (Option Spike.radix.RadixDir))
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (height : Nat) (root : U32)
+    (bindings : List (List U8 × U32)) (tree : RadixTree dirs.val height root bindings)
+    (valid : RadixRows rows.val bindings)
+    (compressed : RadixCompressed dirs.val (radixKeyOf rows.val))
+    : ∃ fuel ordered,
+        RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel (ordered.map Prod.snd)
+        ∧ List.Perm ordered bindings
+        ∧ ordered.Pairwise radixKeyLt := by
+  obtain ⟨fuel, ordered, plan, perm, sort⟩ :=
+    scan_plan_tree dirs.val height root bindings (radixKeyOf rows.val) tree
+  refine ⟨fuel, ordered, plan, perm, sort compressed ?_⟩
+  intro entry hm
+  obtain ⟨_, row, live, key⟩ := valid entry hm
+  simp [radixKeyOf, live, key]
+
+/-- Native traversal of a compressed tree returns the exact lexicographic
+projection when its ordinary scan plan fits the native bounds. -/
+theorem radix_scan_leaves_lex_refines {V : Type}
+    (dirs : Slice (Option Spike.radix.RadixDir))
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (height : Nat) (root : U32)
+    (bindings : List (List U8 × U32)) (tree : RadixTree dirs.val height root bindings)
+    (valid : RadixRows rows.val bindings)
+    (compressed : RadixCompressed dirs.val (radixKeyOf rows.val))
+    (fits
+      : ∃ fuel leaves,
+          RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves
+          ∧ fuel ≤ Usize.max)
+    : WP.spec (Spike.radix.scan_leaves dirs root)
+        (fun result =>
+          ∃ ordered,
+            result.val = ordered.map Prod.snd
+            ∧ List.Perm ordered bindings
+            ∧ ordered.Pairwise radixKeyLt) := by
+  obtain ⟨bounded, leaves, ordinary, room⟩ := fits
+  obtain ⟨fuel, ordered, plan, perm, sort⟩ :=
+    radix_scan_lex_plan_exists dirs rows height root bindings tree valid compressed
+  have size := (scan_plan_unique plan ordinary).1
+  exact WP.spec_mono (radix_scan_plan_matches dirs root fuel _ plan (size.symm ▸ room))
+    (fun _ eq => ⟨ordered, eq, perm, sort⟩)
 
 /-- The native traversal returns every projected leaf link with exactly its
 original multiplicity. Scan order is a separate policy from traversal order. -/

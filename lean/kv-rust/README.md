@@ -214,6 +214,8 @@ It checks the ordered bindings at the new root and the preservation of previousl
 The native mutation proofs also preserve the arena free lists, directory occupancy masks, live child-directory links, the minimum of two occupied slots, and the first-child caches used to choose a representative key.
 The value-level refinements project arena row links to the actual values and implement the model's ordered `find`, `set`, and `erase`.
 The mutation proofs establish the compressed-prefix witnesses for newly allocated directories and preserve those of retained directories, so subsequent mutations can reuse them.
+For a valid compressed root, native traversal enumerates all live bindings in strict byte-key order, including empty and prefix keys.
+This is the order needed by range results, not the model's prepend-on-write scan order.
 With the native put and remove functions, the two-run component medians at 2,048 keys were 9.6-9.9 ns for point reads and 151-160 ns for pinned-root updates across the two key distributions.
 
 The append-only `OrderedRadix` prototype keeps a compact vector of leaf links per root in model order.

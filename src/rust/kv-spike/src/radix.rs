@@ -340,8 +340,8 @@ fn push_children(stack: &mut Vec<u32>, dir: &RadixDir) {
     }
 }
 
-/// Enumerate a live root's leaf links, in directory slot order.
-/// Transaction scans must separately restore the model's write order.
+/// Enumerate a compressed root's leaf links in byte-key order.
+/// Transaction scans still need the model's write order.
 pub fn scan_leaves(dirs: &[Option<RadixDir>], root: u32) -> Vec<u32> {
     let mut leaves = Vec::new();
     if root == 0 {
