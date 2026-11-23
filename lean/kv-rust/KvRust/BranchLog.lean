@@ -77,6 +77,67 @@ private theorem indexed_branch_values {T : Type} (frames : List T) (ids : List U
             List.getElem?_cons_succ]
           exact ih (fun i hm => live i (List.mem_cons_of_mem _ hm)) offset
 
+/-- A requested offset past the last surviving frame selects the current head.
+The handle still identifies the immutable value, not just its branch offset. -/
+theorem branch_cut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+    (valid : BranchValid log) (offset : U64)
+    : WP.spec (Spike.branch_log.BranchLog.at_cut log offset)
+        (fun id =>
+          ∃ frame,
+            log.frames.val[id.val]? = some frame
+            ∧ (branchValues log)[min offset.val (log.branch.val.length - 1)]?
+              = some frame) := by
+  let last := log.branch.val.length - 1
+  have len : (alloc.vec.Vec.len log.branch).val = log.branch.val.length := alloc.vec.Vec.len_val _
+  have pos : 0 < log.branch.val.length := List.length_pos_iff.mpr valid.1
+  have cap := alloc.vec.Vec.len_ineq log.branch
+  have one : (1#usize : Usize).val = 1 := rfl
+  unfold Spike.branch_log.BranchLog.at_cut
+  apply WP.spec_bind
+    (Usize.sub_spec (x := alloc.vec.Vec.len log.branch) (y := 1#usize) (by omega))
+  intro head hp
+  have headVal : head.val = last := by dsimp [last]; omega
+  let head64 := UScalar.cast .U64 head
+  have castHead : head64.val = last := by
+    rw [show head64.val = head.val from UScalar.cast_val_mod_pow_greater_numBits_eq .U64 head
+      (by
+        simp only [UScalarTy.Usize_numBits_eq, UScalarTy.U64_numBits_eq]
+        rcases System.Platform.numBits_eq with h | h <;> simp [h]), headVal]
+  simp only [lift, bind_ok, alloc.vec.Vec.index_slice_index]
+  change WP.spec (do
+    let index ← if offset < head64 then Result.ok (UScalar.cast .Usize offset)
+      else Result.ok head
+    let id ← alloc.vec.Vec.index_usize log.branch index
+    Result.ok id) _
+  have selected : WP.spec
+      (if offset < head64 then Result.ok (UScalar.cast .Usize offset) else Result.ok head)
+      (fun i => i.val = min offset.val last) := by
+    by_cases earlier : offset < head64
+    · have hlt : offset.val < last := by change offset.val < head64.val at earlier; omega
+      rw [ite_eq_left earlier, WP.spec_ok, Nat.min_eq_left hlt.le]
+      apply UScalar.cast_val_mod_pow_of_inBounds_eq
+      rw [← UScalar.max_USize_eq, UScalar.max] at cap
+      have := Nat.two_pow_pos UScalarTy.Usize.numBits
+      dsimp [last] at hlt
+      omega
+    · have hle : last ≤ offset.val := by change ¬offset.val < head64.val at earlier; omega
+      rw [ite_eq_right earlier, WP.spec_ok, Nat.min_eq_right hle, headVal]
+  apply WP.spec_bind selected
+  intro index hi
+  have bound : index.val < log.branch.val.length := by
+    rw [hi]
+    exact (Nat.min_le_right _ _).trans_lt (by dsimp [last]; omega)
+  apply WP.spec_bind (alloc.vec.Vec.index_usize_spec log.branch index bound)
+  intro id he
+  have hm : id ∈ log.branch.val := he ▸ List.getElem_mem bound
+  have slot := valid.2 id hm
+  rw [WP.spec_ok]
+  refine ⟨_, List.getElem?_eq_getElem slot, ?_⟩
+  have pick := indexed_branch_values log.frames.val log.branch.val valid.2 index.val
+  change (branchValues log)[index.val]? = _ at pick
+  rw [← hi, pick, List.getElem?_eq_getElem bound, ← he, Option.bind_some,
+    List.getElem?_eq_getElem slot]
+
 /-- Resolving and borrowing gives the same frame as indexing the active projection. -/
 theorem branch_observe_refines {T : Type} (log : Spike.branch_log.BranchLog T)
     (valid : BranchValid log) (offset : Usize)

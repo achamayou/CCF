@@ -35,6 +35,16 @@ impl<T> BranchLog<T> {
         }
     }
 
+    pub fn at_cut(&self, offset: u64) -> FrameId {
+        let head = self.branch.len() - 1;
+        let i = if offset < head as u64 {
+            offset as usize
+        } else {
+            head
+        };
+        FrameId(self.branch[i])
+    }
+
     pub fn read(&self, id: FrameId) -> &T {
         &self.frames[id.0]
     }
@@ -62,8 +72,10 @@ mod tests {
         assert_eq!(*log.read(log.resolve(2).unwrap()), "discarded");
         assert!(log.rewind(1));
         assert!(log.resolve(2).is_none());
+        assert_eq!(log.at_cut(u64::MAX).0, first.0);
         let replacement = log.append("replacement");
         assert_ne!(replacement.0, discarded.0);
+        assert_eq!(log.at_cut(2).0, replacement.0);
         assert_eq!(*log.read(log.resolve(0).unwrap()), "base");
         assert_eq!(*log.read(log.resolve(2).unwrap()), "replacement");
         assert_eq!(*log.read(first), "first");
