@@ -8,5 +8,9 @@ publish = false
 name = "engine"
 harness = false
 
+[[bench]]
+name = "storage"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"

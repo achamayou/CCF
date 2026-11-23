@@ -148,3 +148,22 @@ These are ranges of two run medians, not confidence intervals.
 The next change replaces a single existing binding in place while retaining the original path for deduplicating repeated bindings.
 Together the copy-removal changes cut a commit replacing 2,048 entries from 301-303 ms to 58.7-59.1 ms, versus 0.79-0.89 ms for C++ in the final pair of runs.
 The remaining bulk cost includes linear lookup, moving vector rows, and copying the committed frame; the benchmark still does not cover replicated CCF.
+
+### Persistent storage experiment
+
+The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
+All three use the same eight-byte keys and inline 64-byte values; the write workload retains every prior root.
+It excludes transaction, FFI, serialization, and durability costs.
+
+```sh
+taskset -c 2 cargo +1.90.0 bench --locked --offline \
+  --manifest-path src/rust/kv-spike/Cargo.toml --bench storage
+```
+
+At 2,048 entries, two runs measured pinned-root updates at 145-159 us for whole-map copy-on-write, 1.02-1.09 us for leaf pages, and 0.226-0.227 us for the radix arena.
+Leaf pages were faster for eight-entry ranges (44-46 ns versus 112-119 ns for the radix arena).
+One run of `kv_backend_bench champ` at the same size measured 206 ns for a pinned-root update and 41 ns for a point read.
+Its eight-entry range takes 7.96 us because it filters a full CHAMP traversal.
+These are component measurements, not a win against C++ CHAMP.
+Neither candidate has been integrated or verified against the engine.
+The radix prototype uses fixed-width keys and does not reclaim arena nodes, so native adoption requires an arbitrary-byte index, accounting for observed scan and write-set order, and reclamation once snapshots are released.

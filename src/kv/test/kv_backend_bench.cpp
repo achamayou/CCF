@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0 License.
 
 #include "ccf/kv/map.h"
+#include "ds/champ_map.h"
 #include "kv/null_encryptor.h"
 #include "kv/store.h"
 #include "kv/test/rust_kv_store.h"
@@ -46,14 +47,110 @@ namespace
               << samples.back() << '\n';
   }
 
-  Bytes key(uint64_t i)
+  std::array<uint8_t, 8> fixed_key(uint64_t i)
   {
-    Bytes bytes(8);
+    std::array<uint8_t, 8> bytes{};
     for (size_t j = 0; j < bytes.size(); ++j)
     {
       bytes[j] = static_cast<uint8_t>(i >> (8 * (bytes.size() - j - 1)));
     }
     return bytes;
+  }
+
+  Bytes key(uint64_t i)
+  {
+    const auto bytes = fixed_key(i);
+    return Bytes(bytes.begin(), bytes.end());
+  }
+
+  void run_champ()
+  {
+    using Key = std::array<uint8_t, 8>;
+    using Value = std::array<uint8_t, 64>;
+
+    struct Hash
+    {
+      size_t operator()(const Key& key) const
+      {
+        return std::hash<Bytes>{}(Bytes(key.begin(), key.end()));
+      }
+    };
+
+    using State = champ::Map<Key, Value, Hash>;
+    constexpr size_t WRITES = 128;
+    Value base{};
+    Value update{};
+    base.fill(1);
+    update.fill(2);
+    auto check = [](bool valid) {
+      if (!valid)
+      {
+        throw std::runtime_error("Unexpected CHAMP benchmark observation");
+      }
+    };
+
+    for (const size_t entries : {64, 512, 2048, 8192})
+    {
+      std::vector<Key> keys;
+      for (size_t i = 0; i < entries; ++i)
+      {
+        keys.push_back(fixed_key(i));
+      }
+      auto seeded = [&] {
+        State state;
+        for (const auto& k : keys)
+        {
+          state = state.put(k, base);
+        }
+        return state;
+      };
+      measure("point_read", entries, entries, [&] {
+        const auto state = seeded();
+        return elapsed([&] {
+          for (const auto& k : keys)
+          {
+            const auto* value = state.getp(k);
+            check(value != nullptr && (*value)[0] == 1);
+          }
+        });
+      });
+      measure("write_with_pinned_root", entries, WRITES, [&] {
+        auto state = seeded();
+        std::vector<State> history;
+        return elapsed([&] {
+          history.reserve(WRITES + 1);
+          history.push_back(state);
+          for (size_t i = 0; i < WRITES; ++i)
+          {
+            state = state.put(keys[(17 * i) % entries], update);
+            history.push_back(state);
+          }
+          const auto* before = history.front().getp(keys.front());
+          const auto* after = state.getp(keys.front());
+          check(
+            before != nullptr && (*before)[0] == 1 && after != nullptr &&
+            (*after)[0] == 2);
+        });
+      });
+      measure("range", entries, entries, [&] {
+        const auto state = seeded();
+        return elapsed([&] {
+          for (size_t i = 0; i < entries; ++i)
+          {
+            const auto start = i % (entries - 8);
+            size_t sum = 0;
+            state.foreach([&](const Key& k, const Value& value) {
+              if (keys[start] <= k && k < keys[start + 8])
+              {
+                sum += value[0];
+              }
+              return true;
+            });
+            check(sum == 8);
+          }
+        });
+      });
+    }
   }
 
   template <typename Tx>
@@ -207,22 +304,25 @@ namespace
 
 int main(int argc, char** argv)
 {
-  if (
-    argc != 2 ||
-    (std::string_view(argv[1]) != "cpp" && std::string_view(argv[1]) != "rust"))
+  const std::string_view backend = argc == 2 ? argv[1] : "";
+  if (backend != "cpp" && backend != "rust" && backend != "champ")
   {
-    std::cerr << "Usage: kv_backend_bench cpp|rust\n";
+    std::cerr << "Usage: kv_backend_bench cpp|rust|champ\n";
     return 2;
   }
   std::cout
     << std::fixed << std::setprecision(1)
     << "workload,entries,operations,median_ns_per_operation,min_ns,max_ns\n";
-  if (std::string_view(argv[1]) == "cpp")
+  if (backend == "cpp")
   {
     run_suite<ccf::kv::Store>();
   }
-  else
+  else if (backend == "rust")
   {
     run_suite<ccf::kv::rust_test::Store>();
+  }
+  else
+  {
+    run_champ();
   }
 }
