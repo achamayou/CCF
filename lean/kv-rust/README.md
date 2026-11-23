@@ -201,5 +201,6 @@ The insertion proof covers an empty root, replacing an existing key, and inserti
 It checks the ordered bindings at the new root and the preservation of previously live rows and directories.
 The native mutation proofs also preserve the arena free lists, directory occupancy masks, live child-directory links, the minimum of two occupied slots, and the first-child caches used to choose a representative key.
 The value-level refinements project arena row links to the actual values and implement the model's ordered `find`, `set`, and `erase`.
+The mutation proofs establish the compressed-prefix witnesses for newly allocated directories and preserve those of retained directories, so subsequent mutations can reuse them.
 With the native put and remove functions, the two-run component medians at 2,048 keys were 9.6-9.9 ns for point reads and 151-160 ns for pinned-root updates across the two key distributions.
-The candidate is not integrated; preserving arena invariants across successive mutations, preserving scan order, bounding reclamation latency, and qualifying transaction performance remain open.
+The candidate is not integrated; native scan order, bounded reclamation latency, and transaction performance remain open.
