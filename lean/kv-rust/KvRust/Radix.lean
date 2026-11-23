@@ -6,6 +6,8 @@ module
 public import KvRust.Extracted.Funs
 public import Kv.Model.Types
 
+import all Aeneas.Data.List.List
+
 @[expose] public section
 
 namespace KvRust
@@ -322,6 +324,194 @@ inductive RadixTree (dirs : List (Option Spike.radix.RadixDir))
 
 private theorem radix_tag : Spike.radix.RADIX_LEAF_TAG = 2147483648#u32 := by
   simp [Spike.radix.RADIX_LEAF_TAG]
+
+/-- Exactly the slots holding a nonempty link appear in a directory's bitmap. -/
+def RadixMask (dir : Spike.radix.RadixDir) : Prop :=
+  ∀ i,
+    i < 32
+    → dir.mask.bv.getLsbD i
+      = decide (∃ child, dir.children.val[i]? = some child ∧ child ≠ 0#u32)
+
+theorem radix_empty_matches (digit : Usize)
+    : WP.spec (Spike.radix.RadixDir.empty digit)
+        (fun dir =>
+          dir.digit = digit
+          ∧ dir.first = 0#u32
+          ∧ dir.children.val = List.replicate 17 0#u32
+          ∧ RadixMask dir) := by
+  unfold Spike.radix.RadixDir.empty
+  simp only [WP.spec_ok, Array.repeat_val]
+  refine ⟨trivial, trivial, rfl, ?_⟩
+  intro i _
+  have hz : (0#u32 : U32).bv = 0#32 := rfl
+  simp only [hz, BitVec.getLsbD_zero, Array.repeat_val]
+  symm
+  apply decide_eq_false
+  rintro ⟨child, hget, nz⟩
+  exact nz (List.mem_replicate.mp (List.mem_of_getElem? hget)).2
+
+/-- A directory update changes just one child and its occupancy bit. The
+caller refreshes the cached first leaf before publishing the directory. -/
+theorem radix_set_child_matches (dir : Spike.radix.RadixDir) (slot : Usize) (child : U32)
+    (bound : slot.val < 17)
+    : WP.spec (Spike.radix.RadixDir.set_child dir slot child)
+        (fun next =>
+          next.digit = dir.digit
+          ∧ next.first = dir.first
+          ∧ next.children.val = dir.children.val.set slot.val child
+          ∧ ∀ i,
+              i < 32
+              → next.mask.bv.getLsbD i
+                = if i = slot.val then child != 0#u32 else dir.mask.bv.getLsbD i) := by
+  have hb : slot.val < dir.children.val.length := by
+    rw [Array.length_eq]
+    exact bound
+  have hshift : slot.val < 32 := by omega
+  have hbit (one : U32) (h : one.bv = (1#u32 : U32).bv <<< slot.val)
+      (i : Nat) (hi : i < 32) : one.bv.getLsbD i = decide (i = slot.val) := by
+    have hone : (1#u32 : U32).bv = 1#32 := rfl
+    rw [h, hone, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_one]
+    by_cases eq : i = slot.val
+    · subst i
+      simp [hshift]
+    · by_cases lt : i < slot.val
+      · simp [lt, eq]
+      · have hd : i - slot.val ≠ 0 := by omega
+        simp [hd, eq]
+  unfold Spike.radix.RadixDir.set_child
+  apply WP.spec_bind (Array.index_mut_usize_spec dir.children slot hb)
+  rintro ⟨_, back⟩ ⟨_, hback⟩
+  by_cases zero : child = 0#u32
+  · simp only [zero, ite_true]
+    apply WP.spec_bind (U32.ShiftLeft_spec 1#u32 slot hshift)
+    intro one h
+    simp only [lift, bind_ok, WP.spec_ok, hback, Array.set_val_eq]
+    refine ⟨trivial, trivial, trivial, ?_⟩
+    intro i hi
+    let old : BitVec 32 := dir.mask.bv
+    let bit : BitVec 32 := one.bv
+    change (old &&& ~~~bit).getLsbD i = _
+    have hset : bit.getLsbD i = decide (i = slot.val) := hbit one h.2 i hi
+    rw [BitVec.getLsbD_and, BitVec.getLsbD_not, hset]
+    by_cases same : i = slot.val <;> simp [hi, same, old]
+  · simp only [zero, ite_false]
+    apply WP.spec_bind (U32.ShiftLeft_spec 1#u32 slot hshift)
+    intro one h
+    simp only [lift, bind_ok, WP.spec_ok, hback, Array.set_val_eq]
+    refine ⟨trivial, trivial, trivial, ?_⟩
+    intro i hi
+    let old : BitVec 32 := dir.mask.bv
+    let bit : BitVec 32 := one.bv
+    change (old ||| bit).getLsbD i = _
+    have hset : bit.getLsbD i = decide (i = slot.val) := hbit one h.2 i hi
+    have nz : (child != 0#u32) = true := bne_iff_ne.mpr zero
+    rw [BitVec.getLsbD_or, hset]
+    by_cases same : i = slot.val <;> simp [same, nz, old]
+
+theorem radix_set_child_preserves_mask (dir : Spike.radix.RadixDir) (slot : Usize)
+    (child : U32) (bound : slot.val < 17) (mask : RadixMask dir)
+    : WP.spec (Spike.radix.RadixDir.set_child dir slot child) RadixMask := by
+  apply WP.spec_mono (radix_set_child_matches dir slot child bound)
+  intro next ⟨_, _, hstep, hmask⟩ i hi
+  rw [hmask i hi, hstep]
+  by_cases same : i = slot.val
+  · subst i
+    have hb : slot.val < dir.children.val.length := by
+      rw [Array.length_eq]
+      exact bound
+    rw [List.getElem?_set_self hb]
+    by_cases zero : child = 0#u32
+    · simp [zero]
+    · have nz : (child != 0#u32) = true := bne_iff_ne.mpr zero
+      have hval : child.val ≠ 0 := fun h => zero (UScalar.eq_of_val_eq h)
+      simp [nz, hval]
+  · rw [ite_eq_right same, List.getElem?_set_ne (Ne.symm same)]
+    exact mask i hi
+
+/-- Allocation preserves every live slot, including those reached from older roots. -/
+theorem radix_allocate_matches {T : Type} (slots : alloc.vec.Vec (Option T))
+    (free : alloc.vec.Vec Usize) (value : T)
+    (vacant : ∀ i ∈ free.val, slots.val[i.val]? = some none)
+    (room : free.val = [] → slots.val.length < Usize.max)
+    : WP.spec (Spike.radix.allocate slots free value)
+        (fun (i, next, left) =>
+          next.val[i.val]? = some (some value)
+          ∧ (∀ (j : Nat) (old : T),
+              slots.val[j]? = some (some old) → next.val[j]? = some (some old))
+          ∧ left.val = free.val.take (free.val.length - 1)) := by
+  have hlen : (alloc.vec.Vec.len free).val = free.val.length := alloc.vec.Vec.len_val free
+  have hone : (1#usize : Usize).val = 1 := rfl
+  have hzero : (0#usize : Usize).val = 0 := rfl
+  unfold Spike.radix.allocate
+  by_cases he : alloc.vec.Vec.len free = 0#usize
+  · have hempty : free.val = [] := by
+      apply List.length_eq_zero_iff.mp
+      exact congrArg UScalar.val he
+    simp only [he, ite_true]
+    apply WP.spec_bind (alloc.vec.Vec.push_spec slots (some value) (room hempty))
+    intro next hnext
+    simp only [WP.spec_ok, hnext, alloc.vec.Vec.len_val]
+    refine ⟨?_, ?_, by simp [hempty]⟩
+    · rw [List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]
+      rfl
+    · intro j old hj
+      have hb : j < slots.val.length := by
+        by_contra hn
+        simp [Nat.le_of_not_gt hn] at hj
+      rwa [List.getElem?_append_left hb]
+  · simp only [he, ite_false]
+    have hpos : 0 < free.val.length := by
+      by_contra hn
+      apply he
+      apply UScalar.eq_of_val_eq
+      omega
+    have hsub : (1#usize : Usize).val ≤ (alloc.vec.Vec.len free).val := by omega
+    apply WP.spec_bind (Usize.sub_spec hsub)
+    intro last hlast
+    have hl : last.val = free.val.length - 1 := by omega
+    have hfi : last.val < free.val.length := by omega
+    simp only [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_mut_slice_index]
+    apply WP.spec_bind (alloc.vec.Vec.index_usize_spec free last hfi)
+    intro index hi
+    have hv := vacant index (hi ▸ List.getElem_mem hfi)
+    have hb : index.val < slots.val.length := by
+      by_contra hn
+      simp [Nat.le_of_not_gt hn] at hv
+    apply WP.spec_bind (alloc.vec.Vec.index_usize_spec slots index hb)
+    intro entry hent
+    rw [List.getElem?_eq_getElem hb, ← hent, Option.some.injEq] at hv
+    rw [hv]
+    simp only [core.option.Option.is_none, massert, Option.isNone_none, ite_true, bind_ok]
+    apply WP.spec_bind (alloc.vec.Vec.resize_spec core.clone.CloneUsize free last 0#usize rfl)
+    intro left hleft
+    apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec slots index hb)
+    rintro ⟨_, back⟩ ⟨_, hback⟩
+    change WP.spec (Result.ok (index, back (some value), left)) _
+    simp only [WP.spec_ok, hback, alloc.vec.Vec.set_val_eq]
+    refine ⟨List.getElem?_set_self hb, ?_, ?_⟩
+    · intro j old hj
+      have different : index.val ≠ j := by
+        intro same
+        rw [← same, List.getElem?_eq_getElem hb, ← hent, hv] at hj
+        cases hj
+      rwa [List.getElem?_set_ne different]
+    · rw [hleft, hl]
+      simp [List.resize, Nat.sub_eq_zero_of_le (Nat.sub_le free.val.length 1)]
+
+/-- Allocating new directories cannot invalidate an existing root whose live
+slots are preserved. The new root is verified separately. -/
+theorem radix_tree_preserved
+    (old next : List (Option Spike.radix.RadixDir))
+    (preserved : ∀ (i : Nat) dir, old[i]? = some (some dir) → next[i]? = some (some dir))
+    {height : Nat} {root : U32} {bindings : List (List U8 × U32)}
+    (tree : RadixTree old height root bindings)
+    : RadixTree next height root bindings := by
+  induction tree with
+  | empty height => exact .empty height
+  | leaf height node key tagged => exact .leaf height node key tagged
+  | branch height node dir bindings positive untagged live child links children ih =>
+      exact .branch height node dir bindings positive untagged (preserved _ _ live) child
+        links ih
 
 private theorem radix_find_leaf_loop_matches (dirs : Slice (Option Spike.radix.RadixDir))
     (key : Slice U8) (height : Nat) (node : U32) (bindings : List (List U8 × U32))

@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 License.
 
 use super::Value;
-use ccf_kv_spike::radix::RadixRow;
+use ccf_kv_spike::radix::{RadixRow, allocate};
 use std::fmt::Debug;
 
 pub(super) trait ByteIndex: Default {
@@ -85,14 +85,7 @@ impl<T> Default for Pool<T> {
 
 impl<T> Pool<T> {
     pub(super) fn add(&mut self, value: T) -> usize {
-        if let Some(i) = self.free.pop() {
-            self.slots[i] = Some(value);
-            i
-        } else {
-            let i = self.slots.len();
-            self.slots.push(Some(value));
-            i
-        }
+        allocate(&mut self.slots, &mut self.free, value)
     }
 
     pub(super) fn get(&self, i: usize) -> &T {

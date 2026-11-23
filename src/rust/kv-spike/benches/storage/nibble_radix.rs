@@ -3,9 +3,7 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{
-    RADIX_FANOUT, RADIX_LEAF_TAG as LEAF, RadixDir, first_difference, get, symbol,
-};
+use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, first_difference, get, symbol};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
@@ -30,31 +28,11 @@ impl Link {
 }
 
 trait DirectoryOps {
-    fn new(digit: usize) -> Self;
-    fn set(&mut self, symbol: usize, child: Link);
     fn child(&self, symbol: usize) -> Link;
     fn first_child(&self) -> Link;
 }
 
 impl DirectoryOps for RadixDir {
-    fn new(digit: usize) -> Self {
-        Self {
-            digit,
-            first: 0,
-            mask: 0,
-            children: [0; RADIX_FANOUT],
-        }
-    }
-
-    fn set(&mut self, symbol: usize, child: Link) {
-        self.children[symbol] = child.0;
-        if child.empty() {
-            self.mask &= !(1 << symbol);
-        } else {
-            self.mask |= 1 << symbol;
-        }
-    }
-
     fn child(&self, symbol: usize) -> Link {
         Link(self.children[symbol])
     }
@@ -100,7 +78,7 @@ impl NibbleRadix {
     fn rebuild(&mut self, mut child: Link) -> Link {
         while let Some((node, sym)) = self.path.pop() {
             let mut dir = *self.dirs.get(node.index());
-            dir.set(sym, child);
+            dir.set_child(sym, child.0);
             child = if dir.mask.is_power_of_two() {
                 dir.first_child()
             } else {
@@ -147,11 +125,11 @@ impl ByteIndex for NibbleRadix {
             let mut dir = if !stem.leaf() && self.dirs.get(stem.index()).digit == at {
                 *self.dirs.get(stem.index())
             } else {
-                let mut dir = RadixDir::new(at);
-                dir.set(old_sym.unwrap(), stem);
+                let mut dir = RadixDir::empty(at);
+                dir.set_child(old_sym.unwrap(), stem.0);
                 dir
             };
-            dir.set(symbol(key, at), leaf);
+            dir.set_child(symbol(key, at), leaf.0);
             self.add_dir(dir)
         } else {
             leaf

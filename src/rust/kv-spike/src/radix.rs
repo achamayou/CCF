@@ -54,9 +54,48 @@ pub struct RadixDir {
     pub children: [u32; RADIX_FANOUT],
 }
 
+impl RadixDir {
+    pub fn empty(digit: usize) -> Self {
+        Self {
+            digit,
+            first: 0,
+            mask: 0,
+            children: [0; RADIX_FANOUT],
+        }
+    }
+
+    #[inline]
+    pub fn set_child(&mut self, slot: usize, child: u32) {
+        self.children[slot] = child;
+        if child == 0 {
+            self.mask &= !(1_u32 << slot);
+        } else {
+            self.mask |= 1_u32 << slot;
+        }
+    }
+}
+
 pub struct RadixRow<V> {
     pub key: Box<[u8]>,
     pub value: V,
+}
+
+/// Add a row or directory, reusing only a vacant slot from the free list.
+#[inline]
+pub fn allocate<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<usize>, value: T) -> usize {
+    let count = free.len();
+    if count == 0 {
+        let index = slots.len();
+        slots.push(Some(value));
+        index
+    } else {
+        let last = count - 1;
+        let index = free[last];
+        assert!(slots[index].is_none(), "radix free list names a live slot");
+        free.resize(last, 0);
+        slots[index] = Some(value);
+        index
+    }
 }
 
 /// Follow directory links until either a leaf or a missing child is reached.
@@ -156,5 +195,16 @@ mod tests {
         assert_eq!(get(&dirs, &rows, 1, &[0x50, 0]), None);
         assert_eq!(get(&dirs, &rows, 1, &[]), None);
         assert_eq!(get(&dirs, &rows, 0, &[0x50]), None);
+    }
+
+    #[test]
+    fn allocation_fills_vacant_slots_without_changing_live_entries() {
+        let mut slots = vec![Some(1), None, Some(3), None];
+        let mut free = vec![1, 3];
+        assert_eq!(allocate(&mut slots, &mut free, 4), 3);
+        assert_eq!(allocate(&mut slots, &mut free, 2), 1);
+        assert_eq!(allocate(&mut slots, &mut free, 5), 4);
+        assert_eq!(slots, [Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        assert!(free.is_empty());
     }
 }
