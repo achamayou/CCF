@@ -296,6 +296,46 @@ fn bulk_replacement_requires_full_coverage_and_preserves_a_pinned_cut() {
 }
 
 #[test]
+fn older_acquisition_reuses_compacted_images_only_on_ordinary_history() {
+    let mut store = Store::new(0);
+    let map = b"public:stable";
+    let name = Bytes::copy_from(map);
+    put(&mut store, 0, map, b"k", b"stable", 1);
+    begin(&mut store, 1);
+    put(&mut store, 0, b"public:other", b"k", b"advanced", 2);
+    run(&mut store, Action::Compact(2));
+    assert!(matches!(
+        acquire(&mut store, 1, map),
+        Output::Acquired(1, 1)
+    ));
+    let tx = &store.txs.0[store.tx_index(1).unwrap()].1;
+    let view = tx.views.get_ref(&name).unwrap();
+    let PinnedImage::Frame(frame) = view.local else {
+        panic!("live map must pin a frame");
+    };
+    assert_eq!(store.history.log.read(frame).version, 2);
+    assert!(view.global.is_none());
+    assert_read(&mut store, 1, map, b"k", false, Some(b"stable"));
+
+    store.install_snapshot(3, Vec::new()).unwrap();
+    begin(&mut store, 2);
+    put(&mut store, 0, b"public:other", b"k", b"advanced again", 4);
+    run(&mut store, Action::Compact(4));
+    assert!(matches!(
+        acquire(&mut store, 2, map),
+        Output::Acquired(1, 1)
+    ));
+    let tx = &store.txs.0[store.tx_index(2).unwrap()].1;
+    let view = tx.views.get_ref(&name).unwrap();
+    let PinnedImage::Frame(frame) = view.local else {
+        panic!("live imported map must pin a frame");
+    };
+    assert_eq!(store.history.log.read(frame).version, 3);
+    assert!(view.global.is_some());
+    assert_read(&mut store, 2, map, b"k", false, Some(b"stable"));
+}
+
+#[test]
 fn ending_another_attempt_keeps_the_pinned_reader_and_its_dependency() {
     let mut store = Store::new(0);
     let map = b"public:map";

@@ -5,6 +5,7 @@ module
 
 public import KvRust.Apply
 public import KvRust.PinnedImage
+public import KvRust.RetainedCuts
 
 @[expose] public section
 
@@ -215,6 +216,65 @@ private theorem pin_global_spec (encode : List U8 → String)
       using (image_encoding encode inj (indexedCellData (indexRows history.index f.data))
               m.val).symm
 
+private theorem pin_maps_spec (encode : List U8 → String)
+    (inj : Function.Injective encode) (history : Spike.engine.History)
+    (current global : Spike.engine.Frame) (m : Spike.engine.Bytes)
+    (currentId globalId : Spike.branch_log.FrameId)
+    (currentSaved : history.log.frames.val[currentId.val]? = some current)
+    (globalSaved : history.log.frames.val[globalId.val]? = some global) (cut : U64)
+    (share
+      : cut.val ≤ history.global.val
+        → image (modelFrame encode history.index current).data (encode m.val)
+          = image (modelFrame encode history.index global).data (encode m.val))
+    : WP.spec (Spike.engine.pin_maps history currentId globalId cut)
+        (fun (localPin, globalPin) =>
+          encodeImage encode (pinImage history m localPin)
+            = image (modelFrame encode history.index current).data (encode m.val)
+          ∧ encodeImage encode (pinImage history m (globalPin.getD localPin))
+            = image (modelFrame encode history.index global).data (encode m.val)
+          ∧ PinLive history localPin
+          ∧ PinLive history (globalPin.getD localPin)) := by
+  let localPin : Spike.engine.PinnedImage := .Frame currentId
+  let globalPin : Spike.engine.PinnedImage := .Frame globalId
+  have localLive : PinLive history localPin := ⟨current, currentSaved⟩
+  have globalLive : PinLive history globalPin := ⟨global, globalSaved⟩
+  have localRows : encodeImage encode (pinImage history m localPin) =
+      image (modelFrame encode history.index current).data (encode m.val) := by
+    simpa [pinImage, localPin, currentSaved, modelFrame]
+      using (image_encoding encode inj
+              (indexedCellData (indexRows history.index current.data)) m.val).symm
+  have globalRows : encodeImage encode (pinImage history m globalPin) =
+      image (modelFrame encode history.index global).data (encode m.val) := by
+    simpa [pinImage, globalPin, globalSaved, modelFrame]
+      using (image_encoding encode inj
+              (indexedCellData (indexRows history.index global.data)) m.val).symm
+  let post : Spike.engine.PinnedImage × Option Spike.engine.PinnedImage → Prop :=
+    fun (l, g) =>
+      encodeImage encode (pinImage history m l)
+        = image (modelFrame encode history.index current).data (encode m.val)
+      ∧ encodeImage encode (pinImage history m (g.getD l))
+        = image (modelFrame encode history.index global).data (encode m.val)
+      ∧ PinLive history l ∧ PinLive history (g.getD l)
+  have fallback : WP.spec (do
+      let g ← Spike.engine.pin_global globalId cut history.global
+      Result.ok (localPin, g)) post := by
+    apply WP.spec_bind (pin_global_spec encode history global m globalId globalSaved cut
+      history.global localPin localLive (fun eq => localRows.trans (share (by rw [eq]))) inj)
+    intro g ⟨rows, live⟩
+    rw [WP.spec_ok]
+    exact ⟨localRows, rows, localLive, live⟩
+  unfold Spike.engine.pin_maps
+  by_cases reusable : history.reuse_compacted_images = true
+  · rw [ite_eq_left reusable]
+    by_cases older : cut < history.global
+    · rw [ite_eq_left older, WP.spec_ok]
+      have past : cut.val ≤ history.global.val := Nat.le_of_lt older
+      exact ⟨globalRows.trans (share past).symm, globalRows, globalLive, globalLive⟩
+    · rw [ite_eq_right older]
+      exact fallback
+  · rw [ite_eq_right reusable]
+    exact fallback
+
 private theorem stamp_refl (stamp : Stamp) : (stamp == stamp) = true := by
   change (stamp.version == stamp.version && stamp.identity == stamp.identity) = true
   simp
@@ -237,6 +297,7 @@ theorem acquire_matches_model (encode : List U8 → String)
       : ∀ i (hi : i < s.activeFrames.length),
           (modelFrame encode s.index s.activeFrames[i]).version = i)
     (hglobal : model.global = s.global.val) (hSnapshot : t.snapshot = some rustSnap)
+    (stable : RevisionHistory model.history)
     (hCut : snap.current.version = rustSnap.version.val) (hPhase : t.phase = .Active)
     (hAbsent
       : find (rustPinnedViews encode s t.views) (encode (alloc.vec.Vec.val m)) = none)
@@ -370,24 +431,22 @@ theorem acquire_matches_model (encode : List U8 → String)
           · have hlt : localRev.version.val < globalRev.version.val := hOld
             simp [hOld, hAv, Nat.not_le.mpr hlt]
           · rw [ite_eq_right hOld]
-            let localPin : Spike.engine.PinnedImage := .Frame currentId
-            have localLive : PinLive s localPin := ⟨current, currentSaved⟩
-            have hLocalRows : encodeImage encode (pinImage s m localPin) =
-                image (modelFrame encode s.index current).data (encode m.val) := by
-              simpa [pinImage, localPin, currentSaved, modelFrame]
-                using (image_encoding encode inj
-                        (indexedCellData (indexRows s.index current.data)) m.val).symm
-            have hShared : rustSnap.version = s.global →
-                encodeImage encode (pinImage s m localPin) =
+            have hle : globalRev.version.val ≤ localRev.version.val :=
+              Nat.le_of_not_gt hOld
+            have hShared (past : rustSnap.version.val ≤ s.global.val) :
+                image (modelFrame encode s.index current).data (encode m.val) =
                   image (modelFrame encode s.index global).data (encode m.val) := by
-              intro he
-              have hFrames : modelFrame encode s.index current = modelFrame encode s.index global := by
-                rw [hCurrent, hGlobalCut, he]
-              simpa only [hFrames] using hLocalRows
+              have avail : available model snap k = true := hAv.trans (decide_eq_true hle)
+              have older : snap.current.version ≤ model.global := by rwa [hCut, hglobal]
+              rcases available_compacted_image model stable snap k older avail with absent | same
+              · rw [hLocal, hBorn] at absent
+                cases absent
+              · rw [hLocal, ← hGlobal] at same
+                exact same
             apply WP.spec_bind
-              (pin_global_spec encode s global m globalId globalSaved rustSnap.version
-                s.global localPin localLive hShared inj)
-            intro globalPin ⟨hGlobalRows, globalLive⟩
+              (pin_maps_spec encode inj s current global m currentId globalId currentSaved
+                globalSaved rustSnap.version hShared)
+            rintro ⟨localPin, globalPin⟩ ⟨hLocalRows, hGlobalRows, localLive, globalLive⟩
             apply WP.spec_bind
               (install_view encode inj s t.views m
                 {
@@ -397,8 +456,6 @@ theorem acquire_matches_model (encode : List U8 → String)
                   global := globalPin
                 } hRoom oldLive ⟨localLive, globalLive⟩)
             intro views ⟨hViews, hLive⟩
-            have hle : globalRev.version.val ≤ localRev.version.val :=
-              Nat.le_of_not_gt hOld
             have hPin : rustPinnedView encode s m
                 {birth := some birth, revision := localRev, «local» := localPin, global := globalPin} =
                   modelPinnedView k v := by
@@ -529,6 +586,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       : ∀ i (hi : i < s.history.activeFrames.length),
           (modelFrame encode s.history.index s.history.activeFrames[i]).version = i)
     (hglobal : model.global = s.history.global.val)
+    (stable : RevisionHistory model.history)
     (hNativeTx : find s.txs.val id = some t)
     (hLookup : lookupTx w sid id.val = some (model, tx))
     (hNativeSnap : t.snapshot = some rustSnap) (hModelSnap : tx.snapshot = some snap)
@@ -619,8 +677,8 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         Result.ok (out, {s with txs := back (id, next)})) _
       apply WP.spec_bind
         (acquire_matches_model encode inj s.history model t snap rustSnap m prior head
-          hframes hmodel hversions hglobal hNativeSnap hCut hNativePhase hMissing hRoom
-          valid oldLive)
+          hframes hmodel hversions hglobal hNativeSnap stable hCut hNativePhase hMissing
+          hRoom valid oldLive)
       rintro ⟨out, next⟩ hn
       change (if available model snap k then
           ∃ localVer globalVer views,

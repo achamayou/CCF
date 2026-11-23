@@ -595,6 +595,8 @@ struct History {
     global: Version,
     term: Term,
     next_identity: u64,
+    // Imported metadata does not yet carry the verified revision-history invariant.
+    reuse_compacted_images: bool,
 }
 
 impl History {
@@ -606,6 +608,7 @@ impl History {
             global: 0,
             term,
             next_identity: 1,
+            reuse_compacted_images: true,
         }
     }
 
@@ -736,6 +739,21 @@ fn pin_global(global: FrameId, local_cut: Version, global_cut: Version) -> Optio
     } else {
         Some(PinnedImage::Frame(global))
     }
+}
+
+fn pin_maps(
+    history: &History,
+    local: FrameId,
+    global: FrameId,
+    local_cut: Version,
+) -> (PinnedImage, Option<PinnedImage>) {
+    if history.reuse_compacted_images && local_cut < history.global {
+        return (PinnedImage::Frame(global), None);
+    }
+    (
+        PinnedImage::Frame(local),
+        pin_global(global, local_cut, history.global),
+    )
 }
 
 #[derive(Clone)]
@@ -899,11 +917,12 @@ impl Tx {
             self.unavailable = true;
             return Ok(Output::Unavailable);
         }
+        let (local_image, global_image) = pin_maps(history, local_id, global_id, snapshot.version);
         let pinned = View {
             birth,
             revision,
-            local: PinnedImage::Frame(local_id),
-            global: pin_global(global_id, snapshot.version, history.global),
+            local: local_image,
+            global: global_image,
         };
         self.views.set(map, pinned);
         Ok(Output::Acquired(revision.version, global_revision.version))
@@ -1509,6 +1528,8 @@ impl Store {
         source.history.index = their_index;
         self.history.next_identity = my_identity + 1;
         source.history.next_identity = their_identity + 1;
+        self.history.reuse_compacted_images = false;
+        source.history.reuse_compacted_images = false;
         self.recovery_views = my_views;
         source.recovery_views = their_views;
         Ok(())
@@ -1633,6 +1654,7 @@ impl Store {
         self.history.log.reset_branch(frame);
         self.history.next_identity = identity + 1;
         self.history.global = version;
+        self.history.reuse_compacted_images = false;
         let mut i = 0;
         while i < maps.len() {
             self.recovery_views = self.recovery_views.erase(&maps[i].name);
@@ -1833,6 +1855,7 @@ impl Store {
         }
         self.history.log.append(next);
         self.history.next_identity += 1;
+        self.history.reuse_compacted_images = false;
     }
 
     fn tx_index(&self, tx: Attempt) -> Result<usize, Error> {

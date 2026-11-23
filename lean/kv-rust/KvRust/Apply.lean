@@ -535,7 +535,12 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     subst prepared
     let publish (log : Spike.branch_log.BranchLog Spike.engine.Frame) (identity : U64)
         : Spike.engine.Store :=
-      {s with history := {s.history with log, index := arena, next_identity := identity}}
+      { s with
+        history := { s.history with
+          log
+          index := arena
+          next_identity := identity
+          reuse_compacted_images := false } }
     change WP.spec (Aeneas.Std.bind
       (do
         let (_, log) ← Spike.branch_log.BranchLog.append s.history.log next

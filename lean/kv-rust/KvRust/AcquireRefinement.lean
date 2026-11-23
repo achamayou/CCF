@@ -175,9 +175,9 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                     obtain ⟨prior, head, hf, _⟩ := hh.split
                     apply WP.spec_mono
                       (execute_acquire_matches_model encode inj n id w sid s tx t snap
-                        rustSnap m prior head hf hh.frames hh.indexed hh.global hn hlookup
-                        hns hms hCut hp hphase hr.views hr.unavailable hm
-                        (hr.fresh_log hm) (room t hn) hh.valid hr.live)
+                        rustSnap m prior head hf hh.frames hh.indexed hh.global
+                        hh.revisions hn hlookup hns hms hCut hp hphase hr.views
+                        hr.unavailable hm (hr.fresh_log hm) (room t hn) hh.valid hr.live)
                     rintro ⟨output, after⟩ ⟨modelAfter, txAfter, tAfter, obs, index, hstep, ho, hw, hv, hu,
                       han, ham, _, hhist, hidx, hrow, hLive⟩
                     rw [hstep]
