@@ -182,7 +182,7 @@ impl ByteIndex for ByteRadix {
 
     fn get(&self, root: Root, key: &[u8]) -> Option<&Value> {
         let row = self.rows.get(self.find_row(root?, key));
-        (row.key.as_ref() == key).then_some(&row.value)
+        (row.key.as_slice() == key).then_some(&row.value)
     }
 
     fn put(&mut self, root: Root, key: &[u8], value: Value) -> Root {
@@ -209,7 +209,7 @@ impl ByteIndex for ByteRadix {
         let root = root?;
         let leaf = self.save_path(root, key, None);
         let old = self.rows.get(self.nodes.get(leaf).first_row());
-        if old.key.as_ref() != key {
+        if old.key.as_slice() != key {
             return Some(root);
         }
         let (_, sibling, _) = self.path.pop()?;
@@ -225,16 +225,16 @@ impl ByteIndex for ByteRadix {
             match *self.nodes.get(at) {
                 Node::Leaf(row) => {
                     let Row { key, value } = self.rows.get(row);
-                    if first <= key.as_ref() && key.as_ref() < last {
+                    if first <= key.as_slice() && key.as_slice() < last {
                         visit(key, value);
                     }
                 }
                 Node::Branch { left, right, .. } => {
                     let cut = self.rows.get(self.nodes.get(right).first_row());
-                    if cut.key.as_ref() < last {
+                    if cut.key.as_slice() < last {
                         stack.push(right);
                     }
-                    if first < cut.key.as_ref() {
+                    if first < cut.key.as_slice() {
                         stack.push(left);
                     }
                 }

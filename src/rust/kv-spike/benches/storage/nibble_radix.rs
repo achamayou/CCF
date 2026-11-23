@@ -159,7 +159,7 @@ impl ByteIndex for NibbleRadix {
         while let Some(node) = stack.pop() {
             if node.leaf() {
                 let Row { key, value } = self.rows.get(node.index());
-                if first <= key.as_ref() && key.as_ref() < last {
+                if first <= key.as_slice() && key.as_slice() < last {
                     visit(key, value);
                 }
                 continue;
@@ -171,10 +171,10 @@ impl ByteIndex for NibbleRadix {
                 mask ^= 1 << sym;
                 let child = dir.child(sym);
                 let key = &self.rows.get(self.first_leaf(child).index()).key;
-                if key.as_ref() < last {
+                if key.as_slice() < last {
                     stack.push(child);
                     // All earlier children end before this child's first key.
-                    if key.as_ref() <= first {
+                    if key.as_slice() <= first {
                         break;
                     }
                 }

@@ -14,8 +14,8 @@ pub fn address_key(map: &[u8], key: &[u8]) -> Vec<u8> {
 }
 
 /// Lexicographic enumeration of these keys visits newer stamps first.
-pub fn reverse_stamp_key(stamp: u64) -> Box<[u8]> {
-    Box::new((!stamp).to_be_bytes())
+pub fn reverse_stamp_key(stamp: u64) -> Vec<u8> {
+    (!stamp).to_be_bytes().to_vec()
 }
 
 /// Zero is the end-of-key symbol; the high and low nibbles occupy 1..=16.
@@ -111,7 +111,7 @@ impl RadixDir {
 }
 
 pub struct RadixRow<V> {
-    pub key: Box<[u8]>,
+    pub key: Vec<u8>,
     pub value: V,
 }
 
@@ -816,11 +816,11 @@ mod tests {
         })];
         let rows = [
             Some(RadixRow {
-                key: Box::new([0x50]),
+                key: vec![0x50],
                 value: 1,
             }),
             Some(RadixRow {
-                key: Box::new([0x51]),
+                key: vec![0x51],
                 value: 2,
             }),
         ];
@@ -848,15 +848,15 @@ mod tests {
     fn path_copy_can_collapse_a_child_without_changing_the_old_root() {
         let rows = [
             Some(RadixRow {
-                key: Box::new([0x10]),
+                key: vec![0x10],
                 value: 1,
             }),
             Some(RadixRow {
-                key: Box::new([0x11]),
+                key: vec![0x11],
                 value: 2,
             }),
             Some(RadixRow {
-                key: Box::new([0x20]),
+                key: vec![0x20],
                 value: 3,
             }),
         ];

@@ -17,6 +17,9 @@ namespace KvRust
 
 open Aeneas.Std
 
+private theorem key_borrow_val (key : alloc.vec.Vec U8)
+    : (alloc.vec.Vec.deref key).val = key.val := by simp [alloc.vec.Vec.deref]
+
 /-- Digit zero marks the end of a key and never aliases an actual nibble. -/
 def radixSymbol (key : List U8) (digit : Nat) : Nat :=
   match key[digit / 2]? with
@@ -1722,9 +1725,9 @@ private theorem radix_check_leaf_spec {V : Type}
   intro found eq
   subst found
   apply WP.spec_bind (core.slice.cmp.PartialEqSlice.eq_homo_spec core.cmp.PartialEqU8
-    row.key key (fun a b => by simp))
+    (alloc.vec.Vec.deref row.key) key (fun a b => by simp))
   intro equal heq
-  by_cases same : row.key.val = key.val <;> simp [heq, Slice.eq_iff, same]
+  by_cases same : row.key.val = key.val <;> simp [heq, Slice.eq_iff, key_borrow_val, same]
 
 theorem find_binding (bindings : List (List U8 × U32)) (key : List U8)
     : match Kv.Model.find bindings key with
@@ -2640,8 +2643,11 @@ private theorem radix_prepare_fresh {V : Type}
   have fit : 2 * min row.key.val.length key.val.length + 1 ≤ Usize.max := by
     have := Nat.min_le_right row.key.val.length key.val.length
     omega
-  apply WP.spec_bind (radix_first_difference_matches row.key key fit)
+  apply WP.spec_bind
+    (radix_first_difference_matches (alloc.vec.Vec.deref row.key) key
+      (by simpa only [key_borrow_val] using fit))
   intro found hsplit
+  simp only [key_borrow_val] at hsplit
   cases found with
   | none =>
       change row.key.val = key.val at hsplit
@@ -2668,17 +2674,17 @@ private theorem radix_prepare_fresh {V : Type}
         have stemUniform := radix_tip_shared walk stored leaf (rep_member cut) compressed actual
         exact fun entry hm i hi => (shared i hi).trans (stemUniform entry hm i hi)
       change WP.spec (do
-        let old ← Spike.radix.symbol row.key digit
+        let old ← Spike.radix.symbol (alloc.vec.Vec.deref row.key) digit
         let new ← Spike.radix.symbol key digit
         Result.ok ((stem, some ({digit, old_slot := old, new_slot := new}
           : Spike.radix.InsertionSplit)), recorded)) _
-      apply WP.spec_bind (radix_symbol_matches row.key digit)
+      apply WP.spec_bind (radix_symbol_matches (alloc.vec.Vec.deref row.key) digit)
       intro old ho
       apply WP.spec_bind (radix_symbol_matches key digit)
       intro new hn
       have oldBound : old.val < 17 := ho ▸ radixSymbol_bound _ _
       have oldSlot : old.val = radixSymbol stored digit.val := by
-        simpa only [same] using ho
+        simpa only [key_borrow_val, same] using ho
       have different : old.val ≠ new.val := by rw [oldSlot, hn]; exact first.1
       simp only [WP.spec_ok]
       exact ⟨_, tip, rfl, length, hn, oldBound, different, walk, oldSlot ▸ source, subset,
@@ -2919,12 +2925,13 @@ private theorem radix_prepare_existing {V : Type}
   intro previous he
   subst previous
   apply WP.spec_bind
-    (radix_first_difference_matches old.key key (by rwa [same, Nat.min_self]))
+    (radix_first_difference_matches (alloc.vec.Vec.deref old.key) key
+      (by simpa [alloc.vec.Vec.deref, same] using keyRoom))
   intro difference hd
   cases difference with
   | some digit =>
       exfalso
-      exact hd.1 (by rw [same])
+      exact hd.1 (by rw [key_borrow_val, same])
   | none =>
       apply WP.spec_bind
         (radix_record_matches dirs path root key none height bindings room tree)
@@ -2994,8 +3001,10 @@ theorem radix_put_existing_matches {V : Type}
       using radix_representatives_of_invariant dirs invariant
   have hrow : radixRow rs.val oldLeaf = some old := by simpa [rs, alloc.vec.Vec.deref] using live
   apply WP.spec_bind
-    (radix_prepare_existing ds rs scratch root oldLeaf row.key height bindings
-      hTree hReps present nz old tagged hrow same (by omega) keyRoom)
+    (radix_prepare_existing ds rs scratch root oldLeaf (alloc.vec.Vec.deref row.key)
+      height bindings hTree hReps (by simpa only [key_borrow_val] using present) nz old
+      tagged hrow (by simpa only [key_borrow_val] using same) (by omega)
+      (by simpa only [key_borrow_val] using keyRoom))
   rintro ⟨⟨stem, split⟩, path⟩ ⟨stemEq, none, depth, visit⟩
   subst split stem
   have walk
@@ -3132,11 +3141,13 @@ theorem radix_put_fresh_matches {V : Type}
       ∃ value, radixRow rs.val entry.2 = some value ∧ value.key.val = entry.1 := by
     simpa [rs, alloc.vec.Vec.deref] using valid
   apply WP.spec_bind
-    (radix_prepare_fresh ds rs scratch root row.key height bindings
-      hTree hReps hCompressed absent nz hRows (by omega) keyRoom)
+    (radix_prepare_fresh ds rs scratch root (alloc.vec.Vec.deref row.key) height bindings
+      hTree hReps hCompressed (by simpa only [key_borrow_val] using absent) nz hRows
+      (by omega) (by simpa only [key_borrow_val] using keyRoom))
   rintro ⟨⟨stem, found⟩, path⟩
     ⟨split, tip, eq, depth, newSlot, oldBound, different, visit, source, subset, guide, common⟩
   subst found
+  simp only [key_borrow_val] at newSlot guide common
   have walk
       : RadixWalk dirs.val row.key.val (some split.digit) root bindings stem tip
           path.val := by
@@ -4473,7 +4484,7 @@ theorem ordered_put_refines {V : Type} (a : Spike.radix.OrderedRadix V)
   let edited := Kv.Model.set bs row.key.val added
   have orderEq : order.val = edited.map Prod.snd := by
     have erase := erase_order_matches a.rows.val bs row.key.val valid
-      (find_in_tree a row.key tree valid)
+      (by simpa only [key_borrow_val] using find_in_tree a (alloc.vec.Vec.deref row.key) tree valid)
     rw [eq, removedEq]
     simp [edited, Kv.Model.set, alloc.vec.Vec.deref, priorOrder, erase]
   let updated : Spike.radix.OrderedRadix V :=

@@ -335,7 +335,7 @@ theorem dual_scan_row_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (radix_row_at_matches _ entry.2 row tag (by simpa [alloc.vec.Vec.deref] using saved))
   intro actual h
   rw [WP.spec_ok, h]
-  exact ⟨row, saved, same, rfl⟩
+  exact ⟨row, saved, by simpa [alloc.vec.Vec.deref] using same, rfl⟩
 
 private theorem stamp_erase {V : Type}
     (rows : List (Option (Spike.radix.RadixRow (Spike.radix.Stamped V))))
@@ -435,8 +435,11 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
       rw [eq]
       apply WP.spec_bind (reverse_stamp_key_refines old.value.stamp)
       intro encoded he
+      let bytes := alloc.vec.Vec.deref encoded
+      have keyEq : bytes.val = reverseStampBytes old.value.stamp := by
+        simpa [bytes, alloc.vec.Vec.deref] using he
       apply WP.spec_bind
-        (arena_remove_refines arena.order root.order encoded orderHeight keys
+        (arena_remove_refines arena.order root.order bytes orderHeight keys
           orderTree orderRows orderOK roomOrder)
       rintro ⟨order, orderAfter⟩ ⟨validOrder, keepsOrder, _, _, oh, ot, orows, op⟩
       apply WP.spec_bind
@@ -446,16 +449,16 @@ theorem dual_remove_refines {V : Type} (arena : Spike.radix.DualRadix V)
       change WP.spec (Result.ok (({ lookup := value, order } : Spike.radix.DualRoot),
         { arena with values := valueAfter, order := orderAfter })) _
       rw [WP.spec_ok]
-      have paired : radixBindings orderAfter.rows.val (Kv.Model.erase keys encoded.val)
+      have paired : radixBindings orderAfter.rows.val (Kv.Model.erase keys bytes.val)
           = dualStampBindings valueAfter.rows.val (Kv.Model.erase bindings key.val) := by
-        rw [op, pairing, he, valuesUnchanged, stamp_erase _ _ _ _ view.values]
+        rw [op, pairing, keyEq, valuesUnchanged, stamp_erase _ _ _ _ view.values]
         intro e hm row live
         exact view.stamps e hm (key.val, leaf) hit row old live saved
       refine ⟨
         ⟨
           ⟨vh, vt⟩,
           vrows,
-          ⟨oh, Kv.Model.erase keys encoded.val, ot, orows, paired, orderSorted.filter _⟩,
+          ⟨oh, Kv.Model.erase keys bytes.val, ot, orows, paired, orderSorted.filter _⟩,
           ?_,
           ?_
         ⟩,
@@ -509,7 +512,9 @@ private theorem prepare_order_before_insert {V : Type} (arena : Spike.radix.Dual
           | some link => do
               let previous ← Spike.radix.row_at (alloc.vec.Vec.deref values.rows) link
               let encoded ← Spike.radix.reverse_stamp_key previous.value.stamp
-              let (order, after) ← Spike.radix.Arena.remove arena.order root.order encoded
+              let (order, after) ←
+                Spike.radix.Arena.remove arena.order root.order
+                  (alloc.vec.Vec.deref encoded)
               Result.ok (values, after, order))
         (fun (same, after, order) =>
           same = values
@@ -546,7 +551,10 @@ private theorem prepare_order_before_insert {V : Type} (arena : Spike.radix.Dual
       subst oldRow
       apply WP.spec_bind (reverse_stamp_key_refines row.value.stamp)
       intro encoded he
-      apply WP.spec_bind (arena_remove_refines arena.order root.order encoded height keys
+      let bytes := alloc.vec.Vec.deref encoded
+      have keyEq : bytes.val = reverseStampBytes row.value.stamp := by
+        simpa [bytes, alloc.vec.Vec.deref] using he
+      apply WP.spec_bind (arena_remove_refines arena.order root.order bytes height keys
         tree rows orderOK room)
       rintro ⟨order, after⟩ ⟨valid, preserves, fixed, growth, h, ht, hr, hp⟩
       change WP.spec (Result.ok (values, after, order)) _
@@ -557,14 +565,14 @@ private theorem prepare_order_before_insert {V : Type} (arena : Spike.radix.Dual
         preserves,
         fixed,
         growth,
-        Kv.Model.erase keys encoded.val,
+        Kv.Model.erase keys bytes.val,
         List.filter_sublist,
         (radix_tree_binding_bound _ valid.directories ht).1,
         hr,
         ?_,
         sorted.filter _
       ⟩
-      rw [hp, pairing, he, stamp_erase _ _ _ _ view.values]
+      rw [hp, pairing, keyEq, stamp_erase _ _ _ _ view.values]
       intro e hm item live
       exact view.stamps e hm (key, link) hit item row live saved
 

@@ -212,7 +212,11 @@ def reverseStampBytes (stamp : U64) : List U8 :=
 theorem reverse_stamp_key_refines (stamp : U64)
     : WP.spec (Spike.radix.reverse_stamp_key stamp)
         (fun out => out.val = reverseStampBytes stamp) := by
-  simp [Spike.radix.reverse_stamp_key, reverseStampBytes, lift, Array.val_to_slice]
+  simp only [Spike.radix.reverse_stamp_key, reverseStampBytes, lift, bind_ok]
+  apply WP.spec_mono (alloc.slice.Slice.to_vec_spec core.clone.CloneU8 _ (fun _ _ => rfl))
+  intro out copied
+  change out.slice.val = _
+  simpa only [Array.val_to_slice] using congrArg Slice.val copied.symm
 
 /-- The latest stamp compares before every previously issued stamp. -/
 theorem reverse_stamp_order (older newer : U64) (lt : older.val < newer.val)
