@@ -207,6 +207,8 @@ Ending an attempt now moves the remaining attempt rows instead of cloning their 
 At 65,536 commits, this reduced Rust median latency from 17.1-17.2 us to 1.42-1.46 us and p99 from 45.9-52.0 us to 6.29-6.73 us across three alternating Rust-to-Rust pairs.
 Matched C++ medians were 1.94-2.21 us and p99 was 3.23-4.17 us.
 Peak RSS remained 147-161 MiB for Rust versus about 11.5 MiB for C++.
+In three additional matched runs, Rust logging took 0.587-0.637 us/tx versus 0.812-0.840 us/tx for C++.
+Governance still took 8.38-9.41 us/tx versus 5.27-5.74 us/tx, and a 2,048-key replacement commit took 2.81-3.05 ms versus 0.79-0.97 ms.
 
 ### Persistent storage experiment
 
@@ -297,7 +299,11 @@ The count-based variant used 914 allocated directory slots versus 1,472, and 4,1
 The budget limits slots processed, not wall-clock latency or queue growth for all traces.
 The benchmark uses the extracted `recycle_slot` primitive.
 [`RadixLiveness`](KvRust/RadixLiveness.lean) proves that recycling preserves every retained root and its values when the selected slot has no incoming links or pins.
-The proof of reference accounting and the retirement queue is still open, and retirement is not used by the transaction backend.
+The [reclamation proofs](KvRust/RadixLiveness.lean) check the extracted retain and release arithmetic against exact owner multiplicities.
+For the dual index they count every live stamp row as an owner of its value, even if the stamp row awaits retirement.
+Recycling an unowned stamp row preserves pinned views and removes exactly one such reference; recycling an unowned value row preserves both views of every pinned root.
+End-to-end accounting for attaching and releasing roots and directory edges, and scheduling retirement, is still open.
+Retirement is not used by the transaction backend.
 
 The experimental history now uses [`BranchLog`](KvRust/BranchLog.lean) to separate active branch offsets from stable frame IDs.
 Its extracted proofs show that rewind truncates the active sequence without invalidating old IDs and that an append at a reused offset names a new frame.

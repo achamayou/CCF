@@ -145,6 +145,23 @@ pub fn recycle_slot<T>(slots: &mut Vec<Option<T>>, free: &mut Vec<usize>, index:
     value
 }
 
+/// Return whether the new reference is the first owner of this live slot.
+#[inline]
+pub fn retain_reference(count: &mut u32) -> bool {
+    let first = *count == 0;
+    assert!(*count < u32::MAX, "radix reference count exhausted");
+    *count += 1;
+    first
+}
+
+/// Return whether releasing one owner leaves this slot ready for retirement.
+#[inline]
+pub fn release_reference(count: &mut u32) -> bool {
+    assert!(*count > 0, "release of unpinned radix link");
+    *count -= 1;
+    *count == 0
+}
+
 fn directory(dirs: &[Option<RadixDir>], link: u32) -> &RadixDir {
     let index = (link - 1) as usize;
     match &dirs[index] {

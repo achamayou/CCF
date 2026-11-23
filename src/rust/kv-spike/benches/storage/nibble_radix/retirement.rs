@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 License.
 
 use super::{ByteIndex, Link, NibbleRadix, Value};
-use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot};
+use ccf_kv_spike::radix::{RadixDir, link_at, recycle_slot, release_reference, retain_reference};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -49,9 +49,7 @@ impl Arena {
             self.activation.push(root);
         }
         while let Some(node) = self.activation.pop() {
-            let count = self.count(node);
-            let unpublished = *count == 0;
-            *count = count.checked_add(1).expect("reference count exhausted");
+            let unpublished = retain_reference(self.count(node));
             // Only new directories activate their edges. Existing children
             // of a retained root already have incoming references.
             if unpublished && !node.leaf() {
@@ -66,9 +64,7 @@ impl Arena {
         if node.empty() {
             return;
         }
-        let count = self.count(node);
-        *count = count.checked_sub(1).expect("release of unpinned link");
-        if *count == 0 {
+        if release_reference(self.count(node)) {
             self.retired.push_back(node);
         }
     }
