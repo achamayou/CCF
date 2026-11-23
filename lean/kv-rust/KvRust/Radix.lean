@@ -659,6 +659,30 @@ private theorem radix_first_mem (dir : Spike.radix.RadixDir) (nz : radixFirst di
   | none => simp [h] at nz
   | some child => exact List.mem_of_find?_eq_some h
 
+/-- The cache agrees with the first occupied child, following that child's
+cache only when the child is itself a directory. -/
+def RadixFirstCache (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (dir : Spike.radix.RadixDir)
+    : Prop :=
+  radixFirst dir ≠ 0#u32
+  ∧ if (2147483648#u32 : U32) ≤ radixFirst dir then
+      dir.first = radixFirst dir
+    else
+      ∃ child,
+        dirs.val[(radixFirst dir).val - 1]? = some (some child) ∧ dir.first = child.first
+
+private theorem radix_cache_preserved {dirs next : DirArena}
+    (keep : preservesSlots dirs next) {dir : Spike.radix.RadixDir}
+    (cache : RadixFirstCache dirs dir)
+    : RadixFirstCache next dir := by
+  refine ⟨cache.1, ?_⟩
+  by_cases tagged : (2147483648#u32 : U32) ≤ radixFirst dir
+  · simpa only [tagged, ite_true] using cache.2
+  · have h := cache.2
+    rw [ite_eq_right tagged] at h ⊢
+    obtain ⟨d, hd, first⟩ := h
+    exact ⟨d, keep _ _ hd, first⟩
+
 private theorem radix_add_directory_matches (dirs : DirArena) (free : alloc.vec.Vec Usize)
     (dir : Spike.radix.RadixDir) (vacant : RadixFree dirs free)
     (room : dirs.val.length < 2147483647)
@@ -674,7 +698,8 @@ private theorem radix_add_directory_matches (dirs : DirArena) (free : alloc.vec.
               next.val[root.val - 1]? = some (some published)
               ∧ published.digit = dir.digit
               ∧ published.children = dir.children
-              ∧ published.mask = dir.mask)
+              ∧ published.mask = dir.mask
+              ∧ RadixFirstCache next published)
           ∧ preservesSlots dirs next
           ∧ next.val.length ≤ dirs.val.length + 1
           ∧ RadixFree next left
@@ -685,9 +710,14 @@ private theorem radix_add_directory_matches (dirs : DirArena) (free : alloc.vec.
   subst first
   have nz : (radixFirst dir != 0#u32) = true := bne_iff_ne.mpr nonempty
   simp only [nz, massert, ite_true, bind_ok, radix_tag]
-  apply WP.spec_bind (Pₘ := fun (_ : U32) => True)
+  apply WP.spec_bind (Pₘ := fun cached => RadixFirstCache dirs {dir with first := cached})
   · by_cases tagged : 2147483648#u32 ≤ radixFirst dir
-    · simp [tagged]
+    · simp only [tagged, ite_true, WP.spec_ok]
+      refine ⟨nonempty, ?_⟩
+      change (if (2147483648#u32 : U32) ≤ radixFirst dir then radixFirst dir = radixFirst dir
+        else ∃ child, dirs.val[(radixFirst dir).val - 1]? = some (some child) ∧
+          radixFirst dir = child.first)
+      simp only [tagged, ite_true]
     · simp only [tagged, ite_false]
       have lower : radixFirst dir < 2147483648#u32 := lt_of_not_ge tagged
       obtain ⟨target, ht⟩ := live lower
@@ -702,8 +732,16 @@ private theorem radix_add_directory_matches (dirs : DirArena) (free : alloc.vec.
       apply WP.spec_bind
         (radix_directory_matches (alloc.vec.Vec.deref dirs) (radixFirst dir) target
           positive hs)
-      simp
-  · intro cached _
+      intro d hd
+      subst d
+      simp only [WP.spec_ok]
+      refine ⟨nonempty, ?_⟩
+      change (if (2147483648#u32 : U32) ≤ radixFirst dir then target.first = radixFirst dir
+        else ∃ child, dirs.val[(radixFirst dir).val - 1]? = some (some child) ∧
+          target.first = child.first)
+      rw [ite_eq_right tagged]
+      exact ⟨target, ht, rfl⟩
+  · intro cached hCache
     let updated : Spike.radix.RadixDir := {dir with first := cached}
     have cap : dirs.val.length < Usize.max := by
       have h : 2147483647 ≤ Usize.max := by scalar_tac
@@ -716,7 +754,8 @@ private theorem radix_add_directory_matches (dirs : DirArena) (free : alloc.vec.
     simp only [WP.spec_ok]
     have hidx : root.val - 1 = i.val := by omega
     rw [hidx]
-    exact ⟨by omega, by omega, ⟨updated, hnew, rfl, rfl, rfl⟩, hprev, hlen, hfree, unchanged⟩
+    exact ⟨by omega, by omega, ⟨updated, hnew, rfl, rfl, rfl, radix_cache_preserved hprev hCache⟩,
+      hprev, hlen, hfree, unchanged⟩
 
 /-- Any directory link names a live slot. Leaf and empty links do not read
 the directory arena. -/
@@ -795,6 +834,7 @@ def RadixDirectoryInvariant (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
     dirs.val[i]? = some (some dir)
     → RadixMask dir
       ∧ (∀ child ∈ dir.children.val, RadixDirLive dirs child)
+      ∧ RadixFirstCache dirs dir
       ∧ ∃ a b, a ≠ b ∧ Occupied dir a ∧ Occupied dir b
 
 /-- A prepared parent names live directories and has a surviving sibling. -/
@@ -813,7 +853,7 @@ private theorem radix_safe_parent_of_invariant {dirs : DirArena}
     (invariant : RadixDirectoryInvariant dirs) (node : U32) (dir : Spike.radix.RadixDir)
     (positive : 0 < node.val) (live : dirs.val[node.val - 1]? = some (some dir))
     : RadixMask dir ∧ ∀ slot : Usize, slot.val < 17 → SafeParent dirs node slot := by
-  obtain ⟨mask, children, a, b, distinct, ha, hb⟩ := invariant _ _ live
+  obtain ⟨mask, children, _, a, b, distinct, ha, hb⟩ := invariant _ _ live
   refine ⟨mask, fun slot h => ⟨positive, h, dir, live, children, ?_⟩⟩
   by_cases selected : a = slot.val
   · obtain ⟨child, hc, hn⟩ := hb
@@ -827,6 +867,7 @@ private theorem radix_extend_invariant {dirs next : DirArena}
     (entry : next.val[index]? = some (some dir))
     (unchanged : ∀ j, j ≠ index → next.val[j]? = dirs.val[j]?) (mask : RadixMask dir)
     (children : ∀ child ∈ dir.children.val, RadixDirLive dirs child)
+    (cache : RadixFirstCache next dir)
     (occupied : ∃ a b, a ≠ b ∧ Occupied dir a ∧ Occupied dir b)
     : RadixDirectoryInvariant next := by
   intro j current hj
@@ -834,10 +875,11 @@ private theorem radix_extend_invariant {dirs next : DirArena}
   · subst j
     rw [entry, Option.some.injEq, Option.some.injEq] at hj
     subst current
-    exact ⟨mask, fun child h => radix_live_preserved keep (children child h), occupied⟩
+    exact ⟨mask, fun child h => radix_live_preserved keep (children child h), cache, occupied⟩
   · rw [unchanged j same] at hj
-    obtain ⟨hm, hs, ho⟩ := invariant j current hj
-    exact ⟨hm, fun child h => radix_live_preserved keep (hs child h), ho⟩
+    obtain ⟨hm, hs, hc, ho⟩ := invariant j current hj
+    exact ⟨hm, fun child h => radix_live_preserved keep (hs child h),
+      radix_cache_preserved keep hc, ho⟩
 
 private theorem radix_safe_parent_preserved {old next : DirArena}
     (keep : preservesSlots old next) {parent : U32} {slot : Usize}
@@ -909,7 +951,7 @@ private theorem radix_copy_parent_step (dirs : DirArena) (free : alloc.vec.Vec U
       rintro ⟨nextLink, next, left⟩ ⟨pos, low, published, keep, hlen, avail, untouched⟩
       refine ⟨keep, hlen, avail, fun _ _ => published.imp fun _ h => h.1, ?_, ?_⟩
       · intro invariant
-        obtain ⟨actual, hAt, _, childEq, maskEq⟩ := published
+        obtain ⟨actual, hAt, _, childEq, maskEq, cache⟩ := published
         have hm := preservesMask ((invariant _ _ hdir).1)
         have notPower : ¬updated.mask.val.isPowerOfTwo := fun h => by
           have invalid := hcollapse.mpr h
@@ -918,6 +960,7 @@ private theorem radix_copy_parent_step (dirs : DirArena) (free : alloc.vec.Vec U
         · intro i hi
           simpa only [childEq, maskEq] using hm i hi
         · simpa only [childEq] using children
+        · exact cache
         · obtain ⟨a, b, different, ha, hb⟩ := radix_multi_slot updated hm nonempty notPower
           exact ⟨a, b, different, by simpa only [Occupied, childEq] using ha,
             by simpa only [Occupied, childEq] using hb⟩
@@ -1796,6 +1839,64 @@ def RadixRepresentatives (dirs : List (Option Spike.radix.RadixDir)) : Prop :=
     → dirs[node.val - 1]? = some (some dir)
     → ∃ key, (key, dir.first) ∈ bindings
 
+private theorem radix_cached_rep {dirs : DirArena}
+    (invariant : RadixDirectoryInvariant dirs) {height : Nat} {root : U32}
+    {bindings : Bindings} (tree : RadixTree dirs.val height root bindings)
+    : if root = 0#u32 then
+        True
+      else if (2147483648#u32 : U32) ≤ root then
+        ∃ key, (key, root) ∈ bindings
+      else
+        ∃ d,
+          dirs.val[root.val - 1]? = some (some d) ∧ ∃ key, (key, d.first) ∈ bindings := by
+  induction tree with
+  | empty => simp
+  | leaf _ node stored tag =>
+      have nz : node ≠ 0#u32 := by
+        intro hz
+        subst node
+        exact (by decide : ¬(2147483648#u32 : U32) ≤ 0#u32) tag
+      simp [nz, tag]
+  | branch height node dir bindings positive low live children links trees ih =>
+      have nz : node ≠ 0#u32 := fun hz => by subst node; contradiction
+      simp only [nz, ite_false, not_le_of_gt low]
+      refine ⟨dir, live, ?_⟩
+      have health := (invariant _ _ live).2.2.1
+      obtain ⟨slot, atSlot⟩ := List.mem_iff_getElem?.mp (radix_first_mem dir health.1)
+      have bound : slot < 17 := occupied_bound dir slot ⟨_, atSlot, health.1⟩
+      have hchild : children slot = radixFirst dir :=
+        Option.some.inj ((links slot bound).symm.trans atSlot)
+      have first := ih slot bound
+      rw [hchild, ite_eq_right health.1] at first
+      by_cases tag : (2147483648#u32 : U32) ≤ radixFirst dir
+      · rw [ite_eq_left tag] at first
+        obtain ⟨k, hk⟩ := first
+        have eq := health.2
+        rw [ite_eq_left tag] at eq
+        exact ⟨k, eq.symm ▸ (List.mem_filter.mp hk).1⟩
+      · rw [ite_eq_right tag] at first
+        obtain ⟨child, hDir, k, hk⟩ := first
+        have hc := health.2
+        rw [ite_eq_right tag] at hc
+        obtain ⟨cached, hCache, eq⟩ := hc
+        have same : cached = child :=
+          Option.some.inj (Option.some.inj (hCache.symm.trans hDir))
+        subst cached
+        exact ⟨k, eq.symm ▸ (List.mem_filter.mp hk).1⟩
+
+/-- The preserved first-child caches select real leaves of every finite projected root. -/
+theorem radix_representatives_of_invariant
+    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (invariant : RadixDirectoryInvariant dirs)
+    : RadixRepresentatives dirs.val := by
+  intro height node bindings dir tree positive low lookup
+  have nz : node ≠ 0#u32 := fun hz => by subst node; contradiction
+  have h := radix_cached_rep invariant tree
+  simp only [nz, ite_false, not_le_of_gt low] at h
+  obtain ⟨d, live, chosen⟩ := h
+  have same : d = dir := Option.some.inj (Option.some.inj (live.symm.trans lookup))
+  exact same ▸ chosen
+
 private inductive RepRoute (dirs : List (Option Spike.radix.RadixDir)) (key : List U8)
     : U32 → Bindings → (List U8 × U32) → Prop where
   | leaf (node : U32) (stored : List U8) (tagged : (2147483648#u32 : U32) ≤ node)
@@ -2211,7 +2312,7 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
       newSlot different hs
       (fun i d h => by
         have atSlot : dirs.val[i]? = some (some d) := by simpa [alloc.vec.Vec.deref] using h
-        obtain ⟨hm, _, a, _, _, ha, _⟩ := invariant i d atSlot
+        obtain ⟨hm, _, _, a, _, _, ha, _⟩ := invariant i d atSlot
         exact ⟨hm, a, ha⟩))
   intro dir ⟨hd, vacant, mask, ⟨sibling, siblingLink, hsibling, siblingNZ⟩, height, parts⟩
   have bound : split.new_slot.val < 17 := newSlot ▸ radixSymbol_bound _ _
@@ -2261,7 +2362,7 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
     (radix_add_directory_matches dirs free updated available room nonempty
       (firstLive nonempty))
   rintro ⟨root, next, avail⟩
-    ⟨pos, low, ⟨published, hroot, digit, directory, bitmap⟩, keep, growth, valid, unchanged⟩
+    ⟨pos, low, ⟨published, hroot, digit, directory, bitmap, cache⟩, keep, growth, valid, unchanged⟩
   change WP.spec (Result.ok (next, avail, root)) _
   simp only [WP.spec_ok]
   let select := fun (i : Nat) => updated.children.val[i]?.getD 0#u32
@@ -2278,6 +2379,7 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
       simpa only [directory, bitmap] using radix_updated_mask dir updated split.new_slot leaf
         bound mask hc hmask i hi
     · simpa only [directory] using childLive
+    · exact cache
     · have differentSlot : split.new_slot.val ≠ sibling := by
         intro equal
         rw [← equal, vacant, Option.some.injEq] at hsibling
@@ -2356,7 +2458,7 @@ theorem radix_put_existing_matches {V : Type}
     (oldLeaf : U32) (tree : RadixTree dirs.val height root bindings)
     (present : (row.key.val, oldLeaf) ∈ bindings) (old : Spike.radix.RadixRow V)
     (tagged : 2147483648 < oldLeaf.val) (live : radixRow rows.val oldLeaf = some old)
-    (same : old.key.val = row.key.val) (reps : RadixRepresentatives dirs.val)
+    (same : old.key.val = row.key.val)
     (invariant : RadixDirectoryInvariant dirs) (availableDirs : RadixFree dirs freeDirs)
     (availableRows : RadixFree rows freeRows)
     (dirRoom : dirs.val.length + height ≤ 2147483647)
@@ -2386,7 +2488,9 @@ theorem radix_put_existing_matches {V : Type}
   let ds := alloc.vec.Vec.deref dirs
   let rs := alloc.vec.Vec.deref rows
   have hTree : RadixTree ds.val height root bindings := by simpa [ds, alloc.vec.Vec.deref] using tree
-  have hReps : RadixRepresentatives ds.val := by simpa [ds, alloc.vec.Vec.deref] using reps
+  have hReps : RadixRepresentatives ds.val := by
+    simpa [ds, alloc.vec.Vec.deref]
+      using radix_representatives_of_invariant dirs invariant
   have hrow : radixRow rs.val oldLeaf = some old := by simpa [rs, alloc.vec.Vec.deref] using live
   apply WP.spec_bind
     (radix_prepare_existing ds rs scratch root oldLeaf row.key height bindings
@@ -2477,7 +2581,6 @@ theorem radix_put_fresh_matches {V : Type}
       : ∀ entry ∈ bindings,
           2147483648 < entry.2.val
           ∧ ∃ value, radixRow rows.val entry.2 = some value ∧ value.key.val = entry.1)
-    (reps : RadixRepresentatives dirs.val)
     (compressed
       : RadixCompressed dirs.val
           (fun leaf =>
@@ -2506,7 +2609,9 @@ theorem radix_put_fresh_matches {V : Type}
   let ds := alloc.vec.Vec.deref dirs
   let rs := alloc.vec.Vec.deref rows
   have hTree : RadixTree ds.val height root bindings := by simpa [ds, alloc.vec.Vec.deref] using tree
-  have hReps : RadixRepresentatives ds.val := by simpa [ds, alloc.vec.Vec.deref] using reps
+  have hReps : RadixRepresentatives ds.val := by
+    simpa [ds, alloc.vec.Vec.deref]
+      using radix_representatives_of_invariant dirs invariant
   have hCompressed : RadixCompressed ds.val (fun leaf =>
       (radixRow rs.val leaf).map (fun row => row.key.val)) := by
     simpa [ds, rs, alloc.vec.Vec.deref] using compressed

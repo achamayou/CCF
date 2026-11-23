@@ -199,6 +199,6 @@ The extracted delete constructs its rebuild path and proves that it removes exac
 Native insertion shares the extracted implementation with the benchmark.
 The insertion proof covers an empty root, replacing an existing key, and inserting a fresh key into a well-formed compressed radix.
 It checks the ordered bindings at the new root and the preservation of previously live rows and directories.
-The native mutation proofs also preserve the arena free lists, directory occupancy masks, live child-directory links, and the minimum of two occupied slots in each published directory.
+The native mutation proofs also preserve the arena free lists, directory occupancy masks, live child-directory links, the minimum of two occupied slots, and the first-child caches used to choose a representative key.
 With the native put and remove functions, the two-run component medians at 2,048 keys were 9.6-9.9 ns for point reads and 151-160 ns for pinned-root updates across the two key distributions.
 The candidate is not integrated; preserving arena invariants across successive mutations, preserving scan order, bounding reclamation latency, and qualifying transaction performance remain open.
