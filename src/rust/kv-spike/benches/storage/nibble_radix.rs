@@ -6,6 +6,9 @@ use super::byte_radix::{ByteIndex, Pool, Row};
 use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, get, put, remove, scan_leaves};
 use std::cmp::Reverse;
 
+#[path = "nibble_radix/retirement.rs"]
+pub(super) mod retirement;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
 

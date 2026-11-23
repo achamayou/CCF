@@ -367,21 +367,26 @@ pub(super) fn check<T: ByteIndex>() {
     assert_eq!(index.allocated_slots(), slots);
 }
 
-pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
-    use std::time::Instant;
+pub(super) const CHURN_KEYS: usize = 2_048;
+pub(super) const CHURN_MUTATIONS: usize = 8_192;
+pub(super) const CHURN_WINDOW: usize = 32;
 
-    const KEYS: usize = 2_048;
-    const MUTATIONS: usize = 8_192;
-    const WINDOW: usize = 32;
-
-    let keys: Vec<_> = (0..KEYS)
+pub(super) fn churn_keys() -> Vec<Vec<u8>> {
+    (0..CHURN_KEYS)
         .map(|i| {
             let mut key = vec![b'a'; i % 17];
             key.push(0);
             key.extend_from_slice(&i.to_be_bytes());
             key
         })
-        .collect();
+        .collect()
+}
+
+pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
+    use self::{CHURN_KEYS as KEYS, CHURN_MUTATIONS as MUTATIONS, CHURN_WINDOW as WINDOW};
+    use std::time::Instant;
+
+    let keys = churn_keys();
     let mut index = T::default();
     let mut head = T::Root::default();
     for (i, key) in keys.iter().enumerate() {
@@ -392,6 +397,7 @@ pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
     }
     let mut held = [head; WINDOW + 1];
     let mut mutation = Vec::with_capacity(MUTATIONS);
+    let mut end_to_end = Vec::with_capacity(MUTATIONS);
     let mut collection = Vec::with_capacity(MUTATIONS / WINDOW);
     let start = Instant::now();
     for i in 0..MUTATIONS {
@@ -409,6 +415,7 @@ pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
             index.collect(&held);
             collection.push(at.elapsed().as_nanos());
         }
+        end_to_end.push(step.elapsed().as_nanos());
     }
     let ns = start.elapsed().as_nanos() as f64 / MUTATIONS as f64;
     assert_eq!(index.get(held[0], &keys[0]), Some(&[1; 64]));
@@ -421,11 +428,13 @@ pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
     index.collect(&[head]);
     assert_eq!(index.live_allocations().1, KEYS);
     mutation.sort_unstable();
+    end_to_end.sort_unstable();
     collection.sort_unstable();
     eprintln!(
-        "{backend} churn: {ns:.1} ns/mutation including GC; mutation p99 {} ns, GC p99 {} ns; \
+        "{backend} churn: {ns:.1} ns/mutation including GC; mutation p99 {} ns, end-to-end mutation p99 {} ns, GC p99 {} ns; \
          {nodes}/{node_slots} live/allocated nodes, {rows}/{row_slots} live/allocated rows",
         mutation[MUTATIONS * 99 / 100],
+        end_to_end[MUTATIONS * 99 / 100],
         collection[collection.len() * 99 / 100],
     );
 }

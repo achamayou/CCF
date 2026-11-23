@@ -224,3 +224,12 @@ At 8,192 entries the vector retains another 32 KiB of leaf links on each replace
 Stamps take eight bytes per allocated row slot instead, but the cost of sorting the full scan grows with map size.
 These are component measurements, not matched transaction results.
 The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.
+
+The `storage -- retirement` mode compares the full arena sweep with a benchmark-only reference-counted variant.
+The variant counts explicit root pins and incoming directory edges, and retires at most 32 zero-reference slots per tick.
+Its checks recompute the reference counts from all live edges and pins, exercise a queue larger than one budget, and confirm that retired slots are reused without changing retained roots.
+With 2,048 variable-length keys, one old root, and a 32-root recent window, four alternating pairs measured 0.85-0.86 us per mutation including retirement versus 1.05-1.08 us including sweep.
+The p99 of a complete mutation fell from 19.7-20.6 us to 1.63-1.89 us in those runs.
+The count-based variant used 914 allocated directory slots versus 1,472, and 4,112 allocated row slots versus 4,127, excluding its count arrays and scratch storage.
+The budget limits slots processed, not wall-clock latency or queue growth for all traces.
+This prototype does not yet have an extracted liveness proof and is not used by the transaction backend.

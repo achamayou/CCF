@@ -418,7 +418,23 @@ fn ordered_suite<T: OrderedIndex>(name: &str, scrambled: bool) {
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("ordered") {
+    let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("retirement") {
+        nibble_radix::retirement::check();
+        for i in 0..4 {
+            let sweep = || byte_radix::measure_churn::<nibble_radix::NibbleRadix>("nibble_radix");
+            let budgeted = nibble_radix::retirement::measure_churn;
+            if i % 2 == 0 {
+                sweep();
+                budgeted();
+            } else {
+                budgeted();
+                sweep();
+            }
+        }
+        return;
+    }
+    if mode.as_deref() == Some("ordered") {
         nibble_radix::check_stamp_reuse();
         println!("backend,workload,entries,operations,median_ns_per_operation,min_ns,max_ns");
         ordered_suite::<OrderedRadix<Value>>("ordered_nibble_radix", false);
