@@ -3,6 +3,7 @@
 
 //! A Rust KV prototype, with the original fixed-size extraction spike retained for comparison.
 
+pub mod branch_log;
 pub mod engine;
 pub mod radix;
 

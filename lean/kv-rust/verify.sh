@@ -42,7 +42,7 @@ fi
 cd "$proof_dir"
 lake build --wfail
 for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
-  KvRust.Correspondence KvRust.Assoc KvRust.History KvRust.Keys KvRust.Publication \
+  KvRust.Correspondence KvRust.Assoc KvRust.BranchLog KvRust.History KvRust.Keys KvRust.Publication \
   KvRust.Validation KvRust.Lineage KvRust.Apply KvRust.Advance KvRust.Acquire \
   KvRust.Point KvRust.Radix KvRust.RadixLiveness KvRust.Range KvRust.Scan KvRust.Relation KvRust.Lifecycle \
   KvRust.LifecycleRefinement KvRust.Environment KvRust.ApplyRefinement \

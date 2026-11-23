@@ -243,3 +243,7 @@ The budget limits slots processed, not wall-clock latency or queue growth for al
 The benchmark uses the extracted `recycle_slot` primitive.
 [`RadixLiveness`](KvRust/RadixLiveness.lean) proves that recycling preserves every retained root and its values when the selected slot has no incoming links or pins.
 The proof of reference accounting and the retirement queue is still open, and retirement is not used by the transaction backend.
+
+The experimental [`BranchLog`](KvRust/BranchLog.lean) separates active branch offsets from immutable frame IDs.
+Its extracted proofs show that rewind truncates the active sequence without invalidating old IDs and that an append at a reused offset names a new frame.
+This is not yet wired into transaction acquisition and does not reclaim discarded frames.
