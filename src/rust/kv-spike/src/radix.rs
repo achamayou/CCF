@@ -725,6 +725,78 @@ impl<V> DualRadix<V> {
         }
     }
 
+    /// Stage a value leaf and its stamp leaf without publishing a directory.
+    pub fn stage_batch_leaf(&mut self, row: RadixRow<V>) -> (u32, u32) {
+        assert!(self.last < u64::MAX, "radix stamp capacity");
+        let stamp = self.last + 1;
+        let lookup = link_at(
+            allocate(
+                &mut self.values.rows,
+                &mut self.values.free_rows,
+                RadixRow {
+                    key: row.key,
+                    value: Stamped {
+                        stamp,
+                        value: row.value,
+                    },
+                },
+            ),
+            true,
+        );
+        let order = link_at(
+            allocate(
+                &mut self.order.rows,
+                &mut self.order.free_rows,
+                RadixRow {
+                    key: reverse_stamp_key(stamp),
+                    value: lookup,
+                },
+            ),
+            true,
+        );
+        self.last = stamp;
+        (lookup, order)
+    }
+
+    /// Publish two lists of staged leaves. Each list must be in increasing
+    /// byte-key order in its own arena.
+    pub fn publish_batch_leaves(&mut self, lookup: &[u32], order: &[u32]) -> DualRoot {
+        let lookup = build_sorted(
+            &mut self.values.dirs,
+            &mut self.values.free_dirs,
+            &self.values.rows,
+            lookup,
+        );
+        let order = build_sorted(
+            &mut self.order.dirs,
+            &mut self.order.free_dirs,
+            &self.order.rows,
+            order,
+        );
+        DualRoot { lookup, order }
+    }
+
+    /// Publish an unpublished image whose rows are present and in strictly
+    /// increasing key order, from oldest to newest write.
+    pub fn build_sorted_batch(&mut self, mut rows: Vec<Option<RadixRow<V>>>) -> DualRoot {
+        let n = rows.len();
+        let mut lookup = Vec::with_capacity(n);
+        let mut order = Vec::new();
+        order.resize(n, 0);
+        let mut i = 0;
+        while i < n {
+            let row = match rows[i].take() {
+                Some(row) => row,
+                None => panic!("missing sorted batch row"),
+            };
+            let (leaf, stamp) = self.stage_batch_leaf(row);
+            lookup.push(leaf);
+            order[n - 1 - i] = stamp;
+            i += 1;
+        }
+        self.publish_batch_leaves(&lookup, &order)
+    }
+
     pub fn get(&self, root: DualRoot, key: &[u8]) -> Option<&V> {
         match get(&self.values.dirs, &self.values.rows, root.lookup, key) {
             Some(cell) => Some(&cell.value),
@@ -802,6 +874,44 @@ impl<V> Default for DualRadix<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_dual_batch_stamps_newest_first_and_keeps_old_roots() {
+        let mut arena = DualRadix::new();
+        let old = arena.put(
+            arena.empty_root(),
+            RadixRow {
+                key: b"a".to_vec(),
+                value: 9,
+            },
+        );
+        let keys: [&[u8]; 4] = [b"", b"a", b"a\0", b"\xff"];
+        let prepared = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                Some(RadixRow {
+                    key: key.to_vec(),
+                    value: i,
+                })
+            })
+            .collect();
+        let next = arena.build_sorted_batch(prepared);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(arena.get(next, key), Some(&i));
+        }
+        let observed = arena
+            .scan_links(next)
+            .into_iter()
+            .map(|link| arena.scan_row(link).0)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, keys.into_iter().rev().collect::<Vec<_>>());
+        assert_eq!(arena.get(old, b"a"), Some(&9));
+        assert_eq!(arena.get(old, b"a\0"), None);
+        let empty = arena.build_sorted_batch(Vec::new());
+        assert!(arena.scan_links(empty).is_empty());
+        assert_eq!(arena.get(next, b"a"), Some(&1));
+    }
 
     #[test]
     fn sorted_batch_handles_prefixes_and_keeps_the_old_root() {

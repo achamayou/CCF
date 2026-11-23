@@ -29,6 +29,7 @@ public import KvRust.Radix
 public import KvRust.RadixAddress
 public import KvRust.RadixBatch
 public import KvRust.RadixDual
+public import KvRust.RadixDualBatch
 public import KvRust.RadixLiveness
 public import KvRust.Range
 public import KvRust.Relation

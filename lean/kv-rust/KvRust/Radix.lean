@@ -664,7 +664,7 @@ theorem radix_tree_preserved
       exact .branch height node dir bindings positive untagged (preserved _ _ live) child
         links ih
 
-private theorem radix_link_matches (index : Usize) (leaf : Bool)
+theorem radix_link_matches (index : Usize) (leaf : Bool)
     (bounded : index.val < 2147483647)
     : WP.spec (Spike.radix.link_at index leaf)
         (fun link =>
@@ -1729,7 +1729,7 @@ def radixKeyOf {V : Type} (rows : List (Option (Spike.radix.RadixRow V))) (leaf 
     : Option (List U8) :=
   (radixRow rows leaf).map (·.key.val)
 
-private theorem radix_keys_kept {V : Type}
+theorem radix_keys_kept {V : Type}
     (old next : List (Option (Spike.radix.RadixRow V)))
     (kept
       : ∀ (i : Nat) previous,

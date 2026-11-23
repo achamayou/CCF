@@ -234,6 +234,7 @@ In one pinned run, the builder took 0.172 ms and 0.295 ms respectively, compared
 These are storage-only timings.
 The [extracted proof](KvRust/RadixBatch.lean) covers split selection, exact interval partitioning, child attachment, and termination of the explicit-stack builder.
 Under the stated size bounds, it constructs exactly the supplied sorted bindings, keeps the arenas valid, and preserves previous roots.
+The [dual-batch proof](KvRust/RadixDualBatch.lean) checks the native staging and publication of both indexes from sorted rows, including exact newest-first scan order.
 The builder has not been enabled in transaction publication.
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
