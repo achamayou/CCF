@@ -203,4 +203,24 @@ The native mutation proofs also preserve the arena free lists, directory occupan
 The value-level refinements project arena row links to the actual values and implement the model's ordered `find`, `set`, and `erase`.
 The mutation proofs establish the compressed-prefix witnesses for newly allocated directories and preserve those of retained directories, so subsequent mutations can reuse them.
 With the native put and remove functions, the two-run component medians at 2,048 keys were 9.6-9.9 ns for point reads and 151-160 ns for pinned-root updates across the two key distributions.
-The candidate is not integrated; native scan order, bounded reclamation latency, and transaction performance remain open.
+
+The append-only `OrderedRadix` prototype keeps a compact vector of leaf links per root in model order.
+The extracted proofs cover construction, point lookup, ordered scan length and every indexed result, insertion, and deletion, given valid arena-local handles and the stated capacity bounds.
+Updates preserve the views and values of all retained roots.
+The proof uses the actual inserted and replaced links returned by the native path copy rather than a second lookup or an assumed scan permutation.
+
+Run the ordered storage benchmark separately:
+
+```bash
+taskset -c 2 cargo +1.90.0 bench --locked --offline \
+  --manifest-path src/rust/kv-spike/Cargo.toml --bench storage -- ordered
+```
+
+The benchmark also tests a separate, unverified variant that assigns an increasing write stamp to each new leaf and sorts live leaves by stamp only when scanned.
+A regression checks exact order across a fork and after reusing a freed row slot.
+Across two paired runs and both key distributions, the 2,048-entry medians were 3.09-8.20 us per pinned-root replacement for the copied order vector versus 0.23-0.27 us for stamps.
+Full ordered scans took 3.02-3.37 us with copied vectors versus 10.45-19.37 us with stamps.
+At 8,192 entries the vector retains another 32 KiB of leaf links on each replacement, before directory, value, and allocator overhead.
+Stamps take eight bytes per allocated row slot instead, but the cost of sorting the full scan grows with map size.
+These are component measurements, not matched transaction results.
+The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.

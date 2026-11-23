@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
+use ccf_kv_spike::radix::{OrderedRadix, RadixRow, Root as OrderedRoot};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -167,20 +168,37 @@ fn measure<T: Index, R>(
     workload: &str,
     keys: &[Key],
     operations: usize,
-    mut run: impl FnMut(&mut T, T::Root) -> R,
+    run: impl FnMut(&mut T, T::Root) -> R,
 ) {
-    let (mut index, root) = seed::<T>(keys);
+    measure_seeded(
+        backend,
+        workload,
+        keys.len(),
+        operations,
+        || seed::<T>(keys),
+        run,
+    );
+}
+
+fn measure_seeded<T, Root, R>(
+    backend: &str,
+    workload: &str,
+    entries: usize,
+    operations: usize,
+    mut prepare: impl FnMut() -> (T, Root),
+    mut run: impl FnMut(&mut T, Root) -> R,
+) {
+    let (mut index, root) = prepare();
     black_box(run(&mut index, root));
     let mut values = [0.0; SAMPLES];
     for value in &mut values {
-        let (mut index, root) = seed::<T>(keys);
+        let (mut index, root) = prepare();
         let start = Instant::now();
         let retained = run(&mut index, root);
         *value = start.elapsed().as_secs_f64() * 1e9 / operations as f64;
         black_box(retained);
     }
     values.sort_unstable_by(f64::total_cmp);
-    let entries = keys.len();
     println!(
         "{backend},{workload},{entries},{operations},{:.1},{:.1},{:.1}",
         values[SAMPLES / 2],
@@ -189,20 +207,25 @@ fn measure<T: Index, R>(
     );
 }
 
+fn sorted_keys(entries: usize, scrambled: bool) -> Vec<Key> {
+    let mut keys: Vec<Key> = (0..entries as u64)
+        .map(|i| {
+            if scrambled {
+                i.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            } else {
+                i
+            }
+            .to_be_bytes()
+        })
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
 fn suite<T: Index>(backend: &str, scrambled: bool) {
     const WRITES: usize = 128;
     for entries in [64_usize, 512, 2048, 8192] {
-        let mut keys: Vec<Key> = (0..entries as u64)
-            .map(|i| {
-                if scrambled {
-                    i.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                } else {
-                    i
-                }
-                .to_be_bytes()
-            })
-            .collect();
-        keys.sort_unstable();
+        let keys = sorted_keys(entries, scrambled);
         measure::<T, _>(backend, "point_read", &keys, entries, |index, root| {
             for key in &keys {
                 assert_eq!(black_box(index.get(&root, key).unwrap())[0], 1);
@@ -276,7 +299,134 @@ fn check_persistence<T: Index>() {
     }
 }
 
+trait OrderedIndex: Default {
+    type Root: Copy;
+
+    fn empty_root(&self) -> Self::Root;
+    fn put(&mut self, root: Self::Root, key: &Key, value: Value) -> Self::Root;
+    fn get(&self, root: Self::Root, key: &Key) -> Option<&Value>;
+    fn scan(&self, root: Self::Root, visit: impl FnMut(&[u8], &Value));
+}
+
+impl OrderedIndex for OrderedRadix<Value> {
+    type Root = OrderedRoot;
+
+    fn empty_root(&self) -> Self::Root {
+        self.empty_root()
+    }
+
+    fn put(&mut self, root: Self::Root, key: &Key, value: Value) -> Self::Root {
+        self.put(
+            root,
+            RadixRow {
+                key: key.as_slice().into(),
+                value,
+            },
+        )
+    }
+
+    fn get(&self, root: Self::Root, key: &Key) -> Option<&Value> {
+        self.get(root, key)
+    }
+
+    fn scan(&self, root: Self::Root, mut visit: impl FnMut(&[u8], &Value)) {
+        for i in 0..self.scan_len(root) {
+            let row = self.scan_at(root, i).unwrap();
+            visit(&row.key, &row.value);
+        }
+    }
+}
+
+impl OrderedIndex for nibble_radix::StampedRadix {
+    type Root = nibble_radix::Link;
+
+    fn empty_root(&self) -> Self::Root {
+        Self::Root::default()
+    }
+
+    fn put(&mut self, root: Self::Root, key: &Key, value: Value) -> Self::Root {
+        self.put(root, key, value)
+    }
+
+    fn get(&self, root: Self::Root, key: &Key) -> Option<&Value> {
+        self.get(root, key)
+    }
+
+    fn scan(&self, root: Self::Root, visit: impl FnMut(&[u8], &Value)) {
+        self.scan(root, visit);
+    }
+}
+
+fn ordered_suite<T: OrderedIndex>(name: &str, scrambled: bool) {
+    for entries in [512_usize, 2048, 8192] {
+        let keys = sorted_keys(entries, scrambled);
+        let prepare = || {
+            let mut arena = T::default();
+            let mut root = arena.empty_root();
+            for key in &keys {
+                root = arena.put(root, key, [1; 64]);
+            }
+            (arena, root)
+        };
+        let (mut arena, prior) = prepare();
+        let next = arena.put(prior, &keys[0], [2; 64]);
+        let mut position = 0;
+        arena.scan(prior, |key, value| {
+            assert_eq!(key, &keys[entries - position - 1]);
+            assert_eq!(value[0], 1);
+            position += 1;
+        });
+        assert_eq!(position, entries);
+        position = 0;
+        arena.scan(next, |key, value| {
+            assert_eq!(
+                key,
+                &keys[if position == 0 { 0 } else { entries - position }]
+            );
+            assert_eq!(value[0], if position == 0 { 2 } else { 1 });
+            position += 1;
+        });
+        assert_eq!(position, entries);
+        drop(arena);
+        let measure = |workload, operations, run: &dyn Fn(&mut T, T::Root)| {
+            measure_seeded(name, workload, entries, operations, prepare, run);
+        };
+        measure("point_read", entries, &|arena, root| {
+            for key in &keys {
+                assert_eq!(black_box(arena.get(root, key).unwrap())[0], 1);
+            }
+        });
+        measure("write_with_pinned_root", 128, &|arena, prior| {
+            let mut root = prior;
+            for i in 0..128 {
+                root = arena.put(root, &keys[(17 * i) % entries], [2; 64]);
+            }
+            assert_eq!(arena.get(prior, &keys[0]).unwrap()[0], 1);
+            assert_eq!(arena.get(root, &keys[0]).unwrap()[0], 2);
+            black_box(root);
+        });
+        measure("ordered_full_scan", 128, &|arena, root| {
+            for _ in 0..128 {
+                let mut sum = 0;
+                arena.scan(black_box(root), |_, value| {
+                    sum += usize::from(black_box(value)[0])
+                });
+                assert_eq!(sum, entries);
+            }
+        });
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("ordered") {
+        nibble_radix::check_stamp_reuse();
+        println!("backend,workload,entries,operations,median_ns_per_operation,min_ns,max_ns");
+        ordered_suite::<OrderedRadix<Value>>("ordered_nibble_radix", false);
+        ordered_suite::<nibble_radix::StampedRadix>("stamped_nibble_radix", false);
+        ordered_suite::<nibble_radix::StampedRadix>("stamped_nibble_radix_scrambled", true);
+        ordered_suite::<OrderedRadix<Value>>("ordered_nibble_radix_scrambled", true);
+        return;
+    }
     check_persistence::<Paged>();
     check_persistence::<radix::Radix>();
     check_persistence::<byte_radix::ByteRadix>();

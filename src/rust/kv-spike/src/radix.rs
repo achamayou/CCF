@@ -268,6 +268,7 @@ fn split_directory(dirs: &[Option<RadixDir>], stem: u32, split: &InsertionSplit)
     dir
 }
 
+/// Return the new root, the inserted leaf, and any leaf it replaced.
 pub fn put<V>(
     dirs: &mut Vec<Option<RadixDir>>,
     free_dirs: &mut Vec<usize>,
@@ -276,21 +277,22 @@ pub fn put<V>(
     path: &mut Vec<(u32, usize)>,
     root: u32,
     row: RadixRow<V>,
-) -> u32 {
+) -> (u32, u32, Option<u32>) {
     if root == 0 {
-        return link_at(allocate(rows, free_rows, row), true);
+        let leaf = link_at(allocate(rows, free_rows, row), true);
+        return (leaf, leaf, None);
     }
     let (stem, split) = prepare_insert(dirs, rows, path, root, &row.key);
     let leaf = link_at(allocate(rows, free_rows, row), true);
-    let child = match split {
-        None => leaf,
+    let (child, replaced) = match split {
+        None => (leaf, Some(stem)),
         Some(split) => {
             let mut dir = split_directory(dirs, stem, &split);
             dir.set_child(split.new_slot, leaf);
-            add_directory(dirs, free_dirs, dir)
+            (add_directory(dirs, free_dirs, dir), None)
         }
     };
-    rebuild_path(dirs, free_dirs, path, child)
+    (rebuild_path(dirs, free_dirs, path, child), leaf, replaced)
 }
 
 /// Follow directory links until either a leaf or a missing child is reached.
@@ -371,9 +373,183 @@ fn check_leaf<'a, V>(rows: &'a [Option<RadixRow<V>>], leaf: u32, key: &[u8]) -> 
     }
 }
 
+fn matching_leaf<V>(
+    dirs: &[Option<RadixDir>],
+    rows: &[Option<RadixRow<V>>],
+    root: u32,
+    key: &[u8],
+) -> Option<u32> {
+    let leaf = find_leaf(dirs, root, key);
+    if leaf == 0 || check_leaf(rows, leaf, key).is_none() {
+        None
+    } else {
+        Some(leaf)
+    }
+}
+
+fn edit_order(order: &[u32], removed: Option<u32>, added: Option<u32>) -> Vec<u32> {
+    let mut next = Vec::new();
+    if let Some(leaf) = added {
+        next.push(leaf);
+    }
+    let mut i = 0;
+    while i < order.len() {
+        let leaf = order[i];
+        let keep = match removed {
+            None => true,
+            Some(old) => old != leaf,
+        };
+        if keep {
+            next.push(leaf);
+        }
+        i += 1;
+    }
+    next
+}
+
+#[derive(Clone, Copy)]
+pub struct Root(usize);
+
+struct OrderedRoot {
+    lookup: u32,
+    order: Vec<u32>,
+}
+
+/// Persistent lookup and scan roots. Pass handles only to their issuing arena.
+/// This prototype retains every version without reclamation.
+pub struct OrderedRadix<V> {
+    dirs: Vec<Option<RadixDir>>,
+    rows: Vec<Option<RadixRow<V>>>,
+    free_dirs: Vec<usize>,
+    free_rows: Vec<usize>,
+    path: Vec<(u32, usize)>,
+    roots: Vec<OrderedRoot>,
+}
+
+impl<V> OrderedRadix<V> {
+    pub fn new() -> Self {
+        let mut roots = Vec::new();
+        roots.push(OrderedRoot {
+            lookup: 0,
+            order: Vec::new(),
+        });
+        Self {
+            dirs: Vec::new(),
+            rows: Vec::new(),
+            free_dirs: Vec::new(),
+            free_rows: Vec::new(),
+            path: Vec::new(),
+            roots,
+        }
+    }
+
+    pub fn empty_root(&self) -> Root {
+        Root(0)
+    }
+
+    pub fn get(&self, root: Root, key: &[u8]) -> Option<&V> {
+        get(&self.dirs, &self.rows, self.roots[root.0].lookup, key)
+    }
+
+    pub fn put(&mut self, root: Root, row: RadixRow<V>) -> Root {
+        let prior = &self.roots[root.0];
+        let (lookup, added, removed) = put(
+            &mut self.dirs,
+            &mut self.free_dirs,
+            &mut self.rows,
+            &mut self.free_rows,
+            &mut self.path,
+            prior.lookup,
+            row,
+        );
+        let order = edit_order(&prior.order, removed, Some(added));
+        self.add_root(lookup, order)
+    }
+
+    pub fn remove(&mut self, root: Root, key: &[u8]) -> Root {
+        let prior = &self.roots[root.0];
+        let removed = matching_leaf(&self.dirs, &self.rows, prior.lookup, key);
+        if removed.is_none() {
+            return root;
+        }
+        let lookup = remove(
+            &mut self.dirs,
+            &mut self.free_dirs,
+            &self.rows,
+            &mut self.path,
+            prior.lookup,
+            key,
+        );
+        let order = edit_order(&prior.order, removed, None);
+        self.add_root(lookup, order)
+    }
+
+    pub fn scan_len(&self, root: Root) -> usize {
+        self.roots[root.0].order.len()
+    }
+
+    pub fn scan_at(&self, root: Root, i: usize) -> Option<&RadixRow<V>> {
+        let order = &self.roots[root.0].order;
+        if i >= order.len() {
+            return None;
+        }
+        Some(row_at(&self.rows, order[i]))
+    }
+
+    fn add_root(&mut self, lookup: u32, order: Vec<u32>) -> Root {
+        let index = self.roots.len();
+        self.roots.push(OrderedRoot { lookup, order });
+        Root(index)
+    }
+}
+
+impl<V> Default for OrderedRadix<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_roots_preserve_write_order_across_replacement_and_forks() {
+        let mut arena = OrderedRadix::new();
+        let empty = arena.empty_root();
+        let mut insert = |root, key: &[u8], value| {
+            arena.put(
+                root,
+                RadixRow {
+                    key: key.into(),
+                    value,
+                },
+            )
+        };
+        let old = insert(empty, b"a", 1);
+        let old = insert(old, b"", 2);
+        let old = insert(old, b"aa", 3);
+        let replaced = insert(old, b"a", 4);
+        let fork = arena.remove(old, b"");
+        let unchanged = arena.remove(fork, b"missing");
+        assert_eq!(unchanged.0, fork.0);
+        let scan = |root| {
+            (0..arena.scan_len(root))
+                .map(|i| {
+                    let row = arena.scan_at(root, i).unwrap();
+                    (row.key.as_ref(), row.value)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(scan(empty), []);
+        assert_eq!(scan(old), [(b"aa".as_slice(), 3), (b"", 2), (b"a", 1)]);
+        assert_eq!(scan(replaced), [(b"a".as_slice(), 4), (b"aa", 3), (b"", 2)]);
+        assert_eq!(scan(fork), [(b"aa".as_slice(), 3), (b"a", 1)]);
+        assert!(arena.scan_at(old, 3).is_none());
+        assert_eq!(arena.get(replaced, b"a"), Some(&4));
+        assert_eq!(arena.get(old, b"a"), Some(&1));
+        assert_eq!(arena.get(fork, b""), None);
+    }
 
     /// Test every pair of byte values, both at the root and below a common prefix.
     #[test]
@@ -498,6 +674,7 @@ mod tests {
                     value,
                 },
             )
+            .0
         };
         let empty = insert(0, &[], 1);
         let prefix = insert(empty, &[0], 2);

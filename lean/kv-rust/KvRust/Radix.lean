@@ -2636,9 +2636,10 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
           let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref dirs) stem split
           let updated ← Spike.radix.RadixDir.set_child dir split.new_slot leaf
           let (root, next, avail) ← Spike.radix.add_directory dirs free updated
-          Result.ok (next, avail, root))
-        (fun (next, avail, root) =>
-          preservesSlots dirs next
+          Result.ok (next, avail, root, (none : Option U32)))
+        (fun (next, avail, root, replaced) =>
+          replaced = none
+          ∧ preservesSlots dirs next
           ∧ RadixFree next avail
           ∧ next.val.length ≤ dirs.val.length + 1
           ∧ RadixDirectoryInvariant next
@@ -2704,7 +2705,7 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
       (firstLive nonempty))
   rintro ⟨root, next, avail⟩
     ⟨pos, low, ⟨published, hroot, digit, directory, bitmap, cache⟩, keep, growth, valid, unchanged⟩
-  change WP.spec (Result.ok (next, avail, root)) _
+  change WP.spec (Result.ok (next, avail, root, none)) _
   simp only [WP.spec_ok]
   have pubParts : RadixPartition next.val height published.digit published.children.val
       (Kv.Model.set tip key leaf) := by
@@ -2714,7 +2715,7 @@ private theorem radix_insert_tip (dirs : DirArena) (free : alloc.vec.Vec Usize)
       simpa only [digit] using radix_tree_preserved dirs.val next.val keep tree⟩
   have newTree := radix_partition_tree next.val root published height (Kv.Model.set tip key leaf)
     pos low hroot pubParts
-  refine ⟨keep, valid, growth, ?_, ?_, height + 1, newTree⟩
+  refine ⟨trivial, keep, valid, growth, ?_, ?_, height + 1, newTree⟩
   · apply radix_extend_invariant invariant keep _ published hroot unchanged
     · intro i hi
       simpa only [directory, bitmap] using radix_updated_mask dir updated split.new_slot leaf
@@ -2810,7 +2811,7 @@ theorem radix_put_existing_matches {V : Type}
     (rowRoom : rows.val.length < 2147483647)
     (keyRoom : 2 * row.key.val.length + 1 ≤ Usize.max)
     : WP.spec (Spike.radix.put dirs freeDirs rows freeRows scratch root row)
-        (fun (after, arena, avail, values, unused, _) =>
+        (fun ((after, leaf, replaced), arena, avail, values, unused, _) =>
           preservesSlots dirs arena
           ∧ RadixFree arena avail
           ∧ RadixDirectoryInvariant arena
@@ -2819,7 +2820,8 @@ theorem radix_put_existing_matches {V : Type}
           ∧ RadixFree values unused
           ∧ (∀ (i : Nat) previous,
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
-          ∧ ∃ height leaf,
+          ∧ replaced = some oldLeaf
+          ∧ ∃ height,
               2147483648 < leaf.val
               ∧ radixRow values.val leaf = some row
               ∧ RadixTree arena.val height after
@@ -2842,8 +2844,8 @@ theorem radix_put_existing_matches {V : Type}
   apply WP.spec_bind
     (radix_prepare_existing ds rs scratch root oldLeaf row.key height bindings
       hTree hReps present nz old tagged hrow same (by omega) keyRoom)
-  rintro ⟨⟨stem, split⟩, path⟩ ⟨_, none, depth, visit⟩
-  subst split
+  rintro ⟨⟨stem, split⟩, path⟩ ⟨stemEq, none, depth, visit⟩
+  subst split stem
   have walk
       : RadixWalk dirs.val row.key.val none root bindings oldLeaf [(row.key.val, oldLeaf)]
           path.val := by
@@ -2875,11 +2877,11 @@ theorem radix_put_existing_matches {V : Type}
         rw [lengthEq, hTip]
         exact ⟨0, .leaf 0 leaf row.key.val (by exact Nat.le_of_lt htag)⟩))
   rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, shape⟩
-  change WP.spec (Result.ok (new, arena, available, values, unused, path)) _
+  change WP.spec (Result.ok ((new, leaf, some oldLeaf), arena, available, values, unused, path)) _
   simp only [WP.spec_ok]
   obtain ⟨h, hshape⟩ := shape
   rw [head] at hshape
-  refine ⟨keep, hdr, inv invariant, ?_, free, kept, h, leaf, htag, hnew, hshape⟩
+  refine ⟨keep, hdr, inv invariant, ?_, free, kept, trivial, h, htag, hnew, hshape⟩
   intro known
   have keysKept := radix_keys_kept rows.val values.val kept
   apply radix_knowledge_extend dirs arena _ _ known keep keysKept
@@ -2900,7 +2902,7 @@ theorem radix_put_empty_matches {V : Type}
     (row : Spike.radix.RadixRow V) (available : RadixFree rows freeRows)
     (room : rows.val.length < 2147483647)
     : WP.spec (Spike.radix.put dirs freeDirs rows freeRows scratch 0#u32 row)
-        (fun (leaf, arena, avail, values, unused, path) =>
+        (fun ((next, leaf, replaced), arena, avail, values, unused, path) =>
           arena = dirs
           ∧ avail = freeDirs
           ∧ path = scratch
@@ -2909,7 +2911,8 @@ theorem radix_put_empty_matches {V : Type}
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
           ∧ 2147483648 < leaf.val
           ∧ radixRow values.val leaf = some row
-          ∧ RadixTree arena.val 0 leaf [(row.key.val, leaf)]) := by
+          ∧ replaced = none
+          ∧ RadixTree arena.val 0 next [(row.key.val, leaf)]) := by
   have hmax : 2147483647 ≤ Usize.max := by scalar_tac
   unfold Spike.radix.put
   simp only [ite_true]
@@ -2924,7 +2927,7 @@ theorem radix_put_empty_matches {V : Type}
     have hi : leaf.val - 2147483648 - 1 = i.val := by omega
     simp [radixRow, hi, value]
   simp only [WP.spec_ok]
-  exact ⟨trivial, trivial, trivial, free, kept, htag, hnew,
+  exact ⟨trivial, trivial, trivial, free, kept, htag, hnew, trivial,
     .leaf 0 leaf row.key.val (Nat.le_of_lt htag)⟩
 
 /-- Inserting a fresh key into a nonempty compressed root creates exactly
@@ -2947,7 +2950,7 @@ theorem radix_put_fresh_matches {V : Type}
     (rowRoom : rows.val.length < 2147483647)
     (keyRoom : 2 * row.key.val.length + 1 ≤ Usize.max)
     : WP.spec (Spike.radix.put dirs freeDirs rows freeRows scratch root row)
-        (fun (after, arena, avail, values, unused, _) =>
+        (fun ((after, leaf, replaced), arena, avail, values, unused, _) =>
           preservesSlots dirs arena
           ∧ RadixFree arena avail
           ∧ RadixDirectoryInvariant arena
@@ -2956,7 +2959,8 @@ theorem radix_put_fresh_matches {V : Type}
           ∧ RadixFree values unused
           ∧ (∀ (i : Nat) previous,
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
-          ∧ ∃ height leaf,
+          ∧ replaced = none
+          ∧ ∃ height,
               2147483648 < leaf.val
               ∧ radixRow values.val leaf = some row
               ∧ RadixTree arena.val height after
@@ -3003,7 +3007,9 @@ theorem radix_put_fresh_matches {V : Type}
   have publishTip := radix_insert_tip dirs freeDirs stem leaf split row.key.val tip oldBound
     newSlot different hSource (Nat.le_of_lt htag) availableDirs invariant (by omega)
   apply WP.spec_bind publishTip
-  rintro ⟨newDirs, freeNext, child⟩ ⟨keeps, nextFree, growth, invTip, addedTip, subtree⟩
+  rintro ⟨newDirs, freeNext, child, replaced⟩
+    ⟨hr, keeps, nextFree, growth, invTip, addedTip, subtree⟩
+  subst replaced
   let input := alloc.vec.Vec.deref path
   have lengthEq : input.val.length = path.val.length := by simp [input, alloc.vec.Vec.deref]
   apply WP.spec_bind
@@ -3015,7 +3021,7 @@ theorem radix_put_fresh_matches {V : Type}
           using radix_path_step_preserved keeps (steps j hi))
       (by rw [lengthEq, tail]; exact subtree))
   rintro ⟨new, arena, available⟩ ⟨keep, hdr, inv, adds, shape⟩
-  change WP.spec (Result.ok (new, arena, available, values, unused, path)) _
+  change WP.spec (Result.ok ((new, leaf, none), arena, available, values, unused, path)) _
   simp only [WP.spec_ok]
   obtain ⟨h, hshape⟩ := shape
   rw [head] at hshape
@@ -3030,7 +3036,7 @@ theorem radix_put_fresh_matches {V : Type}
     have sameLeaf : q = leaf := (Option.some.inj eq).symm
     simp [sameLeaf, radixKeyOf, hnew]
   refine ⟨fun j dir present => keep j dir (keeps j dir present), hdr, inv invTip, ?_,
-    free, kept, h, leaf, htag, hnew, hshape⟩
+    free, kept, trivial, h, htag, hnew, hshape⟩
   intro known
   have routeAddition : RadixAdds newDirs arena (KnowsRows (radixKeyOf values.val)) := by
     apply radix_path_adds_knowledge dirs newDirs arena _ _ row.key.val (some split.digit)
@@ -3206,15 +3212,15 @@ theorem radix_remove_refines {V : Type}
           ∧ RadixDirectoryInvariant arena
           ∧ (RadixKnowledge dirs (radixKeyOf rows.val)
               → RadixKnowledge arena (radixKeyOf rows.val))
-          ∧ ∃ h bs,
-              RadixTree arena.val h next bs
-              ∧ RadixRows rows.val bs
-              ∧ radixBindings rows.val bs
+          ∧ ∃ h,
+              RadixTree arena.val h next (Kv.Model.erase bindings key.val)
+              ∧ RadixRows rows.val (Kv.Model.erase bindings key.val)
+              ∧ radixBindings rows.val (Kv.Model.erase bindings key.val)
                 = Kv.Model.erase (radixBindings rows.val bindings) key.val) := by
   apply WP.spec_mono (radix_remove_matches dirs free rows scratch root key height bindings
     tree valid vacant invariant compressed room)
   rintro ⟨next, arena, avail, _⟩ ⟨keep, avail, invariant, knows, h, tree⟩
-  exact ⟨keep, avail, invariant, knows, h, Kv.Model.erase bindings key.val, tree,
+  exact ⟨keep, avail, invariant, knows, h, tree,
     radix_rows_erase rows.val bindings key.val valid, radix_project_erase rows.val bindings key.val⟩
 
 /-- Every case of native put refines the same ordered association-list update.
@@ -3232,7 +3238,7 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
     (rowRoom : rows.val.length < 2147483647)
     (keyRoom : 2 * row.key.val.length + 1 ≤ Usize.max)
     : WP.spec (Spike.radix.put dirs freeDirs rows freeRows scratch root row)
-        (fun (next, arena, avail, values, unused, _) =>
+        (fun ((next, leaf, replaced), arena, avail, values, unused, _) =>
           preservesSlots dirs arena
           ∧ RadixFree arena avail
           ∧ RadixDirectoryInvariant arena
@@ -3241,10 +3247,11 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           ∧ RadixFree values unused
           ∧ (∀ (i : Nat) previous,
               rows.val[i]? = some (some previous) → values.val[i]? = some (some previous))
-          ∧ ∃ h bs,
-              RadixTree arena.val h next bs
-              ∧ RadixRows values.val bs
-              ∧ radixBindings values.val bs
+          ∧ replaced = Kv.Model.find bindings row.key.val
+          ∧ ∃ h,
+              RadixTree arena.val h next (Kv.Model.set bindings row.key.val leaf)
+              ∧ RadixRows values.val (Kv.Model.set bindings row.key.val leaf)
+              ∧ radixBindings values.val (Kv.Model.set bindings row.key.val leaf)
                 = Kv.Model.set (radixBindings rows.val bindings) row.key.val
                     row.value) := by
   by_cases zero : root = 0#u32
@@ -3252,14 +3259,14 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
     subst bindings root
     apply WP.spec_mono (radix_put_empty_matches dirs freeDirs rows freeRows scratch row
       availableRows rowRoom)
-    rintro ⟨leaf, arena, avail, values, unused, _⟩ ⟨hd, hf, _, vacant, kept, tagged, inserted, ht⟩
+    rintro ⟨⟨next, leaf, replaced⟩, arena, avail, values, unused, _⟩
+      ⟨hd, hf, _, vacant, kept, tagged, inserted, hr, ht⟩
     subst arena avail
     have hp := radix_project_set rows.val values.val kept [] leaf row valid tagged inserted
     exact ⟨fun _ _ h => h, availableDirs, invariant,
       (fun h => radix_knowledge_extend dirs dirs _ _ h (fun _ _ hk => hk)
         (radix_keys_kept rows.val values.val kept) (fun _ _ live absent => (absent live).elim)),
-      vacant, kept,
-      0, [(row.key.val, leaf)], ht, hp.1, hp.2⟩
+      vacant, kept, hr, 0, ht, hp.1, hp.2⟩
   · have h := find_binding bindings row.key.val
     cases hf : Kv.Model.find bindings row.key.val with
     | none =>
@@ -3268,7 +3275,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           (radix_put_fresh_matches dirs freeDirs rows freeRows scratch root row height
             bindings tree zero absent valid compressed invariant availableDirs
             availableRows dirRoom rowRoom keyRoom)
-        rintro ⟨next, arena, avail, values, unused, _⟩ ⟨keep, av, inv, knows, vacant, kept, h, leaf, tag, ins, ht⟩
+        rintro ⟨⟨next, leaf, replaced⟩, arena, avail, values, unused, _⟩
+          ⟨keep, av, inv, knows, vacant, kept, hr, h, tag, ins, ht⟩
         exact ⟨
           keep,
           av,
@@ -3276,8 +3284,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           knows,
           vacant,
           kept,
+          hr,
           h,
-          Kv.Model.set bindings row.key.val leaf,
           ht,
           radix_project_set rows.val values.val kept bindings leaf row valid tag ins
         ⟩
@@ -3293,7 +3301,8 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
             invariant availableDirs availableRows
             (by omega)
             rowRoom keyRoom)
-        rintro ⟨next, arena, avail, values, unused, _⟩ ⟨keep, av, inv, knows, vacant, kept, h, leaf, tag, ins, ht⟩
+        rintro ⟨⟨next, added, replaced⟩, arena, avail, values, unused, _⟩
+          ⟨keep, av, inv, knows, vacant, kept, hr, h, tag, ins, ht⟩
         exact ⟨
           keep,
           av,
@@ -3301,10 +3310,10 @@ theorem radix_put_refines {V : Type} (dirs : alloc.vec.Vec (Option Spike.radix.R
           knows,
           vacant,
           kept,
+          hr,
           h,
-          Kv.Model.set bindings row.key.val leaf,
           ht,
-          radix_project_set rows.val values.val kept bindings leaf row valid tag ins
+          radix_project_set rows.val values.val kept bindings added row valid tag ins
         ⟩
 
 /-- A finite radix has a unique set of key/link bindings once the keys of its
@@ -3739,5 +3748,540 @@ theorem radix_scan_leaves_refines (dirs : Slice (Option Spike.radix.RadixDir))
   apply WP.spec_mono (radix_scan_plan_matches dirs root fuel leaves plan room)
   intro result h
   exact h ▸ permutation
+
+private def keepLeaf (removed : Option U32) (leaf : U32) : Bool :=
+  match removed with
+  | none => true
+  | some old => old != leaf
+
+private theorem edit_order_loop_matches (order : Slice U32) (removed : Option U32)
+    (out : alloc.vec.Vec U32) (count : Usize)
+    (room : out.val.length + (order.val.drop count.val).length ≤ Usize.max)
+    : WP.spec (Spike.radix.edit_order_loop order removed out count)
+        (fun next =>
+          next.val
+          = out.val ++ (order.val.drop count.val).filter (keepLeaf removed)) := by
+  unfold Spike.radix.edit_order_loop
+  let suffix := fun i : Usize => order.val.drop i.val
+  apply loop.spec_decr_nat
+    (fun p : alloc.vec.Vec U32 × Usize => order.val.length - p.2.val)
+    (fun (next, i) =>
+      next.val.length + (suffix i).length ≤ Usize.max
+      ∧ next.val ++ (suffix i).filter (keepLeaf removed)
+        = out.val ++ (suffix count).filter (keepLeaf removed)) _ _ _
+  · rintro ⟨next, i⟩ ⟨capacity, same⟩
+    dsimp only at capacity same ⊢
+    unfold Spike.radix.edit_order_loop.body
+    have hlen : (Slice.len order).val = order.val.length := Slice.len_val _
+    by_cases h : i < Slice.len order
+    · have inside : i.val < order.val.length := by rwa [← hlen]
+      rw [ite_eq_left h]
+      apply WP.spec_bind (Slice.index_usize_spec order i inside)
+      intro leaf hleaf
+      have step : suffix i = leaf :: order.val.drop (i.val + 1) := by
+        dsimp only [suffix]
+        rw [List.drop_eq_getElem_cons inside, ← hleaf]
+      have one : (1#usize : Usize).val = 1 := rfl
+      have max := Slice.length_ineq order
+      let check : Option U32 → Result Bool := fun o => match o with
+          | none => Result.ok true
+          | some old => Result.ok (old != leaf)
+      have cond : check removed = Result.ok (keepLeaf removed leaf) := by
+        cases removed <;> rfl
+      change WP.spec (do
+        let keep ← check removed
+        let n ← if keep then alloc.vec.Vec.push next leaf else Result.ok next
+        let j ← i + 1#usize
+        Result.ok (ControlFlow.cont (n, j))) _
+      rw [cond, bind_ok]
+      have edited : WP.spec
+          (if keepLeaf removed leaf then alloc.vec.Vec.push next leaf else Result.ok next)
+          (fun v => v.val = next.val ++ if keepLeaf removed leaf then [leaf] else []) := by
+        split
+        · apply alloc.vec.Vec.push_spec
+          rw [step, List.length_cons] at capacity
+          omega
+        · simp
+      apply WP.spec_bind edited
+      intro edited equality
+      apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+      intro j hj
+      have increment : j.val = i.val + 1 := by omega
+      have splitSuffix : suffix i = leaf :: suffix j := by simpa [suffix, increment] using step
+      rw [WP.spec_ok]
+      dsimp only
+      refine ⟨⟨?_, ?_⟩, by omega⟩
+      · rw [splitSuffix, List.length_cons] at capacity
+        rw [equality, List.length_append]
+        cases keepLeaf removed leaf <;> simp <;> omega
+      · rw [splitSuffix, List.filter_cons] at same
+        cases keep : keepLeaf removed leaf <;>
+          simpa [equality, keep, List.append_assoc] using same
+    · rw [ite_eq_right h, WP.spec_ok]
+      have past : order.val.length ≤ i.val := by
+        rw [← hlen]
+        exact Nat.le_of_not_gt h
+      simpa [suffix, List.drop_eq_nil_of_le past] using same
+  · exact ⟨room, rfl⟩
+
+private theorem edit_order_matches (order : Slice U32) (removed added : Option U32)
+    (room : order.val.length + added.toList.length ≤ Usize.max)
+    : WP.spec (Spike.radix.edit_order order removed added)
+        (fun next => next.val = added.toList ++ order.val.filter (keepLeaf removed)) := by
+  unfold Spike.radix.edit_order
+  have first : WP.spec
+      (match added with
+        | none => Result.ok (alloc.vec.Vec.new U32)
+        | some leaf => alloc.vec.Vec.push (alloc.vec.Vec.new U32) leaf)
+      (fun out => out.val = added.toList) := by
+    cases added with
+    | none => simp
+    | some leaf =>
+        simpa using alloc.vec.Vec.push_spec (alloc.vec.Vec.new U32) leaf (by
+          change 0 < Usize.max
+          scalar_tac)
+  apply WP.spec_bind first
+  intro out initial
+  have fit : out.val.length + (order.val.drop (0#usize : Usize).val).length ≤ Usize.max := by
+    simpa [initial, Nat.add_comm] using room
+  simpa [initial] using edit_order_loop_matches order removed out 0#usize fit
+
+private theorem matching_leaf_matches {V : Type}
+    (dirs : Slice (Option Spike.radix.RadixDir))
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (root : U32) (key : Slice U8)
+    (height : Nat) (bindings : Bindings) (tree : RadixTree dirs.val height root bindings)
+    (valid : RadixRows rows.val bindings)
+    : WP.spec (Spike.radix.matching_leaf dirs rows root key)
+        (· = Kv.Model.find bindings key.val) := by
+  unfold Spike.radix.matching_leaf
+  apply WP.spec_bind (radix_find_leaf_matches dirs key height root bindings tree)
+  intro leaf ⟨belongs, lookup⟩
+  have hb := find_binding bindings key.val
+  by_cases zero : leaf = 0#u32
+  · rw [ite_eq_left zero, WP.spec_ok]
+    cases found : Kv.Model.find bindings key.val with
+    | none => rfl
+    | some link =>
+        have hm : (key.val, link) ∈ bindings := by simpa only [found] using hb
+        have eq := lookup link hm
+        have tag := (valid _ hm).1
+        rw [← eq, zero] at tag
+        exact ((by decide : ¬2147483648 < (0#u32 : U32).val) tag).elim
+  · obtain ⟨k, hm⟩ := belongs.resolve_left zero
+    obtain ⟨tag, row, live, eq⟩ := valid (k, leaf) hm
+    rw [ite_eq_right zero]
+    apply WP.spec_bind (radix_check_leaf_spec rows leaf key row tag live)
+    intro result check
+    rw [check, eq]
+    cases found : Kv.Model.find bindings key.val with
+    | none =>
+        have diff : k ≠ key.val := by
+          intro same
+          subst k
+          exact (show ∀ l, (key.val, l) ∉ bindings by simpa only [found] using hb) leaf hm
+        simp [diff, core.option.Option.is_none]
+    | some link =>
+        have present : (key.val, link) ∈ bindings := by simpa only [found] using hb
+        have eqLink := lookup link present
+        obtain ⟨_, other, read, same⟩ := valid _ present
+        rw [← eqLink, live, Option.some.injEq] at read
+        subst other link
+        have hk : k = key.val := eq.symm.trans same
+        simp [hk, core.option.Option.is_none]
+
+private theorem erase_order_matches {V : Type}
+    (rows : List (Option (Spike.radix.RadixRow V))) (bindings : Bindings) (key : List U8)
+    (valid : RadixRows rows bindings)
+    (route : ∀ l, (key, l) ∈ bindings → Kv.Model.find bindings key = some l)
+    : (Kv.Model.erase bindings key).map Prod.snd
+      = (bindings.map Prod.snd).filter (keepLeaf (Kv.Model.find bindings key)) := by
+  unfold Kv.Model.erase
+  rw [List.filter_map]
+  apply congrArg (List.map Prod.snd)
+  apply List.filter_congr
+  intro entry hm
+  obtain ⟨k, l⟩ := entry
+  have eq : Kv.Model.find bindings key = some l ↔ k = key := by
+    constructor
+    · intro h
+      have bound := find_binding bindings key
+      rw [h] at bound
+      obtain ⟨_, a, ha, ka⟩ := valid (k, l) hm
+      obtain ⟨_, b, hb, kb⟩ := valid (key, l) bound
+      have same := Option.some.inj (ha.symm.trans hb)
+      exact ka.symm.trans ((congrArg (fun r : Spike.radix.RadixRow V => r.key.val) same).trans kb)
+    · intro h
+      subst k
+      exact route l hm
+  change decide (k ≠ key) = keepLeaf (Kv.Model.find bindings key) l
+  cases found : Kv.Model.find bindings key with
+  | none =>
+      have diff : k ≠ key := fun h => by simpa [found] using eq.mpr h
+      simp [keepLeaf, diff]
+  | some old =>
+      have same : old = l ↔ k = key := by simpa only [found, Option.some.injEq] using eq
+      by_cases h : k = key
+      · simp [keepLeaf, h, same.mpr h]
+      · have diff : old ≠ l := fun he => h (same.mp he)
+        simp [keepLeaf, h, bne_iff_ne.mpr diff]
+
+private theorem find_in_tree {V : Type} (a : Spike.radix.OrderedRadix V) (key : Slice U8)
+    {height : Nat} {lookup : U32} {bindings : Bindings}
+    (tree : RadixTree a.dirs.val height lookup bindings)
+    (valid : RadixRows a.rows.val bindings)
+    : ∀ l, (key.val, l) ∈ bindings → Kv.Model.find bindings key.val = some l := by
+  have ds : RadixTree (alloc.vec.Vec.deref a.dirs).val height lookup bindings := by
+    simpa [alloc.vec.Vec.deref] using tree
+  have rs : RadixRows (alloc.vec.Vec.deref a.rows).val bindings := by
+    simpa [alloc.vec.Vec.deref] using valid
+  have route := radix_find_leaf_matches (alloc.vec.Vec.deref a.dirs) key height lookup bindings ds
+  have matchKey := matching_leaf_matches (alloc.vec.Vec.deref a.dirs)
+    (alloc.vec.Vec.deref a.rows) lookup key height bindings ds rs
+  intro l present
+  have chosen := WP.spec_mono route (fun _ h => h.2 l present)
+  have matched : WP.spec (Spike.radix.matching_leaf (alloc.vec.Vec.deref a.dirs)
+      (alloc.vec.Vec.deref a.rows) lookup key) (· = some l) := by
+    unfold Spike.radix.matching_leaf
+    apply WP.spec_bind chosen
+    intro leaf hl
+    subst leaf
+    obtain ⟨tag, row, live, eq⟩ := rs (key.val, l) present
+    have nonzero : l ≠ 0#u32 := by intro hl; subst l; contradiction
+    rw [ite_eq_right nonzero]
+    apply WP.spec_bind (radix_check_leaf_spec (alloc.vec.Vec.deref a.rows) l key row tag live)
+    intro got hg
+    simp [hg, eq, core.option.Option.is_none]
+  obtain ⟨_, same, wanted⟩ := WP.spec_exists (WP.spec_and matched matchKey)
+  exact wanted.symm.trans same
+
+/-- Relation between an arena-local handle and the ordered key/leaf projection. -/
+structure OrderedView {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (bindings : List (List U8 × U32))
+    : Prop where
+  witness
+    : ∃ (prior : Spike.radix.OrderedRoot) (height : Nat),
+        a.roots.val[root.val]? = some prior
+        ∧ prior.order.val = bindings.map Prod.snd
+        ∧ RadixTree a.dirs.val height prior.lookup bindings
+        ∧ RadixRows a.rows.val bindings
+
+/-- Conditions on the two arenas shared by all roots. -/
+structure OrderedArenaValid {V : Type} (a : Spike.radix.OrderedRadix V) : Prop where
+  freeDirs : RadixFree a.dirs a.free_dirs
+  freeRows : RadixFree a.rows a.free_rows
+  directories : RadixDirectoryInvariant a.dirs
+  known : RadixKnowledge a.dirs (radixKeyOf a.rows.val)
+
+/-- The selected root admits a height bound that leaves room for a path copy. -/
+def OrderedRootFits {V : Type} (a : Spike.radix.OrderedRadix V) (root : Spike.radix.Root)
+    (bindings : List (List U8 × U32)) (extra : Nat)
+    : Prop :=
+  ∃ (prior : Spike.radix.OrderedRoot) (height : Nat),
+    a.roots.val[root.val]? = some prior
+    ∧ RadixTree a.dirs.val height prior.lookup bindings
+    ∧ a.dirs.val.length + height + extra ≤ 2147483647
+
+private theorem ordered_index {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (prior : Spike.radix.OrderedRoot)
+    (live : a.roots.val[root.val]? = some prior)
+    : WP.spec
+        (alloc.vec.Vec.index
+          (core.slice.index.SliceIndexUsizeSlice Spike.radix.OrderedRoot) a.roots root)
+        (· = prior) := by
+  rw [alloc.vec.Vec.index_slice_index]
+  have bound : root.val < a.roots.val.length := by
+    by_contra hn
+    simp [List.getElem?_eq_none (Nat.le_of_not_gt hn)] at live
+  apply WP.spec_mono (alloc.vec.Vec.index_usize_spec a.roots root bound)
+  intro found hf
+  rw [List.getElem?_eq_getElem bound, ← hf, Option.some.injEq] at live
+  exact live
+
+private theorem ordered_add_root {V : Type} (a : Spike.radix.OrderedRadix V)
+    (lookup : U32) (order : alloc.vec.Vec U32) (room : a.roots.val.length < Usize.max)
+    : WP.spec (Spike.radix.OrderedRadix.add_root a lookup order)
+        (fun (root, after) =>
+          ∃ roots,
+            after = { a with roots }
+            ∧ root.val = a.roots.val.length
+            ∧ roots.val = a.roots.val ++ [{ lookup, order }]) := by
+  unfold Spike.radix.OrderedRadix.add_root
+  apply WP.spec_bind (alloc.vec.Vec.push_spec a.roots _ room)
+  intro roots appended
+  rw [WP.spec_ok]
+  exact ⟨roots, rfl, alloc.vec.Vec.len_val _, appended⟩
+
+private theorem ordered_preserve {V : Type} (a after : Spike.radix.OrderedRadix V)
+    (roots : ∃ extra, after.roots.val = a.roots.val ++ extra)
+    (keepDirs : preservesSlots a.dirs after.dirs)
+    (keepRows
+      : ∀ (i : Nat) row,
+          a.rows.val[i]? = some (some row) → after.rows.val[i]? = some (some row))
+    : ∀ root bs,
+        OrderedView a root bs
+        → OrderedView after root bs
+          ∧ radixBindings after.rows.val bs = radixBindings a.rows.val bs := by
+  intro root bs ⟨prior, height, live, order, tree, valid⟩
+  obtain ⟨extra, appended⟩ := roots
+  have bound : root.val < a.roots.val.length := by
+    by_contra hn
+    simp [List.getElem?_eq_none (Nat.le_of_not_gt hn)] at live
+  obtain ⟨shape, rows, same⟩ :=
+    radix_preserves_roots a.dirs after.dirs a.rows after.rows keepDirs keepRows
+      height prior.lookup bs tree valid
+  refine ⟨⟨prior, height, ?_, order, shape, rows⟩, same⟩
+  rw [appended, List.getElem?_append_left bound]
+  exact live
+
+/-- A well-formed append-only arena starts with the model's empty map. -/
+theorem ordered_new_refines (V : Type)
+    : WP.spec (Spike.radix.OrderedRadix.new V)
+        (fun a => OrderedArenaValid a ∧ OrderedView a 0#usize []) := by
+  unfold Spike.radix.OrderedRadix.new
+  apply WP.spec_bind
+    (alloc.vec.Vec.push_spec (alloc.vec.Vec.new _) _
+      (by
+        change 0 < Usize.max
+        scalar_tac))
+  intro roots h
+  rw [WP.spec_ok]
+  constructor
+  · refine ⟨?_, ?_, ?_, radix_empty_knowledge _⟩
+    · simp [RadixFree]
+    · simp [RadixFree]
+    · intro i d live
+      simp at live
+  · exact ⟨{ lookup := 0#u32, order := alloc.vec.Vec.new U32 }, 0,
+      by simp [h], rfl, .empty 0, fun _ hm => (List.not_mem_nil hm).elim⟩
+
+theorem ordered_get_refines {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (key : Slice U8) (bs : List (List U8 × U32))
+    (view : OrderedView a root bs)
+    : WP.spec (Spike.radix.OrderedRadix.get a root key)
+        (· = Kv.Model.find (radixBindings a.rows.val bs) key.val) := by
+  obtain ⟨prior, height, live, _, tree, valid⟩ := view.witness
+  unfold Spike.radix.OrderedRadix.get
+  apply WP.spec_bind (ordered_index a root prior live)
+  intro found h
+  subst found
+  simpa [alloc.vec.Vec.deref]
+    using radix_get_refines (alloc.vec.Vec.deref a.dirs) (alloc.vec.Vec.deref a.rows) key
+      height prior.lookup bs (by simpa [alloc.vec.Vec.deref] using tree)
+      (by simpa [alloc.vec.Vec.deref] using valid)
+
+/-- The native indexed scan exposes exactly the length of the model projection. -/
+theorem ordered_scan_len_refines {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (bs : List (List U8 × U32)) (view : OrderedView a root bs)
+    : WP.spec (Spike.radix.OrderedRadix.scan_len a root)
+        (fun n => n.val = (radixBindings a.rows.val bs).length) := by
+  obtain ⟨prior, height, live, order, tree, valid⟩ := view.witness
+  unfold Spike.radix.OrderedRadix.scan_len
+  apply WP.spec_bind (ordered_index a root prior live)
+  intro found he
+  subst found
+  rw [WP.spec_ok, alloc.vec.Vec.len_val]
+  change prior.order.val.length = _
+  rw [order, List.length_map]
+  clear view order tree
+  induction bs with
+  | nil => rfl
+  | cons p tail ih =>
+      obtain ⟨_, row, read, _⟩ := valid p List.mem_cons_self
+      simp [radixBindings, read, ih (fun e hm => valid e (List.mem_cons_of_mem _ hm))]
+
+private theorem radix_projection_index {V : Type}
+    (rows : List (Option (Spike.radix.RadixRow V))) (bs : Bindings)
+    (valid : RadixRows rows bs) (i : Nat)
+    : (radixBindings rows bs)[i]?
+      = (bs[i]?).bind
+          (fun (k, l) => (radixRow rows l).map (fun row => (k, row.value))) := by
+  induction bs generalizing i with
+  | nil => cases i <;> rfl
+  | cons p tail ih =>
+      obtain ⟨_, row, live, _⟩ := valid p List.mem_cons_self
+      cases i with
+      | zero => simp [radixBindings, live]
+      | succ i =>
+          simp only [radixBindings, List.filterMap_cons, live, Option.map_some,
+            List.getElem?_cons_succ]
+          exact ih (fun e hm => valid e (List.mem_cons_of_mem _ hm)) i
+
+/-- Reading a scan position agrees with the exact ordered model row, including exhaustion. -/
+theorem ordered_scan_at_refines {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (i : Usize) (bs : List (List U8 × U32))
+    (view : OrderedView a root bs)
+    : WP.spec (Spike.radix.OrderedRadix.scan_at a root i)
+        (fun row =>
+          row.map (fun r => (r.key.val, r.value))
+          = (radixBindings a.rows.val bs)[i.val]?) := by
+  obtain ⟨prior, _, live, order, _, valid⟩ := view.witness
+  unfold Spike.radix.OrderedRadix.scan_at
+  apply WP.spec_bind (ordered_index a root prior live)
+  intro found he
+  subst found
+  have len : (alloc.vec.Vec.len prior.order).val = bs.length := by
+    rw [alloc.vec.Vec.len_val]
+    change prior.order.val.length = _
+    rw [order, List.length_map]
+  rw [radix_projection_index _ _ valid]
+  by_cases hb : i.val < bs.length
+  · have less : ¬ i ≥ alloc.vec.Vec.len prior.order := by
+      change ¬ (alloc.vec.Vec.len prior.order).val ≤ i.val
+      omega
+    rw [ite_eq_right less, alloc.vec.Vec.index_slice_index]
+    have bound : i.val < prior.order.val.length := by simpa [order] using hb
+    apply WP.spec_bind (alloc.vec.Vec.index_usize_spec prior.order i bound)
+    intro leaf hleaf
+    let p := bs[i.val]
+    have hm : p ∈ bs := List.getElem_mem hb
+    obtain ⟨tag, row, read, key⟩ := valid p hm
+    have same : leaf = p.2 := by simp [hleaf, order, p]
+    rw [same]
+    apply WP.spec_bind (radix_row_at_matches (alloc.vec.Vec.deref a.rows) p.2 row tag
+      (by simpa [alloc.vec.Vec.deref] using read))
+    intro got hg
+    rw [WP.spec_ok, hg, List.getElem?_eq_getElem hb]
+    change some (row.key.val, row.value) = (radixRow a.rows.val p.2).map (fun r => (p.1, r.value))
+    rw [read, Option.map_some, key]
+  · have past : i ≥ alloc.vec.Vec.len prior.order := by
+      change (alloc.vec.Vec.len prior.order).val ≤ i.val
+      omega
+    rw [ite_eq_left past, WP.spec_ok, List.getElem?_eq_none (Nat.le_of_not_gt hb)]
+    rfl
+
+/-- Insertion refines model `set`, including scan order and all previously published roots. -/
+theorem ordered_put_refines {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (row : Spike.radix.RadixRow V) (bs : List (List U8 × U32))
+    (view : OrderedView a root bs) (good : OrderedArenaValid a)
+    (dirRoom : OrderedRootFits a root bs 1)
+    (rowRoom : a.rows.val.length < 2147483647)
+    (keyRoom : 2 * row.key.val.length + 1 ≤ Usize.max)
+    (orderRoom : bs.length < Usize.max) (rootRoom : a.roots.val.length < Usize.max)
+    : WP.spec (Spike.radix.OrderedRadix.put a root row)
+        (fun (next, after) =>
+          OrderedArenaValid after
+          ∧ (∀ r links,
+              OrderedView a r links
+              → OrderedView after r links
+                ∧ radixBindings after.rows.val links = radixBindings a.rows.val links)
+          ∧ ∃ updated,
+              OrderedView after next updated
+              ∧ radixBindings after.rows.val updated
+                = Kv.Model.set (radixBindings a.rows.val bs) row.key.val row.value) := by
+  obtain ⟨prior, _, live, priorOrder, _, valid⟩ := view.witness
+  obtain ⟨bounded, height, hbound, tree, room⟩ := dirRoom
+  have same := Option.some.inj (hbound.symm.trans live)
+  subst bounded
+  unfold Spike.radix.OrderedRadix.put
+  apply WP.spec_bind (ordered_index a root prior live)
+  intro found hf
+  subst found
+  apply WP.spec_bind (radix_put_refines a.dirs a.free_dirs a.rows a.free_rows a.path
+    prior.lookup row height bs tree valid (radix_compressed_of_knowledge _ _ good.known)
+    good.directories good.freeDirs good.freeRows room rowRoom keyRoom)
+  rintro ⟨⟨lookup, added, removed⟩, dirs, freeDirs, rows, freeRows, path⟩
+    ⟨keepDirs, vacantDirs, invariant, knowledge, vacantRows, keepRows, removedEq,
+      newHeight, newTree, newRows, valueEq⟩
+  have room : (alloc.vec.Vec.deref prior.order).val.length + (some added).toList.length
+      ≤ Usize.max := by simpa [alloc.vec.Vec.deref, priorOrder, Nat.add_one_le_iff] using orderRoom
+  apply WP.spec_bind
+    (edit_order_matches (alloc.vec.Vec.deref prior.order) removed (some added) room)
+  intro order eq
+  let edited := Kv.Model.set bs row.key.val added
+  have orderEq : order.val = edited.map Prod.snd := by
+    have erase := erase_order_matches a.rows.val bs row.key.val valid
+      (find_in_tree a row.key tree valid)
+    rw [eq, removedEq]
+    simp [edited, Kv.Model.set, alloc.vec.Vec.deref, priorOrder, erase]
+  let updated : Spike.radix.OrderedRadix V :=
+    { a with dirs, free_dirs := freeDirs, rows, free_rows := freeRows, path }
+  change WP.spec (Spike.radix.OrderedRadix.add_root updated lookup order) _
+  apply WP.spec_mono (ordered_add_root updated lookup order rootRoom)
+  rintro ⟨next, after⟩ ⟨roots, ha, index, appended⟩
+  subst after
+  change roots.val = a.roots.val ++ [_] at appended
+  refine ⟨⟨vacantDirs, vacantRows, invariant, knowledge good.known⟩,
+    ordered_preserve a _ ⟨_, appended⟩ keepDirs keepRows,
+    edited, ⟨{ lookup, order }, newHeight, ?_, orderEq, newTree, newRows⟩, valueEq⟩
+  change roots.val[next.val]? = some { lookup, order }
+  simp [index, updated, appended]
+
+/-- Deletion refines model `erase`; an absent key retains the same root. -/
+theorem ordered_remove_refines {V : Type} (a : Spike.radix.OrderedRadix V)
+    (root : Spike.radix.Root) (key : Slice U8) (bs : List (List U8 × U32))
+    (view : OrderedView a root bs) (good : OrderedArenaValid a)
+    (dirRoom : OrderedRootFits a root bs 0)
+    (rootRoom : a.roots.val.length < Usize.max)
+    : WP.spec (Spike.radix.OrderedRadix.remove a root key)
+        (fun (next, after) =>
+          OrderedArenaValid after
+          ∧ (∀ r links, OrderedView a r links → OrderedView after r links)
+          ∧ after.rows = a.rows
+          ∧ OrderedView after next (Kv.Model.erase bs key.val)
+          ∧ radixBindings after.rows.val (Kv.Model.erase bs key.val)
+            = Kv.Model.erase (radixBindings a.rows.val bs) key.val) := by
+  obtain ⟨prior, _, live, priorOrder, _, valid⟩ := view.witness
+  obtain ⟨bounded, height, hbound, tree, room⟩ := dirRoom
+  have same := Option.some.inj (hbound.symm.trans live)
+  subst bounded
+  unfold Spike.radix.OrderedRadix.remove
+  apply WP.spec_bind (ordered_index a root prior live)
+  intro found hf
+  subst found
+  let dirs := alloc.vec.Vec.deref a.dirs
+  let rows := alloc.vec.Vec.deref a.rows
+  have tree' : RadixTree dirs.val height prior.lookup bs := by
+    simpa [dirs, alloc.vec.Vec.deref] using tree
+  have valid' : RadixRows rows.val bs := by simpa [rows, alloc.vec.Vec.deref] using valid
+  apply WP.spec_bind
+    (matching_leaf_matches dirs rows prior.lookup key height bs tree' valid')
+  intro removed eq
+  subst removed
+  cases h : Kv.Model.find bs key.val with
+  | none =>
+      have hb := find_binding bs key.val
+      rw [h] at hb
+      have erased := erase_absent bs key.val hb
+      change WP.spec (Result.ok (root, a)) _
+      rw [WP.spec_ok]
+      exact ⟨good, fun _ _ v => v, rfl, erased.symm ▸ view, radix_project_erase _ _ _⟩
+  | some removed =>
+      simp only [core.option.Option.is_none]
+      have compressed : RadixCompressed a.dirs.val (radixKeyOf rows.val) := by
+        simpa [rows, alloc.vec.Vec.deref]
+          using radix_compressed_of_knowledge _ _ good.known
+      apply WP.spec_bind
+        (radix_remove_refines a.dirs a.free_dirs rows a.path prior.lookup key height
+          bs tree valid' good.freeDirs good.directories compressed (by simpa using room))
+      rintro ⟨lookup, dirsAfter, freeDirs, path⟩
+        ⟨keepDirs, vacant, invariant, knowledge, newHeight, newTree, newRows, valueEq⟩
+      let links := alloc.vec.Vec.deref prior.order
+      have room : links.val.length + (none : Option U32).toList.length ≤ Usize.max := by
+        simp
+      apply WP.spec_bind (edit_order_matches links (some removed) none room)
+      intro order eq
+      have orderEq : order.val = (Kv.Model.erase bs key.val).map Prod.snd := by
+        have erase := erase_order_matches a.rows.val bs key.val valid
+          (find_in_tree a key tree valid)
+        rw [h] at erase
+        simpa [links, alloc.vec.Vec.deref, priorOrder, erase] using eq
+      let updated : Spike.radix.OrderedRadix V := { a with dirs := dirsAfter, free_dirs := freeDirs, path }
+      change WP.spec (Spike.radix.OrderedRadix.add_root updated lookup order) _
+      apply WP.spec_mono (ordered_add_root updated lookup order rootRoom)
+      rintro ⟨next, after⟩ ⟨roots, ha, index, appended⟩
+      subst after
+      change roots.val = a.roots.val ++ [_] at appended
+      have knows : RadixKnowledge dirsAfter (radixKeyOf a.rows.val) := by
+        simpa [rows, alloc.vec.Vec.deref]
+          using knowledge (by simpa [rows, alloc.vec.Vec.deref] using good.known)
+      have preserved := ordered_preserve a {updated with roots} ⟨_, appended⟩ keepDirs
+        (fun _ _ hp => hp)
+      refine ⟨⟨vacant, good.freeRows, invariant, knows⟩,
+        fun r b hv => (preserved r b hv).1, rfl,
+        ⟨{ lookup, order }, newHeight, ?_, orderEq, newTree, ?_⟩, ?_⟩
+      · change roots.val[next.val]? = some { lookup, order }
+        simp [index, updated, appended]
+      · simpa [updated, rows, alloc.vec.Vec.deref] using newRows
+      · simpa [updated, rows, alloc.vec.Vec.deref] using valueEq
 
 end KvRust

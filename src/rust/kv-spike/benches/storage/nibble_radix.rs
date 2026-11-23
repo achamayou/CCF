@@ -3,7 +3,8 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, get, put, remove};
+use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, get, put, remove, scan_leaves};
+use std::cmp::Reverse;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
@@ -47,17 +48,9 @@ impl NibbleRadix {
             Link(self.dirs.get(node.index()).first)
         }
     }
-}
 
-impl ByteIndex for NibbleRadix {
-    type Root = Link;
-
-    fn get(&self, root: Link, key: &[u8]) -> Option<&Value> {
-        get(self.dirs.as_slice(), self.rows.as_slice(), root.0, key)
-    }
-
-    fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
-        Link(put(
+    fn write(&mut self, root: Link, key: &[u8], value: Value) -> (Link, Link) {
+        let (lookup, leaf, _) = put(
             &mut self.dirs.slots,
             &mut self.dirs.free,
             &mut self.rows.slots,
@@ -68,7 +61,80 @@ impl ByteIndex for NibbleRadix {
                 key: key.into(),
                 value,
             },
-        ))
+        );
+        (Link(lookup), Link(leaf))
+    }
+}
+
+// Keep order on the rows, not on the roots. A reused slot gets a fresh
+// stamp; rows reachable from a pinned root retain their original stamps.
+#[derive(Default)]
+pub(super) struct StampedRadix {
+    index: NibbleRadix,
+    stamps: Vec<u64>,
+    last: u64,
+}
+
+impl StampedRadix {
+    pub(super) fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
+        let stamp = self.last.checked_add(1).expect("stamp space exhausted");
+        let (next, written) = self.index.write(root, key, value);
+        let i = written.index();
+        if i == self.stamps.len() {
+            self.stamps.push(stamp);
+        } else {
+            self.stamps[i] = stamp;
+        }
+        self.last = stamp;
+        next
+    }
+
+    pub(super) fn get(&self, root: Link, key: &[u8]) -> Option<&Value> {
+        self.index.get(root, key)
+    }
+
+    pub(super) fn scan(&self, root: Link, mut visit: impl FnMut(&[u8], &Value)) {
+        let mut leaves = scan_leaves(self.index.dirs.as_slice(), root.0);
+        leaves.sort_unstable_by_key(|&node| Reverse(self.stamps[Link(node).index()]));
+        for node in leaves {
+            let row = self.index.rows.get(Link(node).index());
+            visit(&row.key, &row.value);
+        }
+    }
+}
+
+pub(super) fn check_stamp_reuse() {
+    let mut arena = StampedRadix::default();
+    let old = arena.put(Link::default(), b"a", [1; 64]);
+    let old = arena.put(old, b"", [2; 64]);
+    let _scratch = arena.put(old, b"aa", [3; 64]);
+    arena.index.collect(&[old]);
+    let stem = arena.put(old, b"\xff", [4; 64]);
+    assert_eq!(arena.index.rows.slots(), 3); // Reused the discarded leaf.
+    let branch = arena.put(stem, b"a", [5; 64]);
+    let branch = arena.index.remove(branch, b"");
+    let scan = |root| {
+        let mut rows = Vec::new();
+        arena.scan(root, |k, v| rows.push((k.to_vec(), v[0])));
+        rows
+    };
+    assert_eq!(scan(old), [(vec![], 2), (b"a".to_vec(), 1)]);
+    assert_eq!(
+        scan(stem),
+        [(b"\xff".to_vec(), 4), (vec![], 2), (b"a".to_vec(), 1)]
+    );
+    assert_eq!(scan(branch), [(b"a".to_vec(), 5), (b"\xff".to_vec(), 4)]);
+}
+
+impl ByteIndex for NibbleRadix {
+    type Root = Link;
+
+    fn get(&self, root: Link, key: &[u8]) -> Option<&Value> {
+        get(self.dirs.as_slice(), self.rows.as_slice(), root.0, key)
+    }
+
+    fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
+        self.write(root, key, value).0
     }
 
     fn remove(&mut self, root: Link, key: &[u8]) -> Link {
