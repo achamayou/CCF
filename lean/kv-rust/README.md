@@ -236,6 +236,7 @@ At 8,192 entries the vector retains another 32 KiB of leaf links on each replace
 Stamps take eight bytes per allocated row slot instead, but the cost of sorting the full scan grows with map size.
 These are component measurements, not matched transaction results.
 The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.
+The [address encoding proof](KvRust/RadixAddress.lean) covers the actual Rust packing code and shows that a shared radix can distinguish arbitrary map/key pairs, including empty and prefix-related byte strings.
 
 The `storage -- retirement` mode compares the full arena sweep with a benchmark-only reference-counted variant.
 The variant counts explicit root pins and incoming directory edges, and retires at most 32 zero-reference slots per tick.

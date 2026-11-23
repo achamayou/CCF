@@ -3,6 +3,16 @@
 
 //! Routing for the experimental persistent radix index.
 
+/// Separate the map and key without reserving any byte value in either.
+pub fn address_key(map: &[u8], key: &[u8]) -> Vec<u8> {
+    let length = (map.len() as u64).to_le_bytes();
+    let mut encoded = Vec::with_capacity(8 + map.len() + key.len());
+    encoded.extend_from_slice(&length);
+    encoded.extend_from_slice(map);
+    encoded.extend_from_slice(key);
+    encoded
+}
+
 /// Zero is the end-of-key symbol; the high and low nibbles occupy 1..=16.
 #[inline]
 pub fn symbol(key: &[u8], digit: usize) -> usize {
@@ -524,6 +534,17 @@ impl<V> Default for OrderedRadix<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_encoding_distinguishes_empty_maps_and_prefix_boundaries() {
+        assert_eq!(address_key(b"", b""), [0; 8]);
+        assert_eq!(
+            address_key(b"a\0", b"\xff"),
+            [2, 0, 0, 0, 0, 0, 0, 0, b'a', 0, 255]
+        );
+        assert_ne!(address_key(b"a\0", b"\xff"), address_key(b"a", b"\0\xff"));
+        assert_ne!(address_key(b"", b"\0"), address_key(b"\0", b""));
+    }
 
     #[test]
     fn ordered_roots_preserve_write_order_across_replacement_and_forks() {

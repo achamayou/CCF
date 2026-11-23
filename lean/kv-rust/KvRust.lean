@@ -22,6 +22,7 @@ public import KvRust.PinnedImage
 public import KvRust.Point
 public import KvRust.Publication
 public import KvRust.Radix
+public import KvRust.RadixAddress
 public import KvRust.RadixLiveness
 public import KvRust.Range
 public import KvRust.Relation
