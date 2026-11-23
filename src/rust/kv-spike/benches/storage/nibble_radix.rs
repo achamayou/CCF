@@ -3,7 +3,7 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::symbol;
+use ccf_kv_spike::radix::{first_difference, symbol};
 
 // Compact benchmark arena links: zero is absent, and high bit tags leaf rows.
 const LEAF: u32 = 1 << 31;
@@ -61,16 +61,6 @@ impl Dir {
     fn first_child(&self) -> Link {
         self.children[self.mask.trailing_zeros() as usize]
     }
-}
-
-fn differing_nibble(a: &[u8], b: &[u8]) -> Option<usize> {
-    for (i, (a, b)) in a.iter().zip(b).enumerate() {
-        let x = a ^ b;
-        if x != 0 {
-            return Some(i * 2 + usize::from(x < 16));
-        }
-    }
-    (a.len() != b.len()).then(|| a.len().min(b.len()) * 2)
 }
 
 #[derive(Default)]
@@ -147,7 +137,7 @@ impl ByteIndex for NibbleRadix {
             return leaf;
         }
         let old = &self.rows.get(self.closest(root, key).index()).key;
-        let diff = differing_nibble(old, key);
+        let diff = first_difference(old, key);
         let old_sym = diff.map(|at| symbol(old, at));
         self.path.clear();
         let mut stem = root;
