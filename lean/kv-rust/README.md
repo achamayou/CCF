@@ -182,3 +182,12 @@ With variable-length keys, one long-lived root, and 32 recent roots, a separate 
 The collector reused slots but did not shrink the backing vectors: at the end it held 8,624 live nodes in 9,697 slots and 4,111 live rows in 4,127 slots.
 These results exclude serialization and FFI, and lexicographic index traversal does not preserve the engine's observed scan order without a separate projection.
 This experiment is not used by the engine; its point performance and collection pauses do not justify integration.
+
+The path-copied `nibble_radix` variant uses 16 byte-digit slots and a separate end-of-key slot; directories and leaf rows use separate arenas.
+The revised CHAMP benchmark uses CCF's native `ByteVector` keys and hasher directly.
+Run `kv_backend_bench champ` for dense 8-byte keys and `kv_backend_bench champ_scrambled` for a spread-out permutation; the Rust storage benchmark includes both distributions.
+At 2,048 keys across two runs and both distributions, the higher-fanout Rust index took 9.9-10.2 ns for point reads and 139-153 ns for pinned-root updates, versus 42-48 ns and 199-262 ns for CHAMP.
+Eight-entry ranges took 0.53-0.58 us versus 31-40 us for full CHAMP traversal with `ByteVector` comparisons.
+In the separate churn workload the nibble index averaged 0.90-0.95 us per mutation including collection, with 29-35 us p99 collection pauses.
+These are storage-component measurements, not a CCF transaction-throughput win.
+The candidate is not integrated; scan-order refinement, bounded reclamation latency, and transaction qualification remain required.

@@ -8,6 +8,8 @@ use std::time::Instant;
 
 #[path = "storage/byte_radix.rs"]
 mod byte_radix;
+#[path = "storage/nibble_radix.rs"]
+mod nibble_radix;
 #[path = "storage/radix.rs"]
 mod radix;
 
@@ -131,20 +133,20 @@ impl Index for radix::Radix {
     }
 }
 
-impl Index for byte_radix::ByteRadix {
-    type Root = byte_radix::Root;
+impl<T: byte_radix::ByteIndex> Index for T {
+    type Root = <T as byte_radix::ByteIndex>::Root;
 
     fn get<'a>(&'a self, root: &Self::Root, key: &Key) -> Option<&'a Value> {
-        self.get(*root, key)
+        byte_radix::ByteIndex::get(self, *root, key)
     }
 
     fn put(&mut self, root: &mut Self::Root, key: Key, value: Value) {
-        *root = self.put(*root, &key, value);
+        *root = byte_radix::ByteIndex::put(self, *root, &key, value);
     }
 
     fn range(&self, root: &Self::Root, first: &Key, last: &Key) -> usize {
         let mut sum = 0;
-        self.range(*root, first, last, |_, value| {
+        byte_radix::ByteIndex::range(self, *root, first, last, |_, value| {
             sum += usize::from(black_box(value)[0]);
         });
         sum
@@ -187,10 +189,20 @@ fn measure<T: Index, R>(
     );
 }
 
-fn suite<T: Index>(backend: &str) {
+fn suite<T: Index>(backend: &str, scrambled: bool) {
     const WRITES: usize = 128;
     for entries in [64_usize, 512, 2048, 8192] {
-        let keys: Vec<Key> = (0..entries as u64).map(u64::to_be_bytes).collect();
+        let mut keys: Vec<Key> = (0..entries as u64)
+            .map(|i| {
+                if scrambled {
+                    i.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                } else {
+                    i
+                }
+                .to_be_bytes()
+            })
+            .collect();
+        keys.sort_unstable();
         measure::<T, _>(backend, "point_read", &keys, entries, |index, root| {
             for key in &keys {
                 assert_eq!(black_box(index.get(&root, key).unwrap())[0], 1);
@@ -268,11 +280,15 @@ fn main() {
     check_persistence::<Paged>();
     check_persistence::<radix::Radix>();
     check_persistence::<byte_radix::ByteRadix>();
-    byte_radix::check();
+    byte_radix::check::<byte_radix::ByteRadix>();
+    byte_radix::check::<nibble_radix::NibbleRadix>();
     println!("backend,workload,entries,operations,median_ns_per_operation,min_ns,max_ns");
-    suite::<WholeMap>("arc_btree");
-    suite::<Paged>("paged");
-    suite::<radix::Radix>("radix_arena");
-    suite::<byte_radix::ByteRadix>("byte_radix");
-    byte_radix::measure_churn();
+    suite::<WholeMap>("arc_btree", false);
+    suite::<Paged>("paged", false);
+    suite::<radix::Radix>("radix_arena", false);
+    suite::<byte_radix::ByteRadix>("byte_radix", false);
+    suite::<nibble_radix::NibbleRadix>("nibble_radix", false);
+    suite::<nibble_radix::NibbleRadix>("nibble_radix_scrambled", true);
+    byte_radix::measure_churn::<byte_radix::ByteRadix>("byte_radix");
+    byte_radix::measure_churn::<nibble_radix::NibbleRadix>("nibble_radix");
 }

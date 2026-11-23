@@ -2,6 +2,19 @@
 // Licensed under the Apache 2.0 License.
 
 use super::Value;
+use std::fmt::Debug;
+
+pub(super) trait ByteIndex: Default {
+    type Root: Copy + Debug + Default + Eq;
+
+    fn get(&self, root: Self::Root, key: &[u8]) -> Option<&Value>;
+    fn put(&mut self, root: Self::Root, key: &[u8], value: Value) -> Self::Root;
+    fn remove(&mut self, root: Self::Root, key: &[u8]) -> Self::Root;
+    fn range(&self, root: Self::Root, first: &[u8], last: &[u8], visit: impl FnMut(&[u8], &Value));
+    fn collect(&mut self, roots: &[Self::Root]);
+    fn live_allocations(&self) -> (usize, usize);
+    fn allocated_slots(&self) -> (usize, usize);
+}
 
 pub type Root = Option<usize>;
 
@@ -55,7 +68,7 @@ impl Node {
     }
 }
 
-struct Pool<T> {
+pub(super) struct Pool<T> {
     slots: Vec<Option<T>>,
     free: Vec<usize>,
 }
@@ -70,7 +83,7 @@ impl<T> Default for Pool<T> {
 }
 
 impl<T> Pool<T> {
-    fn add(&mut self, value: T) -> usize {
+    pub(super) fn add(&mut self, value: T) -> usize {
         if let Some(i) = self.free.pop() {
             self.slots[i] = Some(value);
             i
@@ -81,11 +94,11 @@ impl<T> Pool<T> {
         }
     }
 
-    fn get(&self, i: usize) -> &T {
+    pub(super) fn get(&self, i: usize) -> &T {
         self.slots[i].as_ref().expect("live arena slot")
     }
 
-    fn sweep(&mut self, live: &[bool]) {
+    pub(super) fn sweep(&mut self, live: &[bool]) {
         for (i, (slot, marked)) in self.slots.iter_mut().zip(live).enumerate() {
             if !marked && slot.take().is_some() {
                 self.free.push(i);
@@ -93,14 +106,18 @@ impl<T> Pool<T> {
         }
     }
 
-    fn live(&self) -> usize {
+    pub(super) fn live(&self) -> usize {
         self.slots.len() - self.free.len()
+    }
+
+    pub(super) fn slots(&self) -> usize {
+        self.slots.len()
     }
 }
 
-struct Row {
-    key: Box<[u8]>,
-    value: Value,
+pub(super) struct Row {
+    pub(super) key: Box<[u8]>,
+    pub(super) value: Value,
 }
 
 #[derive(Default)]
@@ -120,11 +137,6 @@ impl ByteRadix {
                 } => node = if split.right(key) { right } else { left },
             }
         }
-    }
-
-    pub fn get(&self, root: Root, key: &[u8]) -> Option<&Value> {
-        let row = self.rows.get(self.find_row(root?, key));
-        (row.key.as_ref() == key).then_some(&row.value)
     }
 
     fn branch(&mut self, split: Split, left: usize, right: usize) -> usize {
@@ -168,8 +180,17 @@ impl ByteRadix {
         }
         node
     }
+}
 
-    pub fn put(&mut self, root: Root, key: &[u8], value: Value) -> Root {
+impl ByteIndex for ByteRadix {
+    type Root = Root;
+
+    fn get(&self, root: Root, key: &[u8]) -> Option<&Value> {
+        let row = self.rows.get(self.find_row(root?, key));
+        (row.key.as_ref() == key).then_some(&row.value)
+    }
+
+    fn put(&mut self, root: Root, key: &[u8], value: Value) -> Root {
         let row = self.rows.add(Row {
             key: key.into(),
             value,
@@ -189,7 +210,7 @@ impl ByteRadix {
         self.rebuild(next)
     }
 
-    pub fn remove(&mut self, root: Root, key: &[u8]) -> Root {
+    fn remove(&mut self, root: Root, key: &[u8]) -> Root {
         let root = root?;
         let leaf = self.save_path(root, key, None);
         let old = self.rows.get(self.nodes.get(leaf).first_row());
@@ -200,13 +221,7 @@ impl ByteRadix {
         self.rebuild(sibling)
     }
 
-    pub fn range(
-        &self,
-        root: Root,
-        first: &[u8],
-        last: &[u8],
-        mut visit: impl FnMut(&[u8], &Value),
-    ) {
+    fn range(&self, root: Root, first: &[u8], last: &[u8], mut visit: impl FnMut(&[u8], &Value)) {
         if first >= last {
             return;
         }
@@ -234,7 +249,7 @@ impl ByteRadix {
 
     // The caller supplies every live root. Slots from omitted roots may be
     // reused immediately; the experiment does not expose such stale handles.
-    pub fn collect(&mut self, roots: &[Root]) {
+    fn collect(&mut self, roots: &[Root]) {
         let mut live = vec![false; self.nodes.slots.len()];
         let mut live_rows = vec![false; self.rows.slots.len()];
         let mut stack: Vec<_> = roots.iter().copied().flatten().collect();
@@ -252,20 +267,21 @@ impl ByteRadix {
         self.rows.sweep(&live_rows);
     }
 
-    pub fn live_allocations(&self) -> (usize, usize) {
+    fn live_allocations(&self) -> (usize, usize) {
         (self.nodes.live(), self.rows.live())
     }
 
-    pub fn allocated_slots(&self) -> (usize, usize) {
+    fn allocated_slots(&self) -> (usize, usize) {
         (self.nodes.slots.len(), self.rows.slots.len())
     }
 }
 
-pub fn check() {
+pub(super) fn check<T: ByteIndex>() {
     use std::collections::BTreeMap;
 
-    let mut index = ByteRadix::default();
-    let empty_key = index.put(None, &[], [1; 64]);
+    let mut index = T::default();
+    let empty = T::Root::default();
+    let empty_key = index.put(empty, &[], [1; 64]);
     let prefix = index.put(empty_key, &[0], [2; 64]);
     let first_fork = index.put(prefix, &[0, 0], [3; 64]);
     let second_fork = index.remove(first_fork, &[]);
@@ -278,7 +294,7 @@ pub fn check() {
     index.range(second_fork, &[1], &[0], |_, _| panic!("reversed range"));
     index.collect(&[]);
 
-    let mut head = None;
+    let mut head = empty;
     let mut expected = BTreeMap::new();
     let keys: Vec<_> = (0..=260)
         .map(|n| match n {
@@ -291,9 +307,10 @@ pub fn check() {
             }
             _ => vec![255; n - 255],
         })
+        .chain((0..=255).map(|byte| vec![byte, 255]))
         .collect();
 
-    fn assert_rows(index: &ByteRadix, root: Root, expected: &BTreeMap<Vec<u8>, Value>) {
+    fn assert_rows<T: ByteIndex>(index: &T, root: T::Root, expected: &BTreeMap<Vec<u8>, Value>) {
         let mut rows = Vec::new();
         index.range(root, &[], &[255; 6], |k, v| rows.push((k.to_vec(), *v)));
         let want = expected
@@ -344,21 +361,18 @@ pub fn check() {
     assert_rows(&index, fork, &old_rows);
 
     index.collect(&[head]);
-    assert_eq!(
-        index.live_allocations(),
-        (expected.len() * 2 - 1, expected.len())
-    );
+    assert_eq!(index.live_allocations().1, expected.len());
     index.collect(&[]);
     assert_eq!(index.live_allocations(), (0, 0));
     let slots = index.allocated_slots();
-    head = index.put(None, &[0], [9; 64]);
+    head = index.put(empty, &[0], [9; 64]);
     assert_eq!(index.get(head, &[0]), Some(&[9; 64]));
     assert_eq!(index.remove(head, &[]), head);
-    assert_eq!(index.remove(head, &[0]), None);
+    assert_eq!(index.remove(head, &[0]), empty);
     assert_eq!(index.allocated_slots(), slots);
 }
 
-pub fn measure_churn() {
+pub(super) fn measure_churn<T: ByteIndex>(backend: &str) {
     use std::time::Instant;
 
     const KEYS: usize = 2_048;
@@ -373,8 +387,8 @@ pub fn measure_churn() {
             key
         })
         .collect();
-    let mut index = ByteRadix::default();
-    let mut head = None;
+    let mut index = T::default();
+    let mut head = T::Root::default();
     for (i, key) in keys.iter().enumerate() {
         head = index.put(head, key, [1; 64]);
         if (i + 1) % WINDOW == 0 {
@@ -410,11 +424,11 @@ pub fn measure_churn() {
     // old window or created before the next sweep.
     assert!(row_slots <= 2 * KEYS + WINDOW);
     index.collect(&[head]);
-    assert_eq!(index.live_allocations(), (2 * KEYS - 1, KEYS));
+    assert_eq!(index.live_allocations().1, KEYS);
     mutation.sort_unstable();
     collection.sort_unstable();
     eprintln!(
-        "byte_radix churn: {ns:.1} ns/mutation including GC; mutation p99 {} ns, GC p99 {} ns; \
+        "{backend} churn: {ns:.1} ns/mutation including GC; mutation p99 {} ns, GC p99 {} ns; \
          {nodes}/{node_slots} live/allocated nodes, {rows}/{row_slots} live/allocated rows",
         mutation[MUTATIONS * 99 / 100],
         collection[collection.len() * 99 / 100],

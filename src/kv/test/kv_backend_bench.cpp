@@ -63,20 +63,10 @@ namespace
     return Bytes(bytes.begin(), bytes.end());
   }
 
-  void run_champ()
+  void run_champ(bool scrambled)
   {
-    using Key = std::array<uint8_t, 8>;
     using Value = std::array<uint8_t, 64>;
-
-    struct Hash
-    {
-      size_t operator()(const Key& key) const
-      {
-        return std::hash<Bytes>{}(Bytes(key.begin(), key.end()));
-      }
-    };
-
-    using State = champ::Map<Key, Value, Hash>;
+    using State = champ::Map<Bytes, Value, std::hash<Bytes>>;
     constexpr size_t WRITES = 128;
     Value base{};
     Value update{};
@@ -91,11 +81,12 @@ namespace
 
     for (const size_t entries : {64, 512, 2048, 8192})
     {
-      std::vector<Key> keys;
-      for (size_t i = 0; i < entries; ++i)
+      std::vector<Bytes> keys;
+      for (uint64_t i = 0; i < entries; ++i)
       {
-        keys.push_back(fixed_key(i));
+        keys.push_back(key(scrambled ? i * 0x9e3779b97f4a7c15ULL : i));
       }
+      std::sort(keys.begin(), keys.end());
       auto seeded = [&] {
         State state;
         for (const auto& k : keys)
@@ -139,8 +130,8 @@ namespace
           {
             const auto start = i % (entries - 8);
             size_t sum = 0;
-            state.foreach([&](const Key& k, const Value& value) {
-              if (keys[start] <= k && k < keys[start + 8])
+            state.foreach([&](const Bytes& k, const Value& value) {
+              if (!(k < keys[start]) && k < keys[start + 8])
               {
                 sum += value[0];
               }
@@ -305,9 +296,11 @@ namespace
 int main(int argc, char** argv)
 {
   const std::string_view backend = argc == 2 ? argv[1] : "";
-  if (backend != "cpp" && backend != "rust" && backend != "champ")
+  if (
+    backend != "cpp" && backend != "rust" && backend != "champ" &&
+    backend != "champ_scrambled")
   {
-    std::cerr << "Usage: kv_backend_bench cpp|rust|champ\n";
+    std::cerr << "Usage: kv_backend_bench cpp|rust|champ|champ_scrambled\n";
     return 2;
   }
   std::cout
@@ -323,6 +316,6 @@ int main(int argc, char** argv)
   }
   else
   {
-    run_champ();
+    run_champ(backend == "champ_scrambled");
   }
 }
