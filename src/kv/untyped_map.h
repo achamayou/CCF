@@ -325,46 +325,7 @@ namespace ccf::kv::untyped
         return;
       }
 
-      const auto& change_set = *non_abstract;
-
-      s.start_map(name, security_domain);
-
-      // Retain the legacy read-set headers for ledger compatibility.
-      s.serialise_entry_version(NoVersion);
-      s.serialise_count_header(0);
-
-      uint64_t write_ctr = 0;
-      uint64_t remove_ctr = 0;
-      for (const auto& [key, maybe_value] : change_set.writes)
-      {
-        if (maybe_value.has_value())
-        {
-          ++write_ctr;
-        }
-        else
-        {
-          ++remove_ctr;
-        }
-      }
-
-      s.serialise_count_header(write_ctr);
-      for (const auto& [key, maybe_value] : change_set.writes)
-      {
-        if (maybe_value.has_value())
-        {
-          // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-          s.serialise_write(key, maybe_value.value());
-        }
-      }
-
-      s.serialise_count_header(remove_ctr);
-      for (const auto& [key, maybe_value] : change_set.writes)
-      {
-        if (!maybe_value.has_value())
-        {
-          s.serialise_remove(key);
-        }
-      }
+      serialise_map_writes(s, name, security_domain, non_abstract->writes);
     }
 
     class SnapshotHandleCommitter : public AbstractCommitter

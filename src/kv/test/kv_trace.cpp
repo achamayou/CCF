@@ -2,8 +2,7 @@
 // Licensed under the Apache 2.0 License.
 #include "ccf/kv/map.h"
 #include "kv/compacted_version_conflict.h"
-#include "kv/null_encryptor.h"
-#include "kv/store.h"
+#include "kv/test/kv_test_store.h"
 #include "kv/test/stub_consensus.h"
 
 #include <atomic>
@@ -11,7 +10,7 @@
 #include <doctest/doctest.h>
 #include <thread>
 
-#ifdef CCF_KV_TRACING
+#if defined(CCF_KV_TRACING) && !defined(CCF_KV_RUST_TEST_BACKEND)
 namespace
 {
   class KVTraceReporter : public doctest::IReporter
@@ -100,13 +99,7 @@ namespace
     ccf::kv::serialisers::BlitSerialiser>;
   using Result = ccf::kv::CommitResult;
 
-  struct TraceStore : public ccf::kv::Store
-  {
-    TraceStore()
-    {
-      set_encryptor(std::make_shared<ccf::kv::NullTxEncryptor>());
-    }
-  };
+  using TraceStore = ccf::kv::test::TestStore;
 }
 
 TEST_CASE("KV trace multi-map semantics")
@@ -248,6 +241,59 @@ TEST_CASE("KV trace iteration")
     writer.rw(map)->put("phantom", "value");
     CHECK(writer.commit() == Result::SUCCESS);
     CHECK(reader.commit() == Result::FAIL_CONFLICT);
+  }
+}
+
+TEST_CASE("Rollback and compact")
+{
+  TraceStore kv_store;
+  ccf::kv::Map<std::string, std::string> map("public:map");
+
+  constexpr auto k = "key";
+  constexpr auto v1 = "value1";
+
+  INFO("Do not read transactions that have been rolled back");
+  {
+    auto tx = kv_store.create_tx();
+    auto tx2 = kv_store.create_tx();
+    auto handle = tx.rw(map);
+    handle->put(k, v1);
+    REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
+
+    kv_store.rollback({kv_store.commit_view(), 0}, kv_store.commit_view());
+    auto handle2 = tx2.rw(map);
+    auto v = handle2->get(k);
+    REQUIRE(!v.has_value());
+    REQUIRE(tx2.commit() == ccf::kv::CommitResult::SUCCESS);
+  }
+
+  INFO("Read committed key");
+  {
+    auto tx = kv_store.create_tx();
+    auto tx2 = kv_store.create_tx();
+    auto handle = tx.rw(map);
+    handle->put(k, v1);
+    REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
+    kv_store.compact(kv_store.current_version());
+
+    auto handle2 = tx2.rw(map);
+    auto va = handle2->get_globally_committed(k);
+    REQUIRE(va.has_value());
+    REQUIRE(va.value() == v1);
+  }
+
+  INFO("Read deleted committed key");
+  {
+    auto tx = kv_store.create_tx();
+    auto tx2 = kv_store.create_tx();
+    auto handle = tx.rw(map);
+    handle->remove(k);
+    REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
+    kv_store.compact(kv_store.current_version());
+
+    auto handle2 = tx2.rw(map);
+    auto va = handle2->get_globally_committed(k);
+    REQUIRE(!va.has_value());
   }
 }
 

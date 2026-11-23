@@ -21,15 +21,15 @@ namespace ccf
   // but still writes placeholder entries to the signature tables when a
   // signature is emitted, so that transactions depending on those tables can
   // be exercised without a real history.
-  class NullTxHistoryPendingTx : public ccf::kv::PendingTx
+  template <typename Store>
+  class BasicNullTxHistoryPendingTx : public ccf::kv::PendingTx
   {
     ccf::TxID txid;
-    ccf::kv::Store& store;
+    Store& store;
     NodeId id;
 
   public:
-    NullTxHistoryPendingTx(
-      ccf::TxID txid_, ccf::kv::Store& store_, NodeId id_) :
+    BasicNullTxHistoryPendingTx(ccf::TxID txid_, Store& store_, NodeId id_) :
       txid(txid_),
       store(store_),
       id(std::move(id_))
@@ -53,9 +53,10 @@ namespace ccf
     }
   };
 
-  class NullTxHistory : public ccf::kv::TxHistory
+  template <typename Store>
+  class BasicNullTxHistory : public ccf::kv::TxHistory
   {
-    ccf::kv::Store& store;
+    Store& store;
     NodeId id;
 
   protected:
@@ -64,8 +65,8 @@ namespace ccf
     ccf::kv::Term term_of_next_version = 0;
 
   public:
-    NullTxHistory(
-      ccf::kv::Store& store_, NodeId id_, ccf::crypto::ECKeyPair& /*unused*/) :
+    BasicNullTxHistory(
+      Store& store_, NodeId id_, ccf::crypto::ECKeyPair& /*unused*/) :
       store(store_),
       id(std::move(id_))
     {}
@@ -119,7 +120,9 @@ namespace ccf
       auto txid = store.next_txid();
       LOG_DEBUG_FMT("Issuing signature at {}.{}", txid.view, txid.seqno);
       store.commit(
-        txid, std::make_unique<NullTxHistoryPendingTx>(txid, store, id), true);
+        txid,
+        std::make_unique<BasicNullTxHistoryPendingTx<Store>>(txid, store, id),
+        true);
     }
 
     void try_emit_signature() override {}
@@ -171,4 +174,7 @@ namespace ccf
 
     void set_endorsed_certificate(const ccf::crypto::Pem& /*cert*/) override {}
   };
+
+  using NullTxHistory = BasicNullTxHistory<ccf::kv::Store>;
+  using NullTxHistoryPendingTx = BasicNullTxHistoryPendingTx<ccf::kv::Store>;
 }

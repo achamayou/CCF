@@ -12,6 +12,10 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
+local instance : DecidableEq Spike.engine.Address :=
+  fun a b =>
+    decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
+
 /-- The extracted dispatcher finds the first live attempt with the given ID. -/
 theorem tx_index (s : Spike.engine.Store) (id : U64)
     : WP.spec (Spike.engine.Store.tx_index s id)
@@ -255,7 +259,8 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       subst row
       change WP.spec (Result.ok
         (core.result.Result.Ok (Spike.engine.Output.Applied version s.history.term reported),
-          ({history := {s.history with frames, next_identity := identity},
+          ({s with
+            history := {s.history with frames, next_identity := identity}
             txs := back (id, {t with phase := .Applied version})} : Spike.engine.Store))) _
       rw [WP.spec_ok]
       refine ⟨version, reported, ?_⟩
@@ -269,5 +274,224 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       · simpa [hone, hIdentity, advance] using hidentity
       · rw [hback.2]
         exact alloc.vec.Vec.set_val_eq _ _ _
+
+/-- The wire-size preflight reads exactly the write set used by the KV model. -/
+theorem pending_writes_match (encode : List U8 → String)
+    (s : Spike.engine.Store) (id : U64) (t : Spike.engine.Tx)
+    (hTx : find s.txs.val id = some t) (hPhase : t.phase = .Active)
+    : WP.spec (Spike.engine.Store.pending_writes s id)
+        (fun result =>
+          ∃ writes,
+            result = .Ok writes
+            ∧ encodeReport encode writes
+              = encodeWrites encode (byteWrites t.pending.val)) := by
+  unfold Spike.engine.Store.pending_writes
+  apply WP.spec_bind (tx_index s id)
+  intro index hindex
+  cases index with
+  | Err _ => simp [hTx] at hindex
+  | Ok i =>
+      obtain ⟨actual, hrow, ht⟩ := hindex
+      rw [hTx] at ht
+      cases ht
+      simp [core.result.Result.Insts.CoreOpsTry.branch, alloc.vec.Vec.index_slice_index,
+        alloc.vec.Vec.index_usize, hrow, hPhase]
+      apply WP.spec_bind (report_matches encode t.pending)
+      intro writes hw
+      simp only [WP.spec_ok]
+      exact ⟨writes, rfl, hw⟩
+
+/-- A gap or duplicate version is rejected before changing the store. -/
+theorem replay_next_rejects_wrong_version
+    (s : Spike.engine.Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (hHead : s.history.frames.val = prior ++ [head])
+    (hVersion : head.version.val < U64.max)
+    (hIdentity : s.history.next_identity.val < U64.max)
+    (requested : U64)
+    (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
+    (wrong : requested.val ≠ head.version.val + 1)
+    : WP.spec (Spike.engine.Store.replay_next s requested writes)
+        (fun r => r = (.Err .Disabled, s)) := by
+  have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
+  have hv : head.version ≠ core.num.U64.MAX := fun he => by
+    have he' := congrArg (fun v : U64 => v.val) he
+    omega
+  have hi : s.history.next_identity ≠ core.num.U64.MAX := fun he => by
+    have he' := congrArg (fun v : U64 => v.val) he
+    omega
+  have hone : (1#u64 : U64).val = 1 := rfl
+  have hroom : head.version.val + (1#u64 : U64).val ≤ U64.max := by omega
+  unfold Spike.engine.Store.replay_next
+  simp only [history_head s.history prior head hHead, bind_ok, hv, hi, ite_false]
+  apply WP.spec_bind (U64.add_spec hroom)
+  intro v hval
+  have hne : requested ≠ v := fun he => by
+    have he' := congrArg (fun x : U64 => x.val) he
+    omega
+  simp [hne]
+
+private def replayRow (row : ReportRow) : Spike.engine.Address × Spike.engine.Write :=
+  (
+    row.1,
+    match row.2 with
+    | some bytes => .Put bytes
+    | none => .Remove
+  )
+
+/-- Replay either leaves the store unchanged, or extends its history using exactly the
+supplied write set and a fresh application identity. -/
+theorem replay_next_matches_advance (encode : List U8 → String)
+    (inj : Function.Injective encode) (s : Spike.engine.Store) (model : Store)
+    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (hHead : s.history.frames.val = prior ++ [head])
+    (hModelHead : model.head = modelFrame encode head)
+    (hIdentity : model.nextIdentity = s.history.next_identity.val)
+    (version : U64) (hVersion : version.val = head.version.val + 1)
+    (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
+    (hF : s.history.frames.val.length < Usize.max)
+    (hI : s.history.next_identity.val < U64.max)
+    (hD : head.data.val.length + writes.val.length ≤ Usize.max)
+    (hR : head.revisions.val.length + writes.val.length ≤ Usize.max)
+    (hB : head.births.val.length + writes.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.Store.replay_next s version writes)
+        (fun (result, after) =>
+          (result = .Err .Disabled ∧ after = s)
+          ∨ (result = .Ok ()
+              ∧ ∃ next,
+                  modelFrame encode next
+                    = (advance model (encodeReport encode writes)).head
+                  ∧ after.history.frames.val = s.history.frames.val ++ [next]
+                  ∧ after.history.next_identity.val = s.history.next_identity.val + 1
+                  ∧ after.history.term = s.history.term
+                  ∧ after.history.global = s.history.global
+                  ∧ after.txs = s.txs)) := by
+  have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
+  have hle : version.val ≤ U64.max := by scalar_tac
+  have hv : head.version ≠ core.num.U64.MAX := fun he => by
+    have he' := congrArg (fun v : U64 => v.val) he
+    omega
+  have hi : s.history.next_identity ≠ core.num.U64.MAX := fun he => by
+    have he' := congrArg (fun v : U64 => v.val) he
+    omega
+  have hone : (1#u64 : U64).val = 1 := rfl
+  have hroom : head.version.val + (1#u64 : U64).val ≤ U64.max := by omega
+  unfold Spike.engine.Store.replay_next
+  simp only [history_head s.history prior head hHead, bind_ok, hv, hi, ite_false]
+  apply WP.spec_bind (U64.add_spec hroom)
+  intro v hv'
+  have hEq : v = version := by
+    apply UScalar.eq_of_val_eq
+    omega
+  subst v
+  simp only [bne_self_eq_false, Bool.false_eq_true, ite_false,
+    Spike.engine.Assoc.new, bind_ok]
+  apply WP.spec_bind
+    (Pₘ :=
+      fun (result, frames, identity) =>
+        (result = .Err .Disabled
+          ∧ frames = s.history.frames
+          ∧ identity = s.history.next_identity)
+        ∨ (result = .Ok ()
+            ∧ ∃ next,
+                modelFrame encode next = (advance model (encodeReport encode writes)).head
+                ∧ frames.val = s.history.frames.val ++ [next]
+                ∧ identity.val = s.history.next_identity.val + 1))
+  · unfold Spike.engine.Store.replay_next_loop
+    apply loop.spec_decr_nat
+      (fun (p : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write × Usize) =>
+        writes.val.length - p.2.val)
+      (fun (pending, j) =>
+        pending.val.length = j.val
+        ∧ pending.val ++ (writes.val.drop j.val).map replayRow = writes.val.map replayRow)
+      _ _ _
+    · rintro ⟨pending, j⟩ ⟨hj, hrows⟩
+      dsimp only at hj hrows ⊢
+      unfold Spike.engine.Store.replay_next_loop.body
+      have hlen : (alloc.vec.Vec.len writes).val = writes.val.length :=
+        alloc.vec.Vec.len_val writes
+      have hcap := alloc.vec.Vec.len_ineq writes
+      have hu : (1#usize : Usize).val = 1 := rfl
+      by_cases hb : j < alloc.vec.Vec.len writes
+      · have hlt : j.val < writes.val.length := by rw [← hlen]; exact hb
+        rw [ite_eq_left hb, alloc.vec.Vec.index_slice_index]
+        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec writes j hlt)
+        rintro ⟨addr, value⟩ hrow
+        apply WP.spec_bind
+          (assoc_index Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey pending addr
+            (fun k => compare_address k addr))
+        intro found _
+        cases found with
+        | some _ => simp
+        | none =>
+            have hwrite :
+                (match value with
+                | none => Result.ok Spike.engine.Write.Remove
+                | some bytes => do
+                    let b ← Spike.engine.Bytes.Insts.CoreCloneClone.clone bytes
+                    Result.ok (Spike.engine.Write.Put b))
+                = .ok (replayRow (addr, value)).2 := by
+              cases value <;> simp [replayRow, clone_bytes]
+            simp only [core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true,
+              ite_false, clone_address, bind_ok]
+            change WP.spec (do
+              let write ←
+                match value with
+                | none => Result.ok Spike.engine.Write.Remove
+                | some bytes => do
+                    let b ← Spike.engine.Bytes.Insts.CoreCloneClone.clone bytes
+                    Result.ok (Spike.engine.Write.Put b)
+              let next ← alloc.vec.Vec.push pending (addr, write)
+              let nextj ← j + 1#usize
+              Result.ok (ControlFlow.cont (next, nextj))) _
+            rw [hwrite, bind_ok]
+            have hpush : pending.val.length < Usize.max := by omega
+            apply WP.spec_bind (alloc.vec.Vec.push_spec pending _ hpush)
+            intro next hn
+            have hinc : j.val + (1#usize : Usize).val ≤ Usize.max := by omega
+            apply WP.spec_bind (Usize.add_spec hinc)
+            intro nextj hnext
+            have hnext' : nextj.val = j.val + 1 := by omega
+            have hsplit : writes.val.drop j.val = (addr, value) :: writes.val.drop nextj.val := by
+              rw [hnext', List.drop_eq_getElem_cons hlt, ← hrow]
+            simp only [WP.spec_ok]
+            refine ⟨⟨by simp [hn, hj, hnext'], ?_⟩, by omega⟩
+            simpa [replayRow, hn, hsplit, List.append_assoc] using hrows
+      · have hge : writes.val.length ≤ j.val := by rw [← hlen]; exact Nat.le_of_not_gt hb
+        rw [ite_eq_right hb]
+        have hp : pending.val = writes.val.map replayRow := by simpa [List.drop_eq_nil_of_le hge] using hrows
+        have hlength : pending.val.length = writes.val.length := by simp [hp]
+        have hWrite : encodeWrites encode (byteWrites pending.val) = encodeReport encode writes := by
+          simp only [hp, byteWrites, encodeWrites, encodeReport, List.map_map, Function.comp_def]
+          apply List.map_congr_left
+          rintro ⟨addr, value⟩ _
+          cases value <;> rfl
+        have hvModel : version.val = model.head.version + 1 := by
+          simp only [hModelHead, modelFrame, modelMetadata]
+          omega
+        cases head with
+        | mk old data revisions births =>
+            apply WP.spec_bind
+              (frame_advance_matches_model encode inj _ model pending version
+                s.history.next_identity hModelHead hvModel hIdentity.symm
+                (by simpa [hlength] using hD) (by simpa [hlength] using hR)
+                (by simpa [hlength] using hB))
+            intro next hn
+            apply WP.spec_bind (alloc.vec.Vec.push_spec s.history.frames next hF)
+            intro frames hf
+            have hsucc : s.history.next_identity.val + (1#u64 : U64).val ≤ U64.max := by
+              omega
+            apply WP.spec_bind (U64.add_spec hsucc)
+            intro ident hident
+            simp only [WP.spec_ok]
+            exact Or.inr ⟨True.intro, next, hWrite ▸ hn, hf, by omega⟩
+    · simp
+  · rintro ⟨result, frames, identity⟩ hr
+    dsimp only at hr
+    change WP.spec (Result.ok (result, {s with history :=
+      {s.history with frames, next_identity := identity}})) _
+    rw [WP.spec_ok]
+    rcases hr with ⟨rfl, rfl, rfl⟩ | ⟨rfl, next, hn, hf, hi'⟩
+    · exact Or.inl ⟨rfl, rfl⟩
+    · exact Or.inr ⟨rfl, next, hn, hf, hi', rfl, rfl, rfl⟩
 
 end KvRust

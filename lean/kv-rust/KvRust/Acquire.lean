@@ -201,6 +201,8 @@ theorem acquire_matches_model (encode : List U8 → String)
   let enc := encode ∘ alloc.vec.Vec.val (α := U8)
   let k := enc m
   let v := captureGlobal model snap k
+  have hzero (cut : U64) : Spike.engine.History.relative_cut s cut = .ok cut :=
+    history_relative_cut_zero s cut (by simp [hframes]) hversions
   change WP.spec (Spike.engine.Tx.acquire t s m) (fun (output, after) =>
     if available model snap k then
       ∃ localVer globalVer views,
@@ -231,7 +233,7 @@ theorem acquire_matches_model (encode : List U8 → String)
       simp only [core.option.Option.is_some]
       apply WP.spec_bind
         (history_at_cut_matches_model s rustSnap.version model (modelFrame encode)
-          prior head hframes hmodel hversions)
+          prior head hframes hmodel (hzero rustSnap.version) hversions)
       intro current ⟨hCurrent, hMem⟩
       have hCutFrame : modelFrame encode current = atCut model snap.current.version := by
         rwa [hCut]
@@ -273,7 +275,7 @@ theorem acquire_matches_model (encode : List U8 → String)
           simp only [core.option.Option.is_none]
           apply WP.spec_bind
             (history_at_cut_matches_model s s.global model (modelFrame encode)
-              prior head hframes hmodel hversions)
+              prior head hframes hmodel (hzero s.global) hversions)
           intro global hg
           have hGlobal : modelFrame encode global = atCut model model.global := by
             rw [hglobal]; exact hg.1

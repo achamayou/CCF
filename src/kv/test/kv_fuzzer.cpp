@@ -6,7 +6,7 @@
 #include "ccf/kv/value.h"
 #include "kv/compacted_version_conflict.h"
 #include "kv/null_encryptor.h"
-#include "kv/store.h"
+#include "kv/test/kv_test_store.h"
 #include "kv/test/stub_consensus.h"
 
 #include <algorithm>
@@ -44,8 +44,10 @@ namespace
     SetSerialisedWith<std::string, ccf::kv::serialisers::BlitSerialiser>;
   using UnitMap = ccf::kv::UnitValue<>;
   using RawMap = ccf::kv::untyped::Map;
-  using Tx = ccf::kv::CommittableTx;
-  using ReadOnlyTx = ccf::kv::ReadOnlyTx;
+  using BackendStore = ccf::kv::test::TestStoreBase;
+  using Tx = decltype(std::declval<BackendStore&>().create_tx());
+  using ReadOnlyTx =
+    decltype(std::declval<BackendStore&>().create_read_only_tx());
   using Result = ccf::kv::CommitResult;
   using Json = nlohmann::json;
 
@@ -463,7 +465,7 @@ namespace
     coverage.add(Counter::CoordinatedPhases);
   }
 
-  struct FuzzStore : public ccf::kv::Store
+  struct FuzzStore : public BackendStore
   {
     FuzzStore()
     {
@@ -478,15 +480,15 @@ namespace
   // read-only transaction.
   struct Handles
   {
-    Map::ReadOnlyHandle* read;
-    ccf::kv::untyped::MapHandle* raw;
-    ValueMap::ReadOnlyHandle* value_read;
-    SetMap::ReadOnlyHandle* set_read;
-    UnitMap::ReadOnlyHandle* unit_read;
-    Map::Handle* write = nullptr;
-    ValueMap::WriteOnlyHandle* value_write = nullptr;
-    SetMap::WriteOnlyHandle* set_write = nullptr;
-    UnitMap::WriteOnlyHandle* unit_write = nullptr;
+    decltype(std::declval<Tx&>().ro<Map>("")) read;
+    decltype(std::declval<Tx&>().ro<RawMap>("")) raw;
+    decltype(std::declval<Tx&>().ro<ValueMap>("")) value_read;
+    decltype(std::declval<Tx&>().ro<SetMap>("")) set_read;
+    decltype(std::declval<Tx&>().ro<UnitMap>("")) unit_read;
+    decltype(std::declval<Tx&>().rw<Map>("")) write = nullptr;
+    decltype(std::declval<Tx&>().wo<ValueMap>("")) value_write = nullptr;
+    decltype(std::declval<Tx&>().wo<SetMap>("")) set_write = nullptr;
+    decltype(std::declval<Tx&>().wo<UnitMap>("")) unit_write = nullptr;
   };
 
   template <typename T>

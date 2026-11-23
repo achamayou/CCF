@@ -10,21 +10,21 @@ Custom key and value types
 
 User-defined types can be used for both the key and value types of a :cpp:type:`ccf::kv::Map`. It must be possible to use the key type as the key of an ``std::map`` (so it must be copyable, assignable, and less-comparable), and both types must be serialisable. By default, when using a :cpp:type:`ccf::kv::Map`, serialisation converts to JSON. To add support to your custom types, it should usually be possible to use the ``DECLARE_JSON_...`` macros:
 
-.. literalinclude:: ../../../src/kv/test/kv_serialisation.cpp
+.. literalinclude:: ../../../src/kv/test/kv_ledger_contract.cpp
     :language: cpp
     :start-after: SNIPPET_START: CustomClass definition
     :end-before: SNIPPET_END: CustomClass definition
 
 Custom serialisers can also be defined. The serialiser itself must be a type implementing ``to_serialised`` and ``from_serialised`` functions for the target type:
 
-.. literalinclude:: ../../../src/kv/test/kv_serialisation.cpp
+.. literalinclude:: ../../../src/kv/test/kv_ledger_contract.cpp
     :language: cpp
     :start-after: SNIPPET_START: CustomSerialiser definition
     :end-before: SNIPPET_END: CustomSerialiser definition
 
 To use these serialised for a specific map declare the map as a :cpp:class:`ccf::kv::TypedMap`, adding the appropriate serialiser types for the key and value types:
 
-.. literalinclude:: ../../../src/kv/test/kv_serialisation.cpp
+.. literalinclude:: ../../../src/kv/test/kv_ledger_contract.cpp
     :language: cpp
     :start-after: SNIPPET_START: CustomSerialisedMap definition
     :end-before: SNIPPET_END: CustomSerialisedMap definition

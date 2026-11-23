@@ -71,7 +71,8 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         exact hh
       obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm⟩ :=
         rollback_retains_model_frames native requested term s (modelFrame encode) prior head
-          hframes hindex h.indexed h.frames h.global (congrArg Frame.version hhead)
+          hframes hindex (fun v => history_relative_cut_zero native.history v h.nonempty h.indexed)
+          h.indexed h.frames h.global (congrArg Frame.version hhead)
           (Nat.le_of_not_gt hLow) (Nat.le_of_not_gt hStale)
       have hh : store.head.version = cut.val := by
         have hsize : native.history.frames.val.length - 1 = prior.length := by simp [hframes]

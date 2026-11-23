@@ -89,6 +89,94 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn replay_rejects_gaps_and_duplicates_without_publishing() {
+    let mut s = Store::new(7);
+    let addr = Address {
+        map: Bytes::copy_from(b"public:map"),
+        key: Bytes::copy_from(b"key"),
+    };
+    let value = Bytes::copy_from(b"value");
+    assert_eq!(
+        s.replay_next(2, vec![(addr.clone(), Some(value.clone()))]),
+        Err(Error::Disabled)
+    );
+    assert_eq!(
+        s.replay_next(
+            1,
+            vec![(addr.clone(), Some(value.clone())), (addr.clone(), None)],
+        ),
+        Err(Error::Disabled)
+    );
+    assert_eq!(s.history.head().version, 0);
+    assert_eq!(s.history.next_identity, 1);
+
+    s.replay_next(1, vec![(addr, Some(value))]).unwrap();
+    assert_eq!(s.history.head().version, 1);
+    assert_eq!(s.history.term, 7);
+    begin(&mut s, 1);
+    acquire(&mut s, 1, b"public:map");
+    assert_read(&mut s, 1, b"public:map", b"key", false, Some(b"value"));
+    assert!(matches!(
+        op(
+            &mut s,
+            1,
+            b"public:map",
+            Operation::Previous(Bytes::copy_from(b"key"))
+        ),
+        Output::Previous(Some(1))
+    ));
+}
+
+#[test]
+fn restored_snapshot_retains_versions_and_only_rolls_back_its_suffix() {
+    let mut s = Store::new(7);
+    let name = b"public:restored";
+    let version = 1_000_000;
+    s.install_snapshot(
+        version,
+        vec![SnapshotMap {
+            name: Bytes::copy_from(name),
+            revision: version - 1,
+            cells: vec![(
+                Bytes::copy_from(b"k"),
+                version - 3,
+                Bytes::copy_from(b"old"),
+            )],
+        }],
+    )
+    .unwrap();
+    assert_eq!(s.history.frames.len(), 1);
+    assert_eq!(s.history.global, version);
+    let maps = s.snapshot_maps(version).unwrap();
+    assert_eq!(maps.len(), 1);
+    assert_eq!(maps[0].revision, version - 1);
+    assert_eq!(maps[0].cells[0].1, version - 3);
+
+    begin(&mut s, 1);
+    assert!(matches!(
+        acquire(&mut s, 1, name),
+        Output::Acquired(local, global) if local == version - 1 && global == local
+    ));
+    assert_read(&mut s, 1, name, b"k", true, Some(b"old"));
+    write(&mut s, 1, name, b"k", Some(b"new"));
+    applied(&mut s, 1, Outcome::Success, version + 1);
+    assert_eq!(s.history.frames.len(), 2);
+    assert!(matches!(
+        run(&mut s, Action::Rollback(version - 1, 8)),
+        Output::RollbackRejected
+    ));
+    assert!(matches!(
+        run(&mut s, Action::Rollback(version, 8)),
+        Output::RolledBack(v) if v == version
+    ));
+    assert_eq!(s.history.frames.len(), 1);
+    assert_eq!(s.history.head().version, version);
+    begin(&mut s, 2);
+    acquire(&mut s, 2, name);
+    assert_read(&mut s, 2, name, b"k", false, Some(b"old"));
+}
+
+#[test]
 fn distinct_global_cuts_are_pinned_per_map() {
     let mut s = Store::new(4);
     begin(&mut s, 1);

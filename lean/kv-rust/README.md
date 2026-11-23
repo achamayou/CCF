@@ -1,12 +1,12 @@
 # Rust KV verification prototype
 
 This opt-in package checks [a Rust prototype](../../src/rust/kv-spike) against the existing [KV model](../kv/Kv/Model/Transitions.lean).
-It is not linked into CCF and does not change the existing Lean specification.
+It is not linked into production CCF and does not change the existing Lean specification.
 
 The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, ordered association lists, and owned, contiguous version frames.
 Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
 Compaction advances the global frontier and changes which map views can be acquired; it does not yet reclaim old frames.
-The prototype has no C++ adapter, multiple-store lifecycle, or persistence integration.
+The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
 
 The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
@@ -49,6 +49,35 @@ bash lean/kv-rust/verify.sh build-kv-aeneas/aeneas
 The script translates the Rust with the pinned Charon and Aeneas, builds the Lean proofs with warnings treated as errors, and rechecks the resulting modules in the Lean kernel.
 It rejects extraction that needs handwritten models of opaque functions or types.
 Generated Lean and intermediate LLBC are not checked in.
+
+## Run C++ unit tests against Rust
+
+In a configured CCF development environment, enable the opt-in backend and build the test target:
+
+```sh
+cmake -S . -B build -GNinja -DBUILD_RUST_KV_TESTS=ON
+cmake --build build --target kv_test kv_rust_test kv_rust_interop_test
+ctest --test-dir build -R '^(kv_test|kv_rust_test|kv_rust_interop_test)$' \
+  --output-on-failure --no-tests=error
+```
+
+`kv_rust_test` compiles the same contract cases as `kv_test` with Rust-backed stores and no link to the C++ KV implementation.
+The shared cases cover typed and untyped map handles, OCC, range and iteration semantics, rollback, compaction, commit hooks, contention, ordinary ledger entries, and snapshots.
+Rust distinguishes pre-application conflicts and stale-term writes from a replication failure after local publication.
+The adapter serializes access to the Rust store and gives CCF's codecs and consensus stubs the actual Rust write set.
+`kv_rust_interop_test` explicitly uses a Rust store and a C++ store to replay ordinary entries and restore snapshots in both directions.
+The default `kv_test` still uses C++ and runs its full suite, including cases not enabled for Rust.
+
+The Rust target runs 98 of the original 114 `kv_test` cases, including reserved writes, signature replay, in-place snapshot restore, private map recovery, and the concurrent operation fuzzer.
+The C++-only cases are `Map name parsing`, nine low-level reader/writer and entry-envelope cases in `kv_serialisation.cpp` and `raw_writer.cpp`, five snapshot codec cases in `kv_snapshot.cpp`, and `Store error handling`, which includes tests of the concrete C++ `AbstractMap` API and store readiness.
+Rust tests the snapshot, rollback, and term guards through its own interface; the C++ suite retains every original assertion.
+The shared snapshot restore tests cover historical encryption secrets and captured-public-map reuse.
+The same fuzzer schedules and assertions run on both backends, but the C++ trace reporter and trace-conformance runner are not wired to the Rust adapter.
+
+The test adapter serializes commit submission and only fills reserved slots in order.
+It does not implement the full CCF store interface or production replication.
+The existing trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
+The extracted ordinary ledger replay proof shows that, after decoding, a successful replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
 
 ## Performance
 

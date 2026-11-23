@@ -5,7 +5,7 @@
 #include "kv/compacted_version_conflict.h"
 #include "kv/kv_serialiser.h"
 #include "kv/null_encryptor.h"
-#include "kv/store.h"
+#include "kv/test/kv_test_store.h"
 #include "kv/test/stub_consensus.h"
 
 #include <atomic>
@@ -43,6 +43,7 @@ DOCTEST_TEST_CASE("Concurrent kv access" * doctest::test_suite("concurrency"))
   // entry. The goal is for these commits and compactions to avoid deadlock
 
   using MapType = ccf::kv::Map<size_t, size_t>;
+  using BackendStore = ccf::kv::test::TestStoreBase;
   constexpr size_t max_k = 32;
 
   constexpr size_t thread_count = 16;
@@ -54,7 +55,7 @@ DOCTEST_TEST_CASE("Concurrent kv access" * doctest::test_suite("concurrency"))
   struct ThreadArgs
   {
     std::vector<MapType> maps;
-    ccf::kv::Store* kv_store;
+    BackendStore* kv_store;
     std::atomic<size_t>* counter;
   };
 
@@ -104,7 +105,7 @@ DOCTEST_TEST_CASE("Concurrent kv access" * doctest::test_suite("concurrency"))
           // Start a transaction over selected maps
           auto tx = args->kv_store->create_tx();
 
-          std::vector<MapType::Handle*> handles;
+          std::vector<decltype(tx.rw(args->maps.front()))> handles;
           for (const auto& map : args->maps)
           {
             handles.push_back(tx.rw(map));
@@ -154,7 +155,7 @@ DOCTEST_TEST_CASE("Concurrent kv access" * doctest::test_suite("concurrency"))
 
   struct CompactArgs
   {
-    ccf::kv::Store* kv_store;
+    BackendStore* kv_store;
     std::atomic<size_t>* tx_counter;
     std::atomic<CompacterState>* compact_state;
   };
@@ -162,7 +163,7 @@ DOCTEST_TEST_CASE("Concurrent kv access" * doctest::test_suite("concurrency"))
   static constexpr auto iterations = 20;
   for (auto i = 0; i < iterations; ++i)
   {
-    ccf::kv::Store kv_store;
+    BackendStore kv_store;
     auto consensus = std::make_shared<SlowStubConsensus>();
     kv_store.set_consensus(consensus);
     auto encryptor = std::make_shared<ccf::kv::NullTxEncryptor>();
@@ -256,7 +257,7 @@ DOCTEST_TEST_CASE(
 
   // Many threads attempt to produce a chain of transactions pointing at the
   // previous write to a single key, at that key.
-  ccf::kv::Store kv_store;
+  ccf::kv::test::TestStoreBase kv_store;
   auto encryptor = std::make_shared<ccf::kv::NullTxEncryptor>();
   kv_store.set_encryptor(encryptor);
   constexpr auto store_commit_term = 2;

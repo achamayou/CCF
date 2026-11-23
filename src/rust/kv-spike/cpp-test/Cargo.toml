@@ -1,0 +1,11 @@
+[package]
+name = "ccf-kv-cpp-test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ccf-kv-spike = { path = ".." }

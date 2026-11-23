@@ -318,7 +318,7 @@ fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
 
 #[derive(Clone)]
 struct History {
-    // Oldest first. The frame at index i has version i, including version zero.
+    // Oldest first. Versions are contiguous from the first retained frame.
     frames: Vec<Frame>,
     global: Version,
     term: Term,
@@ -341,10 +341,16 @@ impl History {
         &self.frames[self.frames.len() - 1]
     }
 
+    fn relative_cut(&self, cut: Version) -> Version {
+        let base = self.frames[0].version;
+        if cut < base { 0 } else { cut - base }
+    }
+
     fn at_cut(&self, cut: Version) -> &Frame {
+        let offset = self.relative_cut(cut);
         let head = self.frames.len() - 1;
-        if cut < head as Version {
-            &self.frames[cut as usize]
+        if offset < head as Version {
+            &self.frames[offset as usize]
         } else {
             &self.frames[head]
         }
@@ -376,8 +382,9 @@ impl History {
         let head = self.head().version;
         let cut = rollback_cut(self.global, head, requested);
         if cut < head {
-            // The cast is lossless: cut is strictly below the head's vector index.
-            self.frames.resize(cut as usize + 1, Frame::empty());
+            // The cut's offset is below the last retained frame's index.
+            let offset = self.relative_cut(cut);
+            self.frames.resize(offset as usize + 1, Frame::empty());
         }
         self.term = term;
         Ok(Output::RolledBack(cut))
@@ -408,6 +415,12 @@ struct View {
     revision: Stamp,
     local: Image,
     global: Image,
+}
+
+#[derive(Clone)]
+struct RecoveryView {
+    revision: Version,
+    image: Image,
 }
 
 impl Clone for View {
@@ -672,6 +685,18 @@ impl Tx {
         }
         true
     }
+
+    fn has_concurrent_map_creation(&self, head: &Frame) -> bool {
+        let mut i = 0;
+        while i < self.views.0.len() {
+            let (map, view) = &self.views.0[i];
+            if view.birth.is_none() && head.births.index(map).is_some() {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
 }
 
 fn cell_value(cell: Option<Cell>) -> Option<Bytes> {
@@ -767,6 +792,73 @@ pub enum Output {
     RollbackRejected,
 }
 
+pub type WriteSet = Vec<(Address, Option<Bytes>)>;
+
+pub struct SnapshotMap {
+    pub name: Bytes,
+    pub revision: Version,
+    pub cells: Vec<(Bytes, Version, Bytes)>,
+}
+
+fn keep_other_map(out: &mut Vec<(Address, Cell)>, row: &(Address, Cell), map: &Bytes) {
+    if !row.0.map.same(map) {
+        out.push((row.0.clone(), row.1.clone()));
+    }
+}
+
+fn without_map(data: &Data, map: &Bytes) -> Data {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.0.len() {
+        keep_other_map(&mut out, &data.0[i], map);
+        i += 1;
+    }
+    Assoc(out)
+}
+
+fn add_snapshot_map(frame: &mut Frame, map: &SnapshotMap, identity: u64) -> bool {
+    if map.revision > frame.version {
+        return false;
+    }
+    if let Some(previous) = frame.births.get(&map.name) {
+        if previous.identity == identity {
+            return false;
+        }
+    }
+    // A snapshot updates each included map. An omitted map is not a deletion.
+    frame.data = without_map(&frame.data, &map.name);
+    let stamp = Stamp {
+        version: map.revision,
+        identity,
+    };
+    frame.births.set(map.name.clone(), stamp);
+    if map.revision == 0 {
+        frame.revisions = frame.revisions.erase(&map.name);
+    } else {
+        frame.revisions.set(map.name.clone(), stamp);
+    }
+    let mut j = 0;
+    while j < map.cells.len() {
+        let (key, written, value) = &map.cells[j];
+        let address = Address {
+            map: map.name.clone(),
+            key: key.clone(),
+        };
+        if *written == 0 || *written > map.revision || frame.data.index(&address).is_some() {
+            return false;
+        }
+        frame.data.0.push((
+            address,
+            Cell {
+                version: *written,
+                value: value.clone(),
+            },
+        ));
+        j += 1;
+    }
+    true
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     /// The action is not enabled in the current state.
@@ -775,9 +867,16 @@ pub enum Error {
     Exhausted,
 }
 
+pub enum CommitPreparation {
+    ReadOnly,
+    Rejected(Outcome),
+    Applied(Version, Term, WriteSet),
+}
+
 pub struct Store {
     history: History,
     txs: Assoc<Attempt, Tx>,
+    recovery_views: Assoc<Bytes, RecoveryView>,
 }
 
 impl Store {
@@ -785,7 +884,17 @@ impl Store {
         Self {
             history: History::new(term),
             txs: Assoc::new(),
+            recovery_views: Assoc::new(),
         }
+    }
+
+    pub fn clear_idle(&mut self) -> Result<(), Error> {
+        if !self.txs.0.is_empty() {
+            return Err(Error::Disabled);
+        }
+        self.history = History::new(0);
+        self.recovery_views = Assoc::new();
+        Ok(())
     }
 
     /// Execute one transition. A returned error leaves the store and attempt state unchanged.
@@ -842,6 +951,446 @@ impl Store {
             Action::CommitResult(tx, result) => self.finish(tx, result),
             Action::Compact(version) => Ok(Output::Compacted(self.history.compact(version))),
             Action::Rollback(version, term) => self.history.rollback(version, term),
+        }
+    }
+
+    /// CCF commit preparation. Submitting a locally applied write set and
+    /// recording its final outcome remain separate operations.
+    pub fn prepare_ccf_commit(&mut self, tx: Attempt) -> Result<CommitPreparation, Error> {
+        let i = self.tx_index(tx)?;
+        let t = &self.txs.0[i].1;
+        if !matches!(t.phase, Phase::Committing) {
+            return Err(Error::Disabled);
+        }
+        // CCF reserves map names conservatively, even for an absent map that
+        // the attempt only acquired. The abstract model permits this conflict.
+        if t.unavailable || t.has_concurrent_map_creation(self.history.head()) {
+            return Ok(CommitPreparation::Rejected(Outcome::Conflict));
+        }
+        if t.pending.0.is_empty() {
+            return Ok(CommitPreparation::ReadOnly);
+        }
+        if let Some(snapshot) = t.snapshot {
+            if snapshot.term != self.history.term {
+                // CCF checks conflicts before requesting a version in the
+                // current term, so lineage or dependency failure takes priority.
+                let outcome = if t.valid_lineage(&self.history)
+                    && t.valid_dependencies(&self.history.head().data)
+                {
+                    Outcome::NoReplicate
+                } else {
+                    Outcome::Conflict
+                };
+                return Ok(CommitPreparation::Rejected(outcome));
+            }
+        }
+        match self.apply(tx) {
+            Ok(Output::Applied(version, term, writes)) => {
+                Ok(CommitPreparation::Applied(version, term, writes))
+            }
+            Err(Error::Disabled) => Ok(CommitPreparation::Rejected(Outcome::Conflict)),
+            Err(Error::Exhausted) => Err(Error::Exhausted),
+            Ok(_) => Err(Error::Disabled),
+        }
+    }
+
+    pub fn acquire_ccf(&mut self, tx: Attempt, map: Bytes) -> Result<Output, Error> {
+        let i = self.tx_index(tx)?;
+        let t = &mut self.txs.0[i].1;
+        let Some(snapshot) = t.snapshot else {
+            return Err(Error::Disabled);
+        };
+        if !matches!(t.phase, Phase::Active) || t.views.index(&map).is_some() {
+            return Err(Error::Disabled);
+        }
+        if snapshot.version < self.history.frames[0].version {
+            t.unavailable = true;
+            return Ok(Output::Unavailable);
+        }
+        if let Some(global) = self.recovery_views.get(&map) {
+            let local = self.history.at_cut(snapshot.version);
+            let birth = local.births.get(&map);
+            if birth.is_some() {
+                let revision = local.revision(&map);
+                if revision.version < global.revision {
+                    t.unavailable = true;
+                    return Ok(Output::Unavailable);
+                }
+                let local_image = image(&local.data, &map);
+                t.views.set(
+                    map,
+                    View {
+                        birth,
+                        revision,
+                        local: local_image,
+                        global: global.image,
+                    },
+                );
+                return Ok(Output::Acquired(revision.version, global.revision));
+            }
+        }
+        t.acquire(&self.history, map)
+    }
+
+    pub fn compact_ccf(&mut self, version: Version) -> Output {
+        let previous = self.history.global;
+        let cut = self.history.compact(version);
+        if previous <= version && cut == version {
+            let frame = self.history.at_cut(cut);
+            let mut retained = Assoc::new();
+            let mut i = 0;
+            while i < self.recovery_views.0.len() {
+                Self::retain_recovery_view(&mut retained, frame, &self.recovery_views.0[i]);
+                i += 1;
+            }
+            self.recovery_views = retained;
+        }
+        Output::Compacted(cut)
+    }
+
+    /// Swap the selected map histories during recovery. Both stores must be
+    /// quiescent. The receiving store keeps its own global cut; the swapped
+    /// maps keep the per-map committed images from their original store.
+    pub fn swap_recovery_maps(
+        &mut self,
+        source: &mut Store,
+        names: Vec<Bytes>,
+    ) -> Result<(), Error> {
+        if !self.txs.0.is_empty()
+            || !source.txs.0.is_empty()
+            || source.history.head().version > self.history.head().version
+        {
+            return Err(Error::Disabled);
+        }
+        let my_identity = self.history.next_identity;
+        let their_identity = source.history.next_identity;
+        if my_identity == u64::MAX || their_identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+        let my_frames = Self::recovery_frames(&self.history, &source.history, &names, my_identity);
+        let their_frames =
+            Self::recovery_frames(&source.history, &self.history, &names, their_identity);
+        let mut my_views = self.recovery_views.clone();
+        let mut their_views = source.recovery_views.clone();
+        let mut i = 0;
+        while i < names.len() {
+            let name = &names[i];
+            my_views.set(name.clone(), source.recovery_view(name));
+            their_views.set(name.clone(), self.recovery_view(name));
+            i += 1;
+        }
+        self.history.frames = my_frames;
+        source.history.frames = their_frames;
+        self.history.next_identity = my_identity + 1;
+        source.history.next_identity = their_identity + 1;
+        self.recovery_views = my_views;
+        source.recovery_views = their_views;
+        Ok(())
+    }
+
+    fn recovery_view(&self, name: &Bytes) -> RecoveryView {
+        if let Some(view) = self.recovery_views.get(name) {
+            return view;
+        }
+        let frame = self.history.at_cut(self.history.global);
+        RecoveryView {
+            revision: frame.revision(name).version,
+            image: image(&frame.data, name),
+        }
+    }
+
+    pub fn snapshot_at_ccf(&mut self, tx: Attempt, version: Version) -> Result<Output, Error> {
+        let i = self.tx_index(tx)?;
+        let t = &mut self.txs.0[i].1;
+        if !matches!(t.phase, Phase::Active)
+            || t.snapshot.is_some()
+            || version < self.history.frames[0].version
+            || version > self.history.head().version
+        {
+            return Err(Error::Disabled);
+        }
+        let term = self.history.term;
+        t.snapshot = Some(Snapshot { version, term });
+        Ok(Output::Snapshot(version, self.history.global, term))
+    }
+
+    /// Observe an already acquired handle after successful CCF commit.
+    /// Evaluating on a temporary attempt cannot change dependencies or stage writes.
+    pub fn inspect_finished(
+        &self,
+        tx: Attempt,
+        map: Bytes,
+        op: Operation,
+    ) -> Result<Output, Error> {
+        let i = self.tx_index(tx)?;
+        let t = &self.txs.0[i].1;
+        if !matches!(t.phase, Phase::Finished)
+            || matches!(op, Operation::Write(..) | Operation::Clear)
+        {
+            return Err(Error::Disabled);
+        }
+        let mut view = t.clone();
+        view.phase = Phase::Active;
+        view.operate(map, op)
+    }
+
+    pub fn pending_writes(&self, tx: Attempt) -> Result<WriteSet, Error> {
+        let i = self.tx_index(tx)?;
+        let t = &self.txs.0[i].1;
+        if !matches!(t.phase, Phase::Active) {
+            return Err(Error::Disabled);
+        }
+        Ok(reported_writes(&t.pending))
+    }
+
+    pub fn map_revision_at(&self, version: Version, map: &Bytes) -> Option<Version> {
+        let frame = self.history.at_cut(version);
+        if frame.births.index(map).is_none() {
+            return None;
+        }
+        Some(frame.revision(map).version)
+    }
+
+    pub fn snapshot_maps(&self, version: Version) -> Result<Vec<SnapshotMap>, Error> {
+        if version < self.history.global || version > self.history.head().version {
+            return Err(Error::Disabled);
+        }
+        let frame = self.history.at_cut(version);
+        let mut maps = Vec::new();
+        let mut i = 0;
+        while i < frame.births.0.len() {
+            let name = &frame.births.0[i].0;
+            let mut cells = Vec::new();
+            let mut j = 0;
+            while j < frame.data.0.len() {
+                let (address, cell) = &frame.data.0[j];
+                if address.map.same(name) {
+                    cells.push((address.key.clone(), cell.version, cell.value.clone()));
+                }
+                j += 1;
+            }
+            maps.push(SnapshotMap {
+                name: name.clone(),
+                revision: frame.revision(name).version,
+                cells,
+            });
+            i += 1;
+        }
+        Ok(maps)
+    }
+
+    /// Install a snapshot as a new irrevocable history base. The image is
+    /// validated completely before discarding any current frames.
+    pub fn install_snapshot(
+        &mut self,
+        version: Version,
+        maps: Vec<SnapshotMap>,
+    ) -> Result<(), Error> {
+        if version < self.history.global {
+            return Err(Error::Disabled);
+        }
+        let identity = self.history.next_identity;
+        if identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+
+        let mut frame = self.history.at_cut(version).clone();
+        frame.version = version;
+        let mut i = 0;
+        while i < maps.len() {
+            if !add_snapshot_map(&mut frame, &maps[i], identity) {
+                return Err(Error::Disabled);
+            }
+            i += 1;
+        }
+        let mut frames = Vec::new();
+        frames.push(frame);
+        self.history.frames = frames;
+        self.history.next_identity = identity + 1;
+        self.history.global = version;
+        let mut i = 0;
+        while i < maps.len() {
+            self.recovery_views = self.recovery_views.erase(&maps[i].name);
+            i += 1;
+        }
+        Ok(())
+    }
+
+    fn retain_recovery_view(
+        out: &mut Assoc<Bytes, RecoveryView>,
+        frame: &Frame,
+        row: &(Bytes, RecoveryView),
+    ) {
+        if frame.revision(&row.0).version < row.1.revision {
+            out.0.push((row.0.clone(), row.1.clone()));
+        }
+    }
+
+    fn copy_recovery_map(dst: &mut Frame, src: &Frame, name: &Bytes, identity: u64) {
+        dst.data = without_map(&dst.data, name);
+        if let Some(birth) = src.births.get(name) {
+            dst.births.set(
+                name.clone(),
+                Stamp {
+                    version: birth.version,
+                    identity,
+                },
+            );
+        } else {
+            dst.births = dst.births.erase(name);
+        }
+        if let Some(revision) = src.revisions.get(name) {
+            dst.revisions.set(
+                name.clone(),
+                Stamp {
+                    version: revision.version,
+                    identity,
+                },
+            );
+        } else {
+            dst.revisions = dst.revisions.erase(name);
+        }
+        let mut i = 0;
+        while i < src.data.0.len() {
+            Self::append_recovery_row(&mut dst.data, &src.data.0[i], name);
+            i += 1;
+        }
+    }
+
+    fn append_recovery_row(data: &mut Data, row: &(Address, Cell), name: &Bytes) {
+        if row.0.map.same(name) {
+            data.0.push((row.0.clone(), row.1.clone()));
+        }
+    }
+
+    fn recovery_frame(base: &Frame, source: &History, names: &Vec<Bytes>, identity: u64) -> Frame {
+        let mut next = base.clone();
+        let donor = source.at_cut(base.version);
+        let mut i = 0;
+        while i < names.len() {
+            Self::copy_recovery_map(&mut next, donor, &names[i], identity);
+            i += 1;
+        }
+        next
+    }
+
+    fn recovery_frames(
+        destination: &History,
+        source: &History,
+        names: &Vec<Bytes>,
+        identity: u64,
+    ) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut i = 0;
+        while i < destination.frames.len() {
+            frames.push(Self::recovery_frame(
+                &destination.frames[i],
+                source,
+                names,
+                identity,
+            ));
+            i += 1;
+        }
+        frames
+    }
+
+    /// Apply an already validated ordinary ledger entry at the next version.
+    /// Import does not set the term for subsequent locally authored commits.
+    pub fn replay_next(&mut self, version: Version, writes: WriteSet) -> Result<(), Error> {
+        let head = self.history.head();
+        let identity = self.history.next_identity;
+        if head.version == u64::MAX || identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+        if version != head.version + 1 {
+            return Err(Error::Disabled);
+        }
+        let mut pending = Assoc::new();
+        let mut i = 0;
+        while i < writes.len() {
+            let (address, value) = &writes[i];
+            if pending.index(address).is_some() {
+                return Err(Error::Disabled);
+            }
+            let write = match value {
+                Some(bytes) => Write::Put(bytes.clone()),
+                None => Write::Remove,
+            };
+            pending.0.push((address.clone(), write));
+            i += 1;
+        }
+        let next = head.advance(version, identity, &pending);
+        self.history.frames.push(next);
+        self.history.next_identity += 1;
+        Ok(())
+    }
+
+    /// CCF historical queries can replay a single later entry into an empty
+    /// store. Missing-key deletions may be visible to a historical diff.
+    pub fn replay_ccf(
+        &mut self,
+        version: Version,
+        writes: WriteSet,
+        track_deletes: bool,
+    ) -> Result<(), Error> {
+        if version != 0 && version <= self.history.head().version {
+            // Replacement of a provisional suffix is atomic even if the
+            // replacement write set fails validation.
+            let mut replacement = Store::new(self.history.term);
+            replacement.history = self.history.clone();
+            if !matches!(
+                replacement
+                    .history
+                    .rollback(version - 1, self.history.term)?,
+                Output::RolledBack(_)
+            ) {
+                return Err(Error::Disabled);
+            }
+            replacement.replay_ccf_next(version, writes, track_deletes)?;
+            self.history = replacement.history;
+            return Ok(());
+        }
+        self.replay_ccf_next(version, writes, track_deletes)
+    }
+
+    fn replay_ccf_next(
+        &mut self,
+        version: Version,
+        writes: WriteSet,
+        track_deletes: bool,
+    ) -> Result<(), Error> {
+        let mut maps = Vec::new();
+        if track_deletes {
+            let mut i = 0;
+            while i < writes.len() {
+                maps.push(writes[i].0.map.clone());
+                i += 1;
+            }
+        }
+        if version > 1 && self.history.head().version == 0 {
+            if !self.txs.0.is_empty() {
+                return Err(Error::Disabled);
+            }
+            let mut isolated = Store::new(self.history.term);
+            isolated.history.next_identity = self.history.next_identity;
+            isolated.install_snapshot(version - 1, Vec::new())?;
+            isolated.replay_next(version, writes)?;
+            self.history = isolated.history;
+        } else {
+            self.replay_next(version, writes)?;
+        }
+        self.stamp_historical_maps(version, &maps);
+        Ok(())
+    }
+
+    fn stamp_historical_maps(&mut self, version: Version, maps: &Vec<Bytes>) {
+        let identity = self.history.next_identity - 1;
+        let at = self.history.frames.len() - 1;
+        let revisions = &mut self.history.frames[at].revisions;
+        let mut i = 0;
+        while i < maps.len() {
+            revisions.set(maps[i].clone(), Stamp { version, identity });
+            i += 1;
         }
     }
 

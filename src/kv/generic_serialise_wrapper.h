@@ -437,6 +437,11 @@ namespace ccf::kv
       domain_restriction(domain_restriction)
     {}
 
+    [[nodiscard]] EntryType get_entry_type() const
+    {
+      return entry_type;
+    }
+
     ccf::ClaimsDigest&& consume_claims_digest() override
     {
       return std::move(claims_digest);

@@ -322,6 +322,7 @@ add_ccf_static_library(
 
 # CCF kv lib
 option(CCF_KV_TRACING "Enable test-only KV semantic trace capture" OFF)
+option(BUILD_RUST_KV_TESTS "Build the test-only Rust KV adapter" OFF)
 set(
   CCF_KV_TRACE_CHECKER
   ""
@@ -716,10 +717,13 @@ if(BUILD_TESTS)
     add_unit_test(
       kv_test
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_test.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_contract.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_ledger_contract.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_contention.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_serialisation.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/raw_writer.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_snapshot.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_snapshot_contract.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_dynamic_tables.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_trace.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/test/kv_fuzzer.cpp
@@ -728,6 +732,9 @@ if(BUILD_TESTS)
       kv_test
       PRIVATE ${CMAKE_THREAD_LIBS_INIT} http_parser ccf_kv
     )
+    if(BUILD_RUST_KV_TESTS)
+      include(${CCF_DIR}/cmake/kv_rust_tests.cmake)
+    endif()
     if(CCF_KV_TRACING AND CCF_KV_TRACE_CHECKER)
       add_test(
         NAME kv_trace_validation

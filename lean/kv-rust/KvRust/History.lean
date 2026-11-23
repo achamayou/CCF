@@ -100,10 +100,27 @@ theorem history_head (history : Spike.engine.History) (prior : List Spike.engine
   rw [alloc.vec.Vec.getElem?_Nat_eq, h, hi']
   simp
 
-/-- The extracted cut lookup clamps to the last retained vector index. -/
+/-- For histories generated from the model's initial state, cut offsets are absolute. -/
+theorem history_relative_cut_zero (s : Spike.engine.History) (cut : U64)
+    (hNonempty : s.frames.val ≠ [])
+    (hIndexed : ∀ i (hi : i < s.frames.val.length), s.frames.val[i].version.val = i)
+    : Spike.engine.History.relative_cut s cut = .ok cut := by
+  have hb : 0 < s.frames.val.length := List.length_pos_iff.mpr hNonempty
+  have hBase := hIndexed 0 hb
+  have hRead : s.frames.val[0]? = some s.frames.val[0] := List.getElem?_eq_getElem hb
+  have hZero : s.frames.val[0].version = 0#u64 := UScalar.eq_of_val_eq hBase
+  simp [Spike.engine.History.relative_cut, alloc.vec.Vec.index_slice_index,
+    alloc.vec.Vec.index_usize, alloc.vec.Vec.getElem?_Nat_eq, hRead, hZero]
+  obtain ⟨offset, hr, hv⟩ := returning
+    (U64.sub_spec (x := cut) (y := 0#u64) (by scalar_tac))
+  have he : offset = cut := UScalar.eq_of_val_eq (by simpa using hv)
+  simpa [he] using hr
+
+/-- With a zero base, the extracted cut lookup clamps to the last retained vector index. -/
 theorem history_at_cut_index (s : Spike.engine.History) (cut : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
     (hframes : s.frames.val = prior ++ [head])
+    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
     : WP.spec (Spike.engine.History.at_cut s cut)
         (fun f => s.frames.val[min cut.val prior.length]? = some f) := by
   have hlen : (alloc.vec.Vec.len s.frames).val = prior.length + 1 := by simp [hframes]
@@ -111,6 +128,7 @@ theorem history_at_cut_index (s : Spike.engine.History) (cut : U64)
   have hsize : s.frames.val.length = prior.length + 1 := by simp [hframes]
   have hbounded := alloc.vec.Vec.len_ineq s.frames
   unfold Spike.engine.History.at_cut
+  simp only [hzero, bind_ok]
   apply WP.spec_bind
     (Usize.sub_spec (x := alloc.vec.Vec.len s.frames) (y := 1#usize) (by omega))
   intro i hi
@@ -179,11 +197,12 @@ theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
     (hframes : s.frames.val = prior ++ [head])
     (hmodel : model.history = modelFrames s project)
+    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
     (hversions
       : ∀ i (hi : i < s.frames.val.length), (project s.frames.val[i]).version = i)
     : WP.spec (Spike.engine.History.at_cut s cut)
         (fun f => project f = atCut model cut.val ∧ project f ∈ model.history) := by
-  apply WP.spec_mono (history_at_cut_index s cut prior head hframes)
+  apply WP.spec_mono (history_at_cut_index s cut prior head hframes hzero)
   intro f hf
   have hlen : s.frames.val.length - 1 = prior.length := by simp [hframes]
   have he : model.history.find? (fun fr => decide (fr.version ≤ cut.val)) = some (project f) := by
@@ -240,6 +259,7 @@ theorem rollback_stale_term (s : Spike.engine.Store) (requested term : U64)
 theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
     (hframes : s.frames.val = prior ++ [head]) (hindex : head.version.val = prior.length)
+    (hzero : ∀ cut, Spike.engine.History.relative_cut s cut = .ok cut)
     (hcut : s.global.val ≤ requested.val) (hterm : s.term.val ≤ term.val)
     : ∃ cut after,
         Spike.engine.History.rollback s requested term
@@ -299,7 +319,7 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     refine ⟨cut, {s with frames, term}, ?_, hvalue, htake, rfl, rfl, rfl⟩
     simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
       history_head s prior head hframes, hcalc, hsmall, ← show i = UScalar.cast .Usize cut from rfl,
-      lift, hadd, hempty, hv]
+      hzero, lift, hadd, hempty, hv]
   · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl⟩
     · simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
         history_head s prior head hframes, hcalc, hsmall]
@@ -313,6 +333,7 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
     (hframes : s.history.frames.val = prior ++ [head])
     (hindex : head.version.val = prior.length)
+    (hzero : ∀ cut, Spike.engine.History.relative_cut s.history cut = .ok cut)
     (hversions
       : ∀ i (hi : i < s.history.frames.val.length),
           (project s.history.frames.val[i]).version = i)
@@ -332,7 +353,7 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
         ∧ after.history.next_identity = s.history.next_identity
         ∧ after.history.term = term := by
   obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht⟩ :=
-    history_rollback s.history requested term prior head hframes hindex hcut hterm
+    history_rollback s.history requested term prior head hframes hindex hzero hcut hterm
   have hmodelcut : cut.val = rollbackCut model requested.val := by
     simpa [rollbackCut, hglobal, hhead] using hvalue
   refine ⟨cut, {s with history := retained}, ?_, hmodelcut, htake, ?_, rfl, hg, hi, ht⟩
