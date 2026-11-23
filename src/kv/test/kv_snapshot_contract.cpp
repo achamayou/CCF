@@ -27,6 +27,36 @@ namespace
 }
 
 TEST_CASE(
+  "Private map recovery rejects a source ahead of the target" *
+  doctest::test_suite("snapshot"))
+{
+  using namespace ccf::kv;
+  test::TestStore target;
+  test::TestStore source;
+  const MapTypes::StringString map("private_map");
+  const auto put = [&](BackendStore& store, const char* value) {
+    auto tx = store.create_tx();
+    tx.rw(map)->put("key", value);
+    REQUIRE(tx.commit() == CommitResult::SUCCESS);
+  };
+  put(target, "target");
+  put(source, "source1");
+  put(source, "source2");
+
+  REQUIRE_THROWS_WITH_AS(
+    target.swap_private_maps(source),
+    "Invalid call to swap_private_maps. Source is at version 2 while "
+    "target is at 1",
+    std::runtime_error);
+  CHECK(target.current_version() == 1);
+  CHECK(source.current_version() == 2);
+  auto target_tx = target.create_read_only_tx();
+  auto source_tx = source.create_read_only_tx();
+  CHECK(target_tx.ro(map)->get("key") == "target");
+  CHECK(source_tx.ro(map)->get("key") == "source2");
+}
+
+TEST_CASE(
   "Snapshots are not subject to the transaction size limit" *
   doctest::test_suite("snapshot"))
 {

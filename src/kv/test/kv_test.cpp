@@ -21,7 +21,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
 #undef FAIL
-#include <cstring>
 #include <functional>
 #include <random>
 #include <set>
@@ -121,33 +120,6 @@ TEST_CASE("Store error handling")
   auto encryptor = std::make_shared<ccf::kv::NullTxEncryptor>();
   kv_store.set_encryptor(encryptor);
   MapTypes::StringString map("public:map");
-
-  // Serialises a public-only write set at the given seqno, containing an empty
-  // change set for each of map_names in turn
-  auto serialise_write_set =
-    [&encryptor](ccf::SeqNo seqno, const std::vector<std::string>& map_names) {
-      ccf::kv::RawKvStoreSerialiser serialiser(
-        encryptor, ccf::TxID{0, seqno}, ccf::kv::EntryType::WriteSet, 0);
-      for (const auto& map_name : map_names)
-      {
-        serialiser.start_map(map_name, ccf::kv::SecurityDomain::PUBLIC);
-        serialiser.serialise_entry_version(0);
-        serialiser.serialise_count_header(0); // reads
-        serialiser.serialise_count_header(0); // writes
-        serialiser.serialise_count_header(0); // removes
-      }
-      return serialiser.get_raw_data();
-    };
-
-  auto edit_header =
-    [](
-      std::vector<uint8_t>& data,
-      const std::function<void(ccf::kv::SerialisedEntryHeader&)>& edit) {
-      ccf::kv::SerialisedEntryHeader header;
-      std::memcpy(&header, data.data(), sizeof(header));
-      edit(header);
-      std::memcpy(data.data(), &header, sizeof(header));
-    };
 
   SUBCASE("Readiness defaults to Ready and can be set/reset")
   {
@@ -250,73 +222,6 @@ TEST_CASE("Store error handling")
       std::logic_error);
   }
 
-  SUBCASE("swap_private_maps rejects a source ahead of the target")
-  {
-    ccf::kv::Store ahead;
-    ahead.set_encryptor(encryptor);
-    MapTypes::StringString ahead_map("public:map");
-
-    {
-      auto tx = kv_store.create_tx();
-      tx.rw(map)->put("k", "v");
-      REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
-    }
-
-    {
-      auto tx = ahead.create_tx();
-      tx.rw(ahead_map)->put("k1", "v1");
-      REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
-    }
-    {
-      auto tx = ahead.create_tx();
-      tx.rw(ahead_map)->put("k2", "v2");
-      REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
-    }
-
-    REQUIRE(ahead.current_version() > kv_store.current_version());
-    REQUIRE_THROWS_WITH_AS(
-      kv_store.swap_private_maps(ahead),
-      "Invalid call to swap_private_maps. Source is at version 2 while "
-      "target is at 1",
-      std::runtime_error);
-  }
-
-  SUBCASE("deserialize rejects a transaction with duplicate map writes")
-  {
-    // Equivalent to the duplicate map check in deserialise_snapshot() (see
-    // "Malformed snapshots are rejected" in kv_snapshot.cpp), for a regular
-    // transaction entry.
-    auto data = serialise_write_set(1, {"public:dup", "public:dup"});
-
-    ccf::kv::Store target;
-    target.set_encryptor(encryptor);
-
-    REQUIRE(target.deserialize(data)->apply() == ccf::kv::ApplyResult::FAIL);
-  }
-
-  SUBCASE("deserialize rejects trailing content after the last map")
-  {
-    auto data = serialise_write_set(1, {"public:m"});
-
-    // Append bytes which do not form another map. The header records the
-    // entry's size, so it is rewritten to cover them too.
-    const std::vector<uint8_t> trailing = {0xAA, 0xBB, 0xCC, 0xDD};
-    data.insert(data.end(), trailing.begin(), trailing.end());
-    edit_header(data, [&trailing](auto& header) {
-      header.set_size(header.size + trailing.size());
-    });
-
-    ccf::kv::Store target;
-    target.set_encryptor(encryptor);
-
-    // The trailing bytes are read as the size prefix of another map's name,
-    // and rejected as too short to be one
-    REQUIRE_THROWS_WITH_AS(
-      target.deserialize(data)->apply(),
-      "Expected 8 bytes for fixed-size entry, found only 4",
-      std::runtime_error);
-  }
-
   SUBCASE("start_map rejects a private map without an encryptor")
   {
     ccf::kv::RawKvStoreSerialiser serialiser(
@@ -325,36 +230,6 @@ TEST_CASE("Store error handling")
       serialiser.start_map("a_private_map", ccf::kv::SecurityDomain::PRIVATE),
       "Private map a_private_map cannot be serialised without an encryptor",
       ccf::kv::KvSerialiserException);
-  }
-
-  SUBCASE(
-    "deserialize rejects an entry whose header size does not match its "
-    "actual size")
-  {
-    auto data = serialise_write_set(1, {"public:m"});
-    edit_header(data, [](auto& header) { header.set_size(header.size + 4); });
-
-    ccf::kv::Store target;
-    target.set_encryptor(encryptor);
-    REQUIRE_THROWS_WITH_AS(
-      target.deserialize(data)->apply(),
-      doctest::Contains("does not match size of entry"),
-      std::logic_error);
-  }
-
-  SUBCASE("deserialize rejects an entry with an unsupported format version")
-  {
-    auto data = serialise_write_set(1, {"public:m"});
-    edit_header(data, [](auto& header) {
-      header.version = ccf::kv::entry_format_v1 + 1;
-    });
-
-    ccf::kv::Store target;
-    target.set_encryptor(encryptor);
-    REQUIRE_THROWS_WITH_AS(
-      target.deserialize(data)->apply(),
-      "Cannot deserialise entry format 2",
-      std::logic_error);
   }
 }
 

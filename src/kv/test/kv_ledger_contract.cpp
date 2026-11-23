@@ -12,6 +12,7 @@
 #include "node/encryptor.h"
 
 #include <algorithm>
+#include <cstring>
 #include <doctest/doctest.h>
 #undef FAIL
 #include <span>
@@ -29,6 +30,75 @@ namespace
     using NumNum = ccf::kv::Map<size_t, size_t>;
     using NumString = ccf::kv::Map<size_t, std::string>;
   };
+}
+
+TEST_CASE("Invalid ledger entries do not advance the store")
+{
+  using namespace ccf::kv;
+  test::TestStore target;
+  const auto encryptor = std::make_shared<NullTxEncryptor>();
+  const auto write_set = [&](const std::vector<std::string>& map_names) {
+    RawKvStoreSerialiser serialiser(
+      encryptor, ccf::TxID{0, 1}, EntryType::WriteSet, 0);
+    for (const auto& map_name : map_names)
+    {
+      serialiser.start_map(map_name, SecurityDomain::PUBLIC);
+      serialiser.serialise_entry_version(NoVersion);
+      serialiser.serialise_count_header(0); // reads
+      serialiser.serialise_count_header(0); // writes
+      serialiser.serialise_count_header(0); // removes
+    }
+    return serialiser.get_raw_data();
+  };
+  const auto edit_header = [](std::vector<uint8_t>& data, auto edit) {
+    SerialisedEntryHeader header;
+    std::memcpy(&header, data.data(), sizeof(header));
+    edit(header);
+    std::memcpy(data.data(), &header, sizeof(header));
+  };
+
+  SUBCASE("Duplicate map writes")
+  {
+    REQUIRE(
+      target.deserialize(write_set({"public:dup", "public:dup"}))->apply() ==
+      ApplyResult::FAIL);
+  }
+
+  SUBCASE("Trailing content after the last map")
+  {
+    auto data = write_set({"public:m"});
+    constexpr size_t trailing_size = 4;
+    data.resize(data.size() + trailing_size, 0xAA);
+    edit_header(
+      data, [](auto& header) { header.set_size(header.size + trailing_size); });
+    REQUIRE_THROWS_WITH_AS(
+      target.deserialize(data)->apply(),
+      "Expected 8 bytes for fixed-size entry, found only 4",
+      std::runtime_error);
+  }
+
+  SUBCASE("Header size does not match the entry size")
+  {
+    auto data = write_set({"public:m"});
+    edit_header(data, [](auto& header) { header.set_size(header.size + 4); });
+    REQUIRE_THROWS_WITH_AS(
+      target.deserialize(data)->apply(),
+      doctest::Contains("does not match size of entry"),
+      std::logic_error);
+  }
+
+  SUBCASE("Unsupported entry format")
+  {
+    auto data = write_set({"public:m"});
+    edit_header(
+      data, [](auto& header) { header.version = entry_format_v1 + 1; });
+    REQUIRE_THROWS_WITH_AS(
+      target.deserialize(data)->apply(),
+      "Cannot deserialise entry format 2",
+      std::logic_error);
+  }
+
+  CHECK(target.current_version() == NoVersion);
 }
 
 TEST_CASE(

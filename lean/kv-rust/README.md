@@ -68,9 +68,10 @@ The adapter serializes access to the Rust store and gives CCF's codecs and conse
 `kv_rust_interop_test` explicitly uses a Rust store and a C++ store to replay ordinary entries and restore snapshots in both directions.
 The default `kv_test` still uses C++ and runs its full suite, including cases not enabled for Rust.
 
-The Rust target runs 98 of the original 114 `kv_test` cases, including reserved writes, signature replay, in-place snapshot restore, private map recovery, and the concurrent operation fuzzer.
-The C++-only cases are `Map name parsing`, nine low-level reader/writer and entry-envelope cases in `kv_serialisation.cpp` and `raw_writer.cpp`, five snapshot codec cases in `kv_snapshot.cpp`, and `Store error handling`, which includes tests of the concrete C++ `AbstractMap` API and store readiness.
-Rust tests the snapshot, rollback, and term guards through its own interface; the C++ suite retains every original assertion.
+The targets share 100 contract cases, including reserved writes, signature replay, in-place snapshot restore, private map recovery, and the concurrent operation fuzzer.
+The shared cases include rejection of malformed ledger entries without advancing the store and rejection of an ahead-of-target recovery source without changing either store.
+The remaining C++-only cases are `Map name parsing`, nine low-level reader/writer and entry-envelope cases in `kv_serialisation.cpp` and `raw_writer.cpp`, five snapshot codec cases in `kv_snapshot.cpp`, and the rest of `Store error handling`, which includes checks of the concrete C++ `AbstractMap` API and store readiness.
+Rust also tests the snapshot, rollback, and term guards through its own interface.
 The shared snapshot restore tests cover historical encryption secrets and captured-public-map reuse.
 The same fuzzer schedules and assertions run on both backends, but the C++ trace reporter and trace-conformance runner are not wired to the Rust adapter.
 
@@ -158,6 +159,9 @@ Whole-map dependency validation now streams the committed rows instead of clonin
 The extracted comparison checks the same ordered key, value, and version pairs, including insertions and deletions.
 Two matched governance runs measured 24.7-26.0 us per Rust transaction before the change, 24.4-25.1 us after it, and 7.31-7.59 us for C++.
 Removing the temporary image eliminates its allocations, but these timings do not establish a consistent transaction speedup.
+Byte equality now uses the same bulk slice comparison for standalone byte keys as for full addresses.
+The extracted equality theorem is unchanged; lexicographic range comparisons still use the byte-order comparator.
+Matched timings did not establish a consistent gain from equality alone, and a separate single-write fast path was not retained because it did not consistently improve the logging workload.
 This benchmark still does not cover replicated CCF.
 
 ### Persistent storage experiment
