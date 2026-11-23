@@ -236,6 +236,9 @@ Across two paired runs and both key distributions, the 2,048-entry medians were 
 Full ordered scans took 3.02-3.37 us with copied vectors versus 10.45-19.37 us with stamps.
 At 8,192 entries the vector retains another 32 KiB of leaf links on each replacement, before directory, value, and allocator overhead.
 Stamps take eight bytes per allocated row slot instead, but the cost of sorting the full scan grows with map size.
+A benchmark-only dual radix keeps a second path-copied index from reverse write stamp to leaf link, avoiding both an order-vector copy on write and a sort on scan.
+At 2,048 entries after 128 scattered replacements, full scans took 9.0-15.1 us with the dual index versus 35.1-48.5 us with on-demand sorting, while pinned replacements took 0.39-0.97 us versus 0.15-0.20 us.
+The dual index tests retained roots, writes to earlier branches, and deletion, but adds a second arena whose allocation and reclamation costs are not qualified.
 These are component measurements, not matched transaction results.
 The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.
 The [address encoding proof](KvRust/RadixAddress.lean) covers the actual Rust packing code and shows that a shared radix can distinguish arbitrary map/key pairs, including empty and prefix-related byte strings.

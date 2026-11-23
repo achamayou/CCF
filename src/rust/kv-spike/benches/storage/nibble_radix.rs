@@ -3,7 +3,9 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{RADIX_LEAF_TAG as LEAF, RadixDir, get, put, remove, scan_leaves};
+use ccf_kv_spike::radix::{
+    RADIX_LEAF_TAG as LEAF, RadixDir, RadixRow, get, put, remove, scan_leaves,
+};
 use std::cmp::Reverse;
 
 #[path = "nibble_radix/retirement.rs"]
@@ -36,14 +38,23 @@ impl DirectoryOps for RadixDir {
     }
 }
 
-#[derive(Default)]
-pub struct NibbleRadix {
+pub struct NibbleRadix<V = Value> {
     dirs: Pool<RadixDir>,
-    rows: Pool<Row>,
+    rows: Pool<RadixRow<V>>,
     path: Vec<(u32, usize)>,
 }
 
-impl NibbleRadix {
+impl<V> Default for NibbleRadix<V> {
+    fn default() -> Self {
+        Self {
+            dirs: Pool::default(),
+            rows: Pool::default(),
+            path: Vec::new(),
+        }
+    }
+}
+
+impl<V> NibbleRadix<V> {
     fn first_leaf(&self, node: Link) -> Link {
         if node.leaf() {
             node
@@ -52,20 +63,35 @@ impl NibbleRadix {
         }
     }
 
-    fn write(&mut self, root: Link, key: &[u8], value: Value) -> (Link, Link) {
-        let (lookup, leaf, _) = put(
+    fn write(&mut self, root: Link, key: &[u8], value: V) -> (Link, Link, Option<Link>) {
+        let (lookup, leaf, replaced) = put(
             &mut self.dirs.slots,
             &mut self.dirs.free,
             &mut self.rows.slots,
             &mut self.rows.free,
             &mut self.path,
             root.0,
-            Row {
+            RadixRow {
                 key: key.into(),
                 value,
             },
         );
-        (Link(lookup), Link(leaf))
+        (Link(lookup), Link(leaf), replaced.map(Link))
+    }
+
+    fn read(&self, root: Link, key: &[u8]) -> Option<&V> {
+        get(self.dirs.as_slice(), self.rows.as_slice(), root.0, key)
+    }
+
+    fn erase(&mut self, root: Link, key: &[u8]) -> Link {
+        Link(remove(
+            &mut self.dirs.slots,
+            &mut self.dirs.free,
+            self.rows.as_slice(),
+            &mut self.path,
+            root.0,
+            key,
+        ))
     }
 }
 
@@ -81,7 +107,7 @@ pub(super) struct StampedRadix {
 impl StampedRadix {
     pub(super) fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
         let stamp = self.last.checked_add(1).expect("stamp space exhausted");
-        let (next, written) = self.index.write(root, key, value);
+        let (next, written, _) = self.index.write(root, key, value);
         let i = written.index();
         if i == self.stamps.len() {
             self.stamps.push(stamp);
@@ -104,6 +130,96 @@ impl StampedRadix {
             visit(&row.key, &row.value);
         }
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct DualRoot {
+    lookup: Link,
+    order: Link,
+}
+
+/// Benchmark-only exact ordered map. The second radix stores newest-write-first
+/// links, so publication copies paths rather than the whole scan vector.
+#[derive(Default)]
+pub(super) struct DualRadix {
+    lookup: NibbleRadix<(u64, Value)>,
+    order: NibbleRadix<Link>,
+    last: u64,
+}
+
+impl DualRadix {
+    fn newest_first(stamp: u64) -> [u8; 8] {
+        (!stamp).to_be_bytes()
+    }
+
+    pub(super) fn put(&mut self, root: DualRoot, key: &[u8], value: Value) -> DualRoot {
+        let stamp = self.last.checked_add(1).expect("stamp space exhausted");
+        let (lookup, leaf, replaced) = self.lookup.write(root.lookup, key, (stamp, value));
+        let mut order = root.order;
+        if let Some(old) = replaced {
+            let old_stamp = self.lookup.rows.get(old.index()).value.0;
+            order = self.order.erase(order, &Self::newest_first(old_stamp));
+        }
+        order = self.order.write(order, &Self::newest_first(stamp), leaf).0;
+        self.last = stamp;
+        DualRoot { lookup, order }
+    }
+
+    pub(super) fn get(&self, root: DualRoot, key: &[u8]) -> Option<&Value> {
+        self.lookup.read(root.lookup, key).map(|row| &row.1)
+    }
+
+    fn remove(&mut self, root: DualRoot, key: &[u8]) -> DualRoot {
+        let Some((stamp, _)) = self.lookup.read(root.lookup, key) else {
+            return root;
+        };
+        let order = self.order.erase(root.order, &Self::newest_first(*stamp));
+        let lookup = self.lookup.erase(root.lookup, key);
+        DualRoot { lookup, order }
+    }
+
+    pub(super) fn scan(&self, root: DualRoot, mut visit: impl FnMut(&[u8], &Value)) {
+        for node in scan_leaves(self.order.dirs.as_slice(), root.order.0) {
+            let link = self.order.rows.get(Link(node).index()).value;
+            let row = self.lookup.rows.get(link.index());
+            visit(&row.key, &row.value.1);
+        }
+    }
+}
+
+pub(super) fn check_dual_order() {
+    let mut arena = DualRadix::default();
+    let base = arena.put(DualRoot::default(), b"a", [1; 64]);
+    let base = arena.put(base, b"", [2; 64]);
+    let base = arena.put(base, b"aa", [3; 64]);
+    let replaced = arena.put(base, b"a", [4; 64]);
+    let removed = arena.remove(replaced, b"");
+    let fork = arena.put(base, b"\xff", [5; 64]);
+    let scan = |root| {
+        let mut rows = Vec::new();
+        arena.scan(root, |k, v| rows.push((k.to_vec(), v[0])));
+        rows
+    };
+    assert_eq!(
+        scan(base),
+        [(b"aa".to_vec(), 3), (vec![], 2), (b"a".to_vec(), 1)]
+    );
+    assert_eq!(
+        scan(replaced),
+        [(b"a".to_vec(), 4), (b"aa".to_vec(), 3), (vec![], 2)]
+    );
+    assert_eq!(scan(removed), [(b"a".to_vec(), 4), (b"aa".to_vec(), 3)]);
+    assert_eq!(
+        scan(fork),
+        [
+            (b"\xff".to_vec(), 5),
+            (b"aa".to_vec(), 3),
+            (vec![], 2),
+            (b"a".to_vec(), 1)
+        ]
+    );
+    assert_eq!(arena.get(removed, b""), None);
+    assert_eq!(arena.get(base, b""), Some(&[2; 64]));
 }
 
 pub(super) fn check_stamp_reuse() {
@@ -133,7 +249,7 @@ impl ByteIndex for NibbleRadix {
     type Root = Link;
 
     fn get(&self, root: Link, key: &[u8]) -> Option<&Value> {
-        get(self.dirs.as_slice(), self.rows.as_slice(), root.0, key)
+        self.read(root, key)
     }
 
     fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
@@ -141,14 +257,7 @@ impl ByteIndex for NibbleRadix {
     }
 
     fn remove(&mut self, root: Link, key: &[u8]) -> Link {
-        Link(remove(
-            &mut self.dirs.slots,
-            &mut self.dirs.free,
-            self.rows.as_slice(),
-            &mut self.path,
-            root.0,
-            key,
-        ))
+        self.erase(root, key)
     }
 
     fn range(&self, root: Link, first: &[u8], last: &[u8], mut visit: impl FnMut(&[u8], &Value)) {
