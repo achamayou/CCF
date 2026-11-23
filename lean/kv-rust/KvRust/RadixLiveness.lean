@@ -151,6 +151,76 @@ private theorem remove_one_live_slot {α : Type} (slots : List (Option α))
           | none => exact h
           | some owner => exact h.cons owner
 
+private theorem recycled_directory_invariant
+    (before after : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (pins : List U32) (node : U32) (index : Usize)
+    (link : node.val = index.val + 1) (zero : radixReferences before.val pins node = 0)
+    (cleared : after.val[index.val]? = some none)
+    (keep : ∀ i, i ≠ index.val → after.val[i]? = before.val[i]?)
+    (valid : RadixDirectoryInvariant before)
+    : RadixDirectoryInvariant after := by
+  intro i dir live
+  have different : i ≠ index.val := by
+    intro same
+    rw [same, cleared] at live
+    cases live
+  have prior : before.val[i]? = some (some dir) := (keep i different).symm.trans live
+  obtain ⟨mask, children, cache, occupied⟩ := valid i dir prior
+  have notChild (child : U32) (member : child ∈ dir.children.val)
+      (nz : child ≠ 0#u32) : child.val - 1 ≠ index.val := by
+    intro same
+    have positive : 0 < child.val := by
+      by_contra no
+      have empty : (0#u32 : U32).val = 0 := rfl
+      exact nz (UScalar.eq_of_val_eq (by omega))
+    have retired : child = node := UScalar.eq_of_val_eq (by omega)
+    have listed : node ∈ pins ++ (before.val.filterMap id).flatMap (·.children.val) := by
+      apply List.mem_append_right
+      exact List.mem_flatMap.mpr ⟨dir, List.mem_filterMap.mpr
+        ⟨some dir, List.mem_iff_getElem?.mpr ⟨i, prior⟩, rfl⟩, retired ▸ member⟩
+    have count := List.count_pos_iff.mpr listed
+    unfold radixReferences at zero
+    omega
+  refine ⟨mask, ?_, ?_, occupied⟩
+  · intro child member nz untagged
+    obtain ⟨value, read⟩ := children child member nz untagged
+    exact ⟨value, (keep _ (notChild child member nz)).trans read⟩
+  · unfold RadixFirstCache at cache ⊢
+    refine ⟨cache.1, ?_⟩
+    by_cases tagged : (2147483648#u32 : U32) ≤ radixFirst dir
+    · simpa only [tagged, ite_true] using cache.2
+    · have h := cache.2
+      rw [ite_eq_right tagged] at h ⊢
+      obtain ⟨child, read, same⟩ := h
+      exact ⟨child, (keep _ (notChild _ (radix_first_mem dir cache.1) cache.1)).trans read, same⟩
+
+private theorem recycled_directory_knowledge
+    (before after : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (pins : List U32) (node : U32) (index : Usize)
+    (link : node.val = index.val + 1) (zero : radixReferences before.val pins node = 0)
+    (cleared : after.val[index.val]? = some none)
+    (keep : ∀ i, i ≠ index.val → after.val[i]? = before.val[i]?)
+    (keyOf : U32 → Option (List U8)) (known : RadixKnowledge before keyOf)
+    : RadixKnowledge after keyOf := by
+  intro i dir live
+  have different : i ≠ index.val := by
+    intro same
+    rw [same, cleared] at live
+    cases live
+  obtain ⟨root, height, rows, atRoot, tagged, projection, keys, uniform⟩ :=
+    known i dir ((keep i different).symm.trans live)
+  have newRoot : root ≠ node := fun eq => different (by rw [eq, link] at atRoot; omega)
+  have stillZero : radixReferences before.val (root :: pins) node = 0 := by
+    simpa [radixReferences, newRoot] using zero
+  refine ⟨root, height, rows, atRoot, tagged, ?_, keys, uniform⟩
+  apply radix_tree_keep_reachable before.val after.val projection
+  intro n positive reach
+  apply keep
+  intro overlap
+  have eq : n = node := UScalar.eq_of_val_eq (by omega)
+  exact radix_zero_unreachable before.val (root :: pins) node root List.mem_cons_self
+    stillZero (eq ▸ reach)
+
 /-- Retiring a zero-count directory leaves the exact projection of every
 retained root intact and removes each of its child references exactly once.
 Counts must separately agree with `radixReferences`. -/
@@ -164,6 +234,8 @@ theorem radix_recycle_dir_refines
         (fun (removed, after, avail) =>
           removed = dir
           ∧ RadixFree after avail
+          ∧ (RadixDirectoryInvariant dirs → RadixDirectoryInvariant after)
+          ∧ (∀ keyOf, RadixKnowledge dirs keyOf → RadixKnowledge after keyOf)
           ∧ (∀ target,
               radixReferences dirs.val pins target
               = radixReferences after.val pins target + dir.children.val.count target)
@@ -173,7 +245,14 @@ theorem radix_recycle_dir_refines
               → RadixTree after.val height root bindings) := by
   apply WP.spec_mono (radix_recycle_slot_matches dirs free index dir live vacant room)
   rintro ⟨removed, after, avail⟩ ⟨same, cleared, _, valid, keep⟩
-  refine ⟨same, valid, ?_, ?_⟩
+  refine ⟨
+    same,
+    valid,
+    recycled_directory_invariant dirs after pins node index link zero cleared keep,
+    recycled_directory_knowledge dirs after pins node index link zero cleared keep,
+    ?_,
+    ?_
+  ⟩
   · intro target
     have erased := recycled_slots_eq dirs.val after.val index.val dir live cleared keep
     have perm := (remove_one_live_slot dirs.val index.val dir live).flatMap_right (·.children.val)
@@ -231,6 +310,37 @@ private theorem radix_row_kept {V : Type}
   unfold radixRow
   rw [keep _ different]
 
+private theorem recycled_row_knowledge {V : Type}
+    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (before after : List (Option (Spike.radix.RadixRow V)))
+    (pins : List U32) (node : U32) (index : Usize)
+    (link : node.val = index.val + 2147483648 + 1)
+    (zero : radixReferences dirs.val pins node = 0)
+    (keep : ∀ j, j ≠ index.val → after[j]? = before[j]?)
+    (known : RadixKnowledge dirs (radixKeyOf before))
+    : RadixKnowledge dirs (radixKeyOf after) := by
+  intro i dir live
+  obtain ⟨root, height, rows, atRoot, tagged, projection, keys, uniform⟩ := known i dir live
+  have different : root ≠ node := by
+    intro same
+    have below : root.val < (2147483648#u32 : U32).val := tagged
+    have tag : (2147483648#u32 : U32).val = 2147483648 := rfl
+    rw [same, link, tag] at below
+    omega
+  have stillZero : radixReferences dirs.val (root :: pins) node = 0 := by
+    simpa [radixReferences, different] using zero
+  refine ⟨root, height, rows, atRoot, tagged, projection, ?_, uniform⟩
+  intro entry hm
+  have was := keys entry hm
+  have above : 2147483648 < entry.2.val := by
+    by_contra no
+    simp [radixKeyOf, radixRow, no] at was
+  have saved := radix_row_kept dirs.val before after (root :: pins) node index link stillZero
+    keep List.mem_cons_self projection entry hm above
+  unfold radixKeyOf
+  rw [saved]
+  exact was
+
 /-- Recycling a zero-count row preserves the values and the exact ordered
 association list of every retained root, with the same arena-relative links. -/
 theorem radix_recycle_row_refines {V : Type}
@@ -244,6 +354,10 @@ theorem radix_recycle_row_refines {V : Type}
         (fun (removed, after, avail) =>
           removed = row
           ∧ RadixFree after avail
+          ∧ (∀ tree,
+              tree.val = dirs
+              → RadixKnowledge tree (radixKeyOf rows.val)
+              → RadixKnowledge tree (radixKeyOf after.val))
           ∧ ∀ height root bindings,
               root ∈ pins
               → RadixTree dirs height root bindings
@@ -253,21 +367,24 @@ theorem radix_recycle_row_refines {V : Type}
                   = radixBindings rows.val bindings) := by
   apply WP.spec_mono (radix_recycle_slot_matches rows free index row live vacant room)
   rintro ⟨removed, after, avail⟩ ⟨same, _, _, valid, keep⟩
-  refine ⟨same, valid, ?_⟩
-  intro height root bindings pinned tree liveRows
-  have preserved : ∀ entry ∈ bindings, radixRow after.val entry.2 = radixRow rows.val entry.2 := by
-    intro entry hm
-    exact radix_row_kept dirs _ _ pins node index link zero keep pinned tree entry hm
-      (liveRows entry hm).1
-  constructor
-  · intro entry hm
-    rw [preserved entry hm]
-    exact liveRows entry hm
-  · unfold radixBindings
-    apply List.filterMap_congr
-    rintro ⟨key, leaf⟩ hm
-    exact congrArg (Option.map (fun r : Spike.radix.RadixRow V => (key, r.value)))
-      (preserved (key, leaf) hm)
+  refine ⟨same, valid, ?_, ?_⟩
+  · intro tree eq known
+    exact recycled_row_knowledge tree _ _ pins node index link (eq.symm ▸ zero) keep known
+  ·
+    intro height root bindings pinned tree liveRows
+    have preserved : ∀ entry ∈ bindings, radixRow after.val entry.2 = radixRow rows.val entry.2 := by
+      intro entry hm
+      exact radix_row_kept dirs _ _ pins node index link zero keep pinned tree entry hm
+        (liveRows entry hm).1
+    constructor
+    · intro entry hm
+      rw [preserved entry hm]
+      exact liveRows entry hm
+    · unfold radixBindings
+      apply List.filterMap_congr
+      rintro ⟨key, leaf⟩ hm
+      exact congrArg (Option.map (fun r : Spike.radix.RadixRow V => (key, r.value)))
+        (preserved (key, leaf) hm)
 
 /-- A stamp row continues owning its value link while it is queued for retirement. -/
 def dualOrderValueLinks {V : Type} (arena : Spike.radix.DualRadix V) : List U32 :=
@@ -283,6 +400,95 @@ def dualOrderReferences {V : Type} (arena : Spike.radix.DualRadix V)
     (pins : List Spike.radix.DualRoot) (node : U32)
     : Nat :=
   radixReferences arena.order.dirs.val (pins.map Spike.radix.DualRoot.order) node
+
+def withValueDirs {V : Type} (arena : Spike.radix.DualRadix V)
+    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (free : alloc.vec.Vec Usize)
+    : Spike.radix.DualRadix V :=
+  {arena with values := {arena.values with dirs, free_dirs := free}}
+
+def withOrderDirs {V : Type} (arena : Spike.radix.DualRadix V)
+    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (free : alloc.vec.Vec Usize)
+    : Spike.radix.DualRadix V :=
+  {arena with order := {arena.order with dirs, free_dirs := free}}
+
+/-- Recycling a lookup directory preserves both pinned views and the valid
+arena needed for subsequent path copies. -/
+theorem dual_recycle_value_dir_refines {V : Type} (arena : Spike.radix.DualRadix V)
+    (pins : List Spike.radix.DualRoot) (node : U32) (index : Usize)
+    (dir : Spike.radix.RadixDir) (link : node.val = index.val + 1)
+    (live : arena.values.dirs.val[index.val]? = some (some dir))
+    (valid : ArenaValid arena.values)
+    (room : arena.values.free_dirs.val.length < Usize.max)
+    (zero : dualValueReferences arena pins node = 0)
+    : WP.spec (Spike.radix.recycle_slot arena.values.dirs arena.values.free_dirs index)
+        (fun (removed, dirs, free) =>
+          removed = dir
+          ∧ ArenaValid (withValueDirs arena dirs free).values
+          ∧ (∀ target,
+              dualValueReferences arena pins target
+              = dualValueReferences (withValueDirs arena dirs free) pins target
+                + dir.children.val.count target)
+          ∧ ∀ root ∈ pins,
+              ∀ bindings,
+                DualView arena root bindings
+                → DualView (withValueDirs arena dirs free) root bindings) := by
+  have zeroLookup : radixReferences arena.values.dirs.val
+      (pins.map Spike.radix.DualRoot.lookup) node = 0 := by
+    unfold dualValueReferences at zero
+    omega
+  apply WP.spec_mono
+    (radix_recycle_dir_refines arena.values.dirs arena.values.free_dirs
+      (pins.map Spike.radix.DualRoot.lookup) node index dir link live valid.dirs room
+      zeroLookup)
+  rintro ⟨removed, dirs, free⟩ ⟨same, vacant, directories, knowledge, refs, kept⟩
+  refine ⟨
+    same,
+    ⟨vacant, valid.rows, directories valid.directories, knowledge _ valid.knowledge⟩,
+    ?_,
+    ?_
+  ⟩
+  · intro target
+    have counts := refs target
+    change radixReferences arena.values.dirs.val _ target + (dualOrderValueLinks arena).count target
+      = radixReferences dirs.val _ target + (dualOrderValueLinks arena).count target
+        + dir.children.val.count target
+    omega
+  · intro root pinned bindings view
+    obtain ⟨height, lookup⟩ := view.lookup
+    exact ⟨⟨height, kept height root.lookup bindings (List.mem_map_of_mem pinned) lookup⟩,
+      view.values, view.order, view.stamps, view.issued⟩
+
+/-- The stamp directory has the same retirement rule, without changing the
+cross-index ownership of any stamp leaf that remains in its arena. -/
+theorem dual_recycle_order_dir_refines {V : Type} (arena : Spike.radix.DualRadix V)
+    (pins : List Spike.radix.DualRoot) (node : U32) (index : Usize)
+    (dir : Spike.radix.RadixDir) (link : node.val = index.val + 1)
+    (live : arena.order.dirs.val[index.val]? = some (some dir))
+    (valid : ArenaValid arena.order) (room : arena.order.free_dirs.val.length < Usize.max)
+    (zero : dualOrderReferences arena pins node = 0)
+    : WP.spec (Spike.radix.recycle_slot arena.order.dirs arena.order.free_dirs index)
+        (fun (removed, dirs, free) =>
+          removed = dir
+          ∧ ArenaValid (withOrderDirs arena dirs free).order
+          ∧ (∀ target,
+              dualOrderReferences arena pins target
+              = dualOrderReferences (withOrderDirs arena dirs free) pins target
+                + dir.children.val.count target)
+          ∧ ∀ root ∈ pins,
+              ∀ bindings,
+                DualView arena root bindings
+                → DualView (withOrderDirs arena dirs free) root bindings) := by
+  apply WP.spec_mono (radix_recycle_dir_refines arena.order.dirs arena.order.free_dirs
+    (pins.map Spike.radix.DualRoot.order) node index dir link live valid.dirs room zero)
+  rintro ⟨removed, dirs, free⟩ ⟨same, vacant, directories, knowledge, refs, kept⟩
+  refine ⟨same, ⟨vacant, valid.rows, directories valid.directories, knowledge _ valid.knowledge⟩, refs, ?_⟩
+  intro root pinned bindings view
+  obtain ⟨height, keys, tree, rows, pairing, order⟩ := view.order
+  exact ⟨view.lookup, view.values,
+    ⟨height, keys, kept height root.order keys (List.mem_map_of_mem pinned) tree, rows, pairing, order⟩,
+    view.stamps, view.issued⟩
 
 theorem dual_value_zero_no_order_owner {V : Type} (arena : Spike.radix.DualRadix V)
     (pins : List Spike.radix.DualRoot) (node : U32)
@@ -309,13 +515,13 @@ theorem dual_recycle_value_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (row : Spike.radix.RadixRow (Spike.radix.Stamped V))
     (link : node.val = index.val + 2147483648 + 1)
     (live : arena.values.rows.val[index.val]? = some (some row))
-    (vacant : RadixFree arena.values.rows arena.values.free_rows)
+    (valid : ArenaValid arena.values)
     (room : arena.values.free_rows.val.length < Usize.max)
     (zero : dualValueReferences arena pins node = 0)
     : WP.spec (Spike.radix.recycle_slot arena.values.rows arena.values.free_rows index)
         (fun (removed, after, avail) =>
           removed = row
-          ∧ RadixFree after avail
+          ∧ ArenaValid (withValueRows arena after avail).values
           ∧ ∀ root ∈ pins,
               ∀ bindings,
                 DualView arena root bindings
@@ -323,16 +529,18 @@ theorem dual_recycle_value_refines {V : Type} (arena : Spike.radix.DualRadix V)
                   ∧ dualBindings (withValueRows arena after avail) bindings
                     = dualBindings arena bindings) := by
   apply WP.spec_mono (radix_recycle_slot_matches arena.values.rows arena.values.free_rows
-    index row live vacant room)
+    index row live valid.rows room)
   rintro ⟨removed, after, avail⟩ ⟨same, _, _, free, keep⟩
-  refine ⟨same, free, ?_⟩
-  intro root pin bindings view
-  obtain ⟨height, lookup⟩ := view.lookup
-  obtain ⟨oh, keys, order, orderedRows, paired, sorted⟩ := view.order
   have noRefs : radixReferences arena.values.dirs.val
       (pins.map Spike.radix.DualRoot.lookup) node = 0 := by
     unfold dualValueReferences at zero
     omega
+  have known := recycled_row_knowledge arena.values.dirs _ _ _ node index link noRefs keep
+    valid.knowledge
+  refine ⟨same, ⟨valid.dirs, free, valid.directories, known⟩, ?_⟩
+  intro root pin bindings view
+  obtain ⟨height, lookup⟩ := view.lookup
+  obtain ⟨oh, keys, order, orderedRows, paired, sorted⟩ := view.order
   have saved (entry : List U8 × U32) (hm : entry ∈ bindings) :
       radixRow after.val entry.2 = radixRow arena.values.rows.val entry.2 :=
     radix_row_kept _ _ _ _ node index link noRefs keep (List.mem_map_of_mem pin) lookup
@@ -391,13 +599,13 @@ theorem dual_recycle_order_refines {V : Type} (arena : Spike.radix.DualRadix V)
     (pins : List Spike.radix.DualRoot) (node : U32) (index : Usize)
     (row : Spike.radix.RadixRow U32) (link : node.val = index.val + 2147483648 + 1)
     (live : arena.order.rows.val[index.val]? = some (some row))
-    (vacant : RadixFree arena.order.rows arena.order.free_rows)
+    (valid : ArenaValid arena.order)
     (room : arena.order.free_rows.val.length < Usize.max)
     (zero : dualOrderReferences arena pins node = 0)
     : WP.spec (Spike.radix.recycle_slot arena.order.rows arena.order.free_rows index)
         (fun (removed, after, avail) =>
           removed = row
-          ∧ RadixFree after avail
+          ∧ ArenaValid (withOrderRows arena after avail).order
           ∧ (∀ target,
               dualValueReferences arena pins target
               = dualValueReferences (withOrderRows arena after avail) pins target
@@ -407,9 +615,11 @@ theorem dual_recycle_order_refines {V : Type} (arena : Spike.radix.DualRadix V)
                 DualView arena root bindings
                 → DualView (withOrderRows arena after avail) root bindings) := by
   apply WP.spec_mono (radix_recycle_slot_matches arena.order.rows arena.order.free_rows
-    index row live vacant room)
+    index row live valid.rows room)
   rintro ⟨removed, after, avail⟩ ⟨same, cleared, _, free, keep⟩
-  refine ⟨same, free, ?_, ?_⟩
+  have known := recycled_row_knowledge arena.order.dirs _ _ _ node index link zero keep
+    valid.knowledge
+  refine ⟨same, ⟨valid.dirs, free, valid.directories, known⟩, ?_, ?_⟩
   · have erased := recycled_slots_eq arena.order.rows.val after.val index.val row live cleared keep
     have perm := (remove_one_live_slot arena.order.rows.val index.val row live).map
       Spike.radix.RadixRow.value

@@ -835,7 +835,7 @@ private theorem radix_adds_chain {a b c : DirArena}
     exact ⟨root, h, bs, hi, low, radix_tree_preserved b.val c.val keep tree, ok⟩
   · exact after index dir live present
 
-private theorem radix_first_mem (dir : Spike.radix.RadixDir) (nz : radixFirst dir ≠ 0#u32)
+theorem radix_first_mem (dir : Spike.radix.RadixDir) (nz : radixFirst dir ≠ 0#u32)
     : radixFirst dir ∈ dir.children.val := by
   unfold radixFirst at nz ⊢
   cases h : dir.children.val.find? (· != 0#u32) with
@@ -1662,7 +1662,13 @@ theorem radix_find_leaf_matches (dirs : Slice (Option Spike.radix.RadixDir))
 /-- Decode the leaf's one-based row index without interpreting directories as leaves. -/
 def radixRow {V : Type} (rows : List (Option (Spike.radix.RadixRow V))) (leaf : U32)
     : Option (Spike.radix.RadixRow V) :=
-  (rows[leaf.val - 2147483648 - 1]?).join
+  if 2147483648 < leaf.val then (rows[leaf.val - 2147483648 - 1]?).join else none
+
+theorem radix_row_tag {V : Type} (rows : List (Option (Spike.radix.RadixRow V)))
+    (leaf : U32) (row : Spike.radix.RadixRow V) (live : radixRow rows leaf = some row)
+    : 2147483648 < leaf.val := by
+  by_contra untagged
+  simp [radixRow, untagged] at live
 
 /-- The actual key associated with a live leaf link. -/
 def radixKeyOf {V : Type} (rows : List (Option (Spike.radix.RadixRow V))) (leaf : U32)
@@ -1676,7 +1682,11 @@ private theorem radix_keys_kept {V : Type}
           old[i]? = some (some previous) → next[i]? = some (some previous))
     : ∀ leaf key, radixKeyOf old leaf = some key → radixKeyOf next leaf = some key := by
   intro leaf key actual
+  have tagged : 2147483648 < leaf.val := by
+    by_contra no
+    simp [radixKeyOf, radixRow, no] at actual
   unfold radixKeyOf radixRow at actual ⊢
+  simp only [tagged, ite_true] at actual ⊢
   cases he : old[leaf.val - 2147483648 - 1]? with
   | none => simp [he] at actual
   | some entry =>
@@ -1692,6 +1702,7 @@ theorem radix_row_at_matches {V : Type}
     (live : radixRow rows.val leaf = some row)
     : WP.spec (Spike.radix.row_at rows leaf) (· = row) := by
   unfold Spike.radix.row_at radixRow at *
+  rw [ite_eq_left tagged] at live
   rw [radix_tag]
   have htag : (2147483648#u32 : U32).val = 2147483648 := rfl
   apply WP.spec_bind (U32.sub_spec (by omega : (2147483648#u32 : U32).val ≤ leaf.val))
@@ -3022,7 +3033,7 @@ theorem radix_put_existing_matches {V : Type}
   have htag : 2147483648 < leaf.val := by omega
   have hnew : radixRow values.val leaf = some row := by
     have hi : leaf.val - 2147483648 - 1 = i.val := by omega
-    simp [radixRow, hi, value]
+    simp [radixRow, htag, hi, value]
   obtain ⟨target, head, tail, steps, sources⟩ :=
     radix_walk_edit_plan dirs row.key.val (some leaf) walk invariant
   have hTip : target path.val.length = [(row.key.val, leaf)] := by
@@ -3103,7 +3114,7 @@ theorem radix_put_empty_matches {V : Type}
   have htag : 2147483648 < leaf.val := by omega
   have hnew : radixRow values.val leaf = some row := by
     have hi : leaf.val - 2147483648 - 1 = i.val := by omega
-    simp [radixRow, hi, value]
+    simp [radixRow, htag, hi, value]
   simp only [WP.spec_ok]
   exact ⟨trivial, trivial, trivial, free, kept, htag, hnew, trivial, rowGrowth,
     .leaf 0 leaf row.key.val (Nat.le_of_lt htag)⟩
@@ -3183,7 +3194,7 @@ theorem radix_put_fresh_matches {V : Type}
   have htag : 2147483648 < leaf.val := by omega
   have hnew : radixRow values.val leaf = some row := by
     have hi : leaf.val - 2147483648 - 1 = i.val := by omega
-    simp [radixRow, hi, value]
+    simp [radixRow, htag, hi, value]
   obtain ⟨target, head, tail, steps, sources⟩ :=
     radix_walk_edit_plan dirs row.key.val (some leaf) walk invariant
   have publishTip := radix_insert_tip dirs freeDirs stem leaf split row.key.val tip oldBound
@@ -3308,7 +3319,9 @@ theorem radix_old_row {V : Type}
     (kept : ∀ (i : Nat) row, old[i]? = some (some row) → next[i]? = some (some row))
     (leaf : U32) (row : Spike.radix.RadixRow V) (live : radixRow old leaf = some row)
     : radixRow next leaf = some row := by
+  have tagged := radix_row_tag old leaf row live
   unfold radixRow at live ⊢
+  simp only [tagged, ite_true] at live ⊢
   cases he : old[leaf.val - 2147483648 - 1]? with
   | none => simp [he] at live
   | some entry =>
