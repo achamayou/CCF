@@ -14,6 +14,9 @@ The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, repla
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
 The [indexed publication proof](KvRust/IndexedPublication.lean) checks the extracted right-to-left write-set fold against `Kv.Model.publish`, with numeric bounds on packed keys, path copies, row slots, and the stamp counter.
 The [archive relation](KvRust/IndexedHistory.lean) ties every archived frame to its ordered index view, including frames no longer on the active branch after rollback.
+The [retained-cut proof](KvRust/RetainedCuts.lean) shows that an older acquisition which remains available can read the compacted map image, or the empty placeholder, without changing its observation.
+It preserves the revision invariant across the modeled apply, compact, and rollback steps.
+The engine still keeps these older frames: imported and recovered histories, exact live-pin accounting, and actual release are separate requirements.
 The indexed [materialization](KvRust/IndexedImage.lean) and [pin](KvRust/PinnedImage.lean) proofs relate selected maps and point reads to those views without reconstructing the whole store.
 The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
 The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.

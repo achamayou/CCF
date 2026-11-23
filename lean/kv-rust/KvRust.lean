@@ -31,6 +31,7 @@ public import KvRust.RadixDual
 public import KvRust.RadixLiveness
 public import KvRust.Range
 public import KvRust.Relation
+public import KvRust.RetainedCuts
 public import KvRust.RetireQueue
 public import KvRust.Scan
 public import KvRust.Simulation

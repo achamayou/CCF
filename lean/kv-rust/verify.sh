@@ -46,7 +46,7 @@ for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
   KvRust.KvIndex KvRust.IndexedHistory KvRust.IndexedImage KvRust.IndexedPublication \
   KvRust.Validation KvRust.Lineage KvRust.Apply KvRust.Advance KvRust.Acquire \
   KvRust.PinnedImage KvRust.Point KvRust.Radix KvRust.RadixAddress KvRust.RadixDual KvRust.RadixLiveness \
-  KvRust.RetireQueue \
+  KvRust.RetainedCuts KvRust.RetireQueue \
   KvRust.Range KvRust.Scan KvRust.Relation KvRust.Lifecycle \
   KvRust.LifecycleRefinement KvRust.Environment KvRust.ApplyRefinement \
   KvRust.AcquireRefinement KvRust.OperateRefinement KvRust.Simulation; do

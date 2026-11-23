@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Scan
+public import KvRust.RetainedCuts
 
 @[expose] public section
 
@@ -109,6 +110,7 @@ structure HistoryMatches (encode : List U8 → String)
   identity : model.nextIdentity = native.next_identity.val
   valid : BranchValid native.log
   indexValid : HistoryIndexValid native
+  revisions : RevisionHistory model.history
 
 /-- The single Rust store represents one live store in the reference transition system. -/
 structure StateMatches (encode : List U8 → String) (sid : Nat)
@@ -358,6 +360,7 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     (global : s.global = n.global.val) (term : s.term = n.term.val)
     (ident : s.nextIdentity = n.next_identity.val)
     (valid : BranchValid n.log) (indexed : HistoryIndexValid n)
+    (revisions : RevisionHistory s.history)
     : HistoryMatches encode n s := by
   have h := Kv.Properties.reachable_store_invariants w sid s reach hs
   have versions {rows : List Frame} {v : Nat} (hh : Kv.Properties.History rows v) :
@@ -372,7 +375,7 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     simpa only [frames, modelFrames, ← List.map_reverse, List.reverse_reverse,
       List.map_map, Function.comp_def, modelFrame, modelMetadata]
       using versions h.1
-  refine ⟨?_, frames, h.2.1, ?_, global, term, ident, valid, indexed⟩
+  refine ⟨?_, frames, h.2.1, ?_, global, term, ident, valid, indexed, revisions⟩
   · intro he
     simp [he] at hn
   · intro i hi

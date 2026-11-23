@@ -134,7 +134,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                 (by simpa only [← hw', store] using hg.symm)
                 (by simpa only [← hw', store] using hterm'.symm)
                 (by simpa only [← hw', store] using hi.symm)
-                hvalid indexed
+                hvalid indexed (hhist.revisions.advance hhist.head tx.normal.writes)
             have hv' : version.val = store.head.version := by
               simpa only [← hw', store] using hv
             have htx

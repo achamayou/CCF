@@ -28,7 +28,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     simp [execute, find, Kv.Model.set, erase, s, w]
   have hReach := reachable_execute (CCF.TransitionSystem.Reachable.initial rfl) he
   have hr := history_related (encode := encode) (n := n.history) hReach hs hf.symm hg.symm
-    (by change term.val = n.history.term.val; rw [ht]) hi.symm valid indexed
+    (by change term.val = n.history.term.val; rw [ht]) hi.symm valid indexed revision_history_new
   refine ⟨w, he, ⟨⟨s, hs, hr⟩, ?_, ?_, hReach⟩⟩
   · simp [htx]
   · intro id

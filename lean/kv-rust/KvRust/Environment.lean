@@ -32,11 +32,12 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
       unfold store compactStore
       split <;> rfl
     refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_, h.valid,
-      h.indexValid.congr rfl rfl⟩
+      h.indexValid.congr rfl rfl, ?_⟩
     · rw [he']; exact h.frames
     · rw [he']; exact h.head
     · rw [he']; exact h.term
     · rw [he']; exact h.identity
+    · rw [he']; exact h.revisions
   have rel := replace_history related hn (w' := w')
     (by simp [w', find_set_key]) rfl rfl (reachable_execute related.reachable he)
     (HistoryKeeps.of_same rfl rfl)
@@ -92,7 +93,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
       have reach := reachable_execute related.reachable he
       have hstore : find w'.stores sid = some store := by simp [w', find_set_key]
       have hvalid : HistoryMatches encode after.history store := by
-        refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, hlog, h.indexValid.congr hindexKept hkept⟩
+        refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, hlog, h.indexValid.congr hindexKept hkept, ?_⟩
         · simp [htake, List.take_eq_nil_iff, h.nonempty]
         · rw [hindexKept]; exact hmodel.symm
         · exact (Kv.Properties.reachable_store_invariants w' sid store reach hstore).2.1
@@ -111,6 +112,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           rw [hterm]
         · change s.nextIdentity = after.history.next_identity.val
           rw [hidentity]; exact h.identity
+        · exact h.revisions.filter _
       have rel := replace_history related hvalid hstore htxs rfl reach
         (HistoryKeeps.of_same hkept hindexKept)
       simp only [he, StepMatches, hrun, WP.spec_ok]
