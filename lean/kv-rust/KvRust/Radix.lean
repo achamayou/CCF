@@ -3367,4 +3367,377 @@ theorem radix_compressed_of_knowledge (dirs : alloc.vec.Vec (Option Spike.radix.
     tree witness keys actual
   exact uniform a ((mem a).mp ha) b ((mem b).mp hb) i hi
 
+private theorem radix_group_slots {α : Type} (rows : List α) (slot : α → Nat) (n : Nat)
+    : List.Perm ((List.range n).flatMap fun i => rows.filter (fun row => slot row == i))
+        (rows.filter (fun row => decide (slot row < n))) := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+      rw [List.range_succ, List.flatMap_append]
+      have hsplit := List.filter_append_perm (fun row => decide (slot row < n))
+        (rows.filter fun row => decide (slot row < n + 1))
+      have before :
+          (rows.filter (fun row => decide (slot row < n + 1))).filter
+            (fun row => decide (slot row < n)) = rows.filter (fun row => decide (slot row < n)) := by
+        rw [List.filter_filter]
+        apply List.filter_congr
+        intro row _
+        by_cases h : slot row < n
+        · simp [h, show slot row < n + 1 by omega]
+        · simp [h]
+      have last :
+          (rows.filter (fun row => decide (slot row < n + 1))).filter
+            (fun row => !decide (slot row < n)) = rows.filter (fun row => slot row == n) := by
+        rw [List.filter_filter]
+        apply List.filter_congr
+        intro row _
+        by_cases he : slot row = n
+        · simp [he]
+        · by_cases hlt : slot row < n
+          · simp [he, hlt]
+          · have hb : ¬ slot row < n + 1 := by omega
+            simp [he, hb]
+      rw [before, last] at hsplit
+      simpa only [List.flatMap_cons, List.flatMap_nil, List.append_nil]
+        using (ih.append_right (rows.filter (fun row => slot row == n))).trans hsplit
+
+private theorem radix_push_children (stack : alloc.vec.Vec U32)
+    (dir : Spike.radix.RadixDir) (room : stack.val.length + 17 ≤ Usize.max)
+    : WP.spec (Spike.radix.push_children stack dir)
+        (fun result =>
+          result.val = stack.val ++ (dir.children.val.filter (· != 0#u32)).reverse) := by
+  let live := fun (link : U32) => link != 0#u32
+  let goal := stack.val ++ (dir.children.val.filter live).reverse
+  have size : dir.children.val.length = 17 := Array.length_eq dir.children
+  have one : (1#usize : Usize).val = 1 := rfl
+  have zero : (0#usize : Usize).val = 0 := rfl
+  unfold Spike.radix.push_children Spike.radix.push_children_loop
+  apply loop.spec_decr_nat (fun (p : alloc.vec.Vec U32 × Usize) => p.2.val)
+    (fun p => p.2.val ≤ 17 ∧ p.1.val.length + p.2.val ≤ Usize.max
+      ∧ p.1.val ++ ((dir.children.val.take p.2.val).filter live).reverse = goal)
+    _ _ _
+  · rintro ⟨current, slot⟩ ⟨bound, cap, done⟩
+    dsimp only at bound cap done ⊢
+    unfold Spike.radix.push_children_loop.body
+    by_cases go : slot > 0#usize
+    · rw [ite_eq_left go]
+      have pos : 0 < slot.val := go
+      apply WP.spec_bind (Usize.sub_spec (by omega : (1#usize : Usize).val ≤ slot.val))
+      intro prev hp
+      have step : slot.val = prev.val + 1 := by omega
+      have index : prev.val < dir.children.val.length := by omega
+      apply WP.spec_bind (Array.index_usize_spec dir.children prev index)
+      intro child hc
+      have split : dir.children.val.take slot.val = dir.children.val.take prev.val ++ [child] := by
+        rw [step, List.take_succ_eq_append_getElem index, ← hc]
+      rw [split, List.filter_append, List.reverse_append, ← List.append_assoc] at done
+      by_cases isZero : child = 0#u32
+      · have test : (child != 0#u32) = false := by simp [isZero]
+        simp only [live, List.filter_cons, List.filter_nil, test, Bool.false_eq_true, ite_false,
+          List.reverse_nil, List.append_nil] at done
+        simp only [test, Bool.false_eq_true, ite_false, WP.spec_ok]
+        exact ⟨⟨by omega, by omega, done⟩, by omega⟩
+      · have nonzero : (child != 0#u32) = true := bne_iff_ne.mpr isZero
+        simp only [nonzero, ite_true]
+        apply WP.spec_bind (alloc.vec.Vec.push_spec current child (by omega))
+        intro next hn
+        have hlength : next.val.length = current.val.length + 1 := by simp [hn]
+        simp only [WP.spec_ok]
+        refine ⟨⟨by omega, by omega, ?_⟩, by omega⟩
+        rw [hn]
+        simpa only [live, List.filter_cons, List.filter_nil, nonzero, ite_true,
+          List.reverse_singleton] using done
+    · have stopped : ¬ 0 < slot.val := go
+      have zz : slot.val = 0 := by omega
+      simp only [go, ite_false, WP.spec_ok]
+      simpa [zz, goal, live] using done
+  · have full : dir.children.val.take 17 = dir.children.val := List.take_of_length_le size.le
+    simp [Spike.radix.RADIX_FANOUT, full, room, goal]
+
+/-- A finite traversal of live stack entries, in pop order. A directory
+reserves room to push all its child slots. -/
+inductive RadixScanPlan (dirs : List (Option Spike.radix.RadixDir))
+    : List U32 → Nat → List U32 → Prop where
+  | done : RadixScanPlan dirs [] 0 []
+  | leaf (node : U32) (rest : List U32) (fuel : Nat) (leaves : List U32)
+    (tagged : (2147483648#u32 : U32) ≤ node)
+    (tail : RadixScanPlan dirs rest fuel leaves)
+    : RadixScanPlan dirs (node :: rest) (fuel + 1) (node :: leaves)
+  | branch (node : U32) (dir : Spike.radix.RadixDir)
+    (rest : List U32) (fuel : Nat) (leaves : List U32)
+    (positive : 0 < node.val) (untagged : node < 2147483648#u32)
+    (live : dirs[node.val - 1]? = some (some dir))
+    (tail : RadixScanPlan dirs (dir.children.val.filter (· != 0#u32) ++ rest) fuel leaves)
+    : RadixScanPlan dirs (node :: rest) (fuel + 17) leaves
+
+private theorem scan_plan_room {dirs : List (Option Spike.radix.RadixDir)}
+    {stack : List U32} {fuel : Nat} {leaves : List U32}
+    (plan : RadixScanPlan dirs stack fuel leaves)
+    : stack.length ≤ fuel := by
+  induction plan with
+  | done => simp
+  | leaf _ _ _ _ _ _ ih => simpa only [List.length_cons] using Nat.succ_le_succ ih
+  | branch _ _ _ _ _ _ _ _ _ ih =>
+      simp only [List.length_append] at ih
+      simp only [List.length_cons]
+      omega
+
+private theorem scan_plan_append {dirs : List (Option Spike.radix.RadixDir)}
+    {a b : List U32} {m n : Nat} {xs ys : List U32}
+    (head : RadixScanPlan dirs a m xs) (tail : RadixScanPlan dirs b n ys)
+    : RadixScanPlan dirs (a ++ b) (m + n) (xs ++ ys) := by
+  induction head with
+  | done => simpa using tail
+  | leaf node rest fuel leaves tagged _ ih =>
+      simpa only [List.cons_append, Nat.add_right_comm fuel 1 n]
+        using RadixScanPlan.leaf node (rest ++ b) (fuel + n) (leaves ++ ys) tagged ih
+  | branch node dir rest fuel leaves positive untagged live _ ih =>
+      simpa only [List.cons_append, Nat.add_right_comm fuel 17 n]
+        using RadixScanPlan.branch node dir (rest ++ b) (fuel + n) (leaves ++ ys)
+          positive untagged live (by simpa only [List.append_assoc] using ih)
+
+private theorem scan_plan_slots (dirs : List (Option Spike.radix.RadixDir))
+    (slots : List Nat) (child : Nat → U32) (bindings : Nat → Bindings)
+    (available
+      : ∀ i ∈ slots,
+          ∃ fuel leaves,
+            RadixScanPlan dirs ([child i].filter (· != 0#u32)) fuel leaves
+            ∧ List.Perm leaves ((bindings i).map Prod.snd))
+    : ∃ fuel leaves,
+        RadixScanPlan dirs ((slots.map child).filter (· != 0#u32)) fuel leaves
+        ∧ List.Perm leaves ((slots.flatMap bindings).map Prod.snd) := by
+  induction slots with
+  | nil => exact ⟨0, [], .done, .nil⟩
+  | cons i rest ih =>
+      obtain ⟨m, xs, ha, hp⟩ := available i List.mem_cons_self
+      obtain ⟨n, ys, hb, hq⟩ := ih (fun j hj => available j (List.mem_cons_of_mem _ hj))
+      refine ⟨m + n, xs ++ ys, ?_, ?_⟩
+      · rw [List.map_cons, ← List.singleton_append, List.filter_append]
+        exact scan_plan_append ha hb
+      · simpa only [List.flatMap_cons, List.map_append] using hp.append hq
+
+private theorem scan_plan_tree (dirs : List (Option Spike.radix.RadixDir))
+    (height : Nat) (root : U32) (bindings : Bindings)
+    (tree : RadixTree dirs height root bindings)
+    : ∃ fuel leaves,
+        RadixScanPlan dirs ([root].filter (· != 0#u32)) fuel leaves
+        ∧ List.Perm leaves (bindings.map Prod.snd) := by
+  induction tree with
+  | empty => exact ⟨0, [], by simpa using (RadixScanPlan.done (dirs := dirs)), .nil⟩
+  | leaf _ node key tagged =>
+      have nz : node ≠ 0#u32 := by
+        intro hz
+        subst node
+        exact (by decide : ¬(2147483648#u32 : U32) ≤ 0#u32) tagged
+      have test : (node != 0#u32) = true := bne_iff_ne.mpr nz
+      exact ⟨
+        1,
+        [node],
+        by
+          simpa only [List.filter_cons, List.filter_nil, test, ite_true]
+            using RadixScanPlan.leaf node [] 0 [] tagged (.done (dirs := dirs)),
+        .refl _
+      ⟩
+  | branch h node dir bindings positive low live child links children ih =>
+      let rows :=
+        fun i => bindings.filter (fun row => radixSymbol row.1 dir.digit.val == i)
+      obtain ⟨fuel, leaves, plan, perm⟩ := scan_plan_slots dirs (List.range 17) child rows
+        (fun i hi => ih i (List.mem_range.mp hi))
+      have pointers : (List.range 17).map child = dir.children.val := by
+        apply List.ext_getElem?
+        intro i
+        by_cases inside : i < 17
+        · rw [List.getElem?_map, List.getElem?_range inside, Option.map_some, links i inside]
+        · have size : dir.children.val.length = 17 := Array.length_eq dir.children
+          have hIndex : 17 ≤ i := Nat.le_of_not_gt inside
+          rw [List.getElem?_map, List.getElem?_eq_none (by simpa using hIndex),
+            List.getElem?_eq_none (size.symm ▸ hIndex)]
+          rfl
+      rw [pointers] at plan
+      have hfilter
+          : bindings.filter (fun row => decide (radixSymbol row.1 dir.digit.val < 17))
+            = bindings :=
+        List.filter_eq_self.mpr (fun row _ => decide_eq_true (radixSymbol_bound _ _))
+      have partition :=
+        radix_group_slots bindings (fun row => radixSymbol row.1 dir.digit.val) 17
+      rw [hfilter] at partition
+      have nz : node ≠ 0#u32 := fun hz => by subst node; contradiction
+      refine ⟨fuel + 17, leaves, ?_, perm.trans (partition.map Prod.snd)⟩
+      simpa only [List.filter_cons, List.filter_nil, bne_iff_ne.mpr nz, ite_true,
+        List.append_nil]
+        using RadixScanPlan.branch node dir [] fuel leaves positive low live
+          (by simpa using plan)
+
+private theorem scan_step {dirs : Slice (Option Spike.radix.RadixDir)}
+    (out stack : alloc.vec.Vec U32) (node : U32) (rest : List U32)
+    (hstack : stack.val.reverse = node :: rest)
+    (hs : node < 2147483648#u32 → rest.length + 17 ≤ Usize.max)
+    (ho : out.val.length < Usize.max)
+    (live
+      : node < 2147483648#u32
+        → ∃ dir, 0 < node.val ∧ dirs.val[node.val - 1]? = some (some dir))
+    : WP.spec (Spike.radix.scan_leaves_loop.body dirs out stack)
+        (fun result =>
+          ∃ next todo,
+            result = .cont (next, todo)
+            ∧ if node < 2147483648#u32 then
+                ∃ dir,
+                  dirs.val[node.val - 1]? = some (some dir)
+                  ∧ next = out
+                  ∧ todo.val.reverse = dir.children.val.filter (· != 0#u32) ++ rest
+              else
+                next.val = out.val ++ [node] ∧ todo.val.reverse = rest) := by
+  have contents : stack.val = rest.reverse ++ [node] := by
+    simpa only [List.reverse_reverse, List.reverse_cons]
+      using congrArg List.reverse hstack
+  have size : stack.val.length = rest.length + 1 := by simp [contents]
+  have len : (alloc.vec.Vec.len stack).val = stack.val.length := alloc.vec.Vec.len_val _
+  have one : (1#usize : Usize).val = 1 := rfl
+  have go : 0#usize < alloc.vec.Vec.len stack := by
+    change 0 < (alloc.vec.Vec.len stack).val
+    omega
+  unfold Spike.radix.scan_leaves_loop.body
+  simp only [go, ite_true, alloc.vec.Vec.index_slice_index, radix_tag]
+  apply WP.spec_bind
+    (Usize.sub_spec (by omega : (1#usize : Usize).val ≤ (alloc.vec.Vec.len stack).val))
+  intro index hi
+  have atEnd : index.val = rest.length := by omega
+  have bound : index.val < stack.val.length := by omega
+  apply WP.spec_bind (alloc.vec.Vec.index_usize_spec stack index bound)
+  intro link hlink
+  have eq : link = node := by
+    have last : stack.val[index.val]? = some node := by
+      rw [contents, atEnd, List.getElem?_append_right (by simp)]
+      simp
+    rw [List.getElem?_eq_getElem bound, ← hlink, Option.some.injEq] at last
+    exact last
+  rw [eq]
+  apply WP.spec_bind (alloc.vec.Vec.resize_spec core.clone.CloneU32 stack index 0#u32 rfl)
+  intro popped hp
+  have remaining : popped.val = rest.reverse := by
+    have shrink : index.val ≤ stack.val.length := by omega
+    rw [hp, List.resize, Nat.sub_eq_zero_of_le shrink, List.replicate_zero, List.append_nil]
+    rw [contents, atEnd, List.take_append_of_le_length (by simp)]
+    exact List.take_of_length_le (by simp)
+  by_cases tagged : node < 2147483648#u32
+  · obtain ⟨dir, pos, existsDir⟩ := live tagged
+    simp only [tagged, ite_true]
+    apply WP.spec_bind (radix_directory_matches dirs node dir pos existsDir)
+    intro found he
+    subst found
+    apply WP.spec_bind (radix_push_children popped dir (by simpa [remaining] using hs tagged))
+    intro next hn
+    simp only [WP.spec_ok]
+    exact ⟨out, next, rfl, dir, existsDir, rfl, by simp [hn, remaining]⟩
+  · simp only [tagged, ite_false]
+    apply WP.spec_bind (alloc.vec.Vec.push_spec out node ho)
+    intro next hn
+    simp only [WP.spec_ok]
+    exact ⟨next, popped, rfl, hn, by simp [remaining]⟩
+
+private theorem scan_loop_refines (dirs : Slice (Option Spike.radix.RadixDir))
+    (todo : List U32) (fuel : Nat) (leaves : List U32)
+    (plan : RadixScanPlan dirs.val todo fuel leaves)
+    (out stack : alloc.vec.Vec U32)
+    (hstack : stack.val.reverse = todo) (room : out.val.length + fuel ≤ Usize.max)
+    : WP.spec (Spike.radix.scan_leaves_loop dirs out stack)
+        (fun result =>
+          result.val = out.val ++ leaves) := by
+  induction plan generalizing out stack with
+  | done =>
+      have empty : stack.val = [] := by simpa using congrArg List.reverse hstack
+      unfold Spike.radix.scan_leaves_loop loop Spike.radix.scan_leaves_loop.body
+      have zero : ¬0#usize < alloc.vec.Vec.len stack := by
+        change ¬0 < (alloc.vec.Vec.len stack).val
+        simp [empty]
+      simp [zero]
+  | leaf node rest fuel leaves tagged tail ih =>
+      have small : ¬node < 2147483648#u32 := not_lt_of_ge tagged
+      unfold Spike.radix.scan_leaves_loop loop
+      have step
+          : WP.spec (Spike.radix.scan_leaves_loop.body dirs out stack)
+              (fun result =>
+                ∃ next todo,
+                  result = .cont (next, todo)
+                  ∧ next.val = out.val ++ [node]
+                  ∧ todo.val.reverse = rest) := by
+        -- No directory children are pushed in this case.
+        apply WP.spec_mono
+          (scan_step out stack node rest hstack
+            (fun low => (small low).elim) (by omega) (fun low => (small low).elim))
+        rintro r ⟨next, todo, hr, post⟩
+        exact ⟨next, todo, hr, by simpa only [small, ite_false] using post⟩
+      apply WP.spec_bind step
+      rintro result ⟨next, todo, he, hn, ht⟩
+      subst result
+      apply WP.spec_mono (ih next todo ht (by simp [hn]; omega))
+      intro r hr
+      simp [hr, hn, List.append_assoc]
+  | branch node dir rest fuel leaves positive low live tail ih =>
+      have hrest := scan_plan_room tail
+      have hsize : rest.length ≤ fuel := by simp only [List.length_append] at hrest; omega
+      unfold Spike.radix.scan_leaves_loop loop
+      apply WP.spec_bind
+        (scan_step out stack node rest hstack
+          (fun _ => by omega) (by omega) (fun _ => ⟨dir, positive, live⟩))
+      rintro result ⟨next, todo, he, post⟩
+      subst result
+      rw [ite_eq_left low] at post
+      obtain ⟨actual, existsDir, equal, ht⟩ := post
+      have eq : actual = dir :=
+        Option.some.inj (Option.some.inj (existsDir.symm.trans live))
+      subst actual next
+      exact ih out todo ht (by omega)
+
+/-- With room for the traversal, the native scan visits the planned leaves in
+directory order, without consulting rows outside the root. -/
+theorem radix_scan_plan_matches (dirs : Slice (Option Spike.radix.RadixDir))
+    (root : U32) (fuel : Nat) (leaves : List U32)
+    (plan : RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves)
+    (room : fuel ≤ Usize.max)
+    : WP.spec (Spike.radix.scan_leaves dirs root)
+        (fun result => result.val = leaves) := by
+  unfold Spike.radix.scan_leaves
+  by_cases zero : root = 0#u32
+  · subst root
+    rw [ite_eq_left rfl, WP.spec_ok]
+    have empty : RadixScanPlan dirs.val [] fuel leaves := by simpa using plan
+    cases empty
+    rfl
+  · rw [ite_eq_right zero]
+    have hroom : (alloc.vec.Vec.new U32).val.length < Usize.max := by
+      change 0 < Usize.max
+      scalar_tac
+    apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new U32) root hroom)
+    intro stack hs
+    have top : stack.val.reverse = ([root].filter (· != 0#u32)) := by
+      simp [hs, bne_iff_ne.mpr zero]
+    simpa using scan_loop_refines dirs _ fuel leaves plan (alloc.vec.Vec.new U32) stack top (by simpa using room)
+
+/-- Every finite root admits a scan plan with exactly the projected leaf
+links. The plan's fuel bounds the native stack and result vectors. -/
+theorem radix_scan_plan_exists (dirs : Slice (Option Spike.radix.RadixDir))
+    (height : Nat) (root : U32) (bindings : List (List U8 × U32))
+    (tree : RadixTree dirs.val height root bindings)
+    : ∃ fuel leaves,
+        RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves
+        ∧ List.Perm leaves (bindings.map Prod.snd) :=
+  scan_plan_tree dirs.val height root bindings tree
+
+/-- The native traversal returns every projected leaf link with exactly its
+original multiplicity. Scan order is a separate policy from traversal order. -/
+theorem radix_scan_leaves_refines (dirs : Slice (Option Spike.radix.RadixDir))
+    (root : U32) (bindings : List (List U8 × U32))
+    (fits
+      : ∃ fuel leaves,
+          RadixScanPlan dirs.val ([root].filter (· != 0#u32)) fuel leaves
+          ∧ fuel ≤ Usize.max
+          ∧ List.Perm leaves (bindings.map Prod.snd))
+    : WP.spec (Spike.radix.scan_leaves dirs root)
+        (fun result => List.Perm result.val (bindings.map Prod.snd)) := by
+  obtain ⟨fuel, leaves, plan, room, permutation⟩ := fits
+  apply WP.spec_mono (radix_scan_plan_matches dirs root fuel leaves plan room)
+  intro result h
+  exact h ▸ permutation
+
 end KvRust

@@ -305,6 +305,39 @@ pub fn find_leaf(dirs: &[Option<RadixDir>], root: u32, key: &[u8]) -> u32 {
     node
 }
 
+fn push_children(stack: &mut Vec<u32>, dir: &RadixDir) {
+    let mut slot = RADIX_FANOUT;
+    while slot > 0 {
+        slot -= 1;
+        let child = dir.children[slot];
+        if child != 0 {
+            stack.push(child);
+        }
+    }
+}
+
+/// Enumerate a live root's leaf links, in directory slot order.
+/// Transaction scans must separately restore the model's write order.
+pub fn scan_leaves(dirs: &[Option<RadixDir>], root: u32) -> Vec<u32> {
+    let mut leaves = Vec::new();
+    if root == 0 {
+        return leaves;
+    }
+    let mut stack = Vec::new();
+    stack.push(root);
+    while stack.len() > 0 {
+        let last = stack.len() - 1;
+        let node = stack[last];
+        stack.resize(last, 0);
+        if node < RADIX_LEAF_TAG {
+            push_children(&mut stack, directory(dirs, node));
+        } else {
+            leaves.push(node);
+        }
+    }
+    leaves
+}
+
 /// Borrow a matching row from a live arena. A compressed prefix may route
 /// an absent key to an unrelated leaf, so always check the full bytes.
 #[inline]
@@ -480,5 +513,15 @@ mod tests {
         assert_eq!(get(&dirs, &rows, fork, &[0, 0]), None);
         assert_eq!(get(&dirs, &rows, fork, &[0, 255]), Some(&6));
         assert_eq!(get(&dirs, &rows, fork, &[255]), None);
+        assert!(scan_leaves(&dirs, 0).is_empty());
+        let leaves = |root| {
+            scan_leaves(&dirs, root)
+                .into_iter()
+                .map(|link| row_at(&rows, link).value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(leaves(wide), [1, 2, 3, 4]);
+        assert_eq!(leaves(newer), [1, 5, 3, 4]);
+        assert_eq!(leaves(fork), [1, 2, 6]);
     }
 }
