@@ -129,13 +129,18 @@ theorem deps_push (encode : List U8 → String) (t : Spike.engine.Tx)
 private theorem observe_global (encode : List U8 → String)
     (inj : Function.Injective encode) (t : Spike.engine.Tx) (a : Spike.engine.Address)
     (view : Spike.engine.View) (db : Data)
-    (hImage : encodeImage encode (byteImage view.global) = image db (encAddr encode a).1)
+    (hImage
+      : encodeImage encode (byteImage (view.global.getD view.local))
+        = image db (encAddr encode a).1)
     : WP.spec (Spike.engine.Tx.observe t.pending t.deps a view true)
         (fun (value, deps) =>
           encodeValue encode value = (find db (encAddr encode a)).map Cell.value
           ∧ deps = t.deps) := by
   simp only [Spike.engine.Tx.observe, ite_true]
-  apply WP.spec_bind (read_cell encode inj view.global a db hImage)
+  have hGlobal : Spike.engine.View.global_image view = .ok (view.global.getD view.local) := by
+    cases h : view.global <;> simp [Spike.engine.View.global_image, h]
+  simp only [hGlobal, bind_ok]
+  apply WP.spec_bind (read_cell encode inj (view.global.getD view.local) a db hImage)
   intro cell hc
   cases cell <;> simp [Spike.engine.cell_value, ← hc, encodeValue,
     encodeCell, byteCell, Function.comp_def]
@@ -293,7 +298,7 @@ private theorem point_read (encode : List U8 → String) (inj : Function.Injecti
     (view : Spike.engine.View) (global presence : Bool)
     (hLocal : encodeImage encode (byteImage view.local) = image model.data (encode m.val))
     (hGlobal
-      : encodeImage encode (byteImage view.global)
+      : encodeImage encode (byteImage (view.global.getD view.local))
         = image ((find model.globalViews (encode m.val)).getD {frame := {}}).frame.data
             (encode m.val))
     (hWrites : pointWrites encode t = model.normal.writes)
@@ -457,7 +462,7 @@ theorem operate_point_matches_model (encode : List U8 → String)
           : encodeImage encode (byteImage native.local)
             = image model.data (encode m.val) :=
         (congrArg PinnedView.localImage hv).trans hLocal
-      have hg : encodeImage encode (byteImage native.global) =
+      have hg : encodeImage encode (byteImage (native.global.getD native.local)) =
           image ((find model.globalViews (encode m.val)).getD {frame := {}}).frame.data (encode m.val) := by
         rw [hView]
         exact congrArg PinnedView.globalImage hv

@@ -29,7 +29,7 @@ def rustPinnedView (encode : List U8 → String) (view : Spike.engine.View) : Pi
     birth := view.birth.map modelStamp
     revision := modelStamp view.revision
     localImage := encodeImage encode (byteImage view.local)
-    globalImage := encodeImage encode (byteImage view.global)
+    globalImage := encodeImage encode (byteImage (view.global.getD view.local))
   }
 
 /-- Project the same map and its birth/revision stamps from the model's two pinned frames. -/
@@ -116,8 +116,8 @@ private theorem map_encoding_injective (encode : List U8 → String)
 /-- Cloning a view preserves its pinned data and stamps. -/
 theorem clone_view (v : Spike.engine.View)
     : Spike.engine.View.Insts.CoreCloneClone.clone v = .ok v := by
-  cases v
-  simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_assoc]
+  obtain ⟨birth, rev, localRows, globalRows⟩ := v
+  cases globalRows <;> simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_assoc]
 
 private theorem install_view (encode : List U8 → String) (inj : Function.Injective encode)
     (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
@@ -157,6 +157,26 @@ private theorem image_frame (encode : List U8 → String) (inj : Function.Inject
   intro rows h
   rw [h]
   exact (image_encoding encode inj (byteData f.data) (alloc.vec.Vec.val m)).symm
+
+private theorem pin_global_spec (encode : List U8 → String)
+    (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
+    (localCut globalCut : U64)
+    (localRows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Cell)
+    (shared
+      : localCut = globalCut
+        → encodeImage encode (byteImage localRows)
+          = image (modelFrame encode f).data (encode m.val))
+    : WP.spec (Spike.engine.pin_global f m localCut globalCut)
+        (fun globalRows =>
+          encodeImage encode (byteImage (globalRows.getD localRows))
+          = image (modelFrame encode f).data (encode m.val)) := by
+  unfold Spike.engine.pin_global
+  by_cases same : localCut = globalCut
+  · simpa [same] using shared same
+  · simp only [same, ite_false]
+    apply WP.spec_bind (image_frame encode inj f m)
+    intro rows hr
+    simpa only [WP.spec_ok, Option.getD_some] using hr
 
 private theorem stamp_refl (stamp : Stamp) : (stamp == stamp) = true := by
   change (stamp.version == stamp.version && stamp.identity == stamp.identity) = true
@@ -251,7 +271,7 @@ theorem acquire_matches_model (encode : List U8 → String)
             simp [v, captureGlobal, captureLocal, hb, find]
           let empty : Spike.engine.View :=
             { birth := none, revision := {version := 0#u64, identity := 0#u64}
-              «local» := alloc.vec.Vec.new _, global := alloc.vec.Vec.new _ }
+              «local» := alloc.vec.Vec.new _, global := none }
           have he : rustPinnedView encode empty = modelPinnedView k v := by
             simp [hView, empty, rustPinnedView, modelPinnedView, encodeImage, byteImage, modelStamp,
               revision, image, find]
@@ -304,7 +324,15 @@ theorem acquire_matches_model (encode : List U8 → String)
           · rw [ite_eq_right hOld]
             apply WP.spec_bind (image_frame encode inj current m)
             intro localRows hLocalRows
-            apply WP.spec_bind (image_frame encode inj global m)
+            have hShared : rustSnap.version = s.global →
+                encodeImage encode (byteImage localRows) =
+                  image (modelFrame encode global).data (encode m.val) := by
+              intro he
+              have hFrames : modelFrame encode current = modelFrame encode global := by
+                rw [hCurrent, hg.1, he]
+              simpa only [hFrames] using hLocalRows
+            apply WP.spec_bind
+              (pin_global_spec encode inj global m rustSnap.version s.global localRows hShared)
             intro globalRows hGlobalRows
             apply WP.spec_bind
               (install_view encode inj t.views m

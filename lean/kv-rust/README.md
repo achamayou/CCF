@@ -152,6 +152,8 @@ The indexed batch path avoids applying the writes one at a time or cloning the i
 The extracted proof checks the ordered result against the original model fold, including puts, removals, and the fallback for repeated addresses or crowded buckets.
 With that path, the 2,048-write commit took **1.32-1.33 ms in Rust versus 0.87-0.88 ms in C++** across two paired runs.
 Rust point reads at that size took 3.91-4.86 us versus 0.63-0.64 us, and the logging mix took 49.7-57.5 us per transaction versus 1.06 us.
+Sharing the already-pinned image when the local and global cuts are identical reduced the logging mix to 33.0-37.1 us in Rust versus 1.02-1.07 us in C++ in two subsequent pairs.
+The unchanged extracted trace theorem covers this sharing, and acquisitions at different cuts still pin independent images.
 This benchmark still does not cover replicated CCF.
 
 ### Persistent storage experiment

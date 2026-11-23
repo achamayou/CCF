@@ -534,7 +534,30 @@ struct View {
     birth: Option<Stamp>,
     revision: Stamp,
     local: Image,
-    global: Image,
+    // None means both reads use the already-pinned local image.
+    global: Option<Image>,
+}
+
+impl View {
+    fn global_image(&self) -> &Image {
+        match &self.global {
+            Some(image) => image,
+            None => &self.local,
+        }
+    }
+}
+
+fn pin_global(
+    global: &Frame,
+    map: &Bytes,
+    local_cut: Version,
+    global_cut: Version,
+) -> Option<Image> {
+    if local_cut == global_cut {
+        None
+    } else {
+        Some(image(&global.data, map))
+    }
 }
 
 #[derive(Clone)]
@@ -549,7 +572,10 @@ impl Clone for View {
             birth: self.birth,
             revision: self.revision,
             local: self.local.clone(),
-            global: self.global.clone(),
+            global: match &self.global {
+                Some(image) => Some(image.clone()),
+                None => None,
+            },
         }
     }
 }
@@ -646,7 +672,7 @@ impl Tx {
                     birth: None,
                     revision: Stamp::zero(),
                     local: Assoc::new(),
-                    global: Assoc::new(),
+                    global: None,
                 },
             );
             return Ok(Output::Acquired(0, 0));
@@ -663,7 +689,7 @@ impl Tx {
             birth,
             revision,
             local: image(&local.data, &map),
-            global: image(&global.data, &map),
+            global: pin_global(global, &map, snapshot.version, history.global),
         };
         self.views.set(map, pinned);
         Ok(Output::Acquired(revision.version, global_revision.version))
@@ -677,7 +703,7 @@ impl Tx {
         global: bool,
     ) -> Option<Bytes> {
         if global {
-            return cell_value(view.global.get(&a.key));
+            return cell_value(view.global_image().get(&a.key));
         }
         if let Some(write) = pending.get(a) {
             return match write {
@@ -1168,7 +1194,7 @@ impl Store {
                         birth,
                         revision,
                         local: local_image,
-                        global: global.image,
+                        global: Some(global.image),
                     },
                 );
                 return Ok(Output::Acquired(revision.version, global.revision));

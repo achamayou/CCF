@@ -167,6 +167,31 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn a_shared_image_stays_pinned_when_later_acquisitions_pin_different_cuts() {
+    let mut s = Store::new(7);
+    let m = b"public:map";
+    let k = b"key";
+    put(&mut s, 1, m, k, b"first", 1);
+    run(&mut s, Action::Compact(1));
+    begin(&mut s, 2);
+    acquire(&mut s, 2, m);
+
+    put(&mut s, 3, m, k, b"second", 2);
+    begin(&mut s, 4);
+    acquire(&mut s, 4, m);
+    run(&mut s, Action::Compact(2));
+    begin(&mut s, 5);
+    acquire(&mut s, 5, m);
+
+    assert_read(&mut s, 2, m, k, false, Some(b"first"));
+    assert_read(&mut s, 2, m, k, true, Some(b"first"));
+    assert_read(&mut s, 4, m, k, false, Some(b"second"));
+    assert_read(&mut s, 4, m, k, true, Some(b"first"));
+    assert_read(&mut s, 5, m, k, false, Some(b"second"));
+    assert_read(&mut s, 5, m, k, true, Some(b"second"));
+}
+
+#[test]
 fn replay_rejects_gaps_and_duplicates_without_publishing() {
     let mut s = Store::new(7);
     let addr = Address {
