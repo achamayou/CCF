@@ -245,6 +245,7 @@ The second arena's allocation and reclamation costs are not qualified.
 These are component measurements, not matched transaction results.
 The engine still uses vectors; bounded reclamation and an ordered representation that meets the scan and update budgets are prerequisites for integrating the radix.
 The [address encoding proof](KvRust/RadixAddress.lean) covers the actual Rust packing code and shows that a shared radix can distinguish arbitrary map/key pairs, including empty and prefix-related byte strings.
+The extracted [`AddressIndex`](KvRust/KvIndex.lean) composes that encoding with the dual radix and relates its lookup, edits, ordered scans, and retained roots to the original address/value association lists.
 
 The `storage -- retirement` mode compares the full arena sweep with a benchmark-only reference-counted variant.
 The variant counts explicit root pins and incoming directory edges, and retires at most 32 zero-reference slots per tick.

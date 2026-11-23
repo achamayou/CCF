@@ -14,6 +14,7 @@ public import KvRust.Correspondence
 public import KvRust.Environment
 public import KvRust.History
 public import KvRust.Keys
+public import KvRust.KvIndex
 public import KvRust.Lifecycle
 public import KvRust.LifecycleRefinement
 public import KvRust.Lineage

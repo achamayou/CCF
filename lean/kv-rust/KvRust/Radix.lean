@@ -4383,8 +4383,9 @@ theorem ordered_scan_len_refines {V : Type} (a : Spike.radix.OrderedRadix V)
       obtain ⟨_, row, read, _⟩ := valid p List.mem_cons_self
       simp [radixBindings, read, ih (fun e hm => valid e (List.mem_cons_of_mem _ hm))]
 
-private theorem radix_projection_index {V : Type}
-    (rows : List (Option (Spike.radix.RadixRow V))) (bs : Bindings)
+/-- A live projection retains the original binding indices. -/
+theorem radix_projection_index {V : Type}
+    (rows : List (Option (Spike.radix.RadixRow V))) (bs : List (List U8 × U32))
     (valid : RadixRows rows bs) (i : Nat)
     : (radixBindings rows bs)[i]?
       = (bs[i]?).bind

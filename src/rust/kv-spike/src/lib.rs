@@ -5,6 +5,7 @@
 
 pub mod branch_log;
 pub mod engine;
+pub mod kv_index;
 pub mod radix;
 
 #[derive(Clone, Copy)]
