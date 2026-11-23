@@ -190,4 +190,7 @@ At 2,048 keys across two runs and both distributions, the higher-fanout Rust ind
 Eight-entry ranges took 0.53-0.58 us versus 31-40 us for full CHAMP traversal with `ByteVector` comparisons.
 In the separate churn workload the nibble index averaged 0.90-0.95 us per mutation including collection, with 29-35 us p99 collection pauses.
 These are storage-component measurements, not a CCF transaction-throughput win.
-The candidate is not integrated; scan-order refinement, bounded reclamation latency, and transaction qualification remain required.
+`KvRust.Radix` proves the exact Rust digit selection, earliest split, and borrowed point lookup used by this benchmark.
+The lookup theorem assumes that directory links partition the projected bindings and that each leaf refers to the correct live row.
+With these extracted functions the two-run medians at 2,048 keys were 8.3-9.5 ns for point reads and 132-148 ns for pinned-root updates across both distributions.
+The candidate is not integrated; updates must preserve those invariants and past roots, and scan-order refinement, bounded reclamation latency, and transaction qualification remain required.

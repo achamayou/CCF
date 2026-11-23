@@ -3,11 +3,9 @@
 
 use super::Value;
 use super::byte_radix::{ByteIndex, Pool, Row};
-use ccf_kv_spike::radix::{first_difference, symbol};
-
-// Compact benchmark arena links: zero is absent, and high bit tags leaf rows.
-const LEAF: u32 = 1 << 31;
-const FANOUT: usize = 17;
+use ccf_kv_spike::radix::{
+    RADIX_FANOUT, RADIX_LEAF_TAG as LEAF, RadixDir, first_difference, get, symbol,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Link(u32);
@@ -31,26 +29,25 @@ impl Link {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Dir {
-    at: usize,
-    first: Link,
-    mask: u32,
-    children: [Link; FANOUT],
+trait DirectoryOps {
+    fn new(digit: usize) -> Self;
+    fn set(&mut self, symbol: usize, child: Link);
+    fn child(&self, symbol: usize) -> Link;
+    fn first_child(&self) -> Link;
 }
 
-impl Dir {
-    fn new(at: usize) -> Self {
+impl DirectoryOps for RadixDir {
+    fn new(digit: usize) -> Self {
         Self {
-            at,
-            first: Link::default(),
+            digit,
+            first: 0,
             mask: 0,
-            children: [Link::default(); FANOUT],
+            children: [0; RADIX_FANOUT],
         }
     }
 
     fn set(&mut self, symbol: usize, child: Link) {
-        self.children[symbol] = child;
+        self.children[symbol] = child.0;
         if child.empty() {
             self.mask &= !(1 << symbol);
         } else {
@@ -58,14 +55,18 @@ impl Dir {
         }
     }
 
+    fn child(&self, symbol: usize) -> Link {
+        Link(self.children[symbol])
+    }
+
     fn first_child(&self) -> Link {
-        self.children[self.mask.trailing_zeros() as usize]
+        self.child(self.mask.trailing_zeros() as usize)
     }
 }
 
 #[derive(Default)]
 pub struct NibbleRadix {
-    dirs: Pool<Dir>,
+    dirs: Pool<RadixDir>,
     rows: Pool<Row>,
     path: Vec<(Link, usize)>,
 }
@@ -75,24 +76,24 @@ impl NibbleRadix {
         if node.leaf() {
             node
         } else {
-            self.dirs.get(node.index()).first
+            Link(self.dirs.get(node.index()).first)
         }
     }
 
     fn closest(&self, mut node: Link, key: &[u8]) -> Link {
         while !node.leaf() {
             let dir = self.dirs.get(node.index());
-            let child = dir.children[symbol(key, dir.at)];
+            let child = dir.child(symbol(key, dir.digit));
             if child.empty() {
-                return dir.first;
+                return Link(dir.first);
             }
             node = child;
         }
         node
     }
 
-    fn add_dir(&mut self, mut dir: Dir) -> Link {
-        dir.first = self.first_leaf(dir.first_child());
+    fn add_dir(&mut self, mut dir: RadixDir) -> Link {
+        dir.first = self.first_leaf(dir.first_child()).0;
         Link::new(self.dirs.add(dir), false)
     }
 
@@ -113,16 +114,8 @@ impl NibbleRadix {
 impl ByteIndex for NibbleRadix {
     type Root = Link;
 
-    fn get(&self, mut node: Link, key: &[u8]) -> Option<&Value> {
-        while !node.empty() {
-            if node.leaf() {
-                let row = self.rows.get(node.index());
-                return (row.key.as_ref() == key).then_some(&row.value);
-            }
-            let dir = self.dirs.get(node.index());
-            node = dir.children[symbol(key, dir.at)];
-        }
-        None
+    fn get(&self, root: Link, key: &[u8]) -> Option<&Value> {
+        get(self.dirs.as_slice(), self.rows.as_slice(), root.0, key)
     }
 
     fn put(&mut self, root: Link, key: &[u8], value: Value) -> Link {
@@ -143,18 +136,18 @@ impl ByteIndex for NibbleRadix {
         let mut stem = root;
         while !stem.leaf() {
             let dir = self.dirs.get(stem.index());
-            if diff.is_some_and(|diff| dir.at >= diff) {
+            if diff.is_some_and(|diff| dir.digit >= diff) {
                 break;
             }
-            let sym = symbol(key, dir.at);
+            let sym = symbol(key, dir.digit);
             self.path.push((stem, sym));
-            stem = dir.children[sym];
+            stem = dir.child(sym);
         }
         let next = if let Some(at) = diff {
-            let mut dir = if !stem.leaf() && self.dirs.get(stem.index()).at == at {
+            let mut dir = if !stem.leaf() && self.dirs.get(stem.index()).digit == at {
                 *self.dirs.get(stem.index())
             } else {
-                let mut dir = Dir::new(at);
+                let mut dir = RadixDir::new(at);
                 dir.set(old_sym.unwrap(), stem);
                 dir
             };
@@ -177,9 +170,9 @@ impl ByteIndex for NibbleRadix {
                 break;
             }
             let dir = self.dirs.get(node.index());
-            let sym = symbol(key, dir.at);
+            let sym = symbol(key, dir.digit);
             self.path.push((node, sym));
-            node = dir.children[sym];
+            node = dir.child(sym);
         }
         root
     }
@@ -202,7 +195,7 @@ impl ByteIndex for NibbleRadix {
             while mask != 0 {
                 let sym = 31 - mask.leading_zeros() as usize;
                 mask ^= 1 << sym;
-                let child = dir.children[sym];
+                let child = dir.child(sym);
                 let key = &self.rows.get(self.first_leaf(child).index()).key;
                 if key.as_ref() < last {
                     stack.push(child);
@@ -225,7 +218,13 @@ impl ByteIndex for NibbleRadix {
             } else if !dirs[node.index()] {
                 dirs[node.index()] = true;
                 let dir = self.dirs.get(node.index());
-                stack.extend(dir.children.iter().filter(|link| !link.empty()));
+                stack.extend(
+                    dir.children
+                        .iter()
+                        .copied()
+                        .filter(|&link| link != 0)
+                        .map(Link),
+                );
             }
         }
         self.dirs.sweep(&dirs);

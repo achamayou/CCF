@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Extracted.Funs
+public import Kv.Model.Types
 
 @[expose] public section
 
@@ -297,5 +298,219 @@ theorem radix_first_difference_matches (a b : Slice U8)
         intro digit hdigit
         simpa only [WP.spec_ok, Option.map_some, hdigit, htwo, hlen, ite_false] using split
   · simp
+
+/-- A finite projection of an arena root. Each directory partitions its
+bindings by the selected digit; its children have strictly smaller height. -/
+inductive RadixTree (dirs : List (Option Spike.radix.RadixDir))
+    : Nat → U32 → List (List U8 × U32) → Prop where
+  | empty (height : Nat) : RadixTree dirs height 0#u32 []
+  | leaf (height : Nat) (node : U32) (key : List U8)
+    (tagged : (2147483648#u32 : U32) ≤ node)
+    : RadixTree dirs height node [(key, node)]
+  | branch (height : Nat) (node : U32) (dir : Spike.radix.RadixDir)
+    (bindings : List (List U8 × U32))
+    (positive : 0 < node.val) (untagged : node < 2147483648#u32)
+    (live : dirs[node.val - 1]? = some (some dir))
+    (child : Nat → U32)
+    (links : ∀ slot, slot < 17 → dir.children.val[slot]? = some (child slot))
+    (children
+      : ∀ slot,
+          slot < 17
+          → RadixTree dirs height (child slot)
+              (bindings.filter fun row => radixSymbol row.1 dir.digit.val == slot))
+    : RadixTree dirs (height + 1) node bindings
+
+private theorem radix_tag : Spike.radix.RADIX_LEAF_TAG = 2147483648#u32 := by
+  simp [Spike.radix.RADIX_LEAF_TAG]
+
+private theorem radix_find_leaf_loop_matches (dirs : Slice (Option Spike.radix.RadixDir))
+    (key : Slice U8) (height : Nat) (node : U32) (bindings : List (List U8 × U32))
+    (tree : RadixTree dirs.val height node bindings)
+    : WP.spec (Spike.radix.find_leaf_loop dirs key node)
+        (fun candidate =>
+          (candidate = 0#u32 ∨ ∃ k, (k, candidate) ∈ bindings)
+          ∧ ∀ leaf, (key.val, leaf) ∈ bindings → candidate = leaf) := by
+  induction tree with
+  | empty height =>
+      unfold Spike.radix.find_leaf_loop loop Spike.radix.find_leaf_loop.body
+      simp
+  | leaf height node leafKey tagged =>
+      have nz : node ≠ 0#u32 := by
+        intro h
+        subst node
+        exact (by decide : ¬(2147483648#u32 : U32) ≤ 0#u32) tagged
+      unfold Spike.radix.find_leaf_loop loop Spike.radix.find_leaf_loop.body
+      have htest : (node != 0#u32) = true := bne_iff_ne.mpr nz
+      simp only [htest, ite_true, radix_tag, not_lt_of_ge tagged, ite_false, bind_ok, WP.spec_ok]
+      exact ⟨
+        Or.inr ⟨leafKey, by simp⟩,
+        fun leaf h => congrArg Prod.snd (List.mem_singleton.mp h).symm
+      ⟩
+  | branch height node dir bindings positive untagged live childAt links children ih =>
+      have nz : node ≠ 0#u32 := fun h => by subst node; contradiction
+      have test : (node != 0#u32) = true := bne_iff_ne.mpr nz
+      let chosen := radixSymbol key.val dir.digit.val
+      have chosenBound := radixSymbol_bound key.val dir.digit.val
+      have step : WP.spec (Spike.radix.find_leaf_loop.body dirs key node)
+          (fun out => out = .cont (childAt chosen)) := by
+        unfold Spike.radix.find_leaf_loop.body
+        simp only [test, ite_true, radix_tag, untagged]
+        have hone : (1#u32 : U32).val = 1 := rfl
+        have hsub : (1#u32 : U32).val ≤ node.val := by omega
+        apply WP.spec_bind (U32.sub_spec hsub)
+        intro idx hidx
+        simp only [lift, bind_ok]
+        let i := UScalar.cast .Usize idx
+        have hi : i.val = node.val - 1 := by
+          rw [U32.cast_Usize_val_eq, hidx.1, hone]
+        have hd : i.val < dirs.val.length := by
+          by_contra hn
+          have hl : dirs.val.length ≤ node.val - 1 := by omega
+          simp [hl] at live
+        apply WP.spec_bind (Slice.index_usize_spec dirs i hd)
+        intro got hgot
+        rw [← hi, List.getElem?_eq_getElem hd, ← hgot, Option.some.injEq] at live
+        subst got
+        apply WP.spec_bind (radix_symbol_matches key dir.digit)
+        intro slot hs
+        have hb : slot.val < dir.children.val.length := by
+          rw [Array.length_eq, hs]
+          exact chosenBound
+        apply WP.spec_bind (Array.index_usize_spec dir.children slot hb)
+        intro child hchild
+        have hget := links chosen chosenBound
+        change slot.val = chosen at hs
+        rw [← hs, List.getElem?_eq_getElem hb, ← hchild, Option.some.injEq] at hget
+        simp only [WP.spec_ok, hs, hget]
+      unfold Spike.radix.find_leaf_loop loop
+      apply WP.spec_bind step
+      intro out hout
+      subst out
+      have next := ih chosen chosenBound
+      apply WP.spec_mono next
+      intro candidate ⟨valid, found⟩
+      constructor
+      · rcases valid with h | ⟨k, hk⟩
+        · exact Or.inl h
+        · exact Or.inr ⟨k, (List.mem_filter.mp hk).1⟩
+      · intro leaf h
+        exact found leaf (List.mem_filter.mpr ⟨h, by simp [chosen]⟩)
+
+/-- On a live finite radix tree, the extracted point lookup never visits a
+missing directory. A key in the projection routes to its leaf, and any
+nonempty candidate belongs to that projection. A nonmatching leaf is a miss. -/
+theorem radix_find_leaf_matches (dirs : Slice (Option Spike.radix.RadixDir))
+    (key : Slice U8) (height : Nat) (node : U32) (bindings : List (List U8 × U32))
+    (tree : RadixTree dirs.val height node bindings)
+    : WP.spec (Spike.radix.find_leaf dirs node key)
+        (fun candidate =>
+          (candidate = 0#u32 ∨ ∃ k, (k, candidate) ∈ bindings)
+          ∧ ∀ leaf, (key.val, leaf) ∈ bindings → candidate = leaf) :=
+  radix_find_leaf_loop_matches dirs key height node bindings tree
+
+/-- Decode the leaf's one-based row index without interpreting directories as leaves. -/
+def radixRow {V : Type} (rows : List (Option (Spike.radix.RadixRow V))) (leaf : U32)
+    : Option (Spike.radix.RadixRow V) :=
+  (rows[leaf.val - 2147483648 - 1]?).join
+
+private theorem radix_check_leaf_spec {V : Type}
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (leaf : U32) (key : Slice U8)
+    (row : Spike.radix.RadixRow V) (tagged : 2147483648 < leaf.val)
+    (live : radixRow rows.val leaf = some row)
+    : WP.spec (Spike.radix.check_leaf rows leaf key)
+        (fun got =>
+          got = if row.key.val = key.val then some row.value else none) := by
+  unfold Spike.radix.check_leaf radixRow at *
+  rw [radix_tag]
+  have htag : (2147483648#u32 : U32).val = 2147483648 := rfl
+  apply WP.spec_bind (U32.sub_spec (by omega : (2147483648#u32 : U32).val ≤ leaf.val))
+  intro taggedIndex ht
+  have hone : (1#u32 : U32).val = 1 := rfl
+  apply WP.spec_bind (U32.sub_spec (by omega : (1#u32 : U32).val ≤ taggedIndex.val))
+  intro rawIndex hr
+  simp only [lift, bind_ok]
+  let index := UScalar.cast .Usize rawIndex
+  have hi : index.val = leaf.val - 2147483648 - 1 := by
+    rw [U32.cast_Usize_val_eq, hr.1, ht.1, htag, hone]
+  have bd : index.val < rows.val.length := by
+    by_contra hn
+    have hl : rows.val.length ≤ leaf.val - 2147483648 - 1 := by omega
+    simp [hl] at live
+  apply WP.spec_bind (Slice.index_usize_spec rows index bd)
+  intro got hgot
+  have eq : got = some row := by
+    rwa [← hi, List.getElem?_eq_getElem bd, ← hgot, Option.join_some] at live
+  rw [eq]
+  apply WP.spec_bind (core.slice.cmp.PartialEqSlice.eq_homo_spec core.cmp.PartialEqU8
+    row.key key (fun a b => by simp))
+  intro equal heq
+  by_cases same : row.key.val = key.val <;> simp [heq, Slice.eq_iff, same]
+
+private theorem find_binding (bindings : List (List U8 × U32)) (key : List U8)
+    : match Kv.Model.find bindings key with
+      | none => ∀ leaf, (key, leaf) ∉ bindings
+      | some leaf => (key, leaf) ∈ bindings := by
+  induction bindings with
+  | nil => simp [Kv.Model.find]
+  | cons p tail ih =>
+      obtain ⟨k, leaf⟩ := p
+      by_cases he : k = key
+      · simp [Kv.Model.find, he]
+      · simp only [Kv.Model.find, he, ite_false]
+        cases h : Kv.Model.find tail key with
+        | none =>
+            rw [h] at ih
+            intro other hm
+            rcases List.mem_cons.mp hm with same | rest
+            · exact he (congrArg Prod.fst same).symm
+            · exact ih other rest
+        | some hit =>
+            rw [h] at ih
+            exact List.mem_cons_of_mem _ ih
+
+/-- Borrowed lookup implements association-list lookup on the projected keys
+and reads the corresponding value, including misses at unrelated leaves. -/
+theorem radix_get_matches {V : Type} (dirs : Slice (Option Spike.radix.RadixDir))
+    (rows : Slice (Option (Spike.radix.RadixRow V))) (key : Slice U8)
+    (height : Nat) (root : U32) (bindings : List (List U8 × U32))
+    (tree : RadixTree dirs.val height root bindings)
+    (valid
+      : ∀ entry ∈ bindings,
+          2147483648 < entry.2.val
+          ∧ ∃ row, radixRow rows.val entry.2 = some row ∧ row.key.val = entry.1)
+    : WP.spec (Spike.radix.get dirs rows root key)
+        (fun got =>
+          got
+          = (Kv.Model.find bindings key.val).bind
+              fun leaf =>
+                (radixRow rows.val leaf).map Spike.radix.RadixRow.value) := by
+  unfold Spike.radix.get
+  apply WP.spec_bind (radix_find_leaf_matches dirs key height root bindings tree)
+  intro leaf ⟨belongs, lookup⟩
+  have hb := find_binding bindings key.val
+  cases hf : Kv.Model.find bindings key.val with
+  | none =>
+      simp only [hf] at hb
+      by_cases zero : leaf = 0#u32
+      · simp [zero]
+      · obtain ⟨k, hk⟩ := belongs.resolve_left zero
+        obtain ⟨tagged, row, live, hkrow⟩ := valid (k, leaf) hk
+        have diff : row.key.val ≠ key.val := by
+          intro he
+          exact hb leaf (by rwa [← he, hkrow])
+        simp only [zero, ite_false, Option.bind_none]
+        simpa only [diff, ite_false] using radix_check_leaf_spec rows leaf key row tagged live
+  | some wanted =>
+      simp only [hf] at hb
+      have equal := lookup wanted hb
+      subst leaf
+      obtain ⟨tagged, row, live, hk⟩ := valid (key.val, wanted) hb
+      have zero : wanted ≠ 0#u32 := by
+        intro hz
+        subst wanted
+        exact (by decide : ¬2147483648 < (0#u32 : U32).val) tagged
+      simp only [zero, ite_false, Option.bind_some, live, Option.map_some]
+      simpa only [hk, ite_true]
+        using radix_check_leaf_spec rows wanted key row tagged live
 
 end KvRust

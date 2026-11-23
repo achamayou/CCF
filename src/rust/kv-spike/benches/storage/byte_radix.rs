@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0 License.
 
 use super::Value;
+use ccf_kv_spike::radix::RadixRow;
 use std::fmt::Debug;
 
 pub(super) trait ByteIndex: Default {
@@ -113,12 +114,13 @@ impl<T> Pool<T> {
     pub(super) fn slots(&self) -> usize {
         self.slots.len()
     }
+
+    pub(super) fn as_slice(&self) -> &[Option<T>] {
+        &self.slots
+    }
 }
 
-pub(super) struct Row {
-    pub(super) key: Box<[u8]>,
-    pub(super) value: Value,
-}
+pub(super) type Row = RadixRow<Value>;
 
 #[derive(Default)]
 pub struct ByteRadix {
