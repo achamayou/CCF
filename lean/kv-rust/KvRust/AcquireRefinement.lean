@@ -46,18 +46,21 @@ private theorem acquire_observation (encode : List U8 → String)
       cases out <;> cases h <;> rfl
 
 private theorem native_view_present (encode : List U8 → String) (sid : Nat)
-    (t : Spike.engine.Tx) (tx : Tx) (view : GlobalView) (key : String)
-    (rel : AttemptMatches encode sid t tx) (hf : find tx.globalViews key = some view)
-    : (find (rustPinnedViews encode t.views) key).isSome := by
+    (history : Spike.engine.History) (t : Spike.engine.Tx) (tx : Tx) (view : GlobalView)
+    (key : String) (rel : AttemptMatches encode sid history t tx)
+    (hf : find tx.globalViews key = some view)
+    : (find (rustPinnedViews encode history t.views) key).isSome := by
   rw [← rel.views, lookup_model_view _ _ _ hf]
   rfl
 
 private theorem updated_relation (encode : List U8 → String) (sid : Nat)
+    (history : Spike.engine.History)
     (s : Store) (snap : Snapshot) (rustSnap : Spike.engine.Snapshot) (key : String)
     (t t' : Spike.engine.Tx) (tx tx' : Tx)
-    (rel : AttemptMatches encode sid t tx) (hSnap : t.snapshot = some rustSnap)
+    (rel : AttemptMatches encode sid history t tx) (hSnap : t.snapshot = some rustSnap)
     (unique : Kv.Properties.Unique (image (captureLocal s snap key).data key))
-    (v : modelPinnedViews tx'.globalViews = rustPinnedViews encode t'.views)
+    (v : modelPinnedViews tx'.globalViews = rustPinnedViews encode history t'.views)
+    (live : ViewsLive history t'.views)
     (hu : tx'.unavailable = t'.unavailable)
     (hn
       : if available s snap key then
@@ -74,11 +77,11 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
           }
         else
           tx' = {tx with unavailable := true})
-    : AttemptMatches encode sid t' tx' := by
+    : AttemptMatches encode sid history t' tx' := by
   by_cases ha : available s snap key
   · rw [ite_eq_left ha] at hn hm
     have hnone : t'.snapshot = some rustSnap := by simpa only [hSnap] using congrArg Spike.engine.Tx.snapshot hn
-    refine ⟨?_, ?_, ?_, v, ?_, ?_, ?_, ?_, hu, ?_, ?_⟩
+    refine ⟨?_, ?_, ?_, v, live, ?_, ?_, ?_, ?_, hu, ?_, ?_⟩
     · rw [hm]; exact rel.store
     · rw [hm, hn]; exact rel.snapshot
     · rw [hm, hn]; exact rel.phase
@@ -126,7 +129,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
   let key := encode (alloc.vec.Vec.val m)
   have bind_some {α β : Type} (x : α) (f : α → Option β) : (some x >>= f) = f x := rfl
   have refuse (bad : ∀ t, find n.txs.val id = some t →
-      t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode t.views) key).isSome)
+      t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history t.views) key).isSome)
       (hm : execute w (.acquire sid id.val key) = none) :
       WP.spec (Spike.engine.Store.execute n (.Acquire id m))
         (StepMatches encode sid n (execute w (.acquire sid id.val key))) := by
@@ -141,7 +144,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
   | some t =>
       obtain ⟨tx, hlookup, hr⟩ := rel.lookup hs hn
       have bad (p : Prop) (hp : p) (why : p →
-          t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode t.views) key).isSome)
+          t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history t.views) key).isSome)
           (hm : execute w (.acquire sid id.val key) = none) :
           WP.spec (Spike.engine.Store.execute n (.Acquire id m))
             (StepMatches encode sid n (execute w (.acquire sid id.val key))) :=
@@ -161,7 +164,8 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
               · have hphase : tx.phase = .active := by simp [hr.phase, hp, modelPhase]
                 cases hm : find tx.globalViews key with
                 | some view =>
-                    exact bad _ (native_view_present encode sid t tx view key hr hm)
+                    exact bad _
+                      (native_view_present encode sid n.history t tx view key hr hm)
                       (Or.inr ∘ Or.inr) (by simp [execute, hlookup, hms, hm, hphase])
                 | none =>
                     have hCut : snap.current.version = rustSnap.version.val := by
@@ -173,9 +177,9 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       (execute_acquire_matches_model encode inj n id w sid s tx t snap
                         rustSnap m prior head hf hh.frames hh.indexed hh.global hn hlookup
                         hns hms hCut hp hphase hr.views hr.unavailable hm
-                        (hr.fresh_log hm) (room t hn) hh.valid)
+                        (hr.fresh_log hm) (room t hn) hh.valid hr.live)
                     rintro ⟨output, after⟩ ⟨modelAfter, txAfter, tAfter, obs, index, hstep, ho, hw, hv, hu,
-                      han, ham, _, hhist, hidx, hrow⟩
+                      han, ham, _, hhist, hidx, hrow, hLive⟩
                     rw [hstep]
                     obtain ⟨out, hout, hc⟩ := acquire_observation encode output obs ho
                     refine ⟨
@@ -185,11 +189,14 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       replace_attempt rel id index t tAfter txAfter hidx hrow
                         (congrArg State.txs hw) ?_ ?_
                         (reachable_execute rel.reachable hstep)
+                        (FrameSlotsPreserved.of_same _ _
+                          (congrArg (fun h => h.log.frames) hhist))
                     ⟩
                     · rw [hw, hhist]; exact rel.history
-                    · exact updated_relation encode sid s snap rustSnap key t tAfter tx
+                    · rw [hhist]
+                      exact updated_relation encode sid n.history s snap rustSnap key t tAfter tx
                         txAfter hr hns (selected_unique w sid s snap key rel.reachable hs)
-                        hv hu han ham
+                        hv hLive hu han ham
               · have hm : (tx.phase != .active) = true := by
                   rw [hr.phase]
                   exact model_phase_inactive t.phase hp

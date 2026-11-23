@@ -88,27 +88,19 @@ private theorem image_key (db : Data) (m k : String)
         exact ih
 
 private theorem read_cell (encode : List U8 → String) (inj : Function.Injective encode)
-    (rows : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Cell))
+    (history : Spike.engine.History) (pin : Spike.engine.PinnedImage)
     (a : Spike.engine.Address) (db : Data)
-    (hImage : encodeImage encode (byteImage rows) = image db (encAddr encode a).1)
-    : WP.spec
-        (Spike.engine.Assoc.get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone
-          rows a.key)
+    (hImage
+      : encodeImage encode (pinImage history a.map pin) = image db (encAddr encode a).1)
+    (live : PinLive history pin)
+    : WP.spec (Spike.engine.PinnedImage.point pin history a)
         (fun result =>
           result.map (encodeCell encode ∘ byteCell) = find db (encAddr encode a)) := by
-  let keyOf := encode ∘ alloc.vec.Vec.val (α := U8)
-  let cellOf := encodeCell encode ∘ byteCell
-  have hk : Function.Injective keyOf := inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
-  have himage : rows.val.map (fun (k, c) => (keyOf k, cellOf c)) = image db (encAddr encode a).1 := by
-    simpa only [encodeImage, byteImage, List.map_map, Function.comp_def, keyOf, cellOf]
-      using hImage
-  apply WP.spec_mono (assoc_get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-    Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone
-    rows a.key (fun b => key_same b a.key) clone_cell)
+  apply WP.spec_mono (pin_point_refines history a pin live)
   intro result hr
-  have he := find_projected rows.val a.key keyOf cellOf hk
-  rw [himage, ← hr, image_key] at he
+  have he := find_projected (pinImage history a.map pin) a.key.val encode (encodeCell encode) inj
+  change find (encodeImage encode (pinImage history a.map pin)) (encode a.key.val) = _ at he
+  rw [hImage, ← hr, image_key, Option.map_map] at he
   exact he.symm
 
 private theorem copy_cell_exact (c : Option Spike.engine.Cell)
@@ -128,11 +120,12 @@ theorem deps_push (encode : List U8 → String) (t : Spike.engine.Tx)
 
 private theorem observe_global (encode : List U8 → String)
     (inj : Function.Injective encode) (t : Spike.engine.Tx) (a : Spike.engine.Address)
-    (view : Spike.engine.View) (db : Data)
+    (history : Spike.engine.History) (view : Spike.engine.View) (db : Data)
     (hImage
-      : encodeImage encode (byteImage (view.global.getD view.local))
+      : encodeImage encode (pinImage history a.map (view.global.getD view.local))
         = image db (encAddr encode a).1)
-    : WP.spec (Spike.engine.Tx.observe t.pending t.deps a view true)
+    (live : ViewLive history view)
+    : WP.spec (Spike.engine.Tx.observe history t.pending t.deps a view true)
         (fun (value, deps) =>
           encodeValue encode value = (find db (encAddr encode a)).map Cell.value
           ∧ deps = t.deps) := by
@@ -140,19 +133,23 @@ private theorem observe_global (encode : List U8 → String)
   have hGlobal : Spike.engine.View.global_image view = .ok (view.global.getD view.local) := by
     cases h : view.global <;> simp [Spike.engine.View.global_image, h]
   simp only [hGlobal, bind_ok]
-  apply WP.spec_bind (read_cell encode inj (view.global.getD view.local) a db hImage)
+  apply WP.spec_bind
+    (read_cell encode inj history (view.global.getD view.local) a db hImage live.2)
   intro cell hc
   cases cell <;> simp [Spike.engine.cell_value, ← hc, encodeValue,
     encodeCell, byteCell, Function.comp_def]
 
 private theorem observe_local (encode : List U8 → String)
     (inj : Function.Injective encode) (t : Spike.engine.Tx) (a : Spike.engine.Address)
-    (view : Spike.engine.View) (db : Data)
-    (hImage : encodeImage encode (byteImage view.local) = image db (encAddr encode a).1)
+    (history : Spike.engine.History) (view : Spike.engine.View) (db : Data)
+    (hImage
+      : encodeImage encode (pinImage history a.map view.local)
+        = image db (encAddr encode a).1)
+    (live : ViewLive history view)
     (room
       : find (pointWrites encode t) (encAddr encode a) = none
         → t.deps.val.length < Usize.max)
-    : WP.spec (Spike.engine.Tx.observe t.pending t.deps a view false)
+    : WP.spec (Spike.engine.Tx.observe history t.pending t.deps a view false)
         (fun (value, deps) =>
           encodeValue encode value = valueAt db (pointWrites encode t) (encAddr encode a)
           ∧ pointDeps encode {t with deps}
@@ -165,7 +162,7 @@ private theorem observe_local (encode : List U8 → String)
   cases write with
   | some w => cases w <;> simp [← hw, valueAt, needs, encWrite, encodeValue]
   | none =>
-      apply WP.spec_bind (read_cell encode inj view.local a db hImage)
+      apply WP.spec_bind (read_cell encode inj history view.local a db hImage live.1)
       intro cell hc
       have hroom := room hw.symm
       have hdep (deps : alloc.vec.Vec Spike.engine.Dependency)
@@ -274,35 +271,59 @@ def pointKeepsContext (t next : Spike.engine.Tx) : Prop :=
 
 /-- Lookup of a native handle returns the corresponding pinned view. -/
 theorem view_lookup (encode : List U8 → String) (inj : Function.Injective encode)
-    (t : Spike.engine.Tx) (m : Spike.engine.Bytes)
+    (history : Spike.engine.History) (t : Spike.engine.Tx) (m : Spike.engine.Bytes)
+    (live : ViewsLive history t.views)
     : WP.spec
         (Spike.engine.Assoc.get_ref Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey t.views
           m)
         (fun result =>
-          result.map (rustPinnedView encode)
-          = find (rustPinnedViews encode t.views) (encode m.val)) := by
+          result.map (rustPinnedView encode history m)
+            = find (rustPinnedViews encode history t.views) (encode m.val)
+          ∧ ∀ v, result = some v → ViewLive history v) := by
   apply WP.spec_mono (assoc_get_ref Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
     t.views m (fun b => key_same b m))
   intro result he
   have hi : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
-  rw [he]
-  exact (find_projected t.views.val m (encode ∘ alloc.vec.Vec.val) (rustPinnedView encode) hi).symm
+  constructor
+  · rw [he]
+    exact (find_projected_with_key t.views.val m (encode ∘ alloc.vec.Vec.val)
+      (rustPinnedView encode history) hi).symm
+  · intro v found
+    apply live (m, v)
+    have present : ∀ rows : List (Spike.engine.Bytes × Spike.engine.View),
+        find rows m = some v → (m, v) ∈ rows := by
+      intro rows
+      induction rows with
+      | nil => simp [find]
+      | cons row rest ih =>
+          obtain ⟨k, value⟩ := row
+          by_cases eq : k = m
+          · subst k
+            intro eq
+            have same : value = v := by simpa [find] using eq
+            simp [same]
+          · intro found
+            have next : find rest m = some v := by simpa [find, eq] using found
+            exact List.mem_cons_of_mem _ (ih next)
+    exact present _ (he.symm.trans found)
 
 private theorem encode_value_presence (encode : List U8 → String)
     (v : Option Spike.engine.Bytes)
     : (encodeValue encode v).isSome = v.isSome := by cases v <;> rfl
 
 private theorem point_read (encode : List U8 → String) (inj : Function.Injective encode)
-    (t : Spike.engine.Tx) (model : Tx) (m key : Spike.engine.Bytes)
-    (view : Spike.engine.View) (global presence : Bool)
-    (hLocal : encodeImage encode (byteImage view.local) = image model.data (encode m.val))
+    (history : Spike.engine.History) (t : Spike.engine.Tx) (model : Tx)
+    (m key : Spike.engine.Bytes) (view : Spike.engine.View) (global presence : Bool)
+    (hLocal
+      : encodeImage encode (pinImage history m view.local)
+        = image model.data (encode m.val))
     (hGlobal
-      : encodeImage encode (byteImage (view.global.getD view.local))
+      : encodeImage encode (pinImage history m (view.global.getD view.local))
         = image ((find model.globalViews (encode m.val)).getD {frame := {}}).frame.data
             (encode m.val))
     (hWrites : pointWrites encode t = model.normal.writes)
-    (hDeps : pointDeps encode t = model.normal.deps)
+    (hDeps : pointDeps encode t = model.normal.deps) (live : ViewLive history view)
     (room
       : global = false
         → find (pointWrites encode t) (encode m.val, encode key.val) = none
@@ -314,7 +335,7 @@ private theorem point_read (encode : List U8 → String) (inj : Function.Injecti
       WP.spec
         (do
           let (value, deps) ←
-            Spike.engine.Tx.observe t.pending t.deps {map := m, key} view global
+            Spike.engine.Tx.observe history t.pending t.deps {map := m, key} view global
           let out :=
             if presence then Spike.engine.Output.Presence value.isSome else .Value value
           Result.ok (core.result.Result.Ok out, {t with deps}))
@@ -329,7 +350,8 @@ private theorem point_read (encode : List U8 → String) (inj : Function.Injecti
   | false =>
       have hcap : find (pointWrites encode t) (encAddr encode a) = none →
           t.deps.val.length < Usize.max := by rw [ha]; exact room rfl
-      apply WP.spec_bind (observe_local encode inj t a view model.data hLocal hcap)
+      apply WP.spec_bind
+        (observe_local encode inj t a history view model.data hLocal live hcap)
       rintro ⟨value, deps⟩ ⟨hv, hd⟩
       rw [ha, hWrites] at hv hd
       cases presence <;>
@@ -337,7 +359,7 @@ private theorem point_read (encode : List U8 → String) (inj : Function.Injecti
           hd, hDeps, pointKeepsContext, recordOp, stage, ← encode_value_presence encode value] <;>
         exact hWrites
   | true =>
-      apply WP.spec_bind (observe_global encode inj t a view _ hGlobal)
+      apply WP.spec_bind (observe_global encode inj t a history view _ hGlobal live)
       rintro ⟨value, deps⟩ ⟨hv, ht⟩
       subst deps
       rw [ha] at hv
@@ -346,20 +368,20 @@ private theorem point_read (encode : List U8 → String) (inj : Function.Injecti
             hWrites, hDeps, pointKeepsContext, ← encode_value_presence encode value]
 
 private theorem point_previous (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : Spike.engine.Tx) (model : Tx)
-    (m key : Spike.engine.Bytes) (view : Spike.engine.View)
-    (hLocal : encodeImage encode (byteImage view.local) = image model.data (encode m.val))
+    (inj : Function.Injective encode) (history : Spike.engine.History)
+    (t : Spike.engine.Tx) (model : Tx) (m key : Spike.engine.Bytes)
+    (view : Spike.engine.View)
+    (hLocal
+      : encodeImage encode (pinImage history m view.local)
+        = image model.data (encode m.val))
     (hWrites : pointWrites encode t = model.normal.writes)
-    (hDeps : pointDeps encode t = model.normal.deps)
+    (hDeps : pointDeps encode t = model.normal.deps) (live : ViewLive history view)
     (room : t.deps.val.length < Usize.max)
     : let expected :=
         executeOperation model ((PointOperation.previous key).model encode m)
       WP.spec
         (do
-          let cell ←
-            Spike.engine.Assoc.get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-              Spike.engine.Bytes.Insts.CoreCloneClone
-              Spike.engine.Cell.Insts.CoreCloneClone view.local key
+          let cell ← Spike.engine.PinnedImage.point view.local history {map := m, key}
           let version ← Spike.engine.cell_version cell
           let deps ← alloc.vec.Vec.push t.deps (.Key {map := m, key} cell)
           Result.ok
@@ -370,7 +392,8 @@ private theorem point_previous (encode : List U8 → String)
           ∧ pointDeps encode after = expected.1.normal.deps
           ∧ pointKeepsContext t after) := by
   let addr : Spike.engine.Address := {map := m, key}
-  apply WP.spec_bind (read_cell encode inj view.local addr model.data hLocal)
+  apply WP.spec_bind
+    (read_cell encode inj history view.local addr model.data hLocal live.1)
   intro cell hc
   have he : find model.data (encode m.val, encode key.val) =
       (cell.map byteCell).map (encodeCell encode) := by
@@ -417,22 +440,24 @@ private theorem point_write (encode : List U8 → String) (inj : Function.Inject
 
 /-- An active point operation observes the model result and preserves the related writes and dependencies. -/
 theorem operate_point_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : Spike.engine.Tx) (model : Tx)
-    (m : Spike.engine.Bytes) (op : PointOperation) (view : GlobalView)
-    (hPhase : t.phase = .Active)
+    (inj : Function.Injective encode) (history : Spike.engine.History)
+    (t : Spike.engine.Tx) (model : Tx) (m : Spike.engine.Bytes) (op : PointOperation)
+    (view : GlobalView) (hPhase : t.phase = .Active)
     (hView : find model.globalViews (encode m.val) = some view)
-    (hPinned : rustPinnedViews encode t.views = modelPinnedViews model.globalViews)
+    (hPinned
+      : rustPinnedViews encode history t.views = modelPinnedViews model.globalViews)
     (hLocal : image view.current.data (encode m.val) = image model.data (encode m.val))
     (hWrites : pointWrites encode t = model.normal.writes)
     (hDeps : pointDeps encode t = model.normal.deps) (room : op.fits encode t m)
+    (live : ViewsLive history t.views)
     : let expected := executeOperation model (op.model encode m)
-      WP.spec (Spike.engine.Tx.operate t m op.rust)
+      WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
           pointOutput encode output = some expected.2
           ∧ pointWrites encode after = expected.1.normal.writes
           ∧ pointDeps encode after = expected.1.normal.deps
           ∧ pointKeepsContext t after) := by
-  have hFound : find (rustPinnedViews encode t.views) (encode m.val) =
+  have hFound : find (rustPinnedViews encode history t.views) (encode m.val) =
       some (modelPinnedView (encode m.val) view) := by
     rw [hPinned]
     generalize hm : encode m.val = needle at hView ⊢
@@ -450,19 +475,20 @@ theorem operate_point_matches_model (encode : List U8 → String)
           exact ih hView
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
   simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
-  apply WP.spec_bind (view_lookup encode inj t m)
-  intro found hf
+  apply WP.spec_bind (view_lookup encode inj history t m live)
+  intro found ⟨hf, alive⟩
   rw [hFound] at hf
   cases found with
   | none => cases hf
   | some native =>
-      have hv : rustPinnedView encode native = modelPinnedView (encode m.val) view :=
+      have hv : rustPinnedView encode history m native = modelPinnedView (encode m.val) view :=
         Option.some.inj hf
+      have localLive := alive native rfl
       have hl
-          : encodeImage encode (byteImage native.local)
+          : encodeImage encode (pinImage history m native.local)
             = image model.data (encode m.val) :=
         (congrArg PinnedView.localImage hv).trans hLocal
-      have hg : encodeImage encode (byteImage (native.global.getD native.local)) =
+      have hg : encodeImage encode (pinImage history m (native.global.getD native.local)) =
           image ((find model.globalViews (encode m.val)).getD {frame := {}}).frame.data (encode m.val) := by
         rw [hView]
         exact congrArg PinnedView.globalImage hv
@@ -471,17 +497,17 @@ theorem operate_point_matches_model (encode : List U8 → String)
           simp only [PointOperation.rust]
           rw [← hPhase]
           simpa only [Bool.false_eq_true, ite_false]
-            using (point_read encode inj t model m key native global false hl hg hWrites
-                    hDeps room)
+            using (point_read encode inj history t model m key native global false hl hg
+                    hWrites hDeps localLive room)
       | has key global =>
           simp only [PointOperation.rust]
           rw [← hPhase]
           simpa only [core.option.Option.is_some, Bool.true_eq, ite_true]
-            using (point_read encode inj t model m key native global true hl hg hWrites
-                    hDeps room)
+            using (point_read encode inj history t model m key native global true hl hg
+                    hWrites hDeps localLive room)
       | previous key =>
           rw [← hPhase]
-          exact point_previous encode inj t model m key native hl hWrites hDeps room
+          exact point_previous encode inj history t model m key native hl hWrites hDeps localLive room
       | write key value =>
           simpa only [PointOperation.rust, hPhase]
             using (point_write encode inj t model m key value hWrites hDeps room)
@@ -512,10 +538,11 @@ theorem execute_point_matches_model (encode : List U8 → String)
     (hLookup : lookupTx w sid id.val = some (model, tx))
     (hNativePhase : t.phase = .Active) (hModelPhase : tx.phase = .active)
     (hSnap : tx.snapshot.isSome) (hView : find tx.globalViews (encode m.val) = some view)
-    (hPinned : rustPinnedViews encode t.views = modelPinnedViews tx.globalViews)
+    (hPinned : rustPinnedViews encode s.history t.views = modelPinnedViews tx.globalViews)
     (hLocal : image view.current.data (encode m.val) = image tx.data (encode m.val))
     (hWrites : pointWrites encode t = tx.normal.writes)
     (hDeps : pointDeps encode t = tx.normal.deps) (room : op.fits encode t m)
+    (live : ViewsLive s.history t.views)
     : WP.spec (Spike.engine.Store.execute s (.Operate id m op.rust))
         (fun (output, after) =>
           ∃ modelAfter txAfter tAfter obs index,
@@ -546,11 +573,11 @@ theorem execute_point_matches_model (encode : List U8 → String)
       have he : row = (id, t) := hback.1.trans hget
       subst row
       change WP.spec (do
-        let (out, next) ← Spike.engine.Tx.operate t m op.rust
+        let (out, next) ← Spike.engine.Tx.operate t s.history m op.rust
         Result.ok (out, {s with txs := back (id, next)})) _
       apply WP.spec_bind
-        (operate_point_matches_model encode inj t tx m op view hNativePhase
-          hView hPinned hLocal hWrites hDeps room)
+        (operate_point_matches_model encode inj s.history t tx m op view hNativePhase
+          hView hPinned hLocal hWrites hDeps room live)
       rintro ⟨out, next⟩ ⟨ho, hw, hd, hkeep⟩
       have hupdate : (back (id, next)).val = s.txs.val.set i.val (id, next) := by
         rw [hback.2]

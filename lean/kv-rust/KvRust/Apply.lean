@@ -202,7 +202,8 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ after.history.next_identity.val = expected.nextIdentity
             ∧ s.txs.val[index]? = some (id, t)
             ∧ after.txs.val = s.txs.val.set index (id, {t with phase := .Applied version})
-            ∧ BranchValid after.history.log) := by
+            ∧ BranchValid after.history.log
+            ∧ FrameSlotsPreserved s.history after.history) := by
   dsimp only
   unfold Spike.engine.Store.execute Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -251,7 +252,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         (branch_values_length s.history.log valid) ▸ hCap.history
       apply WP.spec_bind
         (branch_append_refines s.history.log next valid hCap.archive branchRoom)
-      rintro ⟨_, log⟩ ⟨logValid, hf, _, _, _⟩
+      rintro ⟨frameId, log⟩ ⟨logValid, hf, slot, _, kept⟩
       have hibound : s.history.next_identity.val + (1#u64 : U64).val ≤ U64.max := by
         have := hCap.identity
         omega
@@ -270,7 +271,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       rw [WP.spec_ok]
       refine ⟨version, reported, ?_⟩
       refine ⟨rfl, hv', hTerm.symm, hreported, ?_, hGlobal.symm,
-        hTerm.symm, ?_, i.val, hrow, ?_, logValid⟩
+        hTerm.symm, ?_, i.val, hrow, ?_, logValid, ?_⟩
       · simp only [modelFrames, Spike.engine.History.activeFrames, hf, List.reverse_append,
           List.reverse_singleton, List.singleton_append,
           List.map_cons]
@@ -280,6 +281,13 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       · simpa [hone, hIdentity, advance] using hidentity
       · rw [hback.2]
         exact alloc.vec.Vec.set_val_eq _ _ _
+      · intro j f saved
+        have bound : j < frameId.val := by
+          rw [slot]
+          by_contra hn
+          rw [List.getElem?_eq_none (Nat.le_of_not_gt hn)] at saved
+          cases saved
+        exact (kept j bound).trans saved
 
 /-- The wire-size preflight reads exactly the write set used by the KV model. -/
 theorem pending_writes_match (encode : List U8 → String)

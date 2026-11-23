@@ -19,6 +19,17 @@ abbrev _root_.Spike.engine.History.activeFrames (history : Spike.engine.History)
     : List Spike.engine.Frame :=
   branchValues history.log
 
+/-- Every previously issued frame slot retains its value across this history update. -/
+def FrameSlotsPreserved (before after : Spike.engine.History) : Prop :=
+  ∀ (i : Nat) frame,
+    before.log.frames.val[i]? = some frame → after.log.frames.val[i]? = some frame
+
+theorem FrameSlotsPreserved.of_same (before after : Spike.engine.History)
+    (same : after.log.frames = before.log.frames)
+    : FrameSlotsPreserved before after := by
+  intro i frame saved
+  simpa only [same] using saved
+
 private theorem returning {α : Type} {r : Result α} {p : α → Prop} (h : WP.spec r p)
     : ∃ v, r = .ok v ∧ p v := by
   cases r using Result.cases with
@@ -139,7 +150,7 @@ theorem history_at_cut_index (s : Spike.engine.History) (cut : U64)
     (valid : BranchValid s.log)
     : WP.spec (Spike.engine.History.at_cut s cut)
         (fun f => s.activeFrames[min cut.val prior.length]? = some f) := by
-  unfold Spike.engine.History.at_cut
+  unfold Spike.engine.History.at_cut Spike.engine.History.pin_cut
   simp only [hzero, bind_ok]
   apply WP.spec_bind (branch_cut_refines s.log valid cut)
   rintro id ⟨frame, saved, selected⟩
@@ -196,6 +207,34 @@ theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
     rw [hmodel, modelFrames, find_reverse_indexed _ project _ hversions, hlen, hf]
     rfl
   exact ⟨by simp [atCut, he], List.mem_of_find?_eq_some he⟩
+
+/-- Pinning a cut returns a stable frame slot with the model's selected value. -/
+theorem history_pin_cut_matches_model (s : Spike.engine.History) (cut : U64)
+    (model : Store) (project : Spike.engine.Frame → Frame)
+    (hmodel : model.history = modelFrames s project)
+    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
+    (hversions
+      : ∀ i (hi : i < s.activeFrames.length), (project s.activeFrames[i]).version = i)
+    (valid : BranchValid s.log)
+    : WP.spec (Spike.engine.History.pin_cut s cut)
+        (fun id =>
+          ∃ frame,
+            s.log.frames.val[id.val]? = some frame
+            ∧ project frame = atCut model cut.val
+            ∧ project frame ∈ model.history) := by
+  unfold Spike.engine.History.pin_cut
+  simp only [hzero, bind_ok]
+  apply WP.spec_mono (branch_cut_refines s.log valid cut)
+  rintro id ⟨frame, saved, selected⟩
+  have len : s.log.branch.val.length = s.activeFrames.length :=
+    (branch_values_length s.log valid).symm
+  change s.activeFrames[min cut.val (s.log.branch.val.length - 1)]? = some frame at selected
+  rw [len] at selected
+  have found : model.history.find? (fun f => decide (f.version ≤ cut.val))
+      = some (project frame) := by
+    rw [hmodel, modelFrames, find_reverse_indexed _ project _ hversions, selected]
+    rfl
+  exact ⟨frame, saved, by simp [atCut, found], List.mem_of_find?_eq_some found⟩
 
 /-- The version of the selected reference frame is the cut clamped to the surviving branch. -/
 theorem model_cut_version (s : Spike.engine.History) (model : Store)
@@ -260,7 +299,8 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
         ∧ after.global = s.global
         ∧ after.next_identity = s.next_identity
         ∧ after.term = term
-        ∧ BranchValid after.log := by
+        ∧ BranchValid after.log
+        ∧ after.log.frames = s.log.frames := by
   let model : Store := { global := s.global.val, head := {version := head.version.val} }
   have hspec := rollback_cut_model s.global head.version requested model rfl rfl
   have hsuccess : ∃ cut, Spike.engine.rollback_cut s.global head.version requested = .ok cut
@@ -286,18 +326,18 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
       rw [← branch_values_length s.log valid]
       change i.val < s.activeFrames.length
       omega
-    obtain ⟨⟨ok, retained⟩, hrewind, hok, hvalid, _, htake⟩ :=
+    obtain ⟨⟨ok, retained⟩, hrewind, hok, hvalid, hkept, htake⟩ :=
       returning (branch_rewind_refines s.log i valid)
     have accepted : ok = true := by simpa [inside] using hok
     rw [accepted] at hrewind htake
     have hasPrefix : branchValues retained = s.activeFrames.take (cut.val + 1) := by
       simpa [hi] using htake
     refine ⟨cut, {s with log := retained, term}, ?_, hvalue,
-      hasPrefix, rfl, rfl, rfl, hvalid⟩
+      hasPrefix, rfl, rfl, rfl, hvalid, hkept⟩
     simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
       history_head s prior head hframes valid, hcalc, hsmall, ← show i = UScalar.cast .Usize cut from rfl,
       hzero, lift, hrewind, massert]
-  · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl, valid⟩
+  · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl, valid, rfl⟩
     · simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
         history_head s prior head hframes valid, hcalc, hsmall]
     · symm
@@ -330,8 +370,9 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
         ∧ after.history.global = s.history.global
         ∧ after.history.next_identity = s.history.next_identity
         ∧ after.history.term = term
-        ∧ BranchValid after.history.log := by
-  obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht, hvalid⟩ :=
+        ∧ BranchValid after.history.log
+        ∧ after.history.log.frames = s.history.log.frames := by
+  obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht, hvalid, hkept⟩ :=
     history_rollback s.history requested term prior head hframes hindex hzero hcut hterm valid
   have hmodelcut : cut.val = rollbackCut model requested.val := by
     simpa [rollbackCut, hglobal, hhead] using hvalue
@@ -346,7 +387,8 @@ theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term :
     hg,
     hi,
     ht,
-    hvalid
+    hvalid,
+    hkept
   ⟩
   · simp [Spike.engine.Store.execute, hrun]
   · have hfilter : s.history.activeFrames.filter

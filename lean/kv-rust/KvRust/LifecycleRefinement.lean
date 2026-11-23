@@ -79,14 +79,16 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w action r h _ hr
   intro w' _ _ ⟨old, next, modelTx, _, hw, ⟨hh, index, hi, hn⟩, ht⟩ reach
-  apply replace_attempt h id index old next modelTx hi hn (congrArg State.txs hw) _ ht reach
-  rw [hh, hw]
-  exact h.history
+  refine replace_attempt h id index old next modelTx hi hn (congrArg State.txs hw) ?_ ?_ reach ?_
+  · rw [hh, hw]
+    exact h.history
+  · rw [hh]; exact ht
+  · exact FrameSlotsPreserved.of_same _ _ (congrArg (fun h => h.log.frames) hh)
 
 private theorem lookup_for_lifecycle (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64)
     (rel : StateMatches encode sid n w)
-    : Option.Rel (fun t (_, tx) => LifecycleAttempt encode t tx)
+    : Option.Rel (fun t (_, tx) => LifecycleAttempt encode n.history t tx)
         (find n.txs.val id) (lookupTx w sid id.val) := by
   obtain ⟨s, hs, _⟩ := rel.history
   have he := rel.lookupRelated hs id
@@ -146,11 +148,13 @@ theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
   intro w' _ _ ⟨he, hn⟩ reach
   have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} :=
     {hh with term := rfl}
-  refine replace_history h (s := {s with term := term.val}) ?_ ?_ ?_ ?_ reach
+  refine replace_history h (s := {s with term := term.val}) ?_ ?_ ?_ ?_ reach ?_
   · rw [hn]; exact hh'
   · rw [he]; simp [find_set_key]
   · rw [hn]
   · rw [he]
+  · apply FrameSlotsPreserved.of_same
+    rw [hn]
 
 private theorem keys_erase {K V : Type} [DecidableEq K] (xs : Assoc K V) (k : K)
     (h : (xs.map Prod.fst).Nodup)
@@ -189,7 +193,7 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
   · rw [hn]
     exact keys_set _ _ _ h.unique
   · intro q
-    rw [hn, hw, find_set_key, find_set_key]
+    rw [hh, hn, hw, find_set_key, find_set_key]
     by_cases eq : q = id
     · subst q
       simpa using Option.Rel.some ht.related
@@ -216,7 +220,7 @@ theorem end_step_matches (encode : List U8 → String) (sid : Nat)
   · rw [hn]
     exact keys_erase _ _ h.unique
   · intro q
-    rw [hn, hw, find_erase_key, find_erase_key]
+    rw [hh, hn, hw, find_erase_key, find_erase_key]
     by_cases eq : q = id
     · subst q
       simp

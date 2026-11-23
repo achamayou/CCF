@@ -59,7 +59,7 @@ def snapshotCut (s : Snapshot) : Nat × Nat := (s.current.version, s.term)
 
 /-- The two attempts differ in representation and in the model-only normal operation log. -/
 structure AttemptMatches (encode : List U8 → String) (sid : Nat)
-    (native : Spike.engine.Tx) (model : Tx)
+    (history : Spike.engine.History) (native : Spike.engine.Tx) (model : Tx)
     : Prop where
   /-- The model attempt belongs to the represented store. -/
   store : model.store = sid
@@ -68,7 +68,8 @@ structure AttemptMatches (encode : List U8 → String) (sid : Nat)
   /-- The operation phases agree. -/
   phase : model.phase = modelPhase native.phase
   /-- The sequence of acquired maps, stamps, and local/global images agrees. -/
-  views : modelPinnedViews model.globalViews = rustPinnedViews encode native.views
+  views : modelPinnedViews model.globalViews = rustPinnedViews encode history native.views
+  live : ViewsLive history native.views
   /-- The model's flattened read image agrees with each independently pinned view. -/
   data
     : ∀ m,
@@ -122,7 +123,7 @@ structure StateMatches (encode : List U8 → String) (sid : Nat)
   /-- Pointwise lookup forgets differences in the ordering of the attempt tables. -/
   attempts
     : ∀ id : U64,
-        Option.Rel (AttemptMatches encode sid)
+        Option.Rel (AttemptMatches encode sid native.history)
           (find native.txs.val id) (find model.txs id.val)
   /-- The reference execution started from its real initial state. -/
   reachable : transitionSystem.Reachable model
@@ -145,7 +146,9 @@ theorem StateMatches.lookup {encode : List U8 → String} {sid : Nat}
     {n : Spike.engine.Store} {w : State} (h : StateMatches encode sid n w)
     {s : Store} (hs : find w.stores sid = some s) {id : U64} {t : Spike.engine.Tx}
     (ht : find n.txs.val id = some t)
-    : ∃ tx, lookupTx w sid id.val = some (s, tx) ∧ AttemptMatches encode sid t tx := by
+    : ∃ tx,
+        lookupTx w sid id.val = some (s, tx)
+        ∧ AttemptMatches encode sid n.history t tx := by
   have ha := h.attempts id
   rw [ht] at ha
   cases hv : find w.txs id.val with
@@ -171,7 +174,8 @@ theorem StateMatches.lookup_missing {encode : List U8 → String} {sid : Nat}
 theorem StateMatches.lookupRelated {encode : List U8 → String} {sid : Nat}
     {n : Spike.engine.Store} {w : State} (h : StateMatches encode sid n w)
     {s : Store} (hs : find w.stores sid = some s) (id : U64)
-    : Option.Rel (fun t (store, tx) => store = s ∧ AttemptMatches encode sid t tx)
+    : Option.Rel
+        (fun t (store, tx) => store = s ∧ AttemptMatches encode sid n.history t tx)
         (find n.txs.val id) (lookupTx w sid id.val) := by
   cases ht : find n.txs.val id with
   | none =>
@@ -186,7 +190,8 @@ theorem StateMatches.lookupRelated {encode : List U8 → String} {sid : Nat}
 
 /-- A handle that is not yet acquired cannot already occur in the reference log. -/
 theorem AttemptMatches.fresh_log {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Tx} {t : Tx} (h : AttemptMatches encode sid n t)
+    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history n t)
     {m : String} (missing : find t.globalViews m = none)
     : t.normal.log.all (fun op => op.map != m) = true := by
   apply List.all_eq_true.mpr
@@ -198,23 +203,27 @@ theorem AttemptMatches.fresh_log {encode : List U8 → String} {sid : Nat}
 
 /-- The duplicated model image is read from the local, not global, part of the handle. -/
 theorem AttemptMatches.localImage {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Tx} {t : Tx} (h : AttemptMatches encode sid n t)
+    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history n t)
     {m : String} {v : GlobalView} (hv : find t.globalViews m = some v)
     : image v.current.data m = image t.data m := by rw [h.data m, hv]; rfl
 
 /-- Changing commit phase leaves the rest of the attempt relation intact. -/
 theorem AttemptMatches.withPhase {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Tx} {t : Tx} (h : AttemptMatches encode sid n t)
+    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history n t)
     (p : Spike.engine.Phase)
-    : AttemptMatches encode sid {n with phase := p} {t with phase := modelPhase p} :=
+    : AttemptMatches encode sid history {n with phase := p}
+        {t with phase := modelPhase p} :=
   {h with phase := rfl}
 
 /-- Snapshot capture adds only the frozen metadata. -/
 theorem AttemptMatches.withSnapshot {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Tx} {t : Tx} (h : AttemptMatches encode sid n t)
+    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history n t)
     (native : Spike.engine.Snapshot) (model : Snapshot)
     (hCut : snapshotCut model = modelSnapshot native)
-    : AttemptMatches encode sid {n with snapshot := some native}
+    : AttemptMatches encode sid history {n with snapshot := some native}
         {t with snapshot := some model} :=
   {
     h with
@@ -258,7 +267,8 @@ theorem lookup_owner {w : State} {sid tid : Nat} {s : Store} {tx : Tx}
 
 /-- Relate the stamp portions of matching captured views for the eligibility theorem. -/
 theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Tx} {t : Tx} (h : AttemptMatches encode sid n t)
+    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history n t)
     : t.globalViews.map capturedStamps
       = n.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)) := by
   let project := fun (p : String × PinnedView) => (p.1, p.2.birth, p.2.revision)
@@ -268,13 +278,29 @@ theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
       apply List.map_congr_left
       rintro ⟨k, v⟩ _
       rfl
-    _ = (rustPinnedViews encode n.views).map project :=
+    _ = (rustPinnedViews encode history n.views).map project :=
       congrArg (List.map project) h.views
     _ = _ := by
       rw [rustPinnedViews, List.map_map]
       apply List.map_congr_left
       rintro ⟨k, v⟩ _
       rfl
+
+theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
+    {before after : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid before n t) (kept : FrameSlotsPreserved before after)
+    : AttemptMatches encode sid after n t := by
+  obtain ⟨live, views⟩ := pinned_views_preserved encode kept n.views h.live
+  exact { h with views := h.views.trans views.symm, live }
+
+private theorem related_frame_slots {encode : List U8 → String} {sid : Nat}
+    {before after : Spike.engine.History} {n : Option Spike.engine.Tx} {t : Option Tx}
+    (h : Option.Rel (AttemptMatches encode sid before) n t)
+    (kept : FrameSlotsPreserved before after)
+    : Option.Rel (AttemptMatches encode sid after) n t := by
+  cases h with
+  | none => exact .none
+  | some hr => exact .some (hr.withHistory kept)
 
 /-- Replace a modeled attempt at its native index, preserving every other binding and the key set. -/
 theorem replace_attempts {encode : List U8 → String} {sid : Nat}
@@ -283,10 +309,11 @@ theorem replace_attempts {encode : List U8 → String} {sid : Nat}
     (hidx : n.txs.val[i]? = some (id, old))
     (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx)
-    (ht : AttemptMatches encode sid next tx)
+    (ht : AttemptMatches encode sid n'.history next tx)
+    (kept : FrameSlotsPreserved n.history n'.history)
     : (n'.txs.val.map Prod.fst).Nodup
       ∧ ∀ q : U64,
-          Option.Rel (AttemptMatches encode sid)
+          Option.Rel (AttemptMatches encode sid n'.history)
             (find n'.txs.val q) (find w'.txs q.val) := by
   constructor
   · rw [hn, index_update_keys _ _ _ _ _ hidx]
@@ -297,7 +324,7 @@ theorem replace_attempts {encode : List U8 → String} {sid : Nat}
     · subst q
       simpa using Option.Rel.some ht
     · have hn' : q.val ≠ id.val := fun e => h (UScalar.eq_of_val_eq e)
-      simpa [h, hn'] using before.attempts q
+      simpa [h, hn'] using related_frame_slots (before.attempts q) kept
 
 /-- Lift a successful one-step reference transition to reachability for the relation. -/
 theorem reachable_execute {w w' : State} {action : Action} {output : Output}
@@ -311,13 +338,14 @@ theorem reachable_execute {w w' : State} {action : Action} {output : Output}
 theorem replace_attempt {encode : List U8 → String} {sid : Nat}
     {n n' : Spike.engine.Store} {w w' : State} (h : StateMatches encode sid n w)
     (id : U64) (i : Nat) (old next : Spike.engine.Tx) (tx : Tx)
-    (hidx : n.txs.val[i]? = some (id, old))
-    (hn : n'.txs.val = n.txs.val.set i (id, next))
+    (hidx : n.txs.val[i]? = some (id, old)) (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx)
     (history : ∃ s, find w'.stores sid = some s ∧ HistoryMatches encode n'.history s)
-    (ht : AttemptMatches encode sid next tx) (reach : transitionSystem.Reachable w')
+    (ht : AttemptMatches encode sid n'.history next tx)
+    (reach : transitionSystem.Reachable w')
+    (kept : FrameSlotsPreserved n.history n'.history)
     : StateMatches encode sid n' w' :=
-  let ⟨unique, attempts⟩ := replace_attempts h id i old next tx hidx hn hw ht
+  let ⟨unique, attempts⟩ := replace_attempts h id i old next tx hidx hn hw ht kept
   ⟨history, unique, attempts, reach⟩
 
 /-- Exact reference history forces the native array's versions to equal its indices. -/
@@ -361,12 +389,13 @@ theorem replace_history {encode : List U8 → String} {sid : Nat}
     {s : Store} (history : HistoryMatches encode n'.history s)
     (hs : find w'.stores sid = some s) (hn : n'.txs = n.txs) (hw : w'.txs = w.txs)
     (reach : transitionSystem.Reachable w')
+    (kept : FrameSlotsPreserved n.history n'.history)
     : StateMatches encode sid n' w' := by
   refine ⟨⟨s, hs, history⟩, ?_, ?_, reach⟩
   · rw [hn]; exact h.unique
   · intro id
     rw [hn, hw]
-    exact h.attempts id
+    exact related_frame_slots (h.attempts id) kept
 
 /-- A bounded Rust step either agrees with the reference action or rejects without mutation. -/
 def StepMatches (encode : List U8 → String) (sid : Nat)

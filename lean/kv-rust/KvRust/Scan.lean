@@ -30,7 +30,8 @@ def modelEntries (encode : List U8 → String)
 
 private theorem scan_committed (cells : Spike.engine.Assoc Bytes Spike.engine.Cell)
     : WP.spec (Spike.engine.Tx.scan_loop0 cells (alloc.vec.Vec.new _) 0#usize)
-        (fun rows => rows.val = cells.val.map (fun (k, c) => (k, c.value))) := by
+        (fun (retained, rows) =>
+          retained = cells ∧ rows.val = cells.val.map (fun (k, c) => (k, c.value))) := by
   let project := fun (p : Bytes × Spike.engine.Cell) => (p.1, p.2.value)
   unfold Spike.engine.Tx.scan_loop0
   apply loop.spec_decr_nat
@@ -68,7 +69,7 @@ private theorem scan_committed (cells : Spike.engine.Assoc Bytes Spike.engine.Ce
         show cells.val.length - j.val < cells.val.length - i.val by omega⟩
     · have hb : cells.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
       rw [ite_eq_right h, WP.spec_ok]
-      simpa [List.drop_eq_nil_of_le hb, project] using hrows
+      exact ⟨rfl, by simpa [List.drop_eq_nil_of_le hb, project] using hrows⟩
   · simp
 
 private def mapWrites (encode : List U8 → String) (m : Bytes) (rows : List WriteRow)
@@ -221,15 +222,17 @@ private theorem scan_overlay (encode : List U8 → String) (inj : Function.Injec
 
 /-- The native scan includes this map's overlay and records the committed image as a dependency. -/
 theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injective encode)
+    (history : Spike.engine.History)
     (t : Spike.engine.Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View) (tx : Tx)
     (hLocal
-      : encodeImage encode (byteImage view.local)
+      : encodeImage encode (pinImage history m view.local)
         = image tx.data (encode (alloc.vec.Vec.val m)))
+    (live : PinLive history view.local)
     (hWrites : pointWrites encode t = tx.normal.writes)
     (hDeps : pointDeps encode t = tx.normal.deps)
     (room : t.deps.val.length < Usize.max)
-    (rowsRoom : view.local.val.length + t.pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.scan t.pending t.deps m view)
+    (rowsRoom : (pinImage history m view.local).length + t.pending.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
         (fun (rows, deps) =>
           let next := {t with deps}
           modelEntries encode rows
@@ -239,24 +242,32 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
             = .map (encode (alloc.vec.Vec.val m))
                 (image tx.data (encode (alloc.vec.Vec.val m)))
               :: tx.normal.deps
-          ∧ rows.val.length ≤ view.local.val.length + t.pending.val.length) := by
-  simp only [Spike.engine.Tx.scan, clone_bytes, clone_assoc, Spike.engine.Assoc.new, bind_ok]
-  apply WP.spec_bind (deps_push encode t (.Map m view.local) room)
+          ∧ rows.val.length
+            ≤ (pinImage history m view.local).length + t.pending.val.length) := by
+  simp only [Spike.engine.Tx.scan, clone_bytes, Spike.engine.Assoc.new, bind_ok]
+  apply WP.spec_bind (pin_materialize_refines history m view.local live)
+  intro cells hCells
+  have localEq : encodeImage encode (byteImage cells) = image tx.data (encode m.val) :=
+    (congrArg (encodeImage encode) hCells).trans hLocal
+  apply WP.spec_bind (scan_committed cells)
+  rintro ⟨retained, base⟩ ⟨kept, hb⟩
+  subst retained
+  apply WP.spec_bind (deps_push encode t (.Map m cells) room)
   intro deps hd
-  apply WP.spec_bind (scan_committed view.local)
-  intro base hb
-  have hlen : base.val.length = view.local.val.length := by simp [hb]
+  have hlen : base.val.length = (pinImage history m view.local).length := by
+    rw [← hCells]
+    simp [hb, byteImage]
   apply WP.spec_bind
     (scan_overlay encode inj m t.pending base (by simpa [hlen] using rowsRoom))
   intro out ho
   have hbase : modelEntries encode base =
       (image tx.data (encode (alloc.vec.Vec.val m))).map fun (k, c) => (k, c.value) := by
-    rw [← hLocal]
+    rw [← localEq]
     simp [modelEntries, hb, encodeImage, byteImage, List.map_map, Function.comp_def,
       encodeCell, byteCell]
   have hdep : pointDeps encode {t with deps} = .map (encode (alloc.vec.Vec.val m))
       (image tx.data (encode (alloc.vec.Vec.val m))) :: tx.normal.deps := by
-    simpa [byteDependency, encodeDependency, hLocal, hDeps] using hd
+    simpa [byteDependency, encodeDependency, localEq, hDeps] using hd
   rw [WP.spec_ok]
   exact ⟨
     by simpa [scanAt, hbase, map_writes_proj encode inj m t, hWrites] using ho.1,
@@ -459,10 +470,11 @@ theorem lookup_model_view (rows : Assoc String GlobalView) (m : String) (v : Glo
 /-- An enabled scan, size, or clear agrees with the reference action and dependency updates. -/
 theorem operate_scan_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (order : PreservesByteOrder encode)
+    (history : Spike.engine.History)
     (t : Spike.engine.Tx) (tx : Tx) (m : Spike.engine.Bytes) (op : ScanOperation)
     (view : GlobalView) (hPhase : t.phase = .Active)
     (hView : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some view)
-    (hPinned : rustPinnedViews encode t.views = modelPinnedViews tx.globalViews)
+    (hPinned : rustPinnedViews encode history t.views = modelPinnedViews tx.globalViews)
     (hLocal
       : image view.current.data (encode (alloc.vec.Vec.val m))
         = image tx.data (encode (alloc.vec.Vec.val m)))
@@ -477,8 +489,9 @@ theorem operate_scan_matches_model (encode : List U8 → String)
         → t.pending.val.length
             + (scanAt tx.data tx.normal.writes (encode (alloc.vec.Vec.val m))).length
           ≤ Usize.max)
+    (live : ViewsLive history t.views)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
-      WP.spec (Spike.engine.Tx.operate t m op.rust)
+      WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
           scanOutput encode output = some expected.2
           ∧ pointWrites encode after = expected.1.normal.writes
@@ -489,18 +502,18 @@ theorem operate_scan_matches_model (encode : List U8 → String)
   have he := lookup_model_view tx.globalViews mapName view hView
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
   simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
-  apply WP.spec_bind (view_lookup encode inj t m)
-  intro found hf
+  apply WP.spec_bind (view_lookup encode inj history t m live)
+  intro found ⟨hf, alive⟩
   rw [hPinned, he] at hf
   cases found with
   | none => cases hf
   | some native =>
-      have hl : encodeImage encode (byteImage native.local) = image tx.data mapName :=
+      have hl : encodeImage encode (pinImage history m native.local) = image tx.data mapName :=
         (congrArg PinnedView.localImage (Option.some.inj hf)).trans hLocal
-      have hlen : native.local.val.length = (image tx.data mapName).length := by
-        simpa [encodeImage, byteImage] using congrArg List.length hl
+      have hlen : (pinImage history m native.local).length = (image tx.data mapName).length := by
+        simpa [encodeImage] using congrArg List.length hl
       have hscan :=
-        scan_matches_model encode inj t m native tx hl hWrites hDeps room
+        scan_matches_model encode inj history t m native tx hl (alive native rfl).1 hWrites hDeps room
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>
@@ -559,7 +572,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               : Result
                   (core.result.Result Spike.engine.Output Spike.engine.Error
                     × Spike.engine.Tx) := do
-            let (rows, deps) ← Spike.engine.Tx.scan t.pending t.deps m native
+            let (rows, deps) ← Spike.engine.Tx.scan history t.pending t.deps m native
             let filtered ← Spike.engine.ordered_range rows lower upper
             Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
               {t with deps, phase := .Active})

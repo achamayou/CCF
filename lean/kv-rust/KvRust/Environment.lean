@@ -38,6 +38,7 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     · rw [he']; exact h.identity
   have rel := replace_history related hn (w' := w')
     (by simp [w', find_set_key]) rfl rfl (reachable_execute related.reachable he)
+    (FrameSlotsPreserved.of_same _ _ rfl)
   simp only [Spike.engine.Store.execute, hrun, bind_ok, he]
   change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.Compacted result), next)) _
   rw [WP.spec_ok]
@@ -69,7 +70,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           simp
         rw [he] at hh
         exact hh
-      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm, hlog⟩ :=
+      obtain ⟨cut, after, hrun, hcut, htake, hmodel, htxs, hglobal, hidentity, hterm, hlog, hkept⟩ :=
         rollback_retains_model_frames native requested term s (modelFrame encode) prior head
           hframes hindex (fun v => history_relative_cut_zero native.history v h.nonempty h.indexed h.valid)
           h.indexed h.frames h.global (congrArg Frame.version hhead)
@@ -108,6 +109,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         · change s.nextIdentity = after.history.next_identity.val
           rw [hidentity]; exact h.identity
       have rel := replace_history related hvalid hstore htxs rfl reach
+        (FrameSlotsPreserved.of_same _ _ hkept)
       simp only [he, StepMatches, hrun, WP.spec_ok]
       exact ⟨.RolledBack cut, rfl, rfl, rel⟩
 

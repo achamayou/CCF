@@ -24,7 +24,8 @@ private def nativeCommitting : Spike.engine.Phase → Bool
   | _ => false
 
 private theorem apply_empty {encode : List U8 → String} {sid : Nat} {t : Spike.engine.Tx}
-    {tx : Tx} (h : AttemptMatches encode sid t tx)
+    {history : Spike.engine.History} {tx : Tx}
+    (h : AttemptMatches encode sid history t tx)
     : tx.normal.writes.isEmpty = t.pending.val.isEmpty := by
   rw [← h.writes]
   simp [pointWrites, encodeWrites, byteWrites]
@@ -32,7 +33,7 @@ private theorem apply_empty {encode : List U8 → String} {sid : Nat} {t : Spike
 private theorem eligibility (encode : List U8 → String) (inj : Function.Injective encode)
     {sid : Nat} {s : Store} {n : Spike.engine.History}
     {tx : Tx} {t : Spike.engine.Tx} (hs : HistoryMatches encode n s)
-    (ht : AttemptMatches encode sid t tx) (prior : List Spike.engine.Frame)
+    (ht : AttemptMatches encode sid n t tx) (prior : List Spike.engine.Frame)
     (head : Spike.engine.Frame) (hf : n.activeFrames = prior ++ [head])
     (hh : s.head = modelFrame encode head)
     : WP.spec (Spike.engine.Tx.can_apply t n) (fun r => r = canApply s tx) := by
@@ -110,7 +111,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
               (apply_accepted_matches_model encode inj n id t s prior head hn hPhase
                 hWrites hOk hframes hhist.frames hhead hhist.term hhist.global
                 hhist.identity (room t hn prior head hframes) hhist.valid)
-            rintro ⟨observed, after⟩ ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi, hidx, hr, hvalid⟩
+            rintro ⟨observed, after⟩ ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi, hidx, hr, hvalid, kept⟩
             let store := advance s tx.normal.writes
             let next := {tx with phase := .applied store.head.version}
             let w' : State := {w with stores := Kv.Model.set w.stores sid store
@@ -131,11 +132,12 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             have hv' : version.val = store.head.version := by
               simpa only [← hw', store] using hv
             have htx
-                : AttemptMatches encode sid {t with phase := .Applied version} next := by
-              simpa only [next, modelPhase, hv'] using ht.withPhase (.Applied version)
+                : AttemptMatches encode sid after.history {t with phase := .Applied version} next := by
+              simpa only [next, modelPhase, hv']
+                using (ht.withPhase (.Applied version)).withHistory kept
             have rel :=
               replace_attempt h id index t {t with phase := .Applied version} next hidx hr
-                rfl ⟨store, hstore, hrel⟩ htx reach
+                rfl ⟨store, hstore, hrel⟩ htx reach kept
             rw [hstep]
             exact ⟨
               .Applied version n.history.term writes,

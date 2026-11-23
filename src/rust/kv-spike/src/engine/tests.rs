@@ -652,6 +652,27 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
 }
 
 #[test]
+fn acquired_views_keep_both_cuts_across_version_reuse_and_snapshot_install() {
+    let mut store = Store::new(0);
+    put(&mut store, 0, b"a", b"k", b"global", 1);
+    run(&mut store, Action::Compact(1));
+    put(&mut store, 0, b"a", b"k", b"old-local", 2);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, b"a");
+
+    assert!(matches!(
+        run(&mut store, Action::Rollback(1, 1)),
+        Output::RolledBack(1)
+    ));
+    put(&mut store, 0, b"a", b"k", b"new-local", 2);
+    assert_read(&mut store, 1, b"a", b"k", false, Some(b"old-local"));
+    assert_read(&mut store, 1, b"a", b"k", true, Some(b"global"));
+    store.install_snapshot(3, Vec::new()).unwrap();
+    assert_read(&mut store, 1, b"a", b"k", false, Some(b"old-local"));
+    assert_read(&mut store, 1, b"a", b"k", true, Some(b"global"));
+}
+
+#[test]
 fn identity_exhaustion_never_looks_like_conflict_or_partially_applies() {
     let mut s = Store::new(0);
     s.history.next_identity = u64::MAX;

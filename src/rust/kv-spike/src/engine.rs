@@ -3,7 +3,7 @@
 
 //! A single-store KV state machine over finite association lists.
 
-use crate::branch_log::BranchLog;
+use crate::branch_log::{BranchLog, FrameId};
 
 pub type Version = u64;
 pub type Term = u64;
@@ -467,7 +467,11 @@ impl History {
     }
 
     fn at_cut(&self, cut: Version) -> &Frame {
-        self.log.read(self.log.at_cut(self.relative_cut(cut)))
+        self.log.read(self.pin_cut(cut))
+    }
+
+    fn pin_cut(&self, cut: Version) -> FrameId {
+        self.log.at_cut(self.relative_cut(cut))
     }
 
     fn map_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
@@ -524,16 +528,41 @@ struct Snapshot {
     term: Term,
 }
 
+#[derive(Clone)]
+enum PinnedImage {
+    Empty,
+    Frame(FrameId),
+    Recovered(Image),
+}
+
+impl PinnedImage {
+    fn point(&self, history: &History, address: &Address) -> Option<Cell> {
+        match self {
+            Self::Empty => None,
+            Self::Frame(id) => history.log.read(*id).data.get(address),
+            Self::Recovered(image) => image.get(&address.key),
+        }
+    }
+
+    fn materialize(&self, history: &History, map: &Bytes) -> Image {
+        match self {
+            Self::Empty => Assoc::new(),
+            Self::Frame(id) => image(&history.log.read(*id).data, map),
+            Self::Recovered(rows) => rows.clone(),
+        }
+    }
+}
+
 struct View {
     birth: Option<Stamp>,
     revision: Stamp,
-    local: Image,
+    local: PinnedImage,
     // None means both reads use the already-pinned local image.
-    global: Option<Image>,
+    global: Option<PinnedImage>,
 }
 
 impl View {
-    fn global_image(&self) -> &Image {
+    fn global_image(&self) -> &PinnedImage {
         match &self.global {
             Some(image) => image,
             None => &self.local,
@@ -541,16 +570,11 @@ impl View {
     }
 }
 
-fn pin_global(
-    global: &Frame,
-    map: &Bytes,
-    local_cut: Version,
-    global_cut: Version,
-) -> Option<Image> {
+fn pin_global(global: FrameId, local_cut: Version, global_cut: Version) -> Option<PinnedImage> {
     if local_cut == global_cut {
         None
     } else {
-        Some(image(&global.data, map))
+        Some(PinnedImage::Frame(global))
     }
 }
 
@@ -657,7 +681,8 @@ impl Tx {
         if !matches!(self.phase, Phase::Active) || self.views.index(&map).is_some() {
             return Err(Error::Disabled);
         }
-        let local = history.at_cut(snapshot.version);
+        let local_id = history.pin_cut(snapshot.version);
+        let local = history.log.read(local_id);
         let birth = local.births.get(&map);
         if birth.is_none() {
             self.views.set(
@@ -665,13 +690,14 @@ impl Tx {
                 View {
                     birth: None,
                     revision: Stamp::zero(),
-                    local: Assoc::new(),
+                    local: PinnedImage::Empty,
                     global: None,
                 },
             );
             return Ok(Output::Acquired(0, 0));
         }
-        let global = history.at_cut(history.global);
+        let global_id = history.pin_cut(history.global);
+        let global = history.log.read(global_id);
         let revision = local.revision(&map);
         let global_revision = global.revision(&map);
         // This local frame is on the surviving branch, so its lineage is present.
@@ -682,14 +708,15 @@ impl Tx {
         let pinned = View {
             birth,
             revision,
-            local: image(&local.data, &map),
-            global: pin_global(global, &map, snapshot.version, history.global),
+            local: PinnedImage::Frame(local_id),
+            global: pin_global(global_id, snapshot.version, history.global),
         };
         self.views.set(map, pinned);
         Ok(Output::Acquired(revision.version, global_revision.version))
     }
 
     fn observe(
+        history: &History,
         pending: &Pending,
         deps: &mut Vec<Dependency>,
         a: &Address,
@@ -697,7 +724,7 @@ impl Tx {
         global: bool,
     ) -> Option<Bytes> {
         if global {
-            return cell_value(view.global_image().get(&a.key));
+            return cell_value(view.global_image().point(history, a));
         }
         if let Some(write) = pending.get(a) {
             return match write {
@@ -705,21 +732,28 @@ impl Tx {
                 Write::Remove => None,
             };
         }
-        let cell = view.local.get(&a.key);
+        let cell = view.local.point(history, a);
         let value = cell_value(copy_cell(&cell));
         deps.push(Dependency::Key(a.clone(), cell));
         value
     }
 
-    fn scan(pending: &Pending, deps: &mut Vec<Dependency>, map: &Bytes, view: &View) -> Entries {
-        deps.push(Dependency::Map(map.clone(), view.local.clone()));
+    fn scan(
+        history: &History,
+        pending: &Pending,
+        deps: &mut Vec<Dependency>,
+        map: &Bytes,
+        view: &View,
+    ) -> Entries {
+        let local = view.local.materialize(history, map);
         let mut rows = Assoc::new();
         let mut i = 0;
-        while i < view.local.0.len() {
-            let row = &view.local.0[i];
+        while i < local.0.len() {
+            let row = &local.0[i];
             rows.0.push((row.0.clone(), row.1.value.clone()));
             i += 1;
         }
+        deps.push(Dependency::Map(map.clone(), local));
         i = pending.0.len();
         while i > 0 {
             i -= 1;
@@ -734,7 +768,7 @@ impl Tx {
         rows.0
     }
 
-    fn operate(&mut self, map: Bytes, op: Operation) -> Result<Output, Error> {
+    fn operate(&mut self, history: &History, map: Bytes, op: Operation) -> Result<Output, Error> {
         if !matches!(self.phase, Phase::Active) {
             return Err(Error::Disabled);
         }
@@ -743,6 +777,7 @@ impl Tx {
         };
         match op {
             Operation::Get(key, global) => Ok(Output::Value(Self::observe(
+                history,
                 &self.pending,
                 &mut self.deps,
                 &Address { map, key },
@@ -751,6 +786,7 @@ impl Tx {
             ))),
             Operation::Has(key, global) => Ok(Output::Presence(
                 Self::observe(
+                    history,
                     &self.pending,
                     &mut self.deps,
                     &Address { map, key },
@@ -760,9 +796,10 @@ impl Tx {
                 .is_some(),
             )),
             Operation::Previous(key) => {
-                let cell = view.local.get(&key);
+                let address = Address { map, key };
+                let cell = view.local.point(history, &address);
                 let version = cell_version(&cell);
-                self.deps.push(Dependency::Key(Address { map, key }, cell));
+                self.deps.push(Dependency::Key(address, cell));
                 Ok(Output::Previous(version))
             }
             Operation::Write(key, value) => {
@@ -771,16 +808,17 @@ impl Tx {
                 Ok(Output::Unit)
             }
             Operation::Scan => Ok(Output::Entries(Self::scan(
+                history,
                 &self.pending,
                 &mut self.deps,
                 &map,
                 view,
             ))),
             Operation::Size => Ok(Output::Size(
-                Self::scan(&self.pending, &mut self.deps, &map, view).len(),
+                Self::scan(history, &self.pending, &mut self.deps, &map, view).len(),
             )),
             Operation::Clear => {
-                let entries = Self::scan(&self.pending, &mut self.deps, &map, view);
+                let entries = Self::scan(history, &self.pending, &mut self.deps, &map, view);
                 let mut i = 0;
                 while i < entries.len() {
                     self.pending.set(
@@ -801,7 +839,7 @@ impl Tx {
                     }
                 }
                 Ok(Output::Entries(ordered_range(
-                    &Self::scan(&self.pending, &mut self.deps, &map, view),
+                    &Self::scan(history, &self.pending, &mut self.deps, &map, view),
                     &lower,
                     &upper,
                 )))
@@ -1101,7 +1139,7 @@ impl Store {
             }
             Action::Operate(tx, map, op) => {
                 let i = self.tx_index(tx)?;
-                self.txs.0[i].1.operate(map, op)
+                self.txs.0[i].1.operate(&self.history, map, op)
             }
             Action::CommitBegin(tx) => {
                 let i = self.tx_index(tx)?;
@@ -1173,7 +1211,8 @@ impl Store {
             return Ok(Output::Unavailable);
         }
         if let Some(global) = self.recovery_views.get(&map) {
-            let local = self.history.at_cut(snapshot.version);
+            let local_id = self.history.pin_cut(snapshot.version);
+            let local = self.history.log.read(local_id);
             let birth = local.births.get(&map);
             if birth.is_some() {
                 let revision = local.revision(&map);
@@ -1181,14 +1220,13 @@ impl Store {
                     t.unavailable = true;
                     return Ok(Output::Unavailable);
                 }
-                let local_image = image(&local.data, &map);
                 t.views.set(
                     map,
                     View {
                         birth,
                         revision,
-                        local: local_image,
-                        global: Some(global.image),
+                        local: PinnedImage::Frame(local_id),
+                        global: Some(PinnedImage::Recovered(global.image)),
                     },
                 );
                 return Ok(Output::Acquired(revision.version, global.revision));
@@ -1296,7 +1334,7 @@ impl Store {
         }
         let mut view = t.clone();
         view.phase = Phase::Active;
-        view.operate(map, op)
+        view.operate(&self.history, map, op)
     }
 
     pub fn pending_writes(&self, tx: Attempt) -> Result<WriteSet, Error> {

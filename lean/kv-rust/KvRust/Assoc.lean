@@ -462,6 +462,41 @@ theorem set_projected {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
       = (Kv.Model.set rows key value).map (fun (k, v) => (keyOf k, valueOf v)) := by
   simp only [Kv.Model.set, List.map_cons, erase_projected rows key keyOf valueOf injective]
 
+/-- A projection may also use the key when interpreting a selected value. -/
+theorem find_projected_with_key {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
+    (rows : Kv.Model.Assoc K V) (key : K) (keyOf : K → K') (valueOf : K → V → V')
+    (injective : Function.Injective keyOf)
+    : find (rows.map fun (k, v) => (keyOf k, valueOf k v)) (keyOf key)
+      = (find rows key).map (valueOf key) := by
+  induction rows with
+  | nil => rfl
+  | cons row rest ih =>
+      obtain ⟨k, v⟩ := row
+      by_cases same : k = key
+      · subst k
+        simp [find]
+      · have diff : keyOf k ≠ keyOf key := fun h => same (injective h)
+        simp [find, same, diff, ih]
+
+theorem set_projected_with_key {K V K' V' : Type} [DecidableEq K] [DecidableEq K']
+    (rows : Kv.Model.Assoc K V) (key : K) (value : V)
+    (keyOf : K → K') (valueOf : K → V → V') (injective : Function.Injective keyOf)
+    : Kv.Model.set (rows.map fun (k, v) => (keyOf k, valueOf k v)) (keyOf key)
+        (valueOf key value)
+      = (Kv.Model.set rows key value).map (fun (k, v) => (keyOf k, valueOf k v)) := by
+  unfold Kv.Model.set erase
+  rw [List.map_cons, List.filter_map]
+  have kept : rows.filter (fun p => keyOf p.1 != keyOf key)
+      = rows.filter (fun p => p.1 != key) := by
+    apply List.filter_congr
+    rintro ⟨k, v⟩ _
+    by_cases same : k = key
+    · simp [same]
+    · have diff : keyOf k ≠ keyOf key := fun h => same (injective h)
+      exact (bne_iff_ne.mpr diff).trans (bne_iff_ne.mpr same).symm
+  exact congrArg (fun xs => (keyOf key, valueOf key value) ::
+    xs.map (fun (k, v) => (keyOf k, valueOf k v))) kept
+
 /-- Erase removes precisely the selected lookup binding. -/
 theorem find_erase_key {K V : Type} [DecidableEq K] (rows : Kv.Model.Assoc K V) (k q : K)
     : find (erase rows k) q = if q = k then none else find rows q := by

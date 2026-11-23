@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Apply
+public import KvRust.PinnedImage
 
 @[expose] public section
 
@@ -24,12 +25,14 @@ structure PinnedView where
   globalImage : Assoc String (Cell String)
 
 /-- Project a Rust handle without depending on the rest of either historical frame. -/
-def rustPinnedView (encode : List U8 → String) (view : Spike.engine.View) : PinnedView :=
+def rustPinnedView (encode : List U8 → String) (history : Spike.engine.History)
+    (map : Spike.engine.Bytes) (view : Spike.engine.View)
+    : PinnedView :=
   {
     birth := view.birth.map modelStamp
     revision := modelStamp view.revision
-    localImage := encodeImage encode (byteImage view.local)
-    globalImage := encodeImage encode (byteImage (view.global.getD view.local))
+    localImage := encodeImage encode (pinImage history map view.local)
+    globalImage := encodeImage encode (pinImage history map (view.global.getD view.local))
   }
 
 /-- Project the same map and its birth/revision stamps from the model's two pinned frames. -/
@@ -42,10 +45,37 @@ def modelPinnedView (m : String) (view : GlobalView) : PinnedView :=
   }
 
 /-- Relate the association lists of acquired views, including their order. -/
-def rustPinnedViews (encode : List U8 → String)
+def rustPinnedViews (encode : List U8 → String) (history : Spike.engine.History)
     (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
     : Assoc String PinnedView :=
-  rows.val.map fun (m, v) => (encode (alloc.vec.Vec.val m), rustPinnedView encode v)
+  rows.val.map
+    fun (m, v) => (encode (alloc.vec.Vec.val m), rustPinnedView encode history m v)
+
+def ViewLive (history : Spike.engine.History) (view : Spike.engine.View) : Prop :=
+  PinLive history view.local ∧ PinLive history (view.global.getD view.local)
+
+def ViewsLive (history : Spike.engine.History)
+    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    : Prop :=
+  ∀ row ∈ rows.val, ViewLive history row.2
+
+theorem pinned_views_preserved (encode : List U8 → String)
+    {before after : Spike.engine.History} (preserved : FrameSlotsPreserved before after)
+    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (live : ViewsLive before rows)
+    : ViewsLive after rows
+      ∧ rustPinnedViews encode after rows = rustPinnedViews encode before rows := by
+  have localKept (row) (present : row ∈ rows.val) :=
+    pin_preserved preserved row.1 row.2.local (live row present).1
+  have globalKept (row) (present : row ∈ rows.val) :=
+    pin_preserved preserved row.1 (row.2.global.getD row.2.local) (live row present).2
+  constructor
+  · intro row present
+    exact ⟨(localKept row present).1, (globalKept row present).1⟩
+  · unfold rustPinnedViews
+    apply List.map_congr_left
+    rintro ⟨m, v⟩ present
+    simp [rustPinnedView, (localKept (m, v) present).2, (globalKept (m, v) present).2]
 
 /-- Project the acquired model views in their original association-list order. -/
 def modelPinnedViews (rows : Assoc String GlobalView) : Assoc String PinnedView :=
@@ -117,27 +147,37 @@ private theorem map_encoding_injective (encode : List U8 → String)
 theorem clone_view (v : Spike.engine.View)
     : Spike.engine.View.Insts.CoreCloneClone.clone v = .ok v := by
   obtain ⟨birth, rev, localRows, globalRows⟩ := v
-  cases globalRows <;> simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_assoc]
+  cases globalRows <;> simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_pin]
 
 private theorem install_view (encode : List U8 → String) (inj : Function.Injective encode)
+    (history : Spike.engine.History)
     (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
     (m : Spike.engine.Bytes) (v : Spike.engine.View) (room : rows.val.length < Usize.max)
+    (oldLive : ViewsLive history rows) (newLive : ViewLive history v)
     : WP.spec
         (Spike.engine.Assoc.set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
           Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.View.Insts.CoreCloneClone
           rows m v)
         (fun next =>
-          rustPinnedViews encode next
-          = Kv.Model.set (rustPinnedViews encode rows)
-              (encode (alloc.vec.Vec.val m)) (rustPinnedView encode v)) := by
+          rustPinnedViews encode history next
+            = Kv.Model.set (rustPinnedViews encode history rows)
+                (encode (alloc.vec.Vec.val m)) (rustPinnedView encode history m v)
+          ∧ ViewsLive history next) := by
   apply WP.spec_mono (assoc_set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
     Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.View.Insts.CoreCloneClone rows m v
     (fun a => key_same a m) clone_bytes clone_view room)
   intro next he
-  unfold rustPinnedViews
-  rw [he]
-  exact (set_projected rows.val m v (encode ∘ alloc.vec.Vec.val)
-    (rustPinnedView encode) (map_encoding_injective encode inj)).symm
+  constructor
+  · unfold rustPinnedViews
+    rw [he]
+    exact (set_projected_with_key rows.val m v (encode ∘ alloc.vec.Vec.val)
+      (rustPinnedView encode history) (map_encoding_injective encode inj)).symm
+  · intro row member
+    rw [he] at member
+    rcases List.mem_cons.mp member with same | old
+    · subst row
+      exact newLive
+    · exact oldLive row (List.mem_filter.mp old).1
 
 private theorem revision_frame (encode : List U8 → String)
     (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
@@ -159,24 +199,26 @@ private theorem image_frame (encode : List U8 → String) (inj : Function.Inject
   exact (image_encoding encode inj (byteData f.data) (alloc.vec.Vec.val m)).symm
 
 private theorem pin_global_spec (encode : List U8 → String)
-    (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
-    (localCut globalCut : U64)
-    (localRows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Cell)
+    (history : Spike.engine.History) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
+    (id : Spike.branch_log.FrameId) (saved : history.log.frames.val[id.val]? = some f)
+    (localCut globalCut : U64) (localPin : Spike.engine.PinnedImage)
+    (localLive : PinLive history localPin)
     (shared
       : localCut = globalCut
-        → encodeImage encode (byteImage localRows)
+        → encodeImage encode (pinImage history m localPin)
           = image (modelFrame encode f).data (encode m.val))
-    : WP.spec (Spike.engine.pin_global f m localCut globalCut)
-        (fun globalRows =>
-          encodeImage encode (byteImage (globalRows.getD localRows))
-          = image (modelFrame encode f).data (encode m.val)) := by
+    (inj : Function.Injective encode)
+    : WP.spec (Spike.engine.pin_global id localCut globalCut)
+        (fun globalPin =>
+          encodeImage encode (pinImage history m (globalPin.getD localPin))
+            = image (modelFrame encode f).data (encode m.val)
+          ∧ PinLive history (globalPin.getD localPin)) := by
   unfold Spike.engine.pin_global
   by_cases same : localCut = globalCut
-  · simpa [same] using shared same
-  · simp only [same, ite_false]
-    apply WP.spec_bind (image_frame encode inj f m)
-    intro rows hr
-    simpa only [WP.spec_ok, Option.getD_some] using hr
+  · simpa [same] using And.intro (shared same) localLive
+  · simp only [same, ite_false, WP.spec_ok, Option.getD_some]
+    refine ⟨?_, ⟨f, saved⟩⟩
+    simpa [pinImage, saved, modelFrame] using (image_encoding encode inj (byteData f.data) m.val).symm
 
 private theorem stamp_refl (stamp : Stamp) : (stamp == stamp) = true := by
   change (stamp.version == stamp.version && stamp.identity == stamp.identity) = true
@@ -202,9 +244,10 @@ theorem acquire_matches_model (encode : List U8 → String)
     (hglobal : model.global = s.global.val) (hSnapshot : t.snapshot = some rustSnap)
     (hCut : snap.current.version = rustSnap.version.val) (hPhase : t.phase = .Active)
     (hAbsent
-      : find (rustPinnedViews encode t.views) (encode (alloc.vec.Vec.val m)) = none)
+      : find (rustPinnedViews encode s t.views) (encode (alloc.vec.Vec.val m)) = none)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.log)
+    (oldLive : ViewsLive s t.views)
     : let k := encode (alloc.vec.Vec.val m)
       let v := captureGlobal model snap k
       WP.spec (Spike.engine.Tx.acquire t s m)
@@ -215,8 +258,9 @@ theorem acquire_matches_model (encode : List U8 → String)
               ∧ localVer.val = (revision v.current k).version
               ∧ globalVer.val = (revision v.frame k).version
               ∧ after = {t with views}
-              ∧ rustPinnedViews encode views
-                = Kv.Model.set (rustPinnedViews encode t.views) k (modelPinnedView k v)
+              ∧ rustPinnedViews encode s views
+                = Kv.Model.set (rustPinnedViews encode s t.views) k (modelPinnedView k v)
+              ∧ ViewsLive s views
           else
             output = .Ok .Unavailable ∧ after = {t with unavailable := true}) := by
   let enc := encode ∘ alloc.vec.Vec.val (α := U8)
@@ -229,15 +273,16 @@ theorem acquire_matches_model (encode : List U8 → String)
       ∃ localVer globalVer views,
         output = .Ok (.Acquired localVer globalVer) ∧
         localVer.val = (revision v.current k).version ∧ globalVer.val = (revision v.frame k).version ∧
-        after = {t with views} ∧ rustPinnedViews encode views =
-          Kv.Model.set (rustPinnedViews encode t.views) k (modelPinnedView k v)
+        after = {t with views} ∧ rustPinnedViews encode s views =
+          Kv.Model.set (rustPinnedViews encode s t.views) k (modelPinnedView k v)
+        ∧ ViewsLive s views
     else output = .Ok .Unavailable ∧ after = {t with unavailable := true})
   have hi := map_encoding_injective encode inj
-  change find (rustPinnedViews encode t.views) k = none at hAbsent
+  change find (rustPinnedViews encode s t.views) k = none at hAbsent
   have hn : find t.views.val m = none := by
-    have hm : find (rustPinnedViews encode t.views) k =
-        (find t.views.val m).map (rustPinnedView encode) :=
-      find_projected t.views.val m enc (rustPinnedView encode) hi
+    have hm : find (rustPinnedViews encode s t.views) k =
+        (find t.views.val m).map (rustPinnedView encode s m) :=
+      find_projected_with_key t.views.val m enc (rustPinnedView encode s) hi
     rw [hAbsent] at hm
     cases e : find t.views.val m with
     | none => rfl
@@ -253,9 +298,12 @@ theorem acquire_matches_model (encode : List U8 → String)
   | none =>
       simp only [core.option.Option.is_some]
       apply WP.spec_bind
-        (history_at_cut_matches_model s rustSnap.version model (modelFrame encode)
-          prior head hframes hmodel (hzero rustSnap.version) hversions valid)
-      intro current ⟨hCurrent, hMem⟩
+        (history_pin_cut_matches_model s rustSnap.version model (modelFrame encode)
+          hmodel (hzero rustSnap.version) hversions valid)
+      rintro currentId ⟨current, currentSaved, hCurrent, hMem⟩
+      apply WP.spec_bind (branch_read_refines s.log currentId current currentSaved)
+      intro frame hf
+      subst frame
       have hCutFrame : modelFrame encode current = atCut model snap.current.version := by
         rwa [hCut]
       apply WP.spec_bind (stamps_find enc hi current.births m)
@@ -272,19 +320,20 @@ theorem acquire_matches_model (encode : List U8 → String)
             simp [v, captureGlobal, captureLocal, hb, find]
           let empty : Spike.engine.View :=
             { birth := none, revision := {version := 0#u64, identity := 0#u64}
-              «local» := alloc.vec.Vec.new _, global := none }
-          have he : rustPinnedView encode empty = modelPinnedView k v := by
-            simp [hView, empty, rustPinnedView, modelPinnedView, encodeImage, byteImage, modelStamp,
+              «local» := .Empty, global := none }
+          have he : rustPinnedView encode s m empty = modelPinnedView k v := by
+            simp [hView, empty, rustPinnedView, modelPinnedView, encodeImage, pinImage, modelStamp,
               revision, image, find]
           simp only [core.option.Option.is_none, Spike.engine.Stamp.zero,
-            Spike.engine.Assoc.new, bind_ok]
-          apply WP.spec_bind (install_view encode inj t.views m empty hRoom)
-          intro views hvers
+            bind_ok]
+          apply WP.spec_bind (install_view encode inj s t.views m empty hRoom oldLive
+            ⟨trivial, trivial⟩)
+          intro views ⟨hvers, hLive⟩
           rw [WP.spec_ok]
-          have hViews : rustPinnedViews encode views =
-              Kv.Model.set (rustPinnedViews encode t.views) k (modelPinnedView k v) :=
-            hvers.trans (congrArg (Kv.Model.set (rustPinnedViews encode t.views) k) he)
-          simp [hAv, hView, revision, find, hViews]
+          have hViews : rustPinnedViews encode s views =
+              Kv.Model.set (rustPinnedViews encode s t.views) k (modelPinnedView k v) :=
+            hvers.trans (congrArg (Kv.Model.set (rustPinnedViews encode s t.views) k) he)
+          simp [hAv, hView, revision, find, hViews, hLive]
       | some birth =>
           have hLocal : captureLocal model snap k = modelFrame encode current := by
             simp [captureLocal, hb, hCutFrame]
@@ -295,11 +344,14 @@ theorem acquire_matches_model (encode : List U8 → String)
             lineage_of_mem _ _ _ hMem
           simp only [core.option.Option.is_none]
           apply WP.spec_bind
-            (history_at_cut_matches_model s s.global model (modelFrame encode)
-              prior head hframes hmodel (hzero s.global) hversions valid)
-          intro global hg
+            (history_pin_cut_matches_model s s.global model (modelFrame encode)
+              hmodel (hzero s.global) hversions valid)
+          rintro globalId ⟨global, globalSaved, hGlobalCut, _⟩
+          apply WP.spec_bind (branch_read_refines s.log globalId global globalSaved)
+          intro frame hf
+          subst frame
           have hGlobal : modelFrame encode global = atCut model model.global := by
-            rw [hglobal]; exact hg.1
+            rw [hglobal]; exact hGlobalCut
           have hView
               : v
                 = {
@@ -323,31 +375,36 @@ theorem acquire_matches_model (encode : List U8 → String)
           · have hlt : localRev.version.val < globalRev.version.val := hOld
             simp [hOld, hAv, Nat.not_le.mpr hlt]
           · rw [ite_eq_right hOld]
-            apply WP.spec_bind (image_frame encode inj current m)
-            intro localRows hLocalRows
+            let localPin : Spike.engine.PinnedImage := .Frame currentId
+            have localLive : PinLive s localPin := ⟨current, currentSaved⟩
+            have hLocalRows : encodeImage encode (pinImage s m localPin) =
+                image (modelFrame encode current).data (encode m.val) := by
+              simpa [pinImage, localPin, currentSaved, modelFrame]
+                using (image_encoding encode inj (byteData current.data) m.val).symm
             have hShared : rustSnap.version = s.global →
-                encodeImage encode (byteImage localRows) =
+                encodeImage encode (pinImage s m localPin) =
                   image (modelFrame encode global).data (encode m.val) := by
               intro he
               have hFrames : modelFrame encode current = modelFrame encode global := by
-                rw [hCurrent, hg.1, he]
+                rw [hCurrent, hGlobalCut, he]
               simpa only [hFrames] using hLocalRows
             apply WP.spec_bind
-              (pin_global_spec encode inj global m rustSnap.version s.global localRows hShared)
-            intro globalRows hGlobalRows
+              (pin_global_spec encode s global m globalId globalSaved rustSnap.version
+                s.global localPin localLive hShared inj)
+            intro globalPin ⟨hGlobalRows, globalLive⟩
             apply WP.spec_bind
-              (install_view encode inj t.views m
+              (install_view encode inj s t.views m
                 {
                   birth := some birth,
                   revision := localRev,
-                  «local» := localRows,
-                  global := globalRows
-                } hRoom)
-            intro views hViews
+                  «local» := localPin,
+                  global := globalPin
+                } hRoom oldLive ⟨localLive, globalLive⟩)
+            intro views ⟨hViews, hLive⟩
             have hle : globalRev.version.val ≤ localRev.version.val :=
               Nat.le_of_not_gt hOld
-            have hPin : rustPinnedView encode
-                {birth := some birth, revision := localRev, «local» := localRows, global := globalRows} =
+            have hPin : rustPinnedView encode s m
+                {birth := some birth, revision := localRev, «local» := localPin, global := globalPin} =
                   modelPinnedView k v := by
               change find (modelFrame encode current).births (encode (alloc.vec.Vec.val m)) =
                 some (modelStamp birth) at hBorn
@@ -362,11 +419,12 @@ theorem acquire_matches_model (encode : List U8 → String)
               ?_,
               ?_,
               rfl,
-              hViews.trans ?_
+              hViews.trans ?_,
+              hLive
             ⟩
             · simpa [modelStamp, hView, k, enc] using congrArg Stamp.version hl
             · simpa [modelStamp, hView, k, enc] using congrArg Stamp.version hgRev
-            · exact congrArg (Kv.Model.set (rustPinnedViews encode t.views) k) hPin
+            · exact congrArg (Kv.Model.set (rustPinnedViews encode s t.views) k) hPin
 
 /-- Compare the observable result of a completed acquisition, including both reported revisions. -/
 def modelAcquisition (out : core.result.Result Spike.engine.Output Spike.engine.Error)
@@ -386,7 +444,7 @@ private theorem acquire_disabled (encode : List U8 → String)
     (disabled
       : t.snapshot = none
         ∨ t.phase ≠ .Active
-        ∨ (find (rustPinnedViews encode t.views) (encode (alloc.vec.Vec.val m))).isSome)
+        ∨ (find (rustPinnedViews encode s t.views) (encode (alloc.vec.Vec.val m))).isSome)
     : WP.spec (Spike.engine.Tx.acquire t s m) (fun r => r = (.Err .Disabled, t)) := by
   cases hs : t.snapshot with
   | none => simp [Spike.engine.Tx.acquire, hs]
@@ -400,7 +458,7 @@ private theorem acquire_disabled (encode : List U8 → String)
       | Applied version => simp [Spike.engine.Tx.acquire, hs, hp, restore _ hp]
       | Active =>
           have hPresent
-              : (find (rustPinnedViews encode t.views)
+              : (find (rustPinnedViews encode s t.views)
                   (encode (alloc.vec.Vec.val m))).isSome :=
             disabled.resolve_left (by simp [hs]) |>.resolve_left (by simp [hp])
           simp only [Spike.engine.Tx.acquire, hs, hp, bind_ok]
@@ -410,10 +468,10 @@ private theorem acquire_disabled (encode : List U8 → String)
           intro i hi
           cases i with
           | none =>
-              have hfind := find_projected t.views.val m (encode ∘ alloc.vec.Vec.val)
-                (rustPinnedView encode) (map_encoding_injective encode inj)
-              change find (rustPinnedViews encode t.views) (encode (alloc.vec.Vec.val m)) =
-                (find t.views.val m).map (rustPinnedView encode) at hfind
+              have hfind := find_projected_with_key t.views.val m (encode ∘ alloc.vec.Vec.val)
+                (rustPinnedView encode s) (map_encoding_injective encode inj)
+              change find (rustPinnedViews encode s t.views) (encode (alloc.vec.Vec.val m)) =
+                (find t.views.val m).map (rustPinnedView encode s m) at hfind
               change find t.views.val m = none at hi
               rw [hfind, hi] at hPresent
               cases hPresent
@@ -428,7 +486,7 @@ theorem execute_acquire_disabled (encode : List U8 → String)
           find s.txs.val id = some t
           → t.snapshot = none
             ∨ t.phase ≠ .Active
-            ∨ (find (rustPinnedViews encode t.views)
+            ∨ (find (rustPinnedViews encode s.history t.views)
                 (encode (alloc.vec.Vec.val m))).isSome)
     : WP.spec (Spike.engine.Store.execute s (.Acquire id m))
         (fun r => r = (.Err .Disabled, s)) := by
@@ -480,12 +538,13 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     (hNativeSnap : t.snapshot = some rustSnap) (hModelSnap : tx.snapshot = some snap)
     (hCut : snap.current.version = rustSnap.version.val)
     (hNativePhase : t.phase = .Active) (hModelPhase : tx.phase = .active)
-    (hPinned : modelPinnedViews tx.globalViews = rustPinnedViews encode t.views)
+    (hPinned : modelPinnedViews tx.globalViews = rustPinnedViews encode s.history t.views)
     (hUnavailable : tx.unavailable = t.unavailable)
     (hFresh : find tx.globalViews (encode (alloc.vec.Vec.val m)) = none)
     (hLog : tx.normal.log.all (fun op => op.map != encode (alloc.vec.Vec.val m)) = true)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.history.log)
+    (oldLive : ViewsLive s.history t.views)
     : WP.spec (Spike.engine.Store.execute s (.Acquire id m))
         (fun (output, after) =>
           ∃ modelAfter txAfter tAfter obs index,
@@ -493,7 +552,8 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
               = some (modelAfter, obs)
             ∧ modelAcquisition output = some obs
             ∧ modelAfter = {w with txs := Kv.Model.set w.txs id.val txAfter}
-            ∧ modelPinnedViews txAfter.globalViews = rustPinnedViews encode tAfter.views
+            ∧ modelPinnedViews txAfter.globalViews
+              = rustPinnedViews encode s.history tAfter.views
             ∧ txAfter.unavailable = tAfter.unavailable
             ∧ (if available model snap (encode (alloc.vec.Vec.val m)) then
                   tAfter = {t with views := tAfter.views}
@@ -522,10 +582,11 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
                     image tx.data other)
             ∧ after.history = s.history
             ∧ s.txs.val[index]? = some (id, t)
-            ∧ after.txs.val = s.txs.val.set index (id, tAfter)) := by
+            ∧ after.txs.val = s.txs.val.set index (id, tAfter)
+            ∧ ViewsLive s.history tAfter.views) := by
   let k := encode (alloc.vec.Vec.val m)
   let v := captureGlobal model snap k
-  have hMissing : find (rustPinnedViews encode t.views) k = none := by
+  have hMissing : find (rustPinnedViews encode s.history t.views) k = none := by
     rw [← hPinned]
     exact projected_view_missing tx.globalViews k hFresh
   have hStep : execute w (.acquire sid id.val k) =
@@ -563,7 +624,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       apply WP.spec_bind
         (acquire_matches_model encode inj s.history model t snap rustSnap m prior head
           hframes hmodel hversions hglobal hNativeSnap hCut hNativePhase hMissing hRoom
-          valid)
+          valid oldLive)
       rintro ⟨out, next⟩ hn
       change (if available model snap k then
           ∃ localVer globalVer views,
@@ -571,8 +632,9 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             localVer.val = (revision v.current k).version ∧
             globalVer.val = (revision v.frame k).version ∧
             next = {t with views} ∧
-            rustPinnedViews encode views =
-              Kv.Model.set (rustPinnedViews encode t.views) k (modelPinnedView k v)
+            rustPinnedViews encode s.history views =
+              Kv.Model.set (rustPinnedViews encode s.history t.views) k (modelPinnedView k v) ∧
+            ViewsLive s.history views
         else out = .Ok .Unavailable ∧ next = {t with unavailable := true}) at hn
       have hupdate : (back (id, next)).val = s.txs.val.set i.val (id, next) := by
         rw [hback.2]
@@ -581,19 +643,19 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       rw [WP.spec_ok]
       by_cases ha : available model snap k
       · rw [ite_eq_left ha] at hn
-        obtain ⟨lv, gv, views, hout, hl, hg, hNext, hViews⟩ := hn
+        obtain ⟨lv, gv, views, hout, hl, hg, hNext, hViews, hLive⟩ := hn
         let modelNext : Tx := {
           tx with
             globalViews := Kv.Model.set tx.globalViews k v
             data := pinData tx.data k v.current.data
         }
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
-          .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate⟩
+          .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_left ha, ← hl, ← hg]
         · rw [hout]
           rfl
-        · change modelPinnedViews (Kv.Model.set tx.globalViews k v) = rustPinnedViews encode next.views
+        · change modelPinnedViews (Kv.Model.set tx.globalViews k v) = rustPinnedViews encode s.history next.views
           rw [model_pins_set, hPinned, hNext]
           exact hViews.symm
         · rw [hNext]
@@ -617,11 +679,12 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             (if available model snap k ∧ other = k
               then image (captureLocal model snap k).data other else image tx.data other)
           simp [pinned_data_image, he, ha]
+        · rw [hNext]; exact hLive
       · rw [ite_eq_right ha] at hn
         obtain ⟨hout, hNext⟩ := hn
         let modelNext := {tx with unavailable := true}
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
-          .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate⟩
+          .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_, rfl, hrow, hupdate, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_right ha]
         · rw [hout]
@@ -635,5 +698,6 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
           rw [ite_eq_right ha]
         · have ha' : ¬available model snap (encode (alloc.vec.Vec.val m)) = true := ha
           simp [modelNext, ha']
+        · rw [hNext]; exact oldLive
 
 end KvRust

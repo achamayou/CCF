@@ -162,6 +162,10 @@ Removing the temporary image eliminates its allocations, but these timings do no
 Byte equality now uses the same bulk slice comparison for standalone byte keys as for full addresses.
 The extracted equality theorem is unchanged; lexicographic range comparisons still use the byte-order comparator.
 Matched timings did not establish a consistent gain from equality alone, and a separate single-write fast path was not retained because it did not consistently improve the logging workload.
+Pinning local and global frames by stable ID avoids copying a map when a transaction acquires it.
+In two paired runs, this reduced the 512-key logging mix from 28.7-31.5 us per Rust transaction to 4.40-5.31 us, versus 1.07-1.15 us for C++.
+At 2,048 keys, populated point reads were 3.75-3.90 us in Rust versus 0.69-0.71 us in C++, and a batch of 2,048 replacements took 1.20-1.39 ms versus 0.87-0.89 ms.
+The map contents are still vector-backed; the acquired-handle point-read benchmark excludes acquisition and therefore does not measure the cost that was removed.
 This benchmark still does not cover replicated CCF.
 
 ### Persistent storage experiment
@@ -247,5 +251,6 @@ The proof of reference accounting and the retirement queue is still open, and re
 The experimental history now uses [`BranchLog`](KvRust/BranchLog.lean) to separate active branch offsets from stable frame IDs.
 Its extracted proofs show that rewind truncates the active sequence without invalidating old IDs and that an append at a reused offset names a new frame.
 The single-store trace theorem relates the active sequence to the same model history, with an additional capacity bound for the retained frame arena.
-Acquisition still copies its map images.
+Normal acquisitions retain frame IDs instead of copying map images, materializing an ordered image only for a whole-map operation.
+The trace proof carries the validity and values of those handles across commits and rewinds.
 The frame arena retains discarded frames until the log is replaced or dropped; this is not a production reclamation strategy.
