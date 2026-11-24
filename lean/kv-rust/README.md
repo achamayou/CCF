@@ -235,7 +235,10 @@ These are storage-only timings.
 The [extracted proof](KvRust/RadixBatch.lean) covers split selection, exact interval partitioning, child attachment, and termination of the explicit-stack builder.
 Under the stated size bounds, it constructs exactly the supplied sorted bindings, keeps the arenas valid, and preserves previous roots.
 The [dual-batch proof](KvRust/RadixDualBatch.lean) checks the native staging and publication of both indexes from sorted rows, including exact newest-first scan order.
-The builder has not been enabled in transaction publication.
+The [transaction proof](KvRust/SortedPublication.lean) selects it only when the base is empty (including after a full-coverage check), at least 256 writes are puts in increasing packed-key order on one map, and packed keys are at most 56 bytes.
+All other batches use the existing path, and the same frame and trace refinement theorems apply to both.
+In three alternating pinned runs of `kv_backend_bench`, median commits replacing 2,048 entries took 1.14-1.27 ms with the sorted path, 2.42-2.88 ms with the previous Rust path, and 0.70-0.73 ms in C++.
+These are ranges of run medians including ledger-entry serialization, with a null encryptor and no consensus.
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
 All three use the same eight-byte keys and inline 64-byte values; the write workload retains every prior root.

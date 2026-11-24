@@ -696,6 +696,12 @@ pub struct DualRoot {
     order: u32,
 }
 
+impl DualRoot {
+    pub(crate) fn is_empty(self) -> bool {
+        self.lookup == 0 && self.order == 0
+    }
+}
+
 struct Stamped<V> {
     stamp: u64,
     value: V,

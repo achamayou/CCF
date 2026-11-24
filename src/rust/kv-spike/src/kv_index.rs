@@ -4,7 +4,7 @@
 use crate::engine::Address;
 use crate::radix::{DualRadix, DualRoot, RadixRow, address_key};
 
-struct Binding<V> {
+pub(crate) struct Binding<V> {
     address: Address,
     value: V,
 }
@@ -22,6 +22,21 @@ impl<V> AddressIndex<V> {
         self.0.empty_root()
     }
 
+    pub(crate) fn batch_row(address: Address, value: V) -> RadixRow<Binding<V>> {
+        let key = address_key(address.map.as_slice(), address.key.as_slice());
+        RadixRow {
+            key,
+            value: Binding { address, value },
+        }
+    }
+
+    pub(crate) fn build_sorted_batch(
+        &mut self,
+        rows: Vec<Option<RadixRow<Binding<V>>>>,
+    ) -> DualRoot {
+        self.0.build_sorted_batch(rows)
+    }
+
     pub fn get(&self, root: DualRoot, address: &Address) -> Option<&V> {
         let key = address_key(address.map.as_slice(), address.key.as_slice());
         match self.0.get(root, &key) {
@@ -31,14 +46,7 @@ impl<V> AddressIndex<V> {
     }
 
     pub fn put(&mut self, root: DualRoot, address: Address, value: V) -> DualRoot {
-        let key = address_key(address.map.as_slice(), address.key.as_slice());
-        self.0.put(
-            root,
-            RadixRow {
-                key,
-                value: Binding { address, value },
-            },
-        )
+        self.0.put(root, Self::batch_row(address, value))
     }
 
     pub fn remove(&mut self, root: DualRoot, address: &Address) -> DualRoot {

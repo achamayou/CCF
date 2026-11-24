@@ -123,6 +123,22 @@ private theorem address_key_matches (a : Spike.engine.Address)
   intro out bytes
   simpa [alloc.vec.Vec.deref, packedAddress] using bytes
 
+theorem index_batch_row_refines {V : Type} (address : Spike.engine.Address) (value : V)
+    (capacity : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.batch_row address value)
+        (fun row =>
+          row.key.val = packedAddress address
+          ∧ row.value = {address, value}
+          ∧ row.key.val.length
+            = 8 + address.map.val.length + address.key.val.length) := by
+  simp only [Spike.kv_index.AddressIndex.batch_row, Spike.engine.Bytes.as_slice, bind_ok]
+  apply WP.spec_bind (address_key_matches address capacity)
+  intro key encoded
+  rw [WP.spec_ok]
+  refine ⟨encoded, rfl, ?_⟩
+  rw [encoded, packedAddress, addressBytes, List.length_append, List.length_append]
+  simp [addressPrefix, BitVec.toLEBytes_length]
+
 local instance nativeAddressEq : DecidableEq Spike.engine.Address :=
   fun a b => decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
@@ -250,12 +266,11 @@ theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   have orderCount := index_order_count index links keys view.values live pairing
   have lookup := (radix_tree_binding_bound _ valid.1.directories tree).1
   have orderTree := (radix_tree_binding_bound _ valid.2.directories order).1
-  simp only [Spike.kv_index.AddressIndex.put, Spike.engine.Bytes.as_slice, bind_ok]
-  apply WP.spec_bind (address_key_matches address (by omega))
-  intro encoded he
-  have len : encoded.val.length = 8 + address.map.val.length + address.key.val.length := by
-    rw [he, packedAddress, addressBytes, List.length_append, List.length_append]
-    simp [addressPrefix, BitVec.toLEBytes_length]
+  unfold Spike.kv_index.AddressIndex.put
+  apply WP.spec_bind (index_batch_row_refines address value (by omega))
+  rintro ⟨encoded, binding⟩ ⟨he, hb, len⟩
+  dsimp only at he hb len
+  subst binding
   apply WP.spec_bind
     (dual_put_refines index root links
       {key := encoded, value := {address, value}} view valid.1 valid.2 _ _ keys
@@ -266,8 +281,7 @@ theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   rw [WP.spec_ok]
   refine ⟨⟨Kv.Model.set links encoded.val leaf, refined, ?_⟩, ⟨hv, ho⟩, ⟨kv, ko, ?_⟩, ?_⟩
   · rw [hp, projection, he, packed_set]
-  · change index.last.val ≤ after.last.val
-    rw [clock]
+  · rw [clock]
     exact Nat.le_succ _
   · refine ⟨count ▸ vg, ?_, Nat.le_of_eq clock⟩
     simpa only [orderCount, count, Nat.two_mul] using og

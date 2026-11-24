@@ -4,8 +4,8 @@
 //! A single-store KV state machine over finite association lists.
 
 use crate::branch_log::{BranchLog, FrameId};
-use crate::kv_index::AddressIndex;
-use crate::radix::DualRoot;
+use crate::kv_index::{AddressIndex, Binding};
+use crate::radix::{DualRoot, RadixRow};
 
 pub type Version = u64;
 pub type Term = u64;
@@ -442,7 +442,7 @@ impl Frame {
         let base = publication_base(index, self.data, pending);
         Self {
             version,
-            data: publish_indexed(index, base, pending, version),
+            data: publish_selected(index, base, pending, version),
             revisions,
             births,
         }
@@ -483,6 +483,57 @@ fn publication_base(index: &AddressIndex<Cell>, root: DualRoot, pending: &Pendin
         i += 1;
     }
     index.empty_root()
+}
+
+fn single_map_increasing(a: &Address, b: &Address) -> bool {
+    a.map.same(&b.map) && a.key.compare(&b.key) == -1
+}
+
+fn prepare_sorted_batch(
+    pending: &Pending,
+    version: Version,
+) -> Option<Vec<Option<RadixRow<Binding<Cell>>>>> {
+    let len = pending.0.len();
+    let mut batch = Vec::with_capacity(len);
+    let mut i = len;
+    while i > 0 {
+        let prior = i;
+        i -= 1;
+        let (address, write) = &pending.0[i];
+        if prior < len && !single_map_increasing(&pending.0[prior].0, address) {
+            return None;
+        }
+        let Write::Put(value) = write else {
+            return None;
+        };
+        let row = AddressIndex::batch_row(
+            address.clone(),
+            Cell {
+                value: value.clone(),
+                version,
+            },
+        );
+        // Keep the bulk directory bound below the ordinary publication bound.
+        if row.key.len() > 56 {
+            return None;
+        }
+        batch.push(Some(row));
+    }
+    Some(batch)
+}
+
+fn publish_selected(
+    index: &mut AddressIndex<Cell>,
+    base: DualRoot,
+    pending: &Pending,
+    version: Version,
+) -> DualRoot {
+    if base.is_empty() && pending.0.len() >= 256 {
+        if let Some(rows) = prepare_sorted_batch(pending, version) {
+            return index.build_sorted_batch(rows);
+        }
+    }
+    publish_indexed(index, base, pending, version)
 }
 
 fn publish_indexed(

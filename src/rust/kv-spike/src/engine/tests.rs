@@ -226,6 +226,53 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn sorted_publication_keeps_scan_order_and_pinned_values() {
+    let mut store = Store::new(0);
+    let map = b"public:sorted";
+    for (id, value) in [(0, b"old"), (2, b"new")] {
+        begin(&mut store, id);
+        acquire(&mut store, id, map);
+        for key in 0..256_u16 {
+            write(&mut store, id, map, &key.to_be_bytes(), Some(value));
+        }
+        let pending = &store.txs.0[store.tx_index(id).unwrap()].1.pending;
+        assert!(prepare_sorted_batch(pending, id + 1).is_some());
+        let mut reordered = pending.clone();
+        reordered.0.swap(0, 1);
+        assert!(prepare_sorted_batch(&reordered, id + 1).is_none());
+        let mut crossed_map = pending.clone();
+        crossed_map.0[0].0.map = Bytes::copy_from(b"public:other");
+        assert!(prepare_sorted_batch(&crossed_map, id + 1).is_none());
+        let mut long_key = pending.clone();
+        long_key.0[0].0.key = Bytes::copy_from(&[0xff; 57]);
+        assert!(prepare_sorted_batch(&long_key, id + 1).is_none());
+        let version = if id == 0 { 1 } else { 2 };
+        assert!(
+            publication_base(&store.history.index, store.history.head().data, pending).is_empty()
+        );
+        applied(&mut store, id, Outcome::Success, version);
+        if id == 0 {
+            begin(&mut store, 1);
+            acquire(&mut store, 1, map);
+        }
+    }
+    for (id, expected) in [(1, b"old"), (3, b"new")] {
+        if id == 3 {
+            begin(&mut store, id);
+            acquire(&mut store, id, map);
+        }
+        let Output::Entries(rows) = op(&mut store, id, map, Operation::Scan) else {
+            panic!("scan must return the published rows");
+        };
+        assert_eq!(rows.len(), 256);
+        for ((key, value), index) in rows.iter().zip((0..256_u16).rev()) {
+            assert_eq!(key.as_slice(), index.to_be_bytes());
+            assert_eq!(value.as_slice(), expected);
+        }
+    }
+}
+
+#[test]
 fn bulk_replacement_requires_full_coverage_and_preserves_a_pinned_cut() {
     let mut store = Store::new(0);
     let map = b"public:batch";
@@ -250,6 +297,7 @@ fn bulk_replacement_requires_full_coverage_and_preserves_a_pinned_cut() {
     let index = &store.history.index;
     let root = store.history.head().data;
     let pending = &store.txs.0[store.tx_index(2).unwrap()].1.pending;
+    assert!(prepare_sorted_batch(pending, 2).is_none());
     assert!(
         index
             .scan_links(publication_base(index, root, pending))

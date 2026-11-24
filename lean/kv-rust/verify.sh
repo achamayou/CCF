@@ -44,6 +44,7 @@ lake build --wfail
 for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
   KvRust.Correspondence KvRust.Assoc KvRust.BranchLog KvRust.History KvRust.Keys KvRust.Publication \
   KvRust.KvIndex KvRust.IndexedHistory KvRust.IndexedImage KvRust.IndexedPublication \
+  KvRust.SortedPublication \
   KvRust.Validation KvRust.Lineage KvRust.Apply KvRust.Advance KvRust.Acquire \
   KvRust.PinnedImage KvRust.Point KvRust.Radix KvRust.RadixAddress KvRust.RadixBatch KvRust.RadixDual \
   KvRust.RadixDualBatch KvRust.RadixLiveness \
