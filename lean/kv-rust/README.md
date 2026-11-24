@@ -241,6 +241,9 @@ In three alternating pinned runs of `kv_backend_bench`, median commits replacing
 These are ranges of run medians including ledger-entry serialization, with a null encryptor and no consensus.
 Reusing the adapter's grouped write set for both size validation and serialization reduced the Rust median further, to 0.81-0.95 ms versus 1.11-1.46 ms before this adapter change in four paired runs.
 The C++ medians in those runs were 0.67-0.77 ms.
+The adapter also skips constructing a second write report when applying the transaction; the extracted dispatcher still returns the full report.
+In a separate four-pair run, Rust took 0.59-0.68 ms versus 0.62-0.73 ms in C++ for the same 2,048 replacements; Rust was faster in all four pairs.
+The governance mix and pinned-churn tail latency and peak RSS still favor C++.
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
 All three use the same eight-byte keys and inline 64-byte values; the write workload retains every prior root.

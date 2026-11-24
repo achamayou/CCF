@@ -1364,7 +1364,7 @@ pub enum Error {
 pub enum CommitPreparation {
     ReadOnly,
     Rejected(Outcome),
-    Applied(Version, Term, WriteSet),
+    Applied(Version, Term),
 }
 
 pub struct Store {
@@ -1441,7 +1441,7 @@ impl Store {
                 t.phase = Phase::Committing;
                 Ok(Output::Unit)
             }
-            Action::Apply(tx) => self.apply(tx),
+            Action::Apply(tx) => self.apply(tx, true),
             Action::CommitResult(tx, result) => self.finish(tx, result),
             Action::Compact(version) => Ok(Output::Compacted(self.history.compact(version))),
             Action::Rollback(version, term) => self.history.rollback(version, term),
@@ -1477,10 +1477,10 @@ impl Store {
                 return Ok(CommitPreparation::Rejected(outcome));
             }
         }
-        match self.apply(tx) {
-            Ok(Output::Applied(version, term, writes)) => {
-                Ok(CommitPreparation::Applied(version, term, writes))
-            }
+        // The CCF adapter has already collected the pending writes while
+        // holding the store lock. It only needs the assigned transaction ID.
+        match self.apply(tx, false) {
+            Ok(Output::Applied(version, term, _)) => Ok(CommitPreparation::Applied(version, term)),
             Err(Error::Disabled) => Ok(CommitPreparation::Rejected(Outcome::Conflict)),
             Err(Error::Exhausted) => Err(Error::Exhausted),
             Ok(_) => Err(Error::Disabled),
@@ -1945,7 +1945,7 @@ impl Store {
         Ok(pending)
     }
 
-    fn apply(&mut self, tx: Attempt) -> Result<Output, Error> {
+    fn apply(&mut self, tx: Attempt, include_report: bool) -> Result<Output, Error> {
         let i = self.tx_index(tx)?;
         let t = &self.txs.0[i].1;
         if !matches!(t.phase, Phase::Committing)
@@ -1962,7 +1962,11 @@ impl Store {
         let next = self
             .history
             .prepare_frame(version, self.history.next_identity, &t.pending);
-        let writes = reported_writes(&t.pending);
+        let writes = if include_report {
+            reported_writes(&t.pending)
+        } else {
+            Vec::new()
+        };
         self.history.log.append(next);
         self.history.next_identity += 1;
         self.txs.0[i].1.phase = Phase::Applied(version);

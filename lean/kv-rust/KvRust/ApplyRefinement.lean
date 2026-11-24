@@ -111,8 +111,9 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             have hOk
                 : WP.spec (Spike.engine.Tx.can_apply t n.history) (fun r => r = true) :=
               ha ▸ heligible
+            change WP.spec (Spike.engine.Store.apply n id true) _
             apply WP.spec_mono
-              (apply_accepted_matches_model encode inj n id t s prior head hn hPhase
+              (apply_accepted_matches_model encode inj n id true t s prior head hn hPhase
                 hWrites hOk hframes hhist.frames hhead hhist.term hhist.global
                 hhist.identity capacity hhist.valid hhist.indexValid)
             rintro ⟨observed, after⟩
@@ -149,7 +150,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
               .Applied version n.history.term writes,
               hout,
               by
-                simp only [modelOutput, hv', hhist.term, hreport, ← hw'],
+                simp only [modelOutput, hv', hhist.term, hreport, ← hw', ite_true],
               rel
             ⟩
           · have haf : canApply s tx = false := Bool.eq_false_of_not_eq_true ha

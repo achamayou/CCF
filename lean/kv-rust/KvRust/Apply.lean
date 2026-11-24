@@ -154,6 +154,24 @@ private theorem report_matches (encode : List U8 → String)
   rintro ⟨a, w⟩ _
   cases w <;> rfl
 
+private theorem optional_report_matches (encode : List U8 → String)
+    (pending
+      : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (includeReport : Bool)
+    : WP.spec
+        (if includeReport then
+            Spike.engine.reported_writes pending
+          else
+            .ok (alloc.vec.Vec.new ReportRow))
+        (fun reported =>
+          encodeReport encode reported
+          = if includeReport then
+              encodeWrites encode (byteWrites pending.val)
+            else
+              []) := by
+  cases includeReport
+  · simp [encodeReport, alloc.vec.Vec.new]
+  · simpa using report_matches encode pending
+
 /-- The operands of an accepted application fit the machine counters and vector operations. -/
 structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
     (t : Spike.engine.Tx)
@@ -176,12 +194,13 @@ structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
   /-- Capacity for birth records. -/
   births : head.births.val.length + t.pending.val.length ≤ Usize.max
 
-/-- Accepted local application returns the model's next version, term, and full write set. -/
+/-- Accepted local application publishes the same frame with or without a write report. -/
 theorem apply_accepted_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.Store) (id : U64)
-    (t : Spike.engine.Tx) (model : Store) (prior : List Spike.engine.Frame)
-    (head : Spike.engine.Frame) (hTx : find s.txs.val id = some t)
-    (hPhase : t.phase = .Committing) (hWrites : t.pending.val ≠ [])
+    (includeReport : Bool) (t : Spike.engine.Tx) (model : Store)
+    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (hTx : find s.txs.val id = some t) (hPhase : t.phase = .Committing)
+    (hWrites : t.pending.val ≠ [])
     (hEligible : WP.spec (Spike.engine.Tx.can_apply t s.history) (fun r => r = true))
     (hHead : s.history.activeFrames = prior ++ [head])
     (hFrames : model.history = modelFrames s.history (modelFrame encode s.history.index))
@@ -189,18 +208,17 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
     (hTerm : model.term = s.history.term.val)
     (hGlobal : model.global = s.history.global.val)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
-    (hCap : ApplyCapacity s.history head t)
-    (valid : BranchValid s.history.log)
+    (hCap : ApplyCapacity s.history head t) (valid : BranchValid s.history.log)
     (indexed : HistoryIndexValid s.history)
     : let writes := encodeWrites encode (byteWrites t.pending.val)
       let expected := advance model writes
-      WP.spec (Spike.engine.Store.execute s (.Apply id))
+      WP.spec (Spike.engine.Store.apply s id includeReport)
         (fun (result, after) =>
           ∃ version reported index,
             result = .Ok (.Applied version s.history.term reported)
             ∧ version.val = expected.head.version
             ∧ s.history.term.val = expected.term
-            ∧ encodeReport encode reported = writes
+            ∧ encodeReport encode reported = (if includeReport then writes else [])
             ∧ modelFrames after.history (modelFrame encode after.history.index)
               = expected.history
             ∧ after.history.global.val = expected.global
@@ -212,7 +230,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ HistoryIndexValid after.history
             ∧ HistoryKeeps s.history after.history) := by
   dsimp only
-  unfold Spike.engine.Store.execute Spike.engine.Store.apply
+  unfold Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
   intro r hr
   cases r with
@@ -255,7 +273,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       rintro ⟨next, prepared⟩ ⟨arena, same, hnext, view, indexValid, indexKept⟩
       change prepared = {s.history with index := arena} at same
       subst prepared
-      apply WP.spec_bind (report_matches encode t.pending)
+      apply WP.spec_bind (optional_report_matches encode t.pending includeReport)
       intro reported hreported
       have branchRoom : s.history.log.branch.val.length < Usize.max :=
         (branch_values_length s.history.log valid) ▸ hCap.history

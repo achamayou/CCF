@@ -239,8 +239,11 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
             Ok(CommitPreparation::Rejected(Outcome::Success)) => {
                 Reply::status(Status::InvalidRequest)
             }
-            Ok(CommitPreparation::Applied(v, t, writes)) => {
-                Reply::output(Ok(Output::Applied(v, t, writes)))
+            Ok(CommitPreparation::Applied(version, term)) => {
+                let mut reply = Reply::status(Status::Ok);
+                reply.number = version;
+                reply.detail = term;
+                reply
             }
             Err(error) => Reply::output(Err(error)),
         };
