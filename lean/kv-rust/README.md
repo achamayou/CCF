@@ -346,4 +346,6 @@ Its extracted proofs show that rewind truncates the active sequence without inva
 The single-store trace theorem relates the active sequence to the same model history, with an additional capacity bound for the retained frame arena.
 Normal acquisitions retain frame IDs instead of copying map images, materializing an ordered image only for a whole-map operation.
 The trace proof carries the validity and values of those handles across commits and rewinds.
+The [retained-cut lemmas](KvRust/RetainedCuts.lean) show that ordinary history can omit frame payloads strictly below the global cut while preserving lineage metadata, rollback, and the ordered map images returned by new acquisitions.
+This projection is not a native collector: already acquired pins still need their original roots, and CCF recovery can consult data below the global cut.
 The frame arena retains discarded frames until the log is replaced or dropped; this is not a production reclamation strategy.

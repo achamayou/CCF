@@ -297,4 +297,149 @@ theorem available_compacted_image (store : Store) (stable : RevisionHistory stor
               rw [captured, globalEq]
               exact Or.inr (monotone.2 (Nat.le_antisymm notStale monotone.1)).symm
 
+/-- Projection of a frame whose payload may be reclaimed, but whose lineage
+metadata must still be available to lazy acquisitions and validation. -/
+def retainedFrame (floor : Nat) (f : Frame) : Frame :=
+  { f with data := if floor ≤ f.version then f.data else [] }
+
+def retainedBranch (s : Store) : Store :=
+  { s with history := s.history.map (retainedFrame s.global) }
+
+theorem retainedFrame_eq {floor : Nat} {f : Frame} (live : floor ≤ f.version)
+    : retainedFrame floor f = f := by
+  cases f
+  simp [retainedFrame, live]
+
+theorem retained_branch_at_cut (s : Store) (cut : Nat)
+    : atCut (retainedBranch s) cut = retainedFrame s.global (atCut s cut) := by
+  unfold atCut retainedBranch
+  have select (frames : List Frame) :
+      ((frames.map (retainedFrame s.global)).find? (fun f => f.version ≤ cut)) =
+        (frames.find? (fun f => f.version ≤ cut)).map (retainedFrame s.global) := by
+    induction frames with
+    | nil => rfl
+    | cons frame rest ih =>
+        by_cases eligible : frame.version ≤ cut <;>
+          simp [retainedFrame, ih, eligible]
+  simp only [select]
+  cases s.history.find? (fun f => f.version ≤ cut) <;> simp [retainedFrame]
+
+theorem retained_branch_live_cut (s : Store) (cut : Nat)
+    (live : s.global ≤ (atCut s cut).version)
+    : atCut (retainedBranch s) cut = atCut s cut :=
+  (retained_branch_at_cut s cut).trans (retainedFrame_eq live)
+
+theorem retained_branch_lineage (s : Store) (m : String) (f : Frame)
+    : mapLineage (retainedBranch s) f m = mapLineage s f m := by
+  simp [mapLineage, retainedBranch, List.any_map, Function.comp_def, revision, retainedFrame]
+
+theorem retained_branch_eligible (s : Store) (tx : Tx)
+    : canApply (retainedBranch s) tx = canApply s tx := by
+  have term : (retainedBranch s).term = s.term := rfl
+  have head : (retainedBranch s).head = s.head := rfl
+  unfold canApply validLineage
+  simp only [term, head, retained_branch_lineage]
+
+theorem retained_branch_available (s : Store) (snap : Snapshot) (m : String)
+    (globalLive : s.global ≤ (atCut s s.global).version)
+    : available (retainedBranch s) snap m = available s snap m := by
+  have global : (retainedBranch s).global = s.global := rfl
+  unfold available captureLocal
+  rw [retained_branch_at_cut]
+  cases birth : find (atCut s snap.current.version).births m with
+  | none => simp [retainedFrame, birth, mapAvailable, find, image]
+  | some stamp =>
+      have lb : find (retainedFrame s.global (atCut s snap.current.version)).births m =
+          some stamp := birth
+      have same : revision (retainedFrame s.global (atCut s snap.current.version)) m =
+          revision (atCut s snap.current.version) m := rfl
+      simp only [lb, birth, Option.isSome_some, ite_true, mapAvailable, global,
+        retained_branch_live_cut s s.global globalLive, same, retained_branch_lineage]
+      rfl
+
+/-- Compute the local image for an available lazy acquisition without
+reading a compacted frame's discarded data. Existing pins are not replaced. -/
+def retainedAcquisitionImage (s : Store) (snap : Snapshot) (m : String)
+    : Assoc String (Cell String) :=
+  let retained := retainedBranch s
+  let current := atCut retained snap.current.version
+  if (find current.births m).isNone then
+    []
+  else if snap.current.version < s.global then
+    image (atCut retained s.global).data m
+  else
+    image current.data m
+
+theorem retained_acquisition_image (s : Store) (stable : RevisionHistory s.history)
+    (snap : Snapshot) (m : String) (canRead : available s snap m = true)
+    (globalLive : s.global ≤ (atCut s s.global).version)
+    (localLive
+      : s.global ≤ snap.current.version
+        → s.global ≤ (atCut s snap.current.version).version)
+    : retainedAcquisitionImage s snap m = image (captureLocal s snap m).data m := by
+  unfold retainedAcquisitionImage
+  dsimp only
+  rw [retained_branch_at_cut s snap.current.version]
+  cases birth : find (atCut s snap.current.version).births m with
+  | none => simp [retainedFrame, captureLocal, birth, image]
+  | some stamp =>
+      have lb : find (retainedFrame s.global (atCut s snap.current.version)).births m =
+          some stamp := birth
+      have localFrame : captureLocal s snap m = atCut s snap.current.version := by
+        simp [captureLocal, birth]
+      simp only [lb, Option.isNone_some, Bool.false_eq_true, ite_false]
+      by_cases older : snap.current.version < s.global
+      · rw [ite_eq_left older, retained_branch_live_cut _ _ globalLive]
+        rcases available_compacted_image s stable snap m (Nat.le_of_lt older) canRead with missing | equal
+        · simp [localFrame, birth] at missing
+        · exact equal.symm
+      · rw [ite_eq_right older, retainedFrame_eq (localLive (Nat.le_of_not_gt older)), localFrame]
+
+theorem retained_branch_rollback (s : Store) (request term : Nat)
+    (live : s.global ≤ (atCut s (rollbackCut s request)).version)
+    : rollbackStore (retainedBranch s) request term
+      = retainedBranch (rollbackStore s request term) := by
+  have cut : rollbackCut (retainedBranch s) request = rollbackCut s request := rfl
+  unfold rollbackStore
+  dsimp only
+  rw [cut, retained_branch_live_cut s _ live]
+  simp [retainedBranch, List.filter_map, Function.comp_def, retainedFrame]
+  rfl
+
+theorem retained_branch_advance (s : Store) (writes : Pending)
+    (headLive : s.global ≤ s.head.version)
+    : advance (retainedBranch s) writes = retainedBranch (advance s writes) := by
+  have nextLive : s.global ≤ (advance s writes).head.version := by
+    change s.global ≤ s.head.version + 1
+    omega
+  have keep := retainedFrame_eq nextLive
+  simp [retainedBranch, advance] at keep ⊢
+  exact keep.symm
+
+private theorem retained_frame_raise {older newer : Nat} (ordered : older ≤ newer)
+    (f : Frame)
+    : retainedFrame newer (retainedFrame older f) = retainedFrame newer f := by
+  by_cases keep : newer ≤ f.version
+  · rw [retainedFrame_eq (ordered.trans keep)]
+  · simp [retainedFrame, keep]
+
+theorem retained_branch_compact (s : Store) (request : Nat)
+    : retainedBranch (compactStore (retainedBranch s) request)
+      = retainedBranch (compactStore s request) := by
+  have raised : s.global ≤ (compactStore s request).global := by
+    unfold compactStore
+    split <;> simp
+  have compacted : compactStore (retainedBranch s) request =
+      {compactStore s request with history := (retainedBranch s).history} := by
+    unfold compactStore
+    change (if request ≤ s.head.version then _ else _) = _
+    split <;> rfl
+  rw [compacted]
+  have history : (compactStore s request).history = s.history := by
+    unfold compactStore
+    split <;> rfl
+  simp only [retainedBranch, history, List.map_map]
+  congr 1
+  simp only [Function.comp_def, retained_frame_raise raised]
+
 end KvRust
