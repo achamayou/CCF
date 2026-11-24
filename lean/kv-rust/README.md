@@ -86,8 +86,13 @@ The same fuzzer schedules and assertions run on both backends, but the C++ trace
 The test adapter serializes commit submission and only fills reserved slots in order.
 It does not implement the full CCF store interface or production replication.
 The existing trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
-The CCF adapter stages writes by key rather than write recency; the exact-order dispatcher retains the original behavior until the reference specification is relaxed.
+The CCF adapter stages writes by key rather than write recency; the exact-order dispatcher retains the original behavior while the separate relaxed refinement is being composed.
 The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.
+The [order-equivalence lemmas](KvRust/OrderEquivalence.lean) are the bridge to the relaxed contract.
+The extracted `Write` and `Clear` actions, local point-read and scan observations, and frame publication preserve whole bindings and exact version metadata while ignoring incidental list order.
+The range builder still returns the exact sorted result for any permutation of the input.
+The ordinary-branch OCC proof checks the same cells and previous-write versions when each whole-map dependency comes from a surviving cut.
+These results are not yet composed into a trace theorem for the key-ordered dispatcher.
 The extracted ordinary ledger replay proof shows that, after decoding, a successful next-version replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
 Provisional replacement replay and snapshot import are tested, but not covered by that theorem.
 

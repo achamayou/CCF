@@ -5,6 +5,7 @@ module
 
 public import KvRust.History
 public import KvRust.IndexedPublication
+public import KvRust.OrderEquivalence
 
 @[expose] public section
 
@@ -490,6 +491,38 @@ theorem validates_encoding (encode : List U8 → String) (inj : Function.Injecti
       = validates db ds := by
   simp only [validates, List.all_map, Function.comp_def]
   exact List.all_congr rfl (dependency_encoding encode inj db)
+
+/-- Rust appends dependencies while the model prepends them. -/
+def pointDeps (encode : List U8 → String) (t : Spike.engine.Tx)
+    : List (Dependency String String String) :=
+  (t.deps.val.map (encodeDependency encode ∘ byteDependency)).reverse
+
+/-- On an ordinary branch, the extracted OCC check implements the relaxed
+dependency contract for captured images that still have a surviving origin. -/
+theorem validate_dependencies_by_contents (encode : List U8 → String)
+    (inj : Function.Injective encode) (t : Spike.engine.Tx)
+    (history : Spike.engine.History) (head : Spike.engine.Frame) (db : CellRows)
+    (view : IndexView history.index head.data db) (valid : IndexValid history.index)
+    (read : WP.spec (Spike.engine.History.head history) (· = head))
+    (room : ∀ d ∈ t.deps.val, DependencyRoom db d) (frames : List Frame)
+    (current model : Frame) (shape : Kv.Properties.History frames current.version)
+    (present : current ∈ frames)
+    (nativeData : current.data = encodeData encode (indexedCellData db))
+    (same : FrameOrderEq current model) (unique : Kv.Properties.Unique current.data)
+    (reference : List (Dependency String String String))
+    (related : List.Forall₂ DependencyOrderEq (pointDeps encode t) reference)
+    (origins : ∀ d ∈ pointDeps encode t, DependencyHasOrigin frames current d)
+    : WP.spec (Spike.engine.Tx.valid_dependencies t history)
+        (fun r => r = reference.all (holdsByContents model.data)) := by
+  apply WP.spec_mono
+    (validate_dependencies_matches_model t history head db view valid read room)
+  intro r checked
+  rw [← validates_encoding encode inj, ← nativeData] at checked
+  have reordered : validates current.data (pointDeps encode t) =
+      validates current.data ((t.deps.val.map byteDependency).map (encodeDependency encode)) := by
+    simp only [pointDeps, validates, List.all_reverse, List.map_map]
+  exact checked.trans (reordered.symm.trans
+    (validates_by_contents shape current model present same unique related origins))
 
 /-- Encoding staged writes preserves deletions and the order of writes. -/
 def encodeWrites (encode : List U8 → String)

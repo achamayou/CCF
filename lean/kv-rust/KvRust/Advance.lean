@@ -4,6 +4,7 @@
 module
 
 public import KvRust.IndexedHistory
+public import KvRust.RetainedCuts
 public import KvRust.SortedPublication
 
 @[expose] public section
@@ -350,6 +351,44 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   simp only [encodedStamps] at hr hb
   rw [hr, hb]
   rfl
+
+/-- The extracted frame advance publishes the relaxed model's next frame
+without requiring either the existing bindings or staged writes to be ordered alike. -/
+theorem frame_advance_order_matches_model (encode : List U8 → String)
+    (inj : Function.Injective encode) (before : Spike.engine.Frame)
+    (index : CellIndex) (valid : IndexValid index)
+    (view : IndexView index before.data (indexRows index before.data)) (model : Store)
+    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
+    (referenceWrites : Pending) (version identity : U64)
+    (heads : FrameOrderEq (modelFrame encode index before) model.head)
+    (related : (encodeWrites encode (byteWrites pending.val)).Perm referenceWrites)
+    (uniqueData : Kv.Properties.Unique model.head.data)
+    (uniqueWrites : Kv.Properties.Unique (encodeWrites encode (byteWrites pending.val)))
+    (hVersion : version.val = model.head.version + 1)
+    (hIdentity : identity.val = model.nextIdentity)
+    (space
+      : IndexBatchRoom index ((indexRows index before.data).length + pending.val.length)
+          pending.val.length)
+    (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
+    (hRevs : before.revisions.val.length + pending.val.length ≤ Usize.max)
+    (hBirths : before.births.val.length + pending.val.length ≤ Usize.max)
+    : WP.spec (Spike.engine.Frame.advance before index version identity pending)
+        (fun (after, arena) =>
+          FrameOrderEq (modelFrame encode arena after)
+            (advance model referenceWrites).head
+          ∧ IndexView arena after.data (indexRows arena after.data)
+          ∧ IndexValid arena
+          ∧ IndexKeeps index arena) := by
+  let representative := {model with head := modelFrame encode index before}
+  have nextVersion : version.val = representative.head.version + 1 :=
+    heads.version.symm ▸ hVersion
+  apply WP.spec_mono (frame_advance_matches_model encode inj before index valid view
+    representative pending version identity rfl nextVersion hIdentity space addresses hRevs hBirths)
+  rintro ⟨after, arena⟩ ⟨published, retained, live, kept⟩
+  refine ⟨?_, retained, live, kept⟩
+  rw [published]
+  exact advance_order_eq representative model _ _ heads rfl related
+    (unique_of_perm heads.data.symm uniqueData) uniqueWrites
 
 theorem prepare_frame_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (history : Spike.engine.History)

@@ -23,6 +23,14 @@ private theorem pending_lt_irrefl (a : Spike.engine.Address)
     : ¬ pendingAddressLt a a := by
   simp [pendingAddressLt]
 
+theorem PendingSorted.unique {rows : List PendingWrite} (sorted : PendingSorted rows)
+    : (rows.map Prod.fst).Nodup := by
+  change (rows.map Prod.fst).Pairwise (· ≠ ·)
+  rw [List.pairwise_map]
+  apply sorted.imp
+  intro left right lt eq
+  exact pending_lt_irrefl _ (eq ▸ lt)
+
 private theorem pending_lt_trans {a b c : Spike.engine.Address}
     (ab : pendingAddressLt a b) (bc : pendingAddressLt b c)
     : pendingAddressLt a c := by

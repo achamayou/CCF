@@ -234,31 +234,32 @@ private theorem operate_enabled (encode : List U8 → String)
       rintro ⟨out, next⟩ ⟨ho, hw, hd, hc⟩
       exact finish out next ho hw hd hc
 
-private theorem operate_disabled (encode : List U8 → String)
+/-- Both write-order modes reject disabled handle operations without changing the attempt. -/
+theorem operate_with_order_disabled (encode : List U8 → String)
     (inj : Function.Injective encode) (history : Spike.engine.History)
     (t : Spike.engine.Tx) (m : Spike.engine.Bytes)
-    (op : Spike.engine.Operation)
+    (op : Spike.engine.Operation) (byKey : Bool)
     (bad
       : t.phase ≠ .Active
         ∨ find (rustPinnedViews encode history t.views) (encode (alloc.vec.Vec.val m))
           = none)
     (live : ViewsLive history t.views)
-    : WP.spec (Spike.engine.Tx.operate t history m op)
+    : WP.spec (Spike.engine.Tx.operate_with_order t history m op byKey)
         (fun r => r = (.Err .Disabled, t)) := by
   cases hp : t.phase with
   | Committing =>
       have hr : {t with phase := .Committing} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
+      simp [Spike.engine.Tx.operate_with_order, hp, hr]
   | Applied ver =>
       have hr : {t with phase := .Applied ver} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
+      simp [Spike.engine.Tx.operate_with_order, hp, hr]
   | Finished =>
       have hr : {t with phase := .Finished} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
+      simp [Spike.engine.Tx.operate_with_order, hp, hr]
   | Active =>
       have hf := bad.resolve_left (by simp [hp])
       have hr : {t with phase := .Active} = t := by rw [← hp]
-      simp only [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, bind_ok]
+      simp only [Spike.engine.Tx.operate_with_order, hp, bind_ok]
       apply WP.spec_bind (view_lookup encode inj history t m live)
       intro found ⟨he, _⟩
       rw [hf] at he
@@ -312,7 +313,8 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
                 let (out, next) ← Spike.engine.Tx.operate t n.history m op.rust
                 Result.ok (out, {n with txs := back (id, next)}))
               (StepMatches encode sid n (execute w modelAction)) := by
-        apply WP.spec_bind (operate_disabled encode inj n.history t m op.rust bad rel.live)
+        apply WP.spec_bind
+          (operate_with_order_disabled encode inj n.history t m op.rust false bad rel.live)
         intro result hr
         subst result
         have hv : back (id, t) = n.txs := by

@@ -4,6 +4,7 @@
 module
 
 public import KvRust.Assoc
+public import KvRust.OrderEquivalence
 
 @[expose] public section
 
@@ -128,6 +129,56 @@ private theorem revisions_fold (db : Data) (m : String) (stamp : Stamp)
           · simp [effect, eq, find_set_key]
           · simp [effect, eq, Ne.symm eq, find_set_key]
         · simp [effect]
+
+private theorem births_fold (m : String) (stamp : Stamp) (writes : Pending)
+    (initial : Assoc String Stamp)
+    : find
+        (writes.foldl
+          (fun rows (addr, _) =>
+            if (find rows addr.1).isSome then rows else Kv.Model.set rows addr.1 stamp)
+          initial) m
+      = (find initial m).or
+          (if writes.any (fun row => row.1.1 == m) then some stamp else none) := by
+  induction writes generalizing initial with
+  | nil => simp
+  | cons row rest ih =>
+      obtain ⟨⟨table, key⟩, value⟩ := row
+      simp only [List.foldl_cons, List.any_cons]
+      rw [ih]
+      by_cases target : table = m
+      · subst table
+        cases old : find initial m <;> simp [old, find_set_key]
+      · have different : (table == m) = false :=
+          Bool.eq_false_of_not_eq_true (fun h => target (beq_iff_eq.mp h))
+        let touched := rest.any (fun row => row.1.1 == m)
+        change (find (if (find initial table).isSome then initial else
+          Kv.Model.set initial table stamp) m).or (if touched then some stamp else none) =
+          (find initial m).or (if (table == m || touched) then some stamp else none)
+        rw [different, Bool.false_or]
+        cases find initial table <;> simp [Ne.symm target, find_set_key]
+
+/-- Publishing reordered writes changes neither the next version nor any
+cell, birth, or map revision selected by lookup. -/
+theorem advance_order_eq (s t : Store) (xs ys : Pending)
+    (heads : FrameOrderEq s.head t.head) (identity : s.nextIdentity = t.nextIdentity)
+    (related : xs.Perm ys) (baseUnique : Kv.Properties.Unique s.head.data)
+    (writesUnique : Kv.Properties.Unique xs)
+    : FrameOrderEq (advance s xs).head (advance t ys).head := by
+  have version := heads.version
+  have stamp : ({version := s.head.version + 1, identity := s.nextIdentity} : Stamp) =
+      {version := t.head.version + 1, identity := t.nextIdentity} := by rw [version, identity]
+  refine ⟨congrArg (· + 1) version, ?_, ?_, ?_⟩
+  · change (publish s.head.data (s.head.version + 1) xs).Perm
+      (publish t.head.data (t.head.version + 1) ys)
+    rw [← version]
+    exact publication_perm _ heads.data related baseUnique writesUnique
+  · intro m
+    have touches : mapWriteTouches s.head.data m = mapWriteTouches t.head.data m := by
+      funext row
+      simp only [mapWriteTouches, lookup_perm heads.data baseUnique]
+    simp only [advance, revisions_fold, stamp, heads.revisions m, touches, related.any_eq]
+  · intro m
+    simp only [advance, births_fold, stamp, heads.births m, related.any_eq]
 
 /-- A publication with an unchanged map revision leaves its exact ordered
 image intact. The bound is on the old stamp, not on the data or write set. -/

@@ -3,6 +3,7 @@
 
 module
 
+public import KvRust.OrderEquivalence
 public import KvRust.Publication
 public import Kv.Model
 
@@ -446,22 +447,6 @@ private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
       exact ⟨hsorted, by simpa [List.drop_eq_nil_of_le hp] using hperm⟩
   · simp
 
-private theorem eq_of_unique_key {K V : Type} {rows : Assoc K V}
-    (unique : (rows.map Prod.fst).Nodup) {a b : K × V}
-    (ha : a ∈ rows) (hb : b ∈ rows) (heq : a.1 = b.1)
-    : a = b := by
-  induction rows with
-  | nil => simp at ha
-  | cons row rows ih =>
-      simp only [List.map_cons, List.nodup_cons] at unique
-      rcases List.mem_cons.mp ha with rfl | ha'
-      · rcases List.mem_cons.mp hb with rfl | hb'
-        · rfl
-        · exact (unique.1 (heq.symm ▸ List.mem_map_of_mem hb')).elim
-      · rcases List.mem_cons.mp hb with rfl | hb'
-        · exact (unique.1 (heq ▸ List.mem_map_of_mem ha')).elim
-        · exact ih unique.2 ha' hb'
-
 def encodeRangeEntries {V : Type} (encode : List U8 → String)
     (project : V → Spike.engine.Bytes) (entries : List (Spike.engine.Bytes × V))
     : Assoc String String :=
@@ -498,17 +483,11 @@ theorem ordered_range_projected {V : Type} {encode : List U8 → String}
     exact hperm.map encoded
   have hsort : (encodeEntries encode out).Pairwise (fun a b => a.1 ≤ b.1) :=
     hsorted.map encoded (fun _ _ h => h)
-  have hsort' : (filtered.mergeSort cmp).Pairwise (fun a b => a.1 ≤ b.1) := by
-    apply List.Pairwise.imp (R := fun a b => cmp a b = true) (fun h => of_decide_eq_true h)
-    apply List.pairwise_mergeSort
-    · intro a b c hab hbc
-      exact decide_eq_true (_root_.Std.le_trans (of_decide_eq_true hab) (of_decide_eq_true hbc))
-    · intro a b
-      rcases _root_.Std.le_total (a := a.1) (b := b.1) with h | h <;> simp [cmp, h]
+  have hsort' := mergeSort_keys_ordered filtered
   have hm := List.mergeSort_perm filtered cmp
   apply List.Perm.eq_of_pairwise _ hsort hsort' (hp.trans hm.symm)
   intro a b ha hb hab hba
-  exact eq_of_unique_key unique (List.mem_of_mem_filter (hp.subset ha))
+  exact entry_eq_of_unique_key unique (List.mem_of_mem_filter (hp.subset ha))
     (List.mem_of_mem_filter (hm.subset hb)) (_root_.Std.le_antisymm hab hba)
 
 theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder encode)
@@ -526,6 +505,28 @@ theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder 
                   k)).mergeSort
               (fun a b => decide (a.1 ≤ b.1))) :=
   ordered_range_projected order _ id (fun _ => rfl) entries lower upper unique
+
+/-- An unordered input image still produces the exact canonical range result. -/
+theorem ordered_range_by_contents {V : Type} {encode : List U8 → String}
+    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
+    (project : V → Spike.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
+    (entries : alloc.vec.Vec (Spike.engine.Bytes × V)) (reference : Assoc String String)
+    (lower upper : Option Spike.engine.Bytes)
+    (unique : Kv.Properties.Unique reference)
+    (related : (encodeRangeEntries encode project entries.val).Perm reference)
+    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
+        (fun out =>
+          encodeEntries encode out
+          = (reference.filter
+              (fun row =>
+                inRange (encodeBound encode lower)
+                  (encodeBound encode upper) row.1)).mergeSort
+              (fun a b => decide (a.1 ≤ b.1))) := by
+  apply WP.spec_mono (ordered_range_projected order inst project value entries lower upper
+    (unique_of_perm related.symm unique))
+  intro out observed
+  exact observed.trans (sorted_range_eq related (unique_of_perm related.symm unique)
+    (encodeBound encode lower) (encodeBound encode upper))
 
 /-- Even without a uniqueness hypothesis, an empty model interval yields no extracted rows. -/
 theorem ordered_range_empty {encode : List U8 → String}
