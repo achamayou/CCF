@@ -283,7 +283,7 @@ private def removeEntry (m : String) (ws : Pending) (row : String × String) : P
 private theorem clear_rows (encode : List U8 → String) (inj : Function.Injective encode)
     (t : Spike.engine.Tx) (m : Bytes) (entries : Entries)
     (room : t.pending.val.length + entries.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.operate_loop t.pending m entries 0#usize)
+    : WP.spec (Spike.engine.Tx.operate_with_order_loop t.pending m false entries 0#usize)
         (fun next =>
           pointWrites encode {t with pending := next}
           = (modelEntries encode entries).foldl
@@ -293,7 +293,7 @@ private theorem clear_rows (encode : List U8 → String) (inj : Function.Injecti
   let remaining := fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write)) (i : Nat) =>
     ((entries.val.drop i).map project).foldl (removeEntry (encode (alloc.vec.Vec.val m)))
       (pointWrites encode {t with pending := p})
-  unfold Spike.engine.Tx.operate_loop
+  unfold Spike.engine.Tx.operate_with_order_loop
   apply loop.spec_decr_nat
     (fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write) × Usize) =>
       entries.val.length - p.2.val)
@@ -304,7 +304,7 @@ private theorem clear_rows (encode : List U8 → String) (inj : Function.Injecti
     _ _ _
   · rintro ⟨s, i⟩ ⟨hi, hsize, hs⟩
     dsimp only at hi hsize hs ⊢
-    unfold Spike.engine.Tx.operate_loop.body
+    unfold Spike.engine.Tx.operate_with_order_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq entries
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -503,7 +503,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
   let visible := scanAt tx.data tx.normal.writes mapName
   have he := lookup_model_view tx.globalViews mapName view hView
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
-  simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
+  simp only [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hPhase, bind_ok]
   apply WP.spec_bind (view_lookup encode inj history t m live)
   intro found ⟨hf, alive⟩
   rw [hPinned, he] at hf
@@ -545,7 +545,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             rw [hcount]
             exact clearRoom rfl
           change WP.spec (do
-            let pending ← Spike.engine.Tx.operate_loop t.pending m rows 0#usize
+            let pending ← Spike.engine.Tx.operate_with_order_loop t.pending m false rows 0#usize
             Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
               {t with pending, deps, phase := .Active})) _
           apply WP.spec_bind (clear_rows encode inj t m rows hspace)

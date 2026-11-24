@@ -248,17 +248,17 @@ private theorem operate_disabled (encode : List U8 → String)
   cases hp : t.phase with
   | Committing =>
       have hr : {t with phase := .Committing} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, hp, hr]
+      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
   | Applied ver =>
       have hr : {t with phase := .Applied ver} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, hp, hr]
+      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
   | Finished =>
       have hr : {t with phase := .Finished} = t := by rw [← hp]
-      simp [Spike.engine.Tx.operate, hp, hr]
+      simp [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, hr]
   | Active =>
       have hf := bad.resolve_left (by simp [hp])
       have hr : {t with phase := .Active} = t := by rw [← hp]
-      simp only [Spike.engine.Tx.operate, hp, bind_ok]
+      simp only [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hp, bind_ok]
       apply WP.spec_bind (view_lookup encode inj history t m live)
       intro found ⟨he, _⟩
       rw [hf] at he

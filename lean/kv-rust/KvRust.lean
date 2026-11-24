@@ -22,6 +22,7 @@ public import KvRust.Lifecycle
 public import KvRust.LifecycleRefinement
 public import KvRust.Lineage
 public import KvRust.OperateRefinement
+public import KvRust.PendingWrites
 public import KvRust.PinnedImage
 public import KvRust.Point
 public import KvRust.Publication

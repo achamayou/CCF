@@ -490,7 +490,7 @@ theorem operate_point_matches_model (encode : List U8 → String)
         · simp [modelPinnedViews, find, hk] at hView ⊢
           exact ih hView
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
-  simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
+  simp only [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hPhase, bind_ok]
   apply WP.spec_bind (view_lookup encode inj history t m live)
   intro found ⟨hf, alive⟩
   rw [hFound] at hf
@@ -526,7 +526,8 @@ theorem operate_point_matches_model (encode : List U8 → String)
           exact point_previous encode inj history t model m key native hl hWrites hDeps
             localLive indexed space room
       | write key value =>
-          simpa only [PointOperation.rust, hPhase]
+          simpa only [PointOperation.rust, hPhase, Spike.engine.stage_write,
+            Bool.false_eq_true, ite_false]
             using (point_write encode inj t model m key value hWrites hDeps room)
 
 private theorem reference_point_step (encode : List U8 → String) (m : Spike.engine.Bytes)

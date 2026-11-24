@@ -226,6 +226,53 @@ fn expect_conflict(s: &mut Store, id: Attempt) {
 }
 
 #[test]
+fn ccf_pending_writes_replace_and_clear_without_recency_order() {
+    let mut store = Store::new(0);
+    begin(&mut store, 0);
+    for map in [b"m", b"n"] {
+        acquire(&mut store, 0, map);
+    }
+    let mut operation = |map: &[u8], op| store.operate_ccf(0, Bytes::copy_from(map), op).unwrap();
+    let write = |key: &[u8], value: Option<&[u8]>| {
+        Operation::Write(Bytes::copy_from(key), value.map(Bytes::copy_from))
+    };
+    operation(b"m", write(b"z", Some(b"old")));
+    operation(b"m", write(b"a", Some(b"first")));
+    operation(b"n", write(b"a", Some(b"other map")));
+    operation(b"m", write(b"m", Some(b"remove")));
+    operation(b"m", write(b"m", None));
+    operation(b"m", write(b"z", Some(b"latest")));
+    let Output::Entries(rows) = operation(b"m", Operation::Range(None, None)) else {
+        panic!("range must return the pending image");
+    };
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0.as_slice(), b"a");
+    assert_eq!(rows[1].0.as_slice(), b"z");
+    assert_eq!(rows[1].1.as_slice(), b"latest");
+    operation(b"m", Operation::Clear);
+    operation(b"m", write(b"a", Some(b"")));
+
+    let pending = store.pending_writes(0).unwrap();
+    assert_eq!(pending.len(), 4);
+    assert_eq!(pending[0].0.key.as_slice(), b"z");
+    assert!(pending[0].1.is_none());
+    assert_eq!(pending[1].0.key.as_slice(), b"m");
+    assert!(pending[1].1.is_none());
+    assert_eq!(pending[2].0.map.as_slice(), b"n");
+    assert_eq!(pending[2].1.as_ref().unwrap().as_slice(), b"other map");
+    assert_eq!(pending[3].0.map.as_slice(), b"m");
+    assert!(pending[3].1.as_ref().unwrap().as_slice().is_empty());
+
+    applied(&mut store, 0, Outcome::Success, 1);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, b"m");
+    acquire(&mut store, 1, b"n");
+    assert_read(&mut store, 1, b"m", b"a", false, Some(b""));
+    assert_read(&mut store, 1, b"m", b"z", false, None);
+    assert_read(&mut store, 1, b"n", b"a", false, Some(b"other map"));
+}
+
+#[test]
 fn sorted_publication_keeps_scan_order_and_pinned_values() {
     let mut store = Store::new(0);
     let map = b"public:sorted";

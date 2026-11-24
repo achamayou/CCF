@@ -234,6 +234,43 @@ type Pending = Assoc<Address, Write>;
 type Image = Assoc<Bytes, Cell>;
 pub type Entries = Vec<(Bytes, Bytes)>;
 
+fn pending_key_order(a: &Address, b: &Address) -> i8 {
+    let order = a.key.compare(&b.key);
+    if order != 0 {
+        return order;
+    }
+    a.map.compare(&b.map)
+}
+
+fn stage_write(pending: &mut Pending, address: Address, write: Write, by_key: bool) {
+    if !by_key {
+        pending.set(address, write);
+        return;
+    }
+    // Keep keys descending so the bulk publisher can consume a single map
+    // in ascending order without a separate sort.
+    let mut lo = 0;
+    let mut hi = pending.0.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let order = pending_key_order(&pending.0[mid].0, &address);
+        if order == 0 {
+            pending.0[mid].1 = write;
+            return;
+        }
+        if order > 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == pending.0.len() {
+        pending.0.push((address, write));
+    } else {
+        pending.0.insert(lo, (address, write));
+    }
+}
+
 fn publish(data: &Data, pending: &Pending, version: Version) -> Data {
     if pending.0.len() >= 64 {
         if let Some(next) = publish_batch(data, pending, version) {
@@ -1033,6 +1070,16 @@ impl Tx {
     }
 
     fn operate(&mut self, history: &History, map: Bytes, op: Operation) -> Result<Output, Error> {
+        self.operate_with_order(history, map, op, false)
+    }
+
+    fn operate_with_order(
+        &mut self,
+        history: &History,
+        map: Bytes,
+        op: Operation,
+        by_key: bool,
+    ) -> Result<Output, Error> {
         if !matches!(self.phase, Phase::Active) {
             return Err(Error::Disabled);
         }
@@ -1067,8 +1114,12 @@ impl Tx {
                 Ok(Output::Previous(version))
             }
             Operation::Write(key, value) => {
-                self.pending
-                    .set(Address { map, key }, Write::from_option(value));
+                stage_write(
+                    &mut self.pending,
+                    Address { map, key },
+                    Write::from_option(value),
+                    by_key,
+                );
                 Ok(Output::Unit)
             }
             Operation::Scan => Ok(Output::Entries(Self::scan(
@@ -1085,12 +1136,14 @@ impl Tx {
                 let entries = Self::scan(history, &self.pending, &mut self.deps, &map, view);
                 let mut i = 0;
                 while i < entries.len() {
-                    self.pending.set(
+                    stage_write(
+                        &mut self.pending,
                         Address {
                             map: map.clone(),
                             key: entries[i].0.clone(),
                         },
                         Write::Remove,
+                        by_key,
                     );
                     i += 1;
                 }
@@ -1446,6 +1499,15 @@ impl Store {
             Action::Compact(version) => Ok(Output::Compacted(self.history.compact(version))),
             Action::Rollback(version, term) => self.history.rollback(version, term),
         }
+    }
+
+    /// Execute a CCF handle operation without a write-recency ordering guarantee.
+    /// All active map operations on a CCF attempt use this entry point.
+    pub fn operate_ccf(&mut self, tx: Attempt, map: Bytes, op: Operation) -> Result<Output, Error> {
+        let i = self.tx_index(tx)?;
+        self.txs.0[i]
+            .1
+            .operate_with_order(&self.history, map, op, true)
     }
 
     /// CCF commit preparation. Submitting a locally applied write set and

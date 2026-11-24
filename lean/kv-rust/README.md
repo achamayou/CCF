@@ -86,6 +86,8 @@ The same fuzzer schedules and assertions run on both backends, but the C++ trace
 The test adapter serializes commit submission and only fills reserved slots in order.
 It does not implement the full CCF store interface or production replication.
 The existing trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
+The CCF adapter stages writes by key rather than write recency; the exact-order dispatcher retains the original behavior until the reference specification is relaxed.
+The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.
 The extracted ordinary ledger replay proof shows that, after decoding, a successful next-version replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
 Provisional replacement replay and snapshot import are tested, but not covered by that theorem.
 
@@ -193,6 +195,11 @@ These measurements do not establish p99 or retained-memory parity.
 Checking address-key length and the last byte before the full comparison reduced 2,048-key staged replacements from 12.40-12.87 us/key to 8.12-8.67 us/key across four alternating Rust-to-Rust pairs.
 It preserves full byte equality, including keys with the same last byte.
 The commit and mixed-workload timings did not establish a comparable improvement.
+
+Key-ordered staging in the CCF adapter reduced replacement of 2,048 already-staged keys from 6.79-7.21 us/key to 121-141 ns/key across four paired runs; C++ took 1.09-1.24 us/key.
+The timed operations are repeated puts within one transaction, not commits or first writes to a key.
+The separate benchmark for committing 2,048 already-staged replacements took 0.52-0.58 ms in Rust versus 0.62-0.69 ms in C++ in the same runs.
+New keys may still need to shift vector entries, and the measurements do not establish an overall throughput win.
 
 For tail latency and peak process RSS under compaction, run each backend in its own process:
 
