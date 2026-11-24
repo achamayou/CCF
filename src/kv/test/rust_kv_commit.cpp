@@ -145,6 +145,7 @@ namespace ccf::kv::rust_test
       throw std::logic_error(
         "A reserved slot must be filled before a normal write");
     }
+    MapWrites writes;
     if (pending.size != 0)
     {
       if (claims.empty())
@@ -155,6 +156,10 @@ namespace ccf::kv::rust_test
       {
         throw KvSerialiserException("No encryptor set");
       }
+      // CommitBegin freezes the pending writes, and Apply publishes that
+      // same set while the store mutex is held.
+      writes = collect_writes(pending);
+      pending.data.reset();
       if (!reserved)
       {
         SizeKvStoreSerialiser shape(
@@ -164,7 +169,7 @@ namespace ccf::kv::rust_test
           0,
           {},
           claims);
-        serialise_writes(shape, collect_writes(pending));
+        serialise_writes(shape, writes);
         const auto size = shape.get_serialised_size();
         if (size > store.max_entry_size)
         {
@@ -238,7 +243,6 @@ namespace ccf::kv::rust_test
       claims,
       false,
       reserved ? max_serialised_entry_size : store.max_entry_size);
-    const auto writes = collect_writes(applied);
     auto hooks = store.record_commit(id.seqno, writes);
     serialise_writes(serialiser, writes);
     auto data = serialiser.get_raw_data();

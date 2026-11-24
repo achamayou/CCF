@@ -31,6 +31,10 @@ namespace
       auto tx = source.create_tx();
       tx.rw(pub)->put("key", "public");
       tx.rw(priv)->put("key", "private");
+      tx.rw(pub)->put("z", "last");
+      tx.rw(pub)->put("a", "first");
+      tx.rw(priv)->put("a", "private first");
+      tx.rw(pub)->put("middle", "middle");
       REQUIRE(tx.commit() == CommitResult::SUCCESS);
     }
     const auto first = consensus->get_latest_data();
@@ -40,6 +44,8 @@ namespace
       auto tx = source.create_tx();
       tx.rw(pub)->remove("key");
       tx.rw(priv)->put("key", "");
+      tx.rw(pub)->put("z", "changed");
+      tx.rw(pub)->remove("a");
       REQUIRE(tx.commit() == CommitResult::SUCCESS);
     }
     const auto second = consensus->get_latest_data();
@@ -50,10 +56,18 @@ namespace
       auto reader = target.create_read_only_tx();
       CHECK(reader.ro(pub)->get("key") == "public");
       CHECK(reader.ro(priv)->get("key") == "private");
+      CHECK(reader.ro(pub)->get("z") == "last");
+      CHECK(reader.ro(pub)->get("a") == "first");
+      CHECK(reader.ro(pub)->get("middle") == "middle");
+      CHECK(reader.ro(priv)->get("a") == "private first");
     }
     REQUIRE(target.deserialize(*second)->apply() == ApplyResult::PASS);
     auto reader = target.create_read_only_tx();
     CHECK_FALSE(reader.ro(pub)->has("key"));
+    CHECK_FALSE(reader.ro(pub)->has("a"));
+    CHECK(reader.ro(pub)->get("z") == "changed");
+    CHECK(reader.ro(pub)->get("middle") == "middle");
+    CHECK(reader.ro(priv)->get("a") == "private first");
     CHECK(reader.ro(priv)->get("key") == "");
     CHECK(reader.ro(priv)->get_version_of_previous_write("key") == 2);
   }

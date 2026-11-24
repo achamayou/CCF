@@ -84,16 +84,34 @@ namespace ccf::kv::rust_test
     }
   };
 
-  using MapWrites = std::map<std::string, untyped::Write>;
+  using MapWrites = std::map<std::string, untyped::Write, std::less<>>;
 
   inline MapWrites collect_writes(const Response& r)
   {
     MapWrites writes;
+    auto current = writes.end();
+    untyped::Write::iterator hint;
     for (size_t i = 0; i < r.size; ++i)
     {
       const auto row = r.entry(i);
-      const auto map = copy(row.map);
-      writes[std::string(map.begin(), map.end())].emplace(
+      if (row.map.data == nullptr)
+      {
+        throw std::logic_error("Rust KV reply is missing map name");
+      }
+      const std::string_view name(
+        reinterpret_cast<const char*>(row.map.data), row.map.size);
+      if (current == writes.end() || current->first != name)
+      {
+        current = writes.lower_bound(name);
+        if (current == writes.end() || current->first != name)
+        {
+          current =
+            writes.emplace_hint(current, std::string(name), untyped::Write{});
+        }
+        hint = current->second.end();
+      }
+      hint = current->second.emplace_hint(
+        hint,
         copy(row.key),
         row.value.data != nullptr ? std::make_optional(copy(row.value)) :
                                     std::nullopt);

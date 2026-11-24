@@ -239,6 +239,8 @@ The [transaction proof](KvRust/SortedPublication.lean) selects it only when the 
 All other batches use the existing path, and the same frame and trace refinement theorems apply to both.
 In three alternating pinned runs of `kv_backend_bench`, median commits replacing 2,048 entries took 1.14-1.27 ms with the sorted path, 2.42-2.88 ms with the previous Rust path, and 0.70-0.73 ms in C++.
 These are ranges of run medians including ledger-entry serialization, with a null encryptor and no consensus.
+Reusing the adapter's grouped write set for both size validation and serialization reduced the Rust median further, to 0.81-0.95 ms versus 1.11-1.46 ms before this adapter change in four paired runs.
+The C++ medians in those runs were 0.67-0.77 ms.
 
 The benchmark-only `storage` target compares whole-map copy-on-write (`Arc<BTreeMap>`), copy-on-write leaf pages, and an append-only arena-backed radix tree.
 All three use the same eight-byte keys and inline 64-byte values; the write workload retains every prior root.
