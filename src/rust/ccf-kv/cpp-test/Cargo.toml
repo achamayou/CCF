@@ -9,3 +9,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 ccf-kv = { path = ".." }
+
+[lints.rust]
+warnings = "deny"

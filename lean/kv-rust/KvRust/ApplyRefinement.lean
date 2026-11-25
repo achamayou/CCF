@@ -136,10 +136,9 @@ private theorem nat_head_in_frames {encode : List U8 → String}
   rfl
 
 private theorem eligibility (encode : List U8 → String) (inj : Function.Injective encode)
-    {sid : Nat} {w : State} {s : Store} {store : CcfKv.engine.Store}
+    {sid : Nat} {s : Store} {store : CcfKv.engine.Store}
     {natArchive archive : List Frame} {tx : Tx} {t : CcfKv.engine.Tx} {id : U64}
     {pinsCount : Nat}
-    (reach : transitionSystem.Reachable w) (hsFound : find w.stores sid = some s)
     (hs : HistoryMatches encode store.history s natArchive archive)
     (hMeta : StoreMetaLive encode store natArchive)
     (hTxMem : (id, t) ∈ store.txs.val)
@@ -206,24 +205,12 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     List.mem_of_head? hHeadFirstNative
   have hHeadMemNatArch : nativeHead ∈ natArchive :=
     nat_active_in_archive n.log natArchive hHeadMemNative
-  have hHeadMemModel : s.head ∈ s.history := by
-    have hh := hs.head
-    cases h : s.history with
-    | nil => simp [h] at hh
-    | cons first rest =>
-        rw [h] at hh
-        rw [Option.some.inj hh]
-        exact List.mem_cons_self
-  have hModelShape : Kv.Properties.History s.history s.head.version :=
-    (Kv.Properties.reachable_store_invariants w sid s reach hsFound).1
   have hNatUnique : Kv.Properties.Unique nativeHead.data :=
     hs.nativeArchive.unique nativeHead hHeadMemNatArch
-  have hModUnique : Kv.Properties.Unique s.head.data :=
-    hs.modelArchive.unique s.head (hs.modelSub s.head hHeadMemModel)
   have hCheckDeps (hLin : tx.globalViews.all (fun (m, view) => mapLineage s view.current m) = true) :
       WP.spec (CcfKv.engine.Tx.valid_dependencies t n) (fun r => r = validates s.head.data tx.normal.deps) := by
     have hNatCanon : ∀ d ∈ pointDeps encode n.index t,
-        d.holds nativeHead.data = holdsByContents nativeHead.data d := by
+        holdsExact nativeHead.data d = holdsByContents nativeHead.data d := by
       intro d hd
       have hfrom := ht.nativeDeps d hd
       cases d with
@@ -270,7 +257,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
                 exact hfImg.trans (hs.nativeArchive.sameRevision f hfMem old holdArch m'
                   (hfRev.trans hrEq.symm))
           rw [hImgEq]
-          simp only [Dependency.holds, holdsByContents]
+          simp only [holdsExact, holdsByContents]
           apply decide_eq_decide.mpr
           constructor
           · intro h; rw [h]
@@ -278,49 +265,22 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
             exact encKeyLt_perm_eq inj
               (hs.natSorted nativeHead hHeadMemNatArch m')
               (hs.natSorted old holdArch m') hperm
-    have hModOrigins : ∀ d ∈ tx.normal.deps, DependencyHasOrigin s.history s.head d := by
-      intro d hd
-      have hfrom := ht.modelDeps d hd
-      cases d with
-      | key _ _ => trivial
-      | map m expected =>
-          obtain ⟨gv, hgv, hexp⟩ := hfrom
-          have hgvMem := find_in_mem hgv
-          have hgvArch := (ht.modelViewsIn (m, gv) hgvMem).1
-          have hMapLin := List.all_eq_true.mp hLin (m, gv) hgvMem
-          unfold mapLineage at hMapLin
-          obtain ⟨old, holdMem, holdMatch⟩ := List.any_eq_true.mp hMapLin
-          simp only [Bool.and_eq_true] at holdMatch
-          have holdArch := hs.modelSub old holdMem
-          have hImgEq : expected = image old.data m :=
-            hexp.trans (hs.modelArchive.sameRevision gv.current hgvArch old holdArch m
-              (stamp_beq_eq holdMatch.2).symm)
-          refine ⟨old, holdMem, history_version_bound hModelShape holdMem, hImgEq, ?_⟩
-          rw [hImgEq]
-          exact archive_image_cells_bounded hs.modelArchive holdArch m
-    have hDepsRefl : List.Forall₂ DependencyOrderEq tx.normal.deps tx.normal.deps :=
-      List.forall₂_iff_get.mpr
-        ⟨
-          rfl,
-          fun i hi _ => by
-            cases tx.normal.deps.get ⟨i, hi⟩ with
-            | key _ _ => exact .key _ _
-            | map _ _ => exact .map _ .rfl
-        ⟩
     have hModelEq : validates s.head.data tx.normal.deps =
-        tx.normal.deps.all (holdsByContents s.head.data) :=
-      validates_by_contents hModelShape s.head s.head hHeadMemModel (.refl _) hModUnique
-        hDepsRefl hModOrigins
-    have hNatEq : validates nativeHead.data (pointDeps encode n.index t) =
+        tx.normal.deps.all (holdsByContents s.head.data) := by
+      unfold validates
+      apply List.all_congr rfl
+      intro d
+      cases d <;> rfl
+    have hNatEq : validatesExact nativeHead.data (pointDeps encode n.index t) =
         tx.normal.deps.all (holdsByContents s.head.data) := by
       have hRel := ht.deps
-      clear hModOrigins hDepsRefl hModelEq
+      clear hModelEq
       generalize pointDeps encode n.index t = nds at hRel hNatCanon
       generalize tx.normal.deps = mds at hRel
       induction hRel with
       | nil => rfl
       | @cons x y xs ys hxy hrest ih =>
-          simp only [validates, List.all_cons] at ih ⊢
+          simp only [validatesExact, List.all_cons] at ih ⊢
           rw [hNatCanon x List.mem_cons_self, dependency_order_eq hhead.data hNatUnique hxy,
             ih (fun d hd => hNatCanon d (List.mem_cons_of_mem _ hd))]
     apply WP.spec_mono
@@ -328,11 +288,11 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
         (hs.indexValid.head prior head hf) hs.indexValid.index
         (by simp [history_head n prior head hf hs.valid]) space.dependencies)
     intro r hr
-    rw [hr, ← validates_encoding encode inj]
-    have hRev : validates (encodeData encode (indexedCellData (indexRows n.index head.data)))
+    rw [hr, ← validates_exact_encoding encode inj]
+    have hRev : validatesExact (encodeData encode (indexedCellData (indexRows n.index head.data)))
         ((t.deps.val.map (byteDependency n.index)).map (encodeDependency encode)) =
-        validates nativeHead.data (pointDeps encode n.index t) := by
-      simp [validates, pointDeps, nativeHead, modelFrame, List.all_reverse,
+        validatesExact nativeHead.data (pointDeps encode n.index t) := by
+      simp [validatesExact, pointDeps, nativeHead, modelFrame, List.all_reverse,
         List.map_map, Function.comp_def]
     rw [hRev, hNatEq, ← hModelEq]
   have hcheck : WP.spec (do
@@ -433,7 +393,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
         · have hw : t.pending.val.isEmpty = false := by simpa using hWrites
           have capacity := room t hn prior head hframes
           have hTxMem : (id, t) ∈ n.txs.val := find_in_mem hn
-          have heligible := eligibility encode inj h.reachable hs hhist hMeta hTxMem ht
+          have heligible := eligibility encode inj hhist hMeta hTxMem ht
             prior head hframes hhead capacity
           by_cases ha : canApply s tx
           · let nativeHead := modelFrame encode n.history.index head

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 #include <doctest/doctest.h>
+#include <format>
 #undef FAIL
 #include <span>
 #include <stop_token>
@@ -2046,7 +2047,7 @@ TEST_CASE("Reserved transaction map creation is serialised with lookups")
         // add_dynamic_map is writing. Deliberately avoids current_version(),
         // so this contends only on maps_lock.
         (void)ccf::kv::test::has_map_at(
-          store, 1, fmt::format("public:reserved_{}", n % 2000));
+          store, 1, std::format("public:reserved_{}", n % 2000));
         n++;
       }
     });
@@ -2060,7 +2061,7 @@ TEST_CASE("Reserved transaction map creation is serialised with lookups")
     // maps_lock, or it would order the write against the readers and hide the
     // race being reproduced.
     auto tx = store.create_reserved_tx(store.next_txid());
-    tx.rw<MapTypes::StringString>(fmt::format("public:reserved_{}", i))
+    tx.rw<MapTypes::StringString>(std::format("public:reserved_{}", i))
       ->put("k", "v");
     const auto [result, data, claims, commit_evidence, hooks] =
       tx.commit_reserved();
@@ -2080,7 +2081,7 @@ TEST_CASE("Reserved transaction map creation is serialised with lookups")
   REQUIRE(ccf::kv::test::has_map_at(
     store,
     store.current_version(),
-    fmt::format("public:reserved_{}", reserved_txs - 1)));
+    std::format("public:reserved_{}", reserved_txs - 1)));
 }
 
 // Exposes the version the chunker has recorded entries up to, which is the
@@ -2652,7 +2653,7 @@ struct CustomVerboseDumbSerialiser
 
   static Bytes to_serialised(const CustomClass& c)
   {
-    const auto verbose = fmt::format("{}\ns={}\nn={}", T::prefix, c.s, c.n);
+    const auto verbose = std::format("{}\ns={}\nn={}", T::prefix, c.s, c.n);
     return Bytes(verbose.begin(), verbose.end());
   }
 
@@ -2906,7 +2907,7 @@ TEST_CASE("committable_gap after replaying a ledger ending in a signature")
   for (size_t i = 1; i <= tx_count; ++i)
   {
     auto tx = primary.create_tx();
-    tx.rw(map)->put(fmt::format("key{}", i), "value");
+    tx.rw(map)->put(std::format("key{}", i), "value");
     REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
     REQUIRE(primary.committable_gap() == i);
   }
@@ -2947,7 +2948,7 @@ TEST_CASE("committable_gap after replaying a ledger ending in a signature")
   for (size_t i = 1; i <= tx_count; ++i)
   {
     auto tx = store.create_tx();
-    tx.rw(map)->put("key", fmt::format("value{}", i));
+    tx.rw(map)->put("key", std::format("value{}", i));
     REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
     REQUIRE(store.committable_gap() == i);
   }
@@ -2977,7 +2978,7 @@ TEST_CASE("committable_gap after rolling back replayed entries")
     for (size_t i = 0; i < count; ++i)
     {
       auto tx = primary.create_tx();
-      tx.rw(map)->put("key", fmt::format("value{}", primary.current_version()));
+      tx.rw(map)->put("key", std::format("value{}", primary.current_version()));
       REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
     }
   };

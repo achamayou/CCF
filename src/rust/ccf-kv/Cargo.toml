@@ -10,3 +10,4 @@ harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
+warnings = "deny"

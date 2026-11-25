@@ -320,6 +320,9 @@ theorem can_apply_matches_model (encode : List U8 → String)
     (hDeps
       : tx.normal.deps.reverse
         = t.deps.val.map (encodeDependency encode ∘ byteDependency s.index))
+    (hExact
+      : validatesExact model.head.data tx.normal.deps
+        = validates model.head.data tx.normal.deps)
     (hTerm : model.term = s.term.val)
     (hSnapshot
       : tx.snapshot.map Snapshot.term = t.snapshot.map (fun snap => snap.term.val))
@@ -333,11 +336,11 @@ theorem can_apply_matches_model (encode : List U8 → String)
     s t model tx hViewLive hViews valid
   have hd : WP.spec (CcfKv.engine.Tx.valid_dependencies t s)
       (fun r => r = validates model.head.data tx.normal.deps) := by
-    have hv := validates_encoding encode inj (indexedCellData rows)
+    have hv := validates_exact_encoding encode inj (indexedCellData rows)
       (t.deps.val.map (byteDependency s.index))
     have he : validates model.head.data tx.normal.deps =
-        validates (indexedCellData rows) (t.deps.val.map (byteDependency s.index)) := by
-      rw [← hv, hData, List.map_map, ← hDeps]
+        validatesExact (indexedCellData rows) (t.deps.val.map (byteDependency s.index)) := by
+      rw [← hExact, ← hv, hData, List.map_map, ← hDeps]
       exact (List.all_reverse).symm
     rw [he]
     exact validate_dependencies_matches_model t s head rows indexView indexValid

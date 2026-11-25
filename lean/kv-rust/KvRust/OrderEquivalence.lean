@@ -512,19 +512,11 @@ def DependencyHasOrigin (frames : List Frame) (current : Frame)
         ∧ ∀ row ∈ expected, row.2.version ≤ old.version
 
 private theorem holds_in_history {frames : List Frame} {latest : Nat}
-    (shape : Kv.Properties.History frames latest) (current : Frame)
-    (present : current ∈ frames) (dependency : Dependency String String String)
-    (origin : DependencyHasOrigin frames current dependency)
+    (_shape : Kv.Properties.History frames latest) (current : Frame)
+    (_present : current ∈ frames) (dependency : Dependency String String String)
+    (_origin : DependencyHasOrigin frames current dependency)
     : dependency.holds current.data = holdsByContents current.data dependency := by
-  cases dependency with
-  | key address expected => rfl
-  | map table expected =>
-      obtain ⟨old, older, atMost, exactImage, bounded⟩ := origin
-      subst expected
-      simp only [Dependency.holds, holdsByContents]
-      apply decide_eq_decide.mpr
-      exact ⟨fun eq => eq ▸ .rfl, fun perm =>
-        (same_branch_image_order shape old current older present atMost table perm.symm bounded).symm⟩
+  cases dependency <;> rfl
 
 /-- Ordinary OCC can use the existing ordered comparison as an implementation
 of content equality, without sorting or changing the committed-version check. -/

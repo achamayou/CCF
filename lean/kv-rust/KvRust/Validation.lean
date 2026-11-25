@@ -51,6 +51,19 @@ theorem cell_same (a b : CcfKv.engine.Cell)
   · simp [CcfKv.engine.Cell.same, hv, bytes_same, byteCell]
   · simp [CcfKv.engine.Cell.same, hv, byteCell, hversion]
 
+/-- Exact-order dependency check matching the extracted ordered radix comparison. -/
+def holdsExact {M K V : Type} [DecidableEq M] [DecidableEq K] [DecidableEq V]
+    (db : DB M K V)
+    : Dependency M K V → Bool
+  | .key a expected => decide (find db a = expected)
+  | .map m expected => decide (image db m = expected)
+
+/-- All dependencies hold under exact list order. -/
+def validatesExact {M K V : Type} [DecidableEq M] [DecidableEq K] [DecidableEq V]
+    (db : DB M K V) (deps : List (Dependency M K V))
+    : Bool :=
+  deps.all (holdsExact db)
+
 /-- Point dependencies accept exactly the unchanged cell or unchanged absence. -/
 theorem point_dependency_matches_model
     (index : CellIndex) (root : CcfKv.radix.RadixRoot)
@@ -60,12 +73,12 @@ theorem point_dependency_matches_model
     : WP.spec (CcfKv.engine.Dependency.holds (.Key addr expected) index root)
         (fun r =>
           r
-          = (Dependency.key (byteAddr addr) (expected.map byteCell)).holds
-              (indexedCellData rows)) := by
+          = holdsExact (indexedCellData rows)
+              (.key (byteAddr addr) (expected.map byteCell))) := by
   unfold CcfKv.engine.Dependency.holds
   apply WP.spec_bind (index_data_lookup index root rows view addr space)
   intro lookup h
-  cases lookup <;> cases expected <;> simp [Dependency.holds, ← h, cell_same]
+  cases lookup <;> cases expected <;> simp [holdsExact, ← h, cell_same]
 
 private abbrev Rows := alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Cell)
 
@@ -491,14 +504,14 @@ theorem map_dependency_matches_model
     : WP.spec (CcfKv.engine.Dependency.holds (.Map m expected) index root)
         (fun r =>
           r
-          = (Dependency.map (alloc.vec.Vec.val m) (pinImage index m expected)).holds
-              (indexedCellData db)) := by
+          = holdsExact (indexedCellData db)
+              (.map (alloc.vec.Vec.val m) (pinImage index m expected))) := by
   unfold CcfKv.engine.Dependency.holds
   cases expected with
   | Empty =>
       apply WP.spec_bind (index_scan_map_refines index root db m view valid mapRoom space)
       intro links ⟨len, _⟩
-      simp only [alloc.vec.Vec.is_empty, WP.spec_ok, Dependency.holds, pinImage]
+      simp only [alloc.vec.Vec.is_empty, WP.spec_ok, holdsExact, pinImage]
       have hsel := imageRows_filter_eq db m
       have hslen := imageRows_filter_length db m
       have hiff : links.val.length = 0 ↔ image (indexedCellData db) m.val = [] := by
@@ -510,13 +523,13 @@ theorem map_dependency_matches_model
         (indexed_same_map_roots_matches index root pinned db (indexRows index pinned)
           view pinLive valid space pinRoom m mapRoom)
       intro result h
-      rw [h, Dependency.holds, pinImage]
+      rw [h, holdsExact, pinImage]
       exact decide_eq_decide.mpr (by rfl)
   | Recovered rows =>
       apply WP.spec_mono
         (indexed_same_image_matches index root db view valid space m mapRoom rows)
       intro result h
-      rw [h, Dependency.holds, pinImage]
+      rw [h, holdsExact, pinImage]
       exact decide_eq_decide.mpr (by rfl)
 
 /-- Project an extracted dependency into the existing KV model. -/
@@ -539,14 +552,14 @@ private theorem dependency_matches_model (index : CellIndex)
     (room : DependencyRoom index db d)
     : WP.spec (CcfKv.engine.Dependency.holds d index root)
         (fun r =>
-          r = (byteDependency index d).holds (indexedCellData db)) := by
+          r = holdsExact (indexedCellData db) (byteDependency index d)) := by
   cases d with
   | Key a e => exact point_dependency_matches_model index root db view a e room
   | Map m e =>
       exact map_dependency_matches_model index root db view valid room.1 m room.2.1 e
         room.2.2.1 room.2.2.2
 
-/-- The extracted OCC read-set check accepts exactly the dependencies accepted by the model. -/
+/-- The extracted OCC read-set check tests exact list equality on radix-ordered map images. -/
 theorem validate_dependencies_matches_model
     (t : CcfKv.engine.Tx) (history : CcfKv.engine.History) (head : CcfKv.engine.Frame)
     (db : CellRows) (view : IndexView history.index head.data db)
@@ -556,10 +569,10 @@ theorem validate_dependencies_matches_model
     : WP.spec (CcfKv.engine.Tx.valid_dependencies t history)
         (fun r =>
           r
-          = validates (indexedCellData db)
+          = validatesExact (indexedCellData db)
               (t.deps.val.map (byteDependency history.index))) := by
   let checks := fun (deps : List CcfKv.engine.Dependency) =>
-    validates (indexedCellData db) (deps.map (byteDependency history.index))
+    validatesExact (indexedCellData db) (deps.map (byteDependency history.index))
   unfold CcfKv.engine.Tx.valid_dependencies CcfKv.engine.Tx.valid_dependencies_loop
   apply loop.spec_decr_nat (fun (i : Usize) => t.deps.val.length - i.val)
     (fun i => checks (t.deps.val.drop i.val) = checks t.deps.val) _ _ _
@@ -584,7 +597,7 @@ theorem validate_dependencies_matches_model
       cases result with
       | false =>
           simp only [Bool.false_eq_true, ite_false, WP.spec_ok]
-          simpa [checks, validates, ← hresult] using hp
+          simpa [checks, validatesExact, ← hresult] using hp
       | true =>
           simp only [ite_true]
           have hinc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
@@ -593,10 +606,10 @@ theorem validate_dependencies_matches_model
           have hj' : j.val = i.val + 1 := by omega
           simp only [WP.spec_ok]
           refine ⟨?_, by omega⟩
-          simpa [hj', checks, validates, ← hresult] using hp
+          simpa [hj', checks, validatesExact, ← hresult] using hp
     · have hb : t.deps.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
       rw [ite_eq_right h, WP.spec_ok]
-      simpa [List.drop_eq_nil_of_le hb, checks, validates] using hinv
+      simpa [List.drop_eq_nil_of_le hb, checks, validatesExact] using hinv
   · simp
 
 /-- Encode both coordinates of a byte address as strings. -/
@@ -674,10 +687,11 @@ theorem image_encoding (encode : List U8 → String)
         simp [image, encodeData, encodeImage, encodeAddr, h, hn] at ih ⊢
         exact ih
 
-private theorem dependency_encoding (encode : List U8 → String)
+private theorem dependency_exact_encoding (encode : List U8 → String)
     (inj : Function.Injective encode) (db : DB (List U8) (List U8) (List U8))
     (d : Dependency (List U8) (List U8) (List U8))
-    : (encodeDependency encode d).holds (encodeData encode db) = d.holds db := by
+    : holdsExact (encodeData encode db) (encodeDependency encode d)
+      = holdsExact db d := by
   cases d with
   | key a expected =>
       apply decide_eq_decide.mpr
@@ -691,50 +705,20 @@ private theorem dependency_encoding (encode : List U8 → String)
       rw [image_encoding encode inj]
       exact ⟨fun h => encode_image_inj inj h, congrArg (encodeImage encode)⟩
 
-/-- Dependency validation is unchanged by an injective encoding into the executable model. -/
-theorem validates_encoding (encode : List U8 → String) (inj : Function.Injective encode)
-    (db : DB (List U8) (List U8) (List U8))
+/-- Exact dependency validation is unchanged by an injective encoding into the executable model. -/
+theorem validates_exact_encoding (encode : List U8 → String)
+    (inj : Function.Injective encode) (db : DB (List U8) (List U8) (List U8))
     (ds : List (Dependency (List U8) (List U8) (List U8)))
-    : validates (encodeData encode db) (ds.map (encodeDependency encode))
-      = validates db ds := by
-  simp only [validates, List.all_map, Function.comp_def]
-  exact List.all_congr rfl (dependency_encoding encode inj db)
+    : validatesExact (encodeData encode db) (ds.map (encodeDependency encode))
+      = validatesExact db ds := by
+  simp only [validatesExact, List.all_map, Function.comp_def]
+  exact List.all_congr rfl (dependency_exact_encoding encode inj db)
 
 /-- Rust appends dependencies while the model prepends them. -/
 noncomputable def pointDeps (encode : List U8 → String) (index : CellIndex)
     (t : CcfKv.engine.Tx)
     : List (Dependency String String String) :=
   (t.deps.val.map (encodeDependency encode ∘ byteDependency index)).reverse
-
-/-- On an ordinary branch, the extracted OCC check implements the relaxed
-dependency contract for captured images that still have a surviving origin. -/
-theorem validate_dependencies_by_contents (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : CcfKv.engine.Tx)
-    (history : CcfKv.engine.History) (head : CcfKv.engine.Frame) (db : CellRows)
-    (view : IndexView history.index head.data db) (valid : IndexValid history.index)
-    (read : WP.spec (CcfKv.engine.History.head history) (· = head))
-    (room : ∀ d ∈ t.deps.val, DependencyRoom history.index db d) (frames : List Frame)
-    (current model : Frame) (shape : Kv.Properties.History frames current.version)
-    (present : current ∈ frames)
-    (nativeData : current.data = encodeData encode (indexedCellData db))
-    (same : FrameOrderEq current model) (unique : Kv.Properties.Unique current.data)
-    (reference : List (Dependency String String String))
-    (related
-      : List.Forall₂ DependencyOrderEq (pointDeps encode history.index t) reference)
-    (origins
-      : ∀ d ∈ pointDeps encode history.index t, DependencyHasOrigin frames current d)
-    : WP.spec (CcfKv.engine.Tx.valid_dependencies t history)
-        (fun r => r = reference.all (holdsByContents model.data)) := by
-  apply WP.spec_mono
-    (validate_dependencies_matches_model t history head db view valid read room)
-  intro r checked
-  rw [← validates_encoding encode inj, ← nativeData] at checked
-  have reordered : validates current.data (pointDeps encode history.index t) =
-      validates current.data
-        ((t.deps.val.map (byteDependency history.index)).map (encodeDependency encode)) := by
-    simp only [pointDeps, validates, List.all_reverse, List.map_map]
-  exact checked.trans (reordered.symm.trans
-    (validates_by_contents shape current model present same unique related origins))
 
 /-- Encoding staged writes preserves deletions and the order of writes. -/
 def encodeWrites (encode : List U8 → String)

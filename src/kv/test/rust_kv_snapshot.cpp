@@ -7,6 +7,7 @@
 #include "kv/untyped_change_set.h"
 
 #include <bit>
+#include <format>
 
 namespace ccf::kv::rust_test
 {
@@ -149,7 +150,7 @@ namespace ccf::kv::rust_test
     std::scoped_lock lock(mutex, source.mutex);
     if (source.head > head)
     {
-      throw std::runtime_error(fmt::format(
+      throw std::runtime_error(std::format(
         "Invalid call to swap_private_maps. Source is at version {} while "
         "target is at {}",
         source.head,
@@ -182,7 +183,7 @@ namespace ccf::kv::rust_test
       native.get(), source.native.get(), views.data(), views.size());
     if (status != Status::OK)
     {
-      throw std::logic_error(fmt::format(
+      throw std::logic_error(std::format(
         "Rust KV could not swap private maps (status {})",
         static_cast<unsigned>(status)));
     }

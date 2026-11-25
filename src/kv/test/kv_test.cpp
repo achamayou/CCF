@@ -18,6 +18,8 @@
 #include "kv/test/null_tx_history.h"
 #include "kv/test/stub_consensus.h"
 
+#include <format>
+
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
 #undef FAIL
@@ -235,7 +237,7 @@ TEST_CASE("Store error handling")
 
 std::string rand_string(size_t i)
 {
-  return fmt::format("{}: {}", i, rand());
+  return std::format("{}: {}", i, rand());
 }
 
 int main(int argc, char** argv)
