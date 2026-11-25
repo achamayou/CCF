@@ -108,7 +108,7 @@ private theorem update_birth_step (encode : List U8 → String)
       simp [hf, he]
 
 private def advanceRevision (revisions : Stamps) (index : CellIndex)
-    (root : Spike.radix.DualRoot) (a : Spike.engine.Address) (w : Spike.engine.Write)
+    (root : Spike.radix.RadixRoot) (a : Spike.engine.Address) (w : Spike.engine.Write)
     (stamp : Spike.engine.Stamp)
     : Result (Stamps × Spike.engine.Address) := do
   let written ←
@@ -136,7 +136,7 @@ private def advanceRevision (revisions : Stamps) (index : CellIndex)
 
 private theorem update_revision_step (encode : List U8 → String)
     (inj : Function.Injective encode) (revisions : Stamps) (index : CellIndex)
-    (root : Spike.radix.DualRoot) (data : CellRows) (view : IndexView index root data)
+    (root : Spike.radix.RadixRoot) (data : CellRows) (view : IndexView index root data)
     (a : Spike.engine.Address) (w : Spike.engine.Write) (stamp : Spike.engine.Stamp)
     (hc : revisions.val.length < Usize.max) (room : IndexKeyRoom (a, w))
     : WP.spec (advanceRevision revisions index root a w stamp)
@@ -182,7 +182,7 @@ private theorem update_revision_step (encode : List U8 → String)
 
 private theorem advance_stamps_matches (encode : List U8 → String)
     (inj : Function.Injective encode) (revisions births : Stamps) (index : CellIndex)
-    (root : Spike.radix.DualRoot) (data : CellRows) (view : IndexView index root data)
+    (root : Spike.radix.RadixRoot) (data : CellRows) (view : IndexView index root data)
     (row : IndexWrite) (stamp : Spike.engine.Stamp)
     (hr : revisions.val.length < Usize.max) (hb : births.val.length < Usize.max)
     (room : IndexKeyRoom row)
@@ -216,7 +216,7 @@ private theorem advance_stamps_matches (encode : List U8 → String)
   exact ⟨hv, h⟩
 
 private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injective encode)
-    (index : CellIndex) (root : Spike.radix.DualRoot) (data : CellRows)
+    (index : CellIndex) (root : Spike.radix.RadixRoot) (data : CellRows)
     (view : IndexView index root data) (pending : NativeWrites) (version identity : U64)
     (revs births : Stamps)
     (hr : revs.val.length + pending.val.length ≤ Usize.max)
@@ -289,7 +289,8 @@ private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injecti
       exact ⟨rfl, hrev, hbirth⟩
   · simpa [rows] using ⟨hr, hb⟩
 
-/-- The extracted advance publishes the entire frame, including revision and birth metadata. -/
+/-- The extracted advance publishes the entire frame modulo binding order, including
+exact revision and birth metadata. -/
 theorem frame_advance_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (before : Spike.engine.Frame)
     (index : CellIndex) (valid : IndexValid index)
@@ -306,8 +307,8 @@ theorem frame_advance_matches_model (encode : List U8 → String)
     (hBirths : before.births.val.length + pending.val.length ≤ Usize.max)
     : WP.spec (Spike.engine.Frame.advance before index version identity pending)
         (fun (after, arena) =>
-          modelFrame encode arena after
-            = (advance model (encodeWrites encode (byteWrites pending.val))).head
+          FrameOrderEq (modelFrame encode arena after)
+            (advance model (encodeWrites encode (byteWrites pending.val))).head
           ∧ IndexView arena after.data (indexRows arena after.data)
           ∧ IndexValid arena
           ∧ IndexKeeps index arena) := by
@@ -330,27 +331,41 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   apply WP.spec_bind
     (sorted_publication_refines index before.data base data pending version
       view valid space addresses chosen)
-  rintro ⟨root, after⟩ ⟨updated, arenaValid, kept⟩
+  rintro ⟨root, after⟩ ⟨⟨out, updated, hPermOut⟩, arenaValid, kept⟩
   have hw : encodeWrites encode (byteWrites pending.val) = pending.val.map (encodeRow encode) := by
     simp only [encodeWrites, byteWrites, List.map_map, Function.comp_def]
     apply List.map_congr_left
     rintro ⟨a, w⟩ _
     cases w <;> rfl
   have projected := index_rows_eq updated
-  have hdb : encodeData encode (indexedCellData (indexRows after root)) =
-      publish (encodeData encode (indexedCellData data)) version.val
-        (encodeWrites encode (byteWrites pending.val)) := by
-    rw [projected, indexed_fold_projects, publish_encoding encode inj]
+  have hdbPerm : (encodeData encode (indexedCellData (indexRows after root))).Perm
+      (publish (encodeData encode (indexedCellData data)) version.val
+        (encodeWrites encode (byteWrites pending.val))) := by
+    rw [projected, ← publish_encoding encode inj, ← indexed_fold_projects]
+    exact (hPermOut.map _).map _
   change WP.spec (Result.ok (({version, data := root, revisions := rev, births := birth} :
     Spike.engine.Frame), after)) _
   rw [WP.spec_ok]
   refine ⟨?_, projected.symm ▸ updated, arenaValid, kept⟩
-  simp only [modelFrame, modelMetadata, advance]
-  simp only [hBefore, modelFrame, modelMetadata] at hVersion ⊢
-  rw [← hVersion, ← hIdentity, hdb, hw]
-  simp only [encodedStamps] at hr hb
-  rw [hr, hb]
-  rfl
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · simp only [modelFrame, modelMetadata, advance]
+    exact hVersion
+  · simp only [modelFrame, modelMetadata, advance]
+    simp only [hBefore, modelFrame, modelMetadata] at hVersion ⊢
+    rw [← hVersion]
+    exact hdbPerm
+  · intro m
+    simp only [modelFrame, modelMetadata, advance]
+    simp only [hBefore, modelFrame, modelMetadata] at hVersion ⊢
+    rw [← hVersion, ← hIdentity, hw]
+    simp only [encodedStamps] at hr
+    rw [hr]; rfl
+  · intro m
+    simp only [modelFrame, modelMetadata, advance]
+    simp only [hBefore, modelFrame, modelMetadata] at hVersion ⊢
+    rw [← hVersion, ← hIdentity, hw]
+    simp only [encodedStamps] at hb
+    rw [hb]; rfl
 
 /-- The extracted frame advance publishes the relaxed model's next frame
 without requiring either the existing bindings or staged writes to be ordered alike. -/
@@ -386,9 +401,8 @@ theorem frame_advance_order_matches_model (encode : List U8 → String)
     representative pending version identity rfl nextVersion hIdentity space addresses hRevs hBirths)
   rintro ⟨after, arena⟩ ⟨published, retained, live, kept⟩
   refine ⟨?_, retained, live, kept⟩
-  rw [published]
-  exact advance_order_eq representative model _ _ heads rfl related
-    (unique_of_perm heads.data.symm uniqueData) uniqueWrites
+  exact published.trans (advance_order_eq representative model _ _ heads rfl related
+    (unique_of_perm heads.data.symm uniqueData) uniqueWrites)
 
 theorem prepare_frame_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (history : Spike.engine.History)
@@ -411,8 +425,8 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
         (fun (after, prepared) =>
           ∃ arena,
             prepared = {history with index := arena}
-            ∧ modelFrame encode arena after
-              = (advance model (encodeWrites encode (byteWrites pending.val))).head
+            ∧ FrameOrderEq (modelFrame encode arena after)
+                (advance model (encodeWrites encode (byteWrites pending.val))).head
             ∧ IndexView arena after.data (indexRows arena after.data)
             ∧ IndexValid arena
             ∧ IndexKeeps history.index arena) := by

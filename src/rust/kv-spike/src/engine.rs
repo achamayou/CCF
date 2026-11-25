@@ -5,7 +5,7 @@
 
 use crate::branch_log::{BranchLog, FrameId};
 use crate::kv_index::{AddressIndex, Binding};
-use crate::radix::{DualRoot, RadixRow};
+use crate::radix::{RadixRoot, RadixRow};
 
 pub type Version = u64;
 pub type Term = u64;
@@ -419,13 +419,13 @@ fn same_image(data: &Data, map: &Bytes, expected: &Image) -> bool {
 #[derive(Clone)]
 struct Frame {
     version: Version,
-    data: DualRoot,
+    data: RadixRoot,
     revisions: Assoc<Bytes, Stamp>,
     births: Assoc<Bytes, Stamp>,
 }
 
 impl Frame {
-    fn empty(data: DualRoot) -> Self {
+    fn empty(data: RadixRoot) -> Self {
         Self {
             version: 0,
             data,
@@ -486,7 +486,7 @@ fn advance_stamps(
     revisions: &mut Assoc<Bytes, Stamp>,
     births: &mut Assoc<Bytes, Stamp>,
     index: &AddressIndex<Cell>,
-    root: DualRoot,
+    root: RadixRoot,
     row: &(Address, Write),
     stamp: Stamp,
 ) {
@@ -497,7 +497,7 @@ fn advance_stamps(
     update_birth(births, &a.map, stamp);
 }
 
-fn publication_base(index: &AddressIndex<Cell>, root: DualRoot, pending: &Pending) -> DualRoot {
+fn publication_base(index: &AddressIndex<Cell>, root: RadixRoot, pending: &Pending) -> RadixRoot {
     let count = pending.0.len();
     if count < 256 || count == usize::MAX {
         return root;
@@ -510,7 +510,7 @@ fn publication_base(index: &AddressIndex<Cell>, root: DualRoot, pending: &Pendin
     let mut i = 0;
     while i < count {
         let row = index.scan_row(links[i]);
-        if !row.0.same(&pending.0[i].0) {
+        if !row.0.same(&pending.0[count - 1 - i].0) {
             return root;
         }
         i += 1;
@@ -557,10 +557,10 @@ fn prepare_sorted_batch(
 
 fn publish_selected(
     index: &mut AddressIndex<Cell>,
-    base: DualRoot,
+    base: RadixRoot,
     pending: &Pending,
     version: Version,
-) -> DualRoot {
+) -> RadixRoot {
     if base.is_empty() && pending.0.len() >= 256 {
         if let Some(rows) = prepare_sorted_batch(pending, version) {
             return index.build_sorted_batch(rows);
@@ -571,10 +571,10 @@ fn publish_selected(
 
 fn publish_indexed(
     index: &mut AddressIndex<Cell>,
-    mut root: DualRoot,
+    mut root: RadixRoot,
     pending: &Pending,
     version: Version,
-) -> DualRoot {
+) -> RadixRoot {
     let mut i = pending.0.len();
     while i > 0 {
         i -= 1;
@@ -585,10 +585,10 @@ fn publish_indexed(
 
 fn publish_indexed_row(
     index: &mut AddressIndex<Cell>,
-    root: DualRoot,
+    root: RadixRoot,
     row: &(Address, Write),
     version: Version,
-) -> DualRoot {
+) -> RadixRoot {
     let (address, write) = row;
     match write {
         Write::Put(value) => index.put(
@@ -603,7 +603,7 @@ fn publish_indexed_row(
     }
 }
 
-fn indexed_data(index: &AddressIndex<Cell>, root: DualRoot) -> Data {
+fn indexed_data(index: &AddressIndex<Cell>, root: RadixRoot) -> Data {
     let links = index.scan_links(root);
     let mut rows = Vec::with_capacity(links.len());
     let mut i = 0;
@@ -615,9 +615,9 @@ fn indexed_data(index: &AddressIndex<Cell>, root: DualRoot) -> Data {
     Assoc(rows)
 }
 
-fn indexed_image(index: &AddressIndex<Cell>, root: DualRoot, map: &Bytes) -> Image {
-    let links = index.scan_links(root);
-    let mut rows = Vec::new();
+fn indexed_image(index: &AddressIndex<Cell>, root: RadixRoot, map: &Bytes) -> Image {
+    let links = index.scan_map_links(root, map);
+    let mut rows = Vec::with_capacity(links.len());
     let mut i = 0;
     while i < links.len() {
         let (address, cell) = index.scan_row(links[i]);
@@ -644,7 +644,7 @@ fn append_snapshot_cell(
     }
 }
 
-fn index_from_rows(index: &mut AddressIndex<Cell>, rows: Data) -> DualRoot {
+fn index_from_rows(index: &mut AddressIndex<Cell>, rows: Data) -> RadixRoot {
     let mut root = index.empty_root();
     let mut i = rows.0.len();
     while i > 0 {
@@ -882,7 +882,7 @@ fn copy_cell(cell: &Option<Cell>) -> Option<Cell> {
 }
 
 impl Dependency {
-    fn holds(&self, index: &AddressIndex<Cell>, root: DualRoot) -> bool {
+    fn holds(&self, index: &AddressIndex<Cell>, root: RadixRoot) -> bool {
         match self {
             Self::Key(a, expected) => match (index.get(root, a), expected) {
                 (None, None) => true,
@@ -890,7 +890,10 @@ impl Dependency {
                 _ => false,
             },
             Self::Map(map, expected) => {
-                let links = index.scan_links(root);
+                let links = index.scan_map_links(root, map);
+                if links.len() != expected.0.len() {
+                    return false;
+                }
                 let mut i = 0;
                 let mut matched = 0;
                 while i < links.len() {
@@ -1691,12 +1694,12 @@ impl Store {
             return Err(Error::Disabled);
         }
         let frame = self.history.at_cut(version);
-        let links = self.history.index.scan_links(frame.data);
         let mut maps = Vec::new();
         let mut i = 0;
         while i < frame.births.0.len() {
             let name = &frame.births.0[i].0;
-            let mut cells = Vec::new();
+            let links = self.history.index.scan_map_links(frame.data, name);
+            let mut cells = Vec::with_capacity(links.len());
             let mut j = 0;
             while j < links.len() {
                 let (address, cell) = self.history.index.scan_row(links[j]);

@@ -122,9 +122,6 @@ structure HistoryMatches (encode : List U8 → String)
   identity : model.nextIdentity = native.next_identity.val
   valid : BranchValid native.log
   indexValid : HistoryIndexValid native
-  nativeShape
-    : Kv.Properties.History (modelFrames native (modelFrame encode native.index))
-        model.head.version
   revisions : RevisionHistory (modelFrames native (modelFrame encode native.index))
   nativeArchive
     : ArchiveConsistent
@@ -422,8 +419,6 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     (global : s.global = n.global.val) (term : s.term = n.term.val)
     (ident : s.nextIdentity = n.next_identity.val)
     (valid : BranchValid n.log) (indexed : HistoryIndexValid n)
-    (nativeShape
-      : Kv.Properties.History (modelFrames n (modelFrame encode n.index)) s.head.version)
     (revisions : RevisionHistory (modelFrames n (modelFrame encode n.index)))
     (nativeArchive
       : ArchiveConsistent (n.log.frames.val.map (modelFrame encode n.index))
@@ -462,7 +457,6 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     ident,
     valid,
     indexed,
-    nativeShape,
     revisions,
     nativeArchive,
     modelSub,

@@ -229,7 +229,9 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
       : encodeImage encode (pinImage history m view.local)
         = image tx.data (encode (alloc.vec.Vec.val m)))
     (live : PinLive history view.local)
-    (indexed : HistoryIndexValid history) (space : PinScanRoom history view.local)
+    (indexed : HistoryIndexValid history)
+    (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
+    (space : PinScanRoom history view.local)
     (hWrites : pointWrites encode t = tx.normal.writes)
     (hDeps : pointDeps encode t = tx.normal.deps)
     (room : t.deps.val.length < Usize.max)
@@ -247,7 +249,8 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
           ∧ rows.val.length
             ≤ (pinImage history m view.local).length + t.pending.val.length) := by
   simp only [Spike.engine.Tx.scan, clone_bytes, Spike.engine.Assoc.new, bind_ok]
-  apply WP.spec_bind (pin_materialize_refines history m view.local live indexed space)
+  apply WP.spec_bind
+    (pin_materialize_refines history m view.local live indexed mapRoom space)
   intro cells hCells
   have localEq : encodeImage encode (byteImage cells) = image tx.data (encode m.val) :=
     (congrArg (encodeImage encode) hCells).trans hLocal
@@ -289,7 +292,9 @@ theorem scan_by_contents_matches (encode : List U8 → String)
     (writes : (pointWrites encode t).Perm tx.normal.writes)
     (unique : Kv.Properties.Unique (image tx.data (encode m.val)))
     (sorted : PendingSorted t.pending.val) (live : PinLive history view.local)
-    (indexed : HistoryIndexValid history) (space : PinScanRoom history view.local)
+    (indexed : HistoryIndexValid history)
+    (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
+    (space : PinScanRoom history view.local)
     (room : t.deps.val.length < Usize.max)
     (rowsRoom : (pinImage history m view.local).length + t.pending.val.length ≤ Usize.max)
     : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
@@ -314,7 +319,7 @@ theorem scan_by_contents_matches (encode : List U8 → String)
   have observed := scan_perm table projected writes validImage (sorted_pending_unique encode inj t sorted)
   apply WP.spec_mono
     (scan_matches_model encode inj history t m view representative same.symm
-      live indexed space rfl rfl room rowsRoom)
+      live indexed mapRoom space rfl rfl room rowsRoom)
   rintro ⟨rows, deps⟩ ⟨read, _, dependency, bound⟩
   refine ⟨?_, ?_, bound⟩
   · rw [read]
@@ -495,7 +500,9 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             + (scanAt tx.data tx.normal.writes (encode (alloc.vec.Vec.val m))).length
           ≤ Usize.max)
     (live : ViewsLive history t.views)
-    (indexed : HistoryIndexValid history) (space : HistoryScanRoom history)
+    (indexed : HistoryIndexValid history)
+    (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
+    (space : HistoryScanRoom history)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
       WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
@@ -554,7 +561,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
         · exact hModelOrig d old
       have hscan :=
         scan_by_contents_matches encode inj history t m native tx hl hWrites unique hSorted
-          (alive native rfl).1 indexed (space.pin native.local) room
+          (alive native rfl).1 indexed mapRoom (space.pin native.local) room
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>
@@ -740,7 +747,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               simp only [nonemptyScan, emptyTest, clean, decide_true, bind_tc_ok, ite_true,
                 committedRange]
               apply WP.spec_bind (pin_materialize_refines history m native.local
-                (alive native rfl).1 indexed (space.pin native.local))
+                (alive native rfl).1 indexed mapRoom (space.pin native.local))
               intro base cells
               have baseEq : encodeImage encode (byteImage base) =
                   encodeImage encode (pinImage history m native.local) :=

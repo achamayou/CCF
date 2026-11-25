@@ -68,6 +68,7 @@ theorem HistoryScanRoom.pin {history : Spike.engine.History}
 theorem pin_materialize_refines (history : Spike.engine.History)
     (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
     (live : PinLive history pin) (valid : HistoryIndexValid history)
+    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
     (space : PinScanRoom history pin)
     : WP.spec (Spike.engine.PinnedImage.materialize pin history map)
         (fun rows => byteImage rows = pinImage history map pin) := by
@@ -81,7 +82,7 @@ theorem pin_materialize_refines (history : Spike.engine.History)
       intro current he
       subst current
       apply WP.spec_mono (indexed_image_refines history.index frame.data _ map
-        (valid.archived id.val frame saved) valid.index (space frame saved))
+        (valid.archived id.val frame saved) valid.index mapRoom (space frame saved))
       intro rows h
       simp only [byteImage, h, pinImage, saved, Option.map_some, Option.getD_some]
       exact indexed_image_projects _ _

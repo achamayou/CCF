@@ -3,7 +3,7 @@
 
 module
 
-public import KvRust.RadixDual
+public import KvRust.RadixSingle
 public import KvRust.Publication
 
 @[expose] public section
@@ -29,32 +29,57 @@ def packedBindings {V : Type} (rows : List (Spike.engine.Address × V))
     : List (List U8 × Spike.kv_index.Binding V) :=
   rows.map fun (a, v) => (packedAddress a, { address := a, value := v })
 
-/-- The native root implements the original ordered address/value list. -/
+/-- The native single-radix root implements the sorted address/value list. -/
 structure IndexView {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
     : Prop where
   witness
-    : ∃ links, DualView index root links ∧ dualBindings index links = packedBindings rows
+    : ∃ links,
+        SingleView index root links ∧ singleBindings index links = packedBindings rows
+
+theorem index_view_sorted {V : Type} {index : Spike.kv_index.AddressIndex V}
+    {root : Spike.radix.RadixRoot} {rows : List (Spike.engine.Address × V)}
+    (view : IndexView index root rows)
+    : rows.Pairwise (fun a b => packedAddress a.1 < packedAddress b.1) := by
+  obtain ⟨links, sv, proj⟩ := view.witness
+  have hkeys : (singleBindings index links).map Prod.fst = links.map Prod.fst := by
+    unfold singleBindings radixBindings
+    have hvalid := sv.values
+    clear proj sv
+    induction links with
+    | nil => rfl
+    | cons e rest ih =>
+        obtain ⟨_, row, saved, _⟩ := hvalid e List.mem_cons_self
+        have htail := ih (fun x hx => hvalid x (List.mem_cons_of_mem _ hx))
+        simp [saved, htail]
+  have hpacked : rows.map (fun r => packedAddress r.1) = links.map Prod.fst := by
+    have := congrArg (List.map Prod.fst) proj
+    simpa [packedBindings, List.map_map, Function.comp_def, hkeys] using this.symm
+  have hlinkKeys : (links.map Prod.fst).Pairwise (· < ·) := by
+    rw [List.pairwise_map]
+    exact sv.sorted.imp (fun h => (radixKeyLt_iff _ _).mp h)
+  rw [← hpacked, List.pairwise_map] at hlinkKeys
+  exact hlinkKeys
 
 theorem index_view_unique {V : Type} {index : Spike.kv_index.AddressIndex V}
-    {root : Spike.radix.DualRoot} {a b : List (Spike.engine.Address × V)}
+    {root : Spike.radix.RadixRoot} {a b : List (Spike.engine.Address × V)}
     (va : IndexView index root a) (vb : IndexView index root b)
     : a = b := by
   obtain ⟨la, ha, pa⟩ := va.witness
   obtain ⟨lb, hb, pb⟩ := vb.witness
-  obtain rfl := dual_view_unique ha hb
+  obtain rfl := single_view_unique ha hb
   have payload := congrArg (List.map fun row : List U8 × Spike.kv_index.Binding V =>
     (row.2.address, row.2.value)) (pa.symm.trans pb)
   simpa [packedBindings, List.map_map, Function.comp_def] using payload
 
 noncomputable def indexRows {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot)
+    (root : Spike.radix.RadixRoot)
     : List (Spike.engine.Address × V) := by
   classical
   exact if h : ∃ rows, IndexView index root rows then Classical.choose h else []
 
 theorem index_rows_eq {V : Type} {index : Spike.kv_index.AddressIndex V}
-    {root : Spike.radix.DualRoot} {rows : List (Spike.engine.Address × V)}
+    {root : Spike.radix.RadixRoot} {rows : List (Spike.engine.Address × V)}
     (h : IndexView index root rows)
     : indexRows index root = rows := by
   unfold indexRows
@@ -62,34 +87,32 @@ theorem index_rows_eq {V : Type} {index : Spike.kv_index.AddressIndex V}
   exact index_view_unique (Classical.choose_spec _) h
 
 theorem index_rows_view {V : Type} {index : Spike.kv_index.AddressIndex V}
-    {root : Spike.radix.DualRoot} (live : ∃ rows, IndexView index root rows)
+    {root : Spike.radix.RadixRoot} (live : ∃ rows, IndexView index root rows)
     : IndexView index root (indexRows index root) := by
   obtain ⟨rows, view⟩ := live
   rwa [index_rows_eq view]
 
 def IndexValid {V : Type} (index : Spike.kv_index.AddressIndex V) : Prop :=
-  ArenaValid index.values ∧ ArenaValid index.order
+  ArenaValid index.values
 
 def IndexKeeps {V : Type} (before after : Spike.kv_index.AddressIndex V) : Prop :=
   ArenaKeeps before.values after.values
-  ∧ ArenaKeeps before.order after.order
-  ∧ before.last.val ≤ after.last.val
 
 theorem IndexKeeps.refl {V : Type} (index : Spike.kv_index.AddressIndex V)
     : IndexKeeps index index :=
-  ⟨.refl _, .refl _, Nat.le_refl _⟩
+  ArenaKeeps.refl _
 
 theorem IndexKeeps.trans {V : Type} {a b c : Spike.kv_index.AddressIndex V}
     (ab : IndexKeeps a b) (bc : IndexKeeps b c)
     : IndexKeeps a c :=
-  ⟨ab.1.trans bc.1, ab.2.1.trans bc.2.1, Nat.le_trans ab.2.2 bc.2.2⟩
+  ArenaKeeps.trans ab bc
 
 theorem index_keeps_view {V : Type} {old next : Spike.kv_index.AddressIndex V}
-    (kept : IndexKeeps old next) (root : Spike.radix.DualRoot)
+    (kept : IndexKeeps old next) (root : Spike.radix.RadixRoot)
     (rows : List (Spike.engine.Address × V)) (view : IndexView old root rows)
     : IndexView next root rows := by
-  obtain ⟨links, dual, projection⟩ := view.witness
-  obtain ⟨after, same⟩ := dual_retains_views old next kept.1 kept.2.1 kept.2.2 root links dual
+  obtain ⟨links, single, projection⟩ := view.witness
+  obtain ⟨after, same⟩ := single_retains_views old next kept root links single
   exact ⟨links, after, same.trans projection⟩
 
 theorem index_new_refines (V : Type)
@@ -99,19 +122,17 @@ theorem index_new_refines (V : Type)
           ∧ WP.spec (Spike.kv_index.AddressIndex.empty_root index)
               (fun root => IndexView index root [])) := by
   unfold Spike.kv_index.AddressIndex.new Spike.kv_index.AddressIndex.empty_root
-  apply WP.spec_bind (dual_new_refines (Spike.kv_index.Binding V))
-  intro index ⟨validValues, validOrder, empty⟩
+  apply WP.spec_bind (single_new_refines (Spike.kv_index.Binding V))
+  intro index ⟨validValues, empty⟩
   rw [WP.spec_ok]
-  refine ⟨⟨validValues, validOrder⟩, ?_⟩
+  refine ⟨validValues, ?_⟩
   exact WP.spec_mono empty (fun _ view => ⟨[], view, rfl⟩)
 
 theorem index_empty_root_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
     : WP.spec (Spike.kv_index.AddressIndex.empty_root index)
         (fun root => IndexView index root []) := by
-  unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.DualRadix.empty_root
-  rw [WP.spec_ok]
-  refine ⟨[], ⟨⟨0, .empty 0⟩, ?_, ⟨0, [], .empty 0, ?_, rfl, List.Pairwise.nil⟩,
-    ?_, ?_⟩, rfl⟩ <;> simp [RadixRows]
+  unfold Spike.kv_index.AddressIndex.empty_root
+  exact WP.spec_mono (single_empty_root_refines index) (fun _ view => ⟨[], view, rfl⟩)
 
 private theorem address_key_matches (a : Spike.engine.Address)
     (capacity : 8 + a.map.val.length + a.key.val.length ≤ Usize.max)
@@ -143,7 +164,7 @@ local instance nativeAddressEq : DecidableEq Spike.engine.Address :=
   fun a b => decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
 theorem index_get_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
     (view : IndexView index root rows) (address : Spike.engine.Address)
     (capacity : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
     : WP.spec (Spike.kv_index.AddressIndex.get index root address)
@@ -153,7 +174,7 @@ theorem index_get_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   apply WP.spec_bind (address_key_matches address capacity)
   intro encoded same
   apply WP.spec_bind
-    (dual_get_refines index root (alloc.vec.Vec.deref encoded) links related)
+    (single_get_refines index root (alloc.vec.Vec.deref encoded) links related)
   intro found he
   have lookup :
       found = (Kv.Model.find rows address).map
@@ -212,124 +233,108 @@ private theorem radix_filter_map_length {V W : Type}
       simp [saved, h]
 
 private theorem index_link_count {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
-    (links : List (List U8 × U32)) (view : DualView index root links)
-    (projection : dualBindings index links = packedBindings rows)
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
+    (links : List (List U8 × U32)) (view : SingleView index root links)
+    (projection : singleBindings index links = packedBindings rows)
     : links.length = rows.length := by
   have len := congrArg List.length projection
   have size : (radixBindings index.values.rows.val links).length = links.length :=
     radix_filter_map_length _ _ view.values (fun e row => (e.1, row.value))
-  simpa only [dualBindings, packedBindings, List.length_map, size] using len
-
-private theorem index_order_count {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (links keys : List (List U8 × U32)) (view : RadixRows index.values.rows.val links)
-    (live : RadixRows index.order.rows.val keys)
-    (pairing
-      : radixBindings index.order.rows.val keys
-        = dualStampBindings index.values.rows.val links)
-    : keys.length = links.length := by
-  have len := congrArg List.length pairing
-  have size : (radixBindings index.order.rows.val keys).length = keys.length :=
-    radix_filter_map_length _ _ live (fun e row => (e.1, row.value))
-  have stamps : (dualStampBindings index.values.rows.val links).length = links.length :=
-    radix_filter_map_length _ _ view (fun e row => (reverseStampBytes row.value.stamp, e.2))
-  simpa only [size, stamps] using len
+  simpa only [singleBindings, packedBindings, List.length_map, size] using len
 
 def IndexGrowth {V : Type} (before after : Spike.kv_index.AddressIndex V)
-    (lookupDirs orderDirs writes : Nat)
+    (lookupDirs writes : Nat)
     : Prop :=
   ArenaGrowth before.values after.values lookupDirs writes
-  ∧ ArenaGrowth before.order after.order orderDirs writes
-  ∧ after.last.val ≤ before.last.val + writes
 
 theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
     (related : IndexView index root rows)
     (address : Spike.engine.Address) (value : V)
     (valid : IndexValid index)
     (lookupRoom : index.values.dirs.val.length + rows.length + 1 ≤ 2147483647)
-    (orderRoom : index.order.dirs.val.length + 2 * rows.length + 1 ≤ 2147483647)
     (valueRoom : index.values.rows.val.length < 2147483647)
-    (stampRoom : index.order.rows.val.length < 2147483647)
     (keyRoom : 2 * (8 + address.map.val.length + address.key.val.length) + 1 ≤ Usize.max)
-    (counterRoom : index.last.val < U64.max)
     : WP.spec (Spike.kv_index.AddressIndex.put index root address value)
         (fun (next, after) =>
-          IndexView after next (Kv.Model.set rows address value)
+          (∃ out, IndexView after next out ∧ out.Perm (Kv.Model.set rows address value))
           ∧ IndexValid after
           ∧ IndexKeeps index after
-          ∧ IndexGrowth index after (rows.length + 1) (2 * rows.length + 1) 1) := by
+          ∧ IndexGrowth index after (rows.length + 1) 1) := by
   obtain ⟨links, view, projection⟩ := related.witness
-  obtain ⟨h, tree⟩ := view.lookup
-  obtain ⟨oh, keys, order, live, pairing, sorted⟩ := view.order
   have count := index_link_count index root rows links view projection
-  have orderCount := index_order_count index links keys view.values live pairing
-  have lookup := (radix_tree_binding_bound _ valid.1.directories tree).1
-  have orderTree := (radix_tree_binding_bound _ valid.2.directories order).1
   unfold Spike.kv_index.AddressIndex.put
   apply WP.spec_bind (index_batch_row_refines address value (by omega))
   rintro ⟨encoded, binding⟩ ⟨he, hb, len⟩
   dsimp only at he hb len
   subst binding
   apply WP.spec_bind
-    (dual_put_refines index root links
-      {key := encoded, value := {address, value}} view valid.1 valid.2 _ _ keys
-      lookup orderTree live pairing sorted (by omega) (by omega)
-      valueRoom stampRoom (by simpa [len] using keyRoom) counterRoom)
-  rintro ⟨next, after⟩ ⟨leaf, refined, hp, hv, ho, kv, ko, clock, vg, og⟩
+    (single_put_refines index root {key := encoded, value := {address, value}} links
+      view valid (by omega) valueRoom (by simpa [len] using keyRoom))
+  rintro ⟨next, after⟩ ⟨vAfter, kAfter, gAfter, sorted, sv, hperm⟩
   change WP.spec (Result.ok (next, after)) _
   rw [WP.spec_ok]
-  refine ⟨⟨Kv.Model.set links encoded.val leaf, refined, ?_⟩, ⟨hv, ho⟩, ⟨kv, ko, ?_⟩, ?_⟩
-  · rw [hp, projection, he, packed_set]
-  · rw [clock]
-    exact Nat.le_succ _
-  · refine ⟨count ▸ vg, ?_, Nat.le_of_eq clock⟩
-    simpa only [orderCount, count, Nat.two_mul] using og
+  let out : List (Spike.engine.Address × V) :=
+    (singleBindings after sorted).map fun (_, b) => (b.address, b.value)
+  have hPackedPerm : (singleBindings after sorted).Perm
+      (packedBindings (Kv.Model.set rows address value)) := by
+    rw [projection, he, packed_set] at hperm
+    exact hperm
+  have hPackedEq : singleBindings after sorted = packedBindings out := by
+    have hkeyEq : ∀ e ∈ singleBindings after sorted, e.1 = packedAddress e.2.address := by
+      intro e he
+      have hm := hPackedPerm.subset he
+      obtain ⟨⟨a, v⟩, _, hpair⟩ := List.mem_map.mp hm
+      have hfst : packedAddress a = e.1 := congrArg Prod.fst hpair
+      have hsnd : ({ address := a, value := v } : Spike.kv_index.Binding V) = e.2 :=
+        congrArg Prod.snd hpair
+      rw [← hfst, ← hsnd]
+    unfold packedBindings out
+    rw [List.map_map]
+    conv_lhs => rw [← List.map_id (singleBindings after sorted)]
+    apply List.map_congr_left
+    rintro ⟨k, ⟨a, v⟩⟩ hm
+    have hk := hkeyEq (k, ⟨a, v⟩) hm
+    dsimp only at hk ⊢
+    rw [hk]
+    rfl
+  have hOutPerm : out.Perm (Kv.Model.set rows address value) := by
+    have hmap := hPackedPerm.map (fun e : List U8 × Spike.kv_index.Binding V => (e.2.address, e.2.value))
+    simpa [out, packedBindings, List.map_map, Function.comp_def, Prod.mk.eta] using hmap
+  exact ⟨⟨out, ⟨sorted, sv, hPackedEq⟩, hOutPerm⟩, vAfter, kAfter, count ▸ gAfter⟩
 
 theorem index_remove_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
     (related : IndexView index root rows)
     (address : Spike.engine.Address) (valid : IndexValid index)
     (lookupRoom : index.values.dirs.val.length + rows.length ≤ 2147483647)
-    (orderRoom : index.order.dirs.val.length + rows.length ≤ 2147483647)
     (capacity : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
     : WP.spec (Spike.kv_index.AddressIndex.remove index root address)
         (fun (next, after) =>
           IndexView after next (Kv.Model.erase rows address)
           ∧ IndexValid after
           ∧ IndexKeeps index after
-          ∧ IndexGrowth index after rows.length rows.length 0) := by
+          ∧ IndexGrowth index after rows.length 0) := by
   obtain ⟨links, view, projection⟩ := related.witness
-  obtain ⟨h, tree⟩ := view.lookup
-  obtain ⟨oh, keys, order, live, pairing, sorted⟩ := view.order
   have count := index_link_count index root rows links view projection
-  have orderCount := index_order_count index links keys view.values live pairing
-  have lookup := (radix_tree_binding_bound _ valid.1.directories tree).1
-  have orderTree := (radix_tree_binding_bound _ valid.2.directories order).1
   simp only [Spike.kv_index.AddressIndex.remove, Spike.engine.Bytes.as_slice, bind_ok]
   apply WP.spec_bind (address_key_matches address capacity)
   intro encoded he
   apply WP.spec_bind
-    (dual_remove_refines index root links (alloc.vec.Vec.deref encoded) view valid.1
-      valid.2 _ _ keys lookup orderTree live pairing sorted (by omega) (by omega))
-  rintro ⟨next, after⟩ ⟨refined, hp, hv, ho, kv, ko, clock, vg, og⟩
+    (single_remove_refines index root (alloc.vec.Vec.deref encoded) links view valid
+      (by omega))
+  rintro ⟨next, after⟩ ⟨vAfter, kAfter, gAfter, sv, hp⟩
   change WP.spec (Result.ok (next, after)) _
   rw [WP.spec_ok]
-  refine ⟨
-    ⟨Kv.Model.erase links (alloc.vec.Vec.deref encoded).val, refined, ?_⟩,
-    ⟨hv, ho⟩,
-    ⟨kv, ko, by rw [clock]⟩,
-    ⟨count ▸ vg, (orderCount.trans count) ▸ og, by rw [clock, Nat.add_zero]⟩
-  ⟩
+  refine ⟨⟨Kv.Model.erase links (alloc.vec.Vec.deref encoded).val, sv, ?_⟩,
+    vAfter, kAfter, count ▸ gAfter⟩
   rw [hp, projection, show (alloc.vec.Vec.deref encoded).val = packedAddress address from by
     simpa [alloc.vec.Vec.deref] using he, packed_erase]
 
-/- The scan result contains links only; each actual Rust row read is related
-to the pair at the same position of the original association list. -/
 theorem index_scan_up_to_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (limit : Usize) (rows : List (Spike.engine.Address × V))
-    (view : IndexView index root rows) (valid : IndexValid index)
-    (room : 18 * rows.length ≤ Usize.max)
+    (root : Spike.radix.RadixRoot) (limit : Usize)
+    (rows : List (Spike.engine.Address × V)) (view : IndexView index root rows)
+    (valid : IndexValid index) (room : 18 * rows.length ≤ Usize.max)
     : WP.spec (Spike.kv_index.AddressIndex.scan_links_up_to index root limit)
         (fun links =>
           links.val.length = min limit.val rows.length
@@ -341,20 +346,9 @@ theorem index_scan_up_to_refines {V : Type} (index : Spike.kv_index.AddressIndex
                       (· = entry)) := by
   obtain ⟨bindings, related, projection⟩ := view.witness
   have size := index_link_count index root rows bindings related projection
-  obtain ⟨height, keys, tree, live, pairing, _⟩ := related.order
-  have orderedCount := index_order_count index bindings keys related.values live pairing
-  let dirs := alloc.vec.Vec.deref index.order.dirs
-  obtain ⟨fuel, leaves, plan, perm⟩ :=
-    radix_scan_plan_exists dirs height root.order keys
-      (by simpa [dirs, alloc.vec.Vec.deref] using tree)
-  have count : leaves.length = keys.length := by simpa using perm.length_eq
-  have bound := radix_scan_plan_bound index.order.dirs valid.2.directories
-    (by simpa [dirs, alloc.vec.Vec.deref] using plan)
   unfold Spike.kv_index.AddressIndex.scan_links_up_to
   apply WP.spec_mono
-    (dual_scan_up_to_refines index root limit bindings related
-      (radix_compressed_of_knowledge _ _ valid.2.knowledge)
-      ⟨fuel, leaves, by simpa [dirs, alloc.vec.Vec.deref] using plan, by omega⟩)
+    (single_scan_up_to_refines index root limit bindings related valid (by omega))
   intro links scanned
   have sizePrefix : links.val.length = min limit.val rows.length := by
     simp [scanned, size]
@@ -374,25 +368,23 @@ theorem index_scan_up_to_refines {V : Type} (index : Spike.kv_index.AddressIndex
         by_contra outside
         rw [← size] at outside
         simp [List.getElem?_eq_none (Nat.le_of_not_gt outside)] at atLink
-      obtain ⟨_, savedRow, saved, _⟩ := related.values entry inBindings
+      obtain ⟨htag, savedRow, saved, _⟩ := related.values entry inBindings
       have loaded := congrArg (fun items : List (List U8 × Spike.kv_index.Binding V) =>
         items[i]?) projection
-      rw [dualBindings, packedBindings, List.getElem?_map, List.getElem?_map,
+      rw [singleBindings, packedBindings, List.getElem?_map,
         radix_projection_index _ _ related.values, atLink, List.getElem?_eq_getElem inside] at loaded
-      have payload : savedRow.value.value = {address := rows[i].1, value := rows[i].2} := by
+      have payload : savedRow.value = {address := rows[i].1, value := rows[i].2} := by
         simpa [saved] using congrArg (Option.map Prod.snd) loaded
       refine ⟨rows[i], List.getElem?_eq_getElem inside, ?_⟩
       unfold Spike.kv_index.AddressIndex.scan_row
-      apply WP.spec_bind
-        (dual_scan_row_refines index root bindings related entry inBindings)
-      rintro ⟨key, value⟩ ⟨row, original, _, read⟩
-      have same : row = savedRow := Option.some.inj (original.symm.trans saved)
-      subst row
-      change WP.spec (Result.ok (value.address, value.value)) _
-      rw [WP.spec_ok, read, payload]
+      apply WP.spec_bind (single_scan_row_refines index entry.2 savedRow htag saved)
+      rintro ⟨_, b⟩ ⟨_, hb⟩
+      dsimp only at hb
+      change WP.spec (Result.ok (b.address, b.value)) _
+      rw [WP.spec_ok, hb, payload]
 
 theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
-    (root : Spike.radix.DualRoot) (rows : List (Spike.engine.Address × V))
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
     (view : IndexView index root rows) (valid : IndexValid index)
     (room : 18 * rows.length ≤ Usize.max)
     : WP.spec (Spike.kv_index.AddressIndex.scan_links index root)
@@ -404,13 +396,137 @@ theorem index_scan_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
                   rows[i]? = some entry
                   ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link)
                       (· = entry)) := by
-  change WP.spec (Spike.kv_index.AddressIndex.scan_links_up_to index root core.num.Usize.MAX) _
+  obtain ⟨bindings, related, projection⟩ := view.witness
+  have size := index_link_count index root rows bindings related projection
+  unfold Spike.kv_index.AddressIndex.scan_links
+  apply WP.spec_mono (single_scan_refines index root bindings related valid (by omega))
+  intro links scanned
+  have hlen : links.val.length = rows.length := by simp [scanned, size]
+  refine ⟨hlen, ?_⟩
+  intro i link selected
+  rw [scanned, List.getElem?_map] at selected
+  cases atLink : bindings[i]? with
+  | none => simp [atLink] at selected
+  | some entry =>
+      have points : entry.2 = link := by simpa [atLink] using selected
+      subst link
+      have inBindings := List.mem_iff_getElem?.mpr ⟨i, atLink⟩
+      have inside : i < rows.length := by
+        by_contra outside
+        rw [← size] at outside
+        simp [List.getElem?_eq_none (Nat.le_of_not_gt outside)] at atLink
+      obtain ⟨htag, savedRow, saved, _⟩ := related.values entry inBindings
+      have loaded := congrArg (fun items : List (List U8 × Spike.kv_index.Binding V) =>
+        items[i]?) projection
+      rw [singleBindings, packedBindings, List.getElem?_map,
+        radix_projection_index _ _ related.values, atLink, List.getElem?_eq_getElem inside] at loaded
+      have payload : savedRow.value = {address := rows[i].1, value := rows[i].2} := by
+        simpa [saved] using congrArg (Option.map Prod.snd) loaded
+      refine ⟨rows[i], List.getElem?_eq_getElem inside, ?_⟩
+      unfold Spike.kv_index.AddressIndex.scan_row
+      apply WP.spec_bind (single_scan_row_refines index entry.2 savedRow htag saved)
+      rintro ⟨_, b⟩ ⟨_, hb⟩
+      dsimp only at hb
+      change WP.spec (Result.ok (b.address, b.value)) _
+      rw [WP.spec_ok, hb, payload]
+
+/-- Map-prefix scan visits only the entries of `map`, in exact sorted order. -/
+theorem index_scan_map_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
+    (map : Spike.engine.Bytes)
+    (view : IndexView index root rows) (valid : IndexValid index)
+    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
+    (room : 18 * rows.length ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.scan_map_links index root map)
+        (fun links =>
+          let selected := rows.filter fun r => decide (r.1.map.val = map.val)
+          links.val.length = selected.length
+          ∧ ∀ (i : Nat) link,
+              links.val[i]? = some link
+              → ∃ entry,
+                  selected[i]? = some entry
+                  ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link)
+                      (· = entry)) := by
+  obtain ⟨bindings, related, projection⟩ := view.witness
+  have size := index_link_count index root rows bindings related projection
+  simp only [Spike.kv_index.AddressIndex.scan_map_links, Spike.engine.Bytes.as_slice, bind_ok]
+  apply WP.spec_bind
+    (native_map_prefix (alloc.vec.Vec.deref map)
+      (by
+        simpa [alloc.vec.Vec.deref] using (show 8 + map.val.length ≤ Usize.max by omega)))
+  intro pfx hpfx
+  have hpfxVal : pfx.val = mapPrefixBytes map.val := by simpa [alloc.vec.Vec.deref] using hpfx
+  have hpfxLen : pfx.val.length = 8 + map.val.length := by
+    rw [hpfxVal, mapPrefixBytes, List.length_append]
+    simp [addressPrefix, BitVec.toLEBytes_length]
   apply WP.spec_mono
-    (index_scan_up_to_refines index root core.num.Usize.MAX rows view valid room)
-  intro links ⟨count, read⟩
-  have enough : rows.length ≤ core.num.Usize.MAX.val := by
-    change rows.length ≤ Usize.max
-    omega
-  exact ⟨count.trans (Nat.min_eq_right enough), read⟩
+    (single_scan_prefix_refines index root (alloc.vec.Vec.deref pfx) bindings related
+      valid (by simpa [alloc.vec.Vec.deref, hpfxLen] using mapRoom) (by omega))
+  intro links scanned
+  let pfxB := mapPrefixBytes map.val
+  let filtBindings := bindings.filter fun row => decide (pfxB <+: row.1)
+  let selected := rows.filter fun r => decide (r.1.map.val = map.val)
+  have hscanEq : links.val = filtBindings.map Prod.snd := by
+    simpa [alloc.vec.Vec.deref, hpfxVal, filtBindings, pfxB] using scanned
+  have hProjFilt : singleBindings index filtBindings = packedBindings selected := by
+    have hsbFilt :
+        singleBindings index filtBindings
+        = (singleBindings index bindings).filter fun row => decide (pfxB <+: row.1) := by
+      unfold singleBindings radixBindings filtBindings
+      have hvalid := related.values
+      clear projection related size hscanEq scanned
+      induction bindings with
+      | nil => rfl
+      | cons e rest ih =>
+          obtain ⟨_, r, hr, _⟩ := hvalid e List.mem_cons_self
+          have htail := ih (fun x hx => hvalid x (List.mem_cons_of_mem _ hx))
+          by_cases hp : pfxB <+: e.1 <;> simp [hr, hp, htail]
+    rw [hsbFilt, projection]
+    unfold packedBindings selected
+    rw [List.filter_map]
+    apply congrArg (List.map _)
+    apply List.filter_congr
+    rintro ⟨a, v⟩ _
+    have fits (b : Spike.engine.Bytes) : b.val.length < 2 ^ 64 := by
+      have bound := alloc.vec.Vec.len_ineq b
+      have width := Usize.max_succ_eq_pow
+      rcases System.Platform.numBits_eq with h | h <;> simp [h] at width <;> omega
+    exact decide_eq_decide.mpr
+      (map_prefix_iff map.val a.map.val a.key.val (fits map) (fits a.map))
+  have hFiltRows : RadixRows index.values.rows.val filtBindings :=
+    fun e he => related.values e (List.mem_filter.mp he).1
+  have hFiltLen : filtBindings.length = selected.length := by
+    have len := congrArg List.length hProjFilt
+    have hs : (radixBindings index.values.rows.val filtBindings).length = filtBindings.length :=
+      radix_filter_map_length _ _ hFiltRows (fun e row => (e.1, row.value))
+    simpa only [singleBindings, packedBindings, List.length_map, hs] using len
+  refine ⟨?_, ?_⟩
+  · rw [hscanEq, List.length_map, hFiltLen]
+  intro i link sel
+  rw [hscanEq, List.getElem?_map] at sel
+  cases atLink : filtBindings[i]? with
+  | none => simp [atLink] at sel
+  | some entry =>
+      have points : entry.2 = link := by simpa [atLink] using sel
+      subst link
+      have inFilt := List.mem_iff_getElem?.mpr ⟨i, atLink⟩
+      have inside : i < selected.length := by
+        by_contra outside
+        rw [← hFiltLen] at outside
+        simp [List.getElem?_eq_none (Nat.le_of_not_gt outside)] at atLink
+      obtain ⟨htag, savedRow, saved, _⟩ := hFiltRows entry inFilt
+      have loaded := congrArg (fun items : List (List U8 × Spike.kv_index.Binding V) =>
+        items[i]?) hProjFilt
+      rw [singleBindings, packedBindings, List.getElem?_map,
+        radix_projection_index _ _ hFiltRows, atLink, List.getElem?_eq_getElem inside] at loaded
+      have payload : savedRow.value = {address := selected[i].1, value := selected[i].2} := by
+        simpa [saved] using congrArg (Option.map Prod.snd) loaded
+      refine ⟨selected[i], List.getElem?_eq_getElem inside, ?_⟩
+      unfold Spike.kv_index.AddressIndex.scan_row
+      apply WP.spec_bind (single_scan_row_refines index entry.2 savedRow htag saved)
+      rintro ⟨_, b⟩ ⟨_, hb⟩
+      dsimp only at hb
+      change WP.spec (Result.ok (b.address, b.value)) _
+      rw [WP.spec_ok, hb, payload]
 
 end KvRust

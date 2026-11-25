@@ -56,7 +56,7 @@ def OperationCase.fits (encode : List U8 → String) (n : Spike.engine.Tx)
 def OperationCase.indexRoom (history : Spike.engine.History) (m : Spike.engine.Bytes)
     : OperationCase → Prop
   | .point op => op.indexRoom m
-  | .whole _ => HistoryScanRoom history
+  | .whole _ => HistoryScanRoom history ∧ 2 * (8 + m.val.length) ≤ Usize.max
 
 def FitsOperate (encode : List U8 → String) (sid : Nat) (n : Spike.engine.Store)
     (w : State) (id : U64) (m : Spike.engine.Bytes) (op : OperationCase)
@@ -266,10 +266,11 @@ private theorem operate_enabled (encode : List U8 → String)
       exact finish out next _ ho (OutputMatches.of_eq rfl) hw hso hd hno hmo hc
   | whole op =>
       obtain ⟨room, rows, clear⟩ := room
+      obtain ⟨scanSpace, mapRoom⟩ := space
       apply WP.spec_mono
         (operate_scan_matches_model encode inj order history t tx m op v hp hv h.views
           (h.localImage hv) h.writes h.sorted h.deps h.nativeDeps h.modelDeps room rows
-          (h.dataUnique _) clear h.live indexed space)
+          (h.dataUnique _) clear h.live indexed mapRoom scanSpace)
       rintro ⟨out, next⟩ ⟨⟨obs, ho, hmatch⟩, hw, hd, hc, hso, hno, hmo⟩
       have hmatch' : OutputMatches (.operation sid 0 (op.model encode (encode m.val))) obs
           (executeOperation tx (op.model encode (encode m.val))).2 := by

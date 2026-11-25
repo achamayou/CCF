@@ -278,6 +278,35 @@ theorem RevisionHistory.advance {store : Store} (stable : RevisionHistory store.
           rw [hs] at pairs
           exact (List.pairwise_cons.mp pairs).1 f old
 
+theorem RevisionHistory.advance_order {s : Store} (stable : RevisionHistory s.history)
+    (head : s.history.head? = some s.head) (writes : Pending) (next : Frame)
+    (order : FrameOrderEq next (Kv.Model.advance s writes).head)
+    (canon
+      : ∀ f ∈ s.history,
+          ∀ m,
+            (image next.data m).Perm (image f.data m)
+            → image next.data m = image f.data m)
+    : RevisionHistory (next :: s.history) := by
+  have hExact := stable.advance head writes
+  change RevisionHistory ((Kv.Model.advance s writes).head :: s.history) at hExact
+  refine ⟨?_, ?_⟩
+  · intro f hf m
+    rcases List.mem_cons.mp hf with rfl | old
+    · have hb := hExact.bounds (Kv.Model.advance s writes).head List.mem_cons_self m
+      rw [order.version, order.revision_eq m]
+      exact hb
+    · exact stable.bounds f old m
+  · refine List.pairwise_cons.mpr ⟨?_, stable.flow⟩
+    intro f hf m
+    have hflow := (List.pairwise_cons.mp hExact.flow).1 f hf m
+    refine ⟨by rw [order.revision_eq m]; exact hflow.1, ?_⟩
+    intro heq
+    rw [order.revision_eq m] at heq
+    have hEqExact := hflow.2 heq
+    have hperm : (image next.data m).Perm (image f.data m) :=
+      hEqExact ▸ order.image_perm m
+    exact canon f hf m hperm
+
 theorem RevisionHistory.filter {frames : List Frame} (stable : RevisionHistory frames)
     (keep : Frame → Bool)
     : RevisionHistory (frames.filter keep) :=
@@ -626,6 +655,68 @@ theorem ArchiveConsistent.append {frames : List Frame} {s : Store}
     · rw [List.mem_singleton.mp fresh]
       exact Kv.Properties.publish_unique s.head.data (s.head.version + 1) writes
         (inv.unique s.head headIn)
+
+theorem ArchiveConsistent.append_order {frames : List Frame} {s : Store}
+    (inv : ArchiveConsistent frames s.nextIdentity) (headIn : s.head ∈ frames)
+    (writes : Pending) (next : Frame) (order : FrameOrderEq next (advance s writes).head)
+    (canon
+      : ∀ f ∈ frames,
+          ∀ m,
+            (image next.data m).Perm (image f.data m)
+            → image next.data m = image f.data m)
+    : ArchiveConsistent (frames ++ [next]) (s.nextIdentity + 1) := by
+  have hExact := inv.append headIn writes
+  have hNextMem : (advance s writes).head ∈ frames ++ [(advance s writes).head] :=
+    List.mem_append_right _ List.mem_cons_self
+  refine ⟨List.mem_append_left _ inv.emptyPresent, ?_, ?_, ?_, ?_, ?_⟩
+  · intro f hf m
+    rcases List.mem_append.mp hf with old | fresh
+    · exact Nat.lt_trans (inv.identities f old m) (Nat.lt_succ_self _)
+    · rw [List.mem_singleton.mp fresh, order.revision_eq m]
+      exact hExact.identities _ hNextMem m
+  · intro f hf m absent
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.unborn f old m absent
+    · rw [List.mem_singleton.mp fresh] at absent ⊢
+      rw [order.births] at absent
+      obtain ⟨himg, hrev⟩ := hExact.unborn _ hNextMem m absent
+      refine ⟨?_, by rwa [order.revisions]⟩
+      have hperm := order.image_perm m
+      rw [himg] at hperm
+      exact hperm.symm.nil_eq.symm
+  · intro f1 h1 f2 h2 m eq
+    rcases List.mem_append.mp h1 with o1 | n1 <;> rcases List.mem_append.mp h2 with o2 | n2
+    · exact inv.sameRevision f1 o1 f2 o2 m eq
+    · rw [List.mem_singleton.mp n2] at eq ⊢
+      rw [order.revision_eq m] at eq
+      have hEq := hExact.sameRevision f1 (List.mem_append_left _ o1) _ hNextMem m eq
+      have hperm : (image next.data m).Perm (image f1.data m) :=
+        hEq ▸ order.image_perm m
+      exact (canon f1 o1 m hperm).symm
+    · rw [List.mem_singleton.mp n1] at eq ⊢
+      rw [order.revision_eq m] at eq
+      have hEq := hExact.sameRevision _ hNextMem f2 (List.mem_append_left _ o2) m eq
+      have hperm : (image next.data m).Perm (image f2.data m) :=
+        hEq ▸ order.image_perm m
+      exact canon f2 o2 m hperm
+    · rw [List.mem_singleton.mp n1, List.mem_singleton.mp n2]
+  · intro f hf
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.bounded f old
+    · rw [List.mem_singleton.mp fresh]
+      intro k c hfind
+      have hunique := hExact.unique _ hNextMem
+      have hperm := order.data
+      have hfind' : find (advance s writes).head.data k = some c := by
+        rw [lookup_perm hperm (unique_of_perm hperm.symm hunique)] at hfind
+        exact hfind
+      rw [order.version]
+      exact hExact.bounded _ hNextMem k c hfind'
+  · intro f hf
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.unique f old
+    · rw [List.mem_singleton.mp fresh]
+      exact unique_of_perm order.data.symm (hExact.unique _ hNextMem)
 
 theorem archive_image_cells_bounded {frames : List Frame} {nextId : Nat}
     (inv : ArchiveConsistent frames nextId) {f : Frame} (hf : f ∈ frames) (m : String)

@@ -79,7 +79,7 @@ def ArenaGrowth {V : Type} (before after : Spike.radix.Arena V) (dirs rows : Nat
   after.dirs.val.length ≤ before.dirs.val.length + dirs
   ∧ after.rows.val.length ≤ before.rows.val.length + rows
 
-private theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
+theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
     (row : Spike.radix.RadixRow V) (height : Nat) (bindings : List (List U8 × U32))
     (tree : RadixTree arena.dirs.val height root bindings)
     (rows : RadixRows arena.rows.val bindings) (valid : ArenaValid arena)
@@ -124,7 +124,7 @@ private theorem arena_put_refines {V : Type} (arena : Spike.radix.Arena V) (root
     hp
   ⟩
 
-private theorem arena_remove_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
+theorem arena_remove_refines {V : Type} (arena : Spike.radix.Arena V) (root : U32)
     (key : Slice U8) (height : Nat) (bindings : List (List U8 × U32))
     (tree : RadixTree arena.dirs.val height root bindings)
     (rows : RadixRows arena.rows.val bindings) (valid : ArenaValid arena)

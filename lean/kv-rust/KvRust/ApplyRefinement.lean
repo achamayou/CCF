@@ -124,9 +124,6 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
         rw [h] at hh
         rw [Option.some.inj hh]
         exact List.mem_cons_self
-  have hHeadVersion : nativeHead.version = s.head.version := hhead.version
-  have hNativeShape : Kv.Properties.History nativeFrames nativeHead.version := by
-    rw [hHeadVersion]; exact hs.nativeShape
   have hModelShape : Kv.Properties.History s.history s.head.version :=
     (Kv.Properties.reachable_store_invariants w sid s reach hsFound).1
   have hNatUnique : Kv.Properties.Unique nativeHead.data :=
@@ -135,11 +132,12 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     hs.modelArchive.unique s.head (hs.modelSub s.head hHeadMemModel)
   have hCheckDeps (hLin : tx.globalViews.all (fun (m, view) => mapLineage s view.current m) = true) :
       WP.spec (Spike.engine.Tx.valid_dependencies t n) (fun r => r = validates s.head.data tx.normal.deps) := by
-    have hNatOrigins : ∀ d ∈ pointDeps encode t, DependencyHasOrigin nativeFrames nativeHead d := by
+    have hNatCanon : ∀ d ∈ pointDeps encode t,
+        d.holds nativeHead.data = holdsByContents nativeHead.data d := by
       intro d hd
       have hfrom := ht.nativeDeps d hd
       cases d with
-      | key _ _ => trivial
+      | key _ _ => rfl
       | map m expected =>
           obtain ⟨pv, hpv, hexp⟩ := hfrom
           have hmem := find_in_mem hpv
@@ -165,6 +163,8 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
             have := congrArg (fun x => x.2.2) hgvEq
             exact (stamp_beq_eq holdMatch.2).trans this
           have holdArch := native_active_in_archive encode n holdMem
+          obtain ⟨oldNative, holdNativeMem, holdEq⟩ := List.mem_map.mp holdArch
+          obtain ⟨oldIdx, holdIdx⟩ := List.mem_iff_getElem?.mp holdNativeMem
           have hOrig := ht.nativeOrig (bm, bv) hbvMem
           unfold ViewOrigin at hOrig
           dsimp only at hOrig
@@ -184,9 +184,15 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
                   List.mem_map_of_mem hfMem
                 exact hfImg.trans (hs.nativeArchive.sameRevision _ hfArch old holdArch m'
                   (hfRev.trans hrEq.symm))
-          refine ⟨old, holdMem, history_version_bound hNativeShape holdMem, hImgEq, ?_⟩
-          rw [hImgEq]
-          exact archive_image_cells_bounded hs.nativeArchive holdArch m'
+          rw [hImgEq, ← holdEq]
+          simp only [Dependency.holds, holdsByContents]
+          apply decide_eq_decide.mpr
+          constructor
+          · intro h; rw [h]
+          · intro hperm
+            exact modelFrame_image_eq_of_perm inj n.index head oldNative
+              (hs.indexValid.head prior head hf) (hs.indexValid.archived oldIdx oldNative holdIdx)
+              m' hperm
     have hModOrigins : ∀ d ∈ tx.normal.deps, DependencyHasOrigin s.history s.head d := by
       intro d hd
       have hfrom := ht.modelDeps d hd
@@ -220,12 +226,30 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
         tx.normal.deps.all (holdsByContents s.head.data) :=
       validates_by_contents hModelShape s.head s.head hHeadMemModel (.refl _) hModUnique
         hDepsRefl hModOrigins
-    rw [hModelEq]
-    exact validate_dependencies_by_contents encode inj t n head
-      (indexRows n.index head.data) (hs.indexValid.head prior head hf) hs.indexValid.index
-      (by simp [history_head n prior head hf hs.valid]) space.dependencies
-      nativeFrames nativeHead s.head hNativeShape hHeadMemNative rfl hhead hNatUnique
-      tx.normal.deps ht.deps hNatOrigins
+    have hNatEq : validates nativeHead.data (pointDeps encode t) =
+        tx.normal.deps.all (holdsByContents s.head.data) := by
+      have hRel := ht.deps
+      clear hModOrigins hDepsRefl hModelEq
+      generalize pointDeps encode t = nds at hRel hNatCanon
+      generalize tx.normal.deps = mds at hRel
+      induction hRel with
+      | nil => rfl
+      | @cons x y xs ys hxy hrest ih =>
+          simp only [validates, List.all_cons] at ih ⊢
+          rw [hNatCanon x List.mem_cons_self, dependency_order_eq hhead.data hNatUnique hxy,
+            ih (fun d hd => hNatCanon d (List.mem_cons_of_mem _ hd))]
+    apply WP.spec_mono
+      (validate_dependencies_matches_model t n head (indexRows n.index head.data)
+        (hs.indexValid.head prior head hf) hs.indexValid.index
+        (by simp [history_head n prior head hf hs.valid]) space.dependencies)
+    intro r hr
+    rw [hr, ← validates_encoding encode inj]
+    have hRev : validates (encodeData encode (indexedCellData (indexRows n.index head.data)))
+        ((t.deps.val.map byteDependency).map (encodeDependency encode)) =
+        validates nativeHead.data (pointDeps encode t) := by
+      simp [validates, pointDeps, nativeHead, modelFrame, List.all_reverse,
+        List.map_map, Function.comp_def]
+    rw [hRev, hNatEq, ← hModelEq]
   have hcheck : WP.spec (do
       let b ← Spike.engine.Tx.valid_lineage t n
       if b then Spike.engine.Tx.valid_dependencies t n else Result.ok false)
@@ -343,8 +367,8 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                 hn hPhase hWrites hOk hframes rfl rfl hhist.term hhist.global
                 hhist.identity capacity hhist.valid hhist.indexValid)
             rintro ⟨observed, after⟩
-              ⟨version, writes, index, hout, hv, hterm, hreport, hhist', hg, hterm', hi,
-                hidx, hr, hvalid, indexed, kept, hNatArchEq⟩
+              ⟨version, writes, index, nextFrame, hout, hv, hterm, hreport, hnextOrder, hnextView,
+                hhist', hg, hterm', hi, hidx, hr, hvalid, indexed, kept, hArchRaw, hNatArchEq⟩
             let store := advance s tx.normal.writes
             let next := {tx with phase := .applied store.head.version}
             let w' : State := {w with stores := Kv.Model.set w.stores sid store
@@ -370,10 +394,11 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                   rw [h] at hh
                   rw [Option.some.inj hh]
                   exact List.mem_cons_self
-            have hHeadOrder : FrameOrderEq (advance nativeStore nativeWrites).head store.head :=
-              advance_order_eq nativeStore s nativeWrites tx.normal.writes hhead rfl ht.writes
-                (hhist.nativeArchive.unique nativeHead hHeadMemNat)
-                (sorted_pending_unique encode inj t ht.sorted)
+            have hHeadOrder : FrameOrderEq (modelFrame encode after.history.index nextFrame) store.head :=
+              hnextOrder.trans
+                (advance_order_eq nativeStore s nativeWrites tx.normal.writes hhead rfl ht.writes
+                  (hhist.nativeArchive.unique nativeHead hHeadMemNat)
+                  (sorted_pending_unique encode inj t ht.sorted))
             have hFramesNext : List.Forall₂ FrameOrderEq
                 (modelFrames after.history (modelFrame encode after.history.index)) store.history := by
               rw [hhist']
@@ -383,31 +408,30 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
               unfold nativeFrames modelFrames
               rw [hframes, List.reverse_append, List.reverse_singleton, List.singleton_append, List.map_cons]
               rfl
-            have hNatShapeNext : Kv.Properties.History
-                (modelFrames after.history (modelFrame encode after.history.index)) store.head.version := by
-              rw [hhist']
-              change Kv.Properties.History ((advance nativeStore nativeWrites).head :: nativeFrames)
-                (s.head.version + 1)
-              have hVer : (advance nativeStore nativeWrites).head.version = s.head.version + 1 :=
-                congrArg (· + 1) hhead.version
-              have hEff : ∃ ws : Pending,
-                  (advance nativeStore nativeWrites).head.data =
-                    publish (nativeFrames.head?.getD {}).data (s.head.version + 1) ws := by
-                refine ⟨nativeWrites, ?_⟩
-                change publish nativeHead.data (nativeHead.version + 1) nativeWrites = _
-                rw [hNatHeadFirst, Option.getD_some, hhead.version]
-              exact .succ _ s.head.version nativeFrames hVer hEff hhist.nativeShape
+            have hArchCanon : ∀ f ∈ n.history.log.frames.val.map (modelFrame encode n.history.index),
+                ∀ m,
+                  (image (modelFrame encode after.history.index nextFrame).data m).Perm (image f.data m)
+                  → image (modelFrame encode after.history.index nextFrame).data m = image f.data m := by
+              intro f hf m hperm
+              obtain ⟨fnat, hfnatMem, rfl⟩ := List.mem_map.mp hf
+              obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp hfnatMem
+              have hret := model_frame_retained encode kept.index fnat (hhist.indexValid.archived j fnat hj)
+              have hjAfter : after.history.log.frames.val[j]? = some fnat := kept.slots j fnat hj
+              rw [← hret] at hperm ⊢
+              exact modelFrame_image_eq_of_perm inj after.history.index nextFrame fnat
+                hnextView (indexed.archived j fnat hjAfter) m hperm
             have hNatRevNext : RevisionHistory
                 (modelFrames after.history (modelFrame encode after.history.index)) := by
               rw [hhist']
-              exact hhist.revisions.advance hNatHeadFirst nativeWrites
+              exact hhist.revisions.advance_order hNatHeadFirst nativeWrites _ hnextOrder
+                (fun f hf m hp => hArchCanon f (native_active_in_archive encode n.history hf) m hp)
             have hNatArchNext : ArchiveConsistent
                 (after.history.log.frames.val.map (modelFrame encode after.history.index))
                 after.history.next_identity.val := by
               rw [hNatArchEq, hi]
               have hIdEq : nativeStore.nextIdentity = n.history.next_identity.val := hhist.identity
-              exact (hIdEq.symm ▸ hhist.nativeArchive).append (s := nativeStore)
-                hHeadMemNat nativeWrites
+              exact (hIdEq.symm ▸ hhist.nativeArchive).append_order (s := nativeStore)
+                hHeadMemNat nativeWrites _ hnextOrder hArchCanon
             have hModSubNext : ∀ f ∈ store.history, f ∈ archive' := by
               intro f hf
               rcases List.mem_cons.mp hf with rfl | old
@@ -417,9 +441,11 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
               hhist.modelArchive.append hHeadMemMod tx.normal.writes
             have hrel : HistoryMatches encode after.history store archive' :=
               history_related reach hstore hFramesNext hg.symm hterm'.symm hi.symm
-                hvalid indexed hNatShapeNext hNatRevNext hNatArchNext hModSubNext hModArchNext
+                hvalid indexed hNatRevNext hNatArchNext hModSubNext hModArchNext
             have hv' : version.val = store.head.version := by
-              exact hv.trans hHeadOrder.version
+              exact hv.trans (advance_order_eq nativeStore s nativeWrites tx.normal.writes hhead rfl ht.writes
+                (hhist.nativeArchive.unique nativeHead hHeadMemNat)
+                (sorted_pending_unique encode inj t ht.sorted)).version
             have htx
                 : AttemptMatches encode sid after.history archive'
                     {t with phase := .Applied version} next := by

@@ -295,7 +295,9 @@ private theorem sorted_batch_publishes (index : CellIndex) (valid : IndexValid i
     (space : IndexBatchRoom index peak pending.length)
     : WP.spec (Spike.kv_index.AddressIndex.build_sorted_batch index batch)
         (fun (root, after) =>
-          IndexView after root (pending.foldr (applyIndexedWrite version) [])
+          (∃ out,
+            IndexView after root out
+            ∧ out.Perm (pending.foldr (applyIndexedWrite version) []))
           ∧ IndexValid after
           ∧ IndexKeeps index after) := by
   obtain ⟨rows, info⟩ := prepared
@@ -306,54 +308,47 @@ private theorem sorted_batch_publishes (index : CellIndex) (valid : IndexValid i
       using congrArg (List.map Prod.fst) info.exactImage
   have backwards : pending.reverse.Pairwise (fun a b => packedAddress a.1 < packedAddress b.1) :=
     List.pairwise_reverse.mpr info.newestFirst
-  have ordered : rows.Pairwise (fun a b => byteOrder a.key.val b.key.val = (-1)#i8) := by
+  have ordered : rows.Pairwise (fun a b => a.key.val < b.key.val) := by
     have keys : (pending.reverse.map (fun w => packedAddress w.1)).Pairwise (· < ·) :=
       List.pairwise_map.mpr backwards
     rw [← sameKeys, List.pairwise_map] at keys
-    exact keys.imp (fun lt => byte_order_of_lt lt)
-  have room : SortedBatchRoom index rows 112 := by
-    refine ⟨?_, ?_, ?_, ?_, ?_⟩
-    · rw [size]
-      exact ⟨space.values, space.stamps, space.clock⟩
-    · intro row member
-      have small := info.shallow row member
-      omega
-    · intro row member
-      have small := info.shallow row member
-      have width := Usize.max_succ_eq_pow
-      rcases System.Platform.numBits_eq with h | h <;> simp [h] at width <;> omega
-    · rw [size]
-      have strict := Nat.mul_lt_mul_of_pos_left (show 226 < peak + 1 by omega)
-        (show 0 < pending.length by omega)
-      have bound := space.lookup
-      omega
-    · rw [size]
-      have strict := Nat.mul_lt_mul_of_pos_left (show 34 < 2 * peak + 1 by omega)
-        (show 0 < pending.length by omega)
-      have bound := space.order
-      omega
+    exact keys
+  have hDepth : ∀ row ∈ rows, 2 * row.key.val.length ≤ 112 := by
+    intro row member
+    have small := info.shallow row member
+    omega
+  have hKeys : ∀ row ∈ rows, 2 * row.key.val.length + 1 ≤ Usize.max := by
+    intro row member
+    have small := info.shallow row member
+    have width := Usize.max_succ_eq_pow
+    rcases System.Platform.numBits_eq with h | h <;> simp [h] at width <;> omega
+  have hDirRoom : index.values.dirs.val.length + 2 * (rows.length * (112 + 1)) < 2147483647 := by
+    rw [size]
+    have strict := Nat.mul_lt_mul_of_pos_left (show 226 < peak + 1 by omega)
+      (show 0 < pending.length by omega)
+    have bound := space.lookup
+    omega
+  have hRowRoom : index.values.rows.val.length + rows.length ≤ 2147483647 := by
+    rw [size]; exact space.values
   unfold Spike.kv_index.AddressIndex.build_sorted_batch
-  apply WP.spec_bind (build_sorted_batch_refines index batch rows info.owned ordered
-    valid.1 valid.2 112 room)
-  rintro ⟨root, after⟩ ⟨valueValid, orderValid, valueKeeps, orderKeeps, stamp, links, view, bindings⟩
+  apply WP.spec_bind
+    (single_build_sorted_batch_refines index batch rows valid info.owned ordered 112
+      hDepth hKeys hDirRoom hRowRoom)
+  rintro ⟨root, after⟩ ⟨valueValid, valueKeeps, links, view, bindings⟩
   change WP.spec (Result.ok (root, after)) _
   rw [WP.spec_ok]
   have reverseImage : rows.reverse.map batchImage = pending.map (sourceRow version) := by
     simpa only [List.map_reverse, List.reverse_reverse]
       using congrArg List.reverse info.exactImage
-  refine ⟨
-    ⟨
-      links,
-      view,
-      bindings.trans
-        (batch_image_fold version pending rows.reverse reverseImage info.newestFirst)
-    ⟩,
-    ⟨valueValid, orderValid⟩,
-    ⟨valueKeeps, orderKeeps, ?_⟩
-  ⟩
-  omega
+  have hRevFold := batch_image_fold version pending rows.reverse reverseImage info.newestFirst
+  let out : CellRows := (pending.foldr (applyIndexedWrite version) []).reverse
+  have hPacked : singleBindings after links = packedBindings out := by
+    rw [bindings]
+    have hrev := congrArg List.reverse hRevFold
+    simpa only [List.map_reverse, List.reverse_reverse, packedBindings, out] using hrev
+  exact ⟨⟨out, ⟨links, view, hPacked⟩, List.reverse_perm _⟩, valueValid, valueKeeps⟩
 
-theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.DualRoot)
+theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.RadixRoot)
     (rows : CellRows)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
     (view : IndexView index root rows) (valid : IndexValid index)
@@ -364,42 +359,38 @@ theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.
         ∨ (IndexView index base [] ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
     : WP.spec (Spike.engine.publish_selected index base pending version)
         (fun (next, after) =>
-          IndexView after next (pending.val.foldr (applyIndexedWrite version) rows)
+          (∃ out,
+            IndexView after next out
+            ∧ out.Perm (pending.val.foldr (applyIndexedWrite version) rows))
           ∧ IndexValid after
           ∧ IndexKeeps index after) := by
   have fallback := indexed_publish_selected index root base rows pending version
     view valid space addresses chosen
-  unfold Spike.engine.publish_selected Spike.radix.DualRoot.is_empty
-  by_cases lookup : base.lookup = 0#u32
-  · by_cases order : base.order = 0#u32
-    · simp only [lookup, order, ite_true, bind_ok, decide_true]
-      by_cases large : 256#usize ≤ alloc.vec.Vec.len pending
-      · rw [ite_eq_left large]
-        apply WP.spec_bind (prepare_sorted_batch_refines pending version addresses)
-        intro result prep
-        cases result with
-        | none => exact fallback
-        | some batch =>
-            have emptyRoot : base = {lookup := 0#u32, order := 0#u32} := by
-              cases base
-              simp_all
-            have empty : IndexView index base [] := by
-              simpa [Spike.kv_index.AddressIndex.empty_root,
-                Spike.radix.DualRadix.empty_root, WP.spec_ok, emptyRoot]
-                using index_empty_root_refines index
-            have cover : ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst := by
-              rcases chosen with same | covered
-              · have noRows := index_view_unique view (same ▸ empty)
-                simp [noRows]
-              · exact covered.2
-            rw [indexed_fold_cover rows pending.val version cover]
-            have minSize : 256 ≤ pending.val.length := by simpa using large
-            exact sorted_batch_publishes index valid pending.val version batch
-              (prep batch rfl) minSize _ (by omega) space
-      · simpa only [ite_eq_right large] using fallback
-    · simpa only [lookup, order, ite_true, bind_ok, decide_false, Bool.false_eq_true,
-        ite_false]
-        using fallback
-  · simpa only [lookup, ite_false, bind_ok, Bool.false_eq_true] using fallback
+  unfold Spike.engine.publish_selected Spike.radix.RadixRoot.is_empty
+  by_cases emptyBase : base = 0#u32
+  · subst emptyBase
+    simp only [decide_true, bind_ok, ite_true]
+    by_cases large : 256#usize ≤ alloc.vec.Vec.len pending
+    · rw [ite_eq_left large]
+      apply WP.spec_bind (prepare_sorted_batch_refines pending version addresses)
+      intro result prep
+      cases result with
+      | none => exact fallback
+      | some batch =>
+          have empty : IndexView index 0#u32 [] := by
+            simpa [Spike.kv_index.AddressIndex.empty_root,
+              Spike.radix.SingleRadix.empty_root, WP.spec_ok]
+              using index_empty_root_refines index
+          have cover : ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst := by
+            rcases chosen with same | covered
+            · have noRows := index_view_unique view (same ▸ empty)
+              simp [noRows]
+            · exact covered.2
+          rw [indexed_fold_cover rows pending.val version cover]
+          have minSize : 256 ≤ pending.val.length := by simpa using large
+          exact sorted_batch_publishes index valid pending.val version batch
+            (prep batch rfl) minSize _ (by omega) space
+    · simpa only [ite_eq_right large] using fallback
+  · simpa only [emptyBase, decide_false, bind_ok, Bool.false_eq_true, ite_false] using fallback
 
 end KvRust

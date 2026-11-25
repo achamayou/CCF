@@ -33,6 +33,7 @@ public import KvRust.RadixBatch
 public import KvRust.RadixDual
 public import KvRust.RadixDualBatch
 public import KvRust.RadixLiveness
+public import KvRust.RadixSingle
 public import KvRust.Range
 public import KvRust.Relation
 public import KvRust.RetainedCuts

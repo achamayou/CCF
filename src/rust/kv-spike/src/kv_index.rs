@@ -1,24 +1,24 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-use crate::engine::Address;
-use crate::radix::{DualRadix, DualRoot, RadixRow, address_key};
+use crate::engine::{Address, Bytes};
+use crate::radix::{RadixRoot, RadixRow, SingleRadix, address_key, map_prefix};
 
 pub(crate) struct Binding<V> {
     address: Address,
     value: V,
 }
 
-/// Persistent storage over the engine's map/key addresses. The sequence
-/// returned by a scan is the order of the model association list.
-pub struct AddressIndex<V>(DualRadix<Binding<V>>);
+/// Persistent storage over the engine's map/key addresses, scanned in
+/// ascending packed-address byte order.
+pub struct AddressIndex<V>(SingleRadix<Binding<V>>);
 
 impl<V> AddressIndex<V> {
     pub fn new() -> Self {
-        Self(DualRadix::new())
+        Self(SingleRadix::new())
     }
 
-    pub fn empty_root(&self) -> DualRoot {
+    pub fn empty_root(&self) -> RadixRoot {
         self.0.empty_root()
     }
 
@@ -33,11 +33,11 @@ impl<V> AddressIndex<V> {
     pub(crate) fn build_sorted_batch(
         &mut self,
         rows: Vec<Option<RadixRow<Binding<V>>>>,
-    ) -> DualRoot {
+    ) -> RadixRoot {
         self.0.build_sorted_batch(rows)
     }
 
-    pub fn get(&self, root: DualRoot, address: &Address) -> Option<&V> {
+    pub fn get(&self, root: RadixRoot, address: &Address) -> Option<&V> {
         let key = address_key(address.map.as_slice(), address.key.as_slice());
         match self.0.get(root, &key) {
             Some(binding) => Some(&binding.value),
@@ -45,21 +45,26 @@ impl<V> AddressIndex<V> {
         }
     }
 
-    pub fn put(&mut self, root: DualRoot, address: Address, value: V) -> DualRoot {
+    pub fn put(&mut self, root: RadixRoot, address: Address, value: V) -> RadixRoot {
         self.0.put(root, Self::batch_row(address, value))
     }
 
-    pub fn remove(&mut self, root: DualRoot, address: &Address) -> DualRoot {
+    pub fn remove(&mut self, root: RadixRoot, address: &Address) -> RadixRoot {
         let key = address_key(address.map.as_slice(), address.key.as_slice());
         self.0.remove(root, &key)
     }
 
-    pub fn scan_links(&self, root: DualRoot) -> Vec<u32> {
+    pub fn scan_links(&self, root: RadixRoot) -> Vec<u32> {
         self.0.scan_links(root)
     }
 
-    pub fn scan_links_up_to(&self, root: DualRoot, limit: usize) -> Vec<u32> {
+    pub fn scan_links_up_to(&self, root: RadixRoot, limit: usize) -> Vec<u32> {
         self.0.scan_links_up_to(root, limit)
+    }
+
+    pub fn scan_map_links(&self, root: RadixRoot, map: &Bytes) -> Vec<u32> {
+        let prefix = map_prefix(map.as_slice());
+        self.0.scan_prefix_links(root, &prefix)
     }
 
     pub fn scan_row(&self, link: u32) -> (&Address, &V) {
@@ -119,9 +124,22 @@ mod tests {
         assert_eq!(
             ordered(base),
             [
-                (b"a\0".as_slice(), b"\xff".as_slice(), 2),
-                (b"a", b"\0\xff", 1)
+                (b"a".as_slice(), b"\0\xff".as_slice(), 1),
+                (b"a\0", b"\xff", 2)
             ]
         );
+        let for_map = |root, map: &[u8]| {
+            data.scan_map_links(root, &Bytes::copy_from(map))
+                .into_iter()
+                .map(|link| {
+                    let (a, v) = data.scan_row(link);
+                    (a.key.as_slice(), *v)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(for_map(base, b"a"), [(b"\0\xff".as_slice(), 1)]);
+        assert_eq!(for_map(base, b"a\0"), [(b"\xff".as_slice(), 2)]);
+        assert_eq!(for_map(base, b""), []);
+        assert_eq!(for_map(fork, b"a\0"), []);
     }
 }

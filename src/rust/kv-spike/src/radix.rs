@@ -3,6 +3,15 @@
 
 //! Routing for the experimental persistent radix index.
 
+/// Prefix shared by every packed address belonging to `map`.
+pub fn map_prefix(map: &[u8]) -> Vec<u8> {
+    let length = (map.len() as u64).to_le_bytes();
+    let mut encoded = Vec::with_capacity(8 + map.len());
+    encoded.extend_from_slice(&length);
+    encoded.extend_from_slice(map);
+    encoded
+}
+
 /// Separate the map and key without reserving any byte value in either.
 pub fn address_key(map: &[u8], key: &[u8]) -> Vec<u8> {
     let length = (map.len() as u64).to_le_bytes();
@@ -453,9 +462,64 @@ fn push_children(stack: &mut Vec<u32>, dir: &RadixDir) {
 }
 
 /// Enumerate a compressed root's leaf links in byte-key order.
-/// Transaction scans still need the model's write order.
 pub fn scan_leaves(dirs: &[Option<RadixDir>], root: u32) -> Vec<u32> {
     scan_leaves_up_to(dirs, root, usize::MAX)
+}
+
+fn has_prefix(key: &[u8], prefix: &[u8]) -> bool {
+    if key.len() < prefix.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < prefix.len() {
+        if key[i] != prefix[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Descend to the unique subtree containing every key starting with `prefix`.
+pub fn find_prefix_subtree<V>(
+    dirs: &[Option<RadixDir>],
+    rows: &[Option<RadixRow<V>>],
+    root: u32,
+    prefix: &[u8],
+) -> u32 {
+    let prefix_digits = 2 * prefix.len();
+    let mut node = root;
+    while node != 0 && node < RADIX_LEAF_TAG {
+        let dir = directory(dirs, node);
+        if dir.digit >= prefix_digits {
+            break;
+        }
+        node = dir.children[symbol(prefix, dir.digit)];
+    }
+    if node == 0 {
+        return 0;
+    }
+    let rep = if node < RADIX_LEAF_TAG {
+        directory(dirs, node).first
+    } else {
+        node
+    };
+    if has_prefix(&row_at(rows, rep).key, prefix) {
+        node
+    } else {
+        0
+    }
+}
+
+/// Enumerate every leaf whose key starts with `prefix`, in ascending byte-key order.
+pub fn scan_prefix_leaves<V>(
+    dirs: &[Option<RadixDir>],
+    rows: &[Option<RadixRow<V>>],
+    root: u32,
+    prefix: &[u8],
+) -> Vec<u32> {
+    let subtree = find_prefix_subtree(dirs, rows, root, prefix);
+    scan_leaves(dirs, subtree)
 }
 
 fn scan_leaves_up_to(dirs: &[Option<RadixDir>], root: u32, limit: usize) -> Vec<u32> {
@@ -687,6 +751,104 @@ impl<V> Arena<V> {
             root,
             key,
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RadixRoot(pub(crate) u32);
+
+impl RadixRoot {
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Persistent single-arena radix storage ordered by ascending byte key.
+pub struct SingleRadix<V> {
+    values: Arena<V>,
+}
+
+impl<V> SingleRadix<V> {
+    pub fn new() -> Self {
+        Self {
+            values: Arena::new(),
+        }
+    }
+
+    pub fn empty_root(&self) -> RadixRoot {
+        RadixRoot(0)
+    }
+
+    /// Stage one leaf without publishing directories.
+    pub fn stage_batch_leaf(&mut self, row: RadixRow<V>) -> u32 {
+        link_at(
+            allocate(&mut self.values.rows, &mut self.values.free_rows, row),
+            true,
+        )
+    }
+
+    /// Publish staged leaves given in strictly increasing byte-key order.
+    pub fn publish_batch_leaves(&mut self, lookup: &[u32]) -> RadixRoot {
+        RadixRoot(build_sorted(
+            &mut self.values.dirs,
+            &mut self.values.free_dirs,
+            &self.values.rows,
+            lookup,
+        ))
+    }
+
+    /// Publish an unpublished image whose rows are present and in strictly
+    /// increasing byte-key order.
+    pub fn build_sorted_batch(&mut self, mut rows: Vec<Option<RadixRow<V>>>) -> RadixRoot {
+        let n = rows.len();
+        let mut lookup = Vec::with_capacity(n);
+        let mut i = 0;
+        while i < n {
+            let row = match rows[i].take() {
+                Some(row) => row,
+                None => panic!("missing sorted batch row"),
+            };
+            let leaf = self.stage_batch_leaf(row);
+            lookup.push(leaf);
+            i += 1;
+        }
+        self.publish_batch_leaves(&lookup)
+    }
+
+    pub fn get(&self, root: RadixRoot, key: &[u8]) -> Option<&V> {
+        get(&self.values.dirs, &self.values.rows, root.0, key)
+    }
+
+    pub fn put(&mut self, root: RadixRoot, row: RadixRow<V>) -> RadixRoot {
+        let (lookup, _, _) = self.values.put(root.0, row);
+        RadixRoot(lookup)
+    }
+
+    pub fn remove(&mut self, root: RadixRoot, key: &[u8]) -> RadixRoot {
+        RadixRoot(self.values.remove(root.0, key))
+    }
+
+    pub fn scan_links(&self, root: RadixRoot) -> Vec<u32> {
+        scan_leaves(&self.values.dirs, root.0)
+    }
+
+    pub fn scan_links_up_to(&self, root: RadixRoot, limit: usize) -> Vec<u32> {
+        scan_leaves_up_to(&self.values.dirs, root.0, limit)
+    }
+
+    pub fn scan_prefix_links(&self, root: RadixRoot, prefix: &[u8]) -> Vec<u32> {
+        scan_prefix_leaves(&self.values.dirs, &self.values.rows, root.0, prefix)
+    }
+
+    pub fn scan_row(&self, link: u32) -> (&[u8], &V) {
+        let row = row_at(&self.values.rows, link);
+        (&row.key, &row.value)
+    }
+}
+
+impl<V> Default for SingleRadix<V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

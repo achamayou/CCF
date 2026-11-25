@@ -31,10 +31,6 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
       (modelFrames n.history (modelFrame encode n.history.index)) s.history := by
     rw [hf]
     exact .cons (.refl _) .nil
-  have hShape : Kv.Properties.History
-      (modelFrames n.history (modelFrame encode n.history.index)) s.head.version := by
-    rw [hf]
-    exact .zero
   have hRev : RevisionHistory (modelFrames n.history (modelFrame encode n.history.index)) := by
     rw [hf]
     exact revision_history_new
@@ -45,7 +41,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     simpa [hzero, s] using archive_consistent_new
   have hr := history_related (encode := encode) (n := n.history) (archive := [{}]) hReach hs
     hFrames hg.symm (by change term.val = n.history.term.val; rw [ht]) hi.symm valid indexed
-    hShape hRev hNatArch (fun f hm => hm) archive_consistent_new
+    hRev hNatArch (fun f hm => hm) archive_consistent_new
   refine ⟨w, he, ⟨⟨s, [{}], hs, hr, ?_⟩, ?_, hReach⟩⟩
   · intro id
     simp [htx, find, w]

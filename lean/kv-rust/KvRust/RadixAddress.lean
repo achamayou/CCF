@@ -18,6 +18,10 @@ open Aeneas.Std
 def addressPrefix (n : Nat) : List U8 :=
   (BitVec.ofNat 64 n).toLEBytes.map (@UScalar.mk .U8)
 
+/-- Prefix bytes shared by every packed address belonging to `map`. -/
+def mapPrefixBytes (map : List U8) : List U8 :=
+  addressPrefix map.length ++ map
+
 /-- Byte-level separation of map and key for a shared radix. -/
 def addressBytes (map key : List U8) : List U8 :=
   addressPrefix map.length ++ map ++ key
@@ -39,6 +43,29 @@ private theorem address_prefix_inj (a b : Nat) (ha : a < 2 ^ 64) (hb : b < 2 ^ 6
     exact congrArg (fun bytes => (BitVec.fromLEBytes bytes).toNat) equal
   change a % 2 ^ 64 = b % 2 ^ 64 at n
   rwa [Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb] at n
+
+/-- An encoded address starts with `mapPrefixBytes target` iff it belongs to `target`. -/
+theorem map_prefix_iff (target map key : List U8)
+    (ht : target.length < 2 ^ 64) (hm : map.length < 2 ^ 64)
+    : (mapPrefixBytes target <+: addressBytes map key) ↔ map = target := by
+  constructor
+  · rintro ⟨tail, eq⟩
+    have htake : (mapPrefixBytes target ++ tail).take 8 = (addressBytes map key).take 8 :=
+      congrArg (List.take 8) eq
+    have hleft : (mapPrefixBytes target ++ tail).take 8 = addressPrefix target.length := by
+      rw [mapPrefixBytes, List.append_assoc, ← address_prefix_length target.length, List.take_left]
+    have hright : (addressBytes map key).take 8 = addressPrefix map.length := by
+      rw [addressBytes, List.append_assoc, ← address_prefix_length map.length, List.take_left]
+    have hpre : addressPrefix target.length = addressPrefix map.length :=
+      hleft.symm.trans (htake.trans hright)
+    have hlen : target.length = map.length := address_prefix_inj _ _ ht hm hpre
+    rw [mapPrefixBytes, addressBytes, List.append_assoc, List.append_assoc, hpre,
+      List.append_cancel_left_eq] at eq
+    have hmap := congrArg (List.take target.length) eq
+    rw [List.take_left, hlen, List.take_left] at hmap
+    exact hmap.symm
+  · rintro rfl
+    exact ⟨key, rfl⟩
 
 /-- Encoding addresses cannot alias an arbitrary map/key split or an empty half. -/
 theorem address_bytes_injective (a b ka kb : List U8)
@@ -72,6 +99,53 @@ private theorem append_bytes (v : alloc.vec.Vec U8) (s : Slice U8)
       (by intros; rfl : ∀ b ∈ s.val, core.clone.CloneU8.clone b = Result.ok b))
   intro copy equal
   simp [equal]
+
+/-- The extracted map-prefix encoder computes `mapPrefixBytes`. -/
+theorem native_map_prefix (map : Slice U8) (room : 8 + map.val.length ≤ Usize.max)
+    : WP.spec (Spike.radix.map_prefix map)
+        (fun out => out.val = mapPrefixBytes map.val) := by
+  unfold Spike.radix.map_prefix
+  let size := UScalar.cast .U64 (Slice.len map)
+  have sizeVal : size.val = map.val.length := by
+    unfold size
+    rw [UScalar.cast_val_mod_pow_greater_numBits_eq .U64 (Slice.len map)
+      (by
+        simp only [UScalarTy.Usize_numBits_eq, UScalarTy.U64_numBits_eq]
+        rcases System.Platform.numBits_eq with h | h <;> simp [h])]
+    exact Slice.len_val _
+  simp only [lift, bind_ok]
+  let header := Array.to_slice (core.num.U64.to_le_bytes size)
+  have hHeader : header.val = addressPrefix map.val.length := by
+    rw [Array.val_to_slice]
+    have bytes := core.num.U64.to_le_bytes.step_spec size
+    simp only [lift, WP.spec_ok] at bytes
+    have bitEq : size.bv = BitVec.ofNat 64 map.val.length := by
+      apply BitVec.eq_of_toNat_eq
+      change size.val = map.val.length % 2 ^ 64
+      have small : map.val.length < 2 ^ 64 := by
+        rw [← sizeVal]
+        scalar_tac
+      rw [Nat.mod_eq_of_lt small, sizeVal]
+    rw [bytes]
+    change size.bv.toLEBytes.map (@UScalar.mk .U8) = _
+    rw [bitEq]
+    rfl
+  have ml : (Slice.len map).val = map.val.length := Slice.len_val _
+  have eight : (8#usize : Usize).val = 8 := rfl
+  apply WP.spec_bind (Usize.add_spec (x := 8#usize) (y := Slice.len map) (by omega))
+  intro capacity _
+  have hlen : header.val.length = 8 := hHeader ▸ address_prefix_length _
+  apply WP.spec_bind
+    (append_bytes (alloc.vec.Vec.with_capacity U8 capacity) header
+      (by
+        change 0 + header.val.length ≤ Usize.max
+        omega))
+  intro firstBytes hp
+  have headerOnly : firstBytes.val = header.val := by
+    simpa [alloc.vec.Vec.with_capacity] using hp
+  apply WP.spec_mono (append_bytes firstBytes map (by rw [headerOnly, hlen]; exact room))
+  intro out complete
+  simpa [mapPrefixBytes, headerOnly, hHeader] using complete
 
 /-- The extracted bulk-copy path computes exactly the address encoding. -/
 theorem native_address_key (map key : Slice U8)

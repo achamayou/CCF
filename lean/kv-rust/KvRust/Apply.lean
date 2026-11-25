@@ -194,7 +194,7 @@ structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
   /-- Capacity for birth records. -/
   births : head.births.val.length + t.pending.val.length ≤ Usize.max
 
-/-- Accepted local application publishes the same frame with or without a write report. -/
+/-- Accepted local application publishes the frame modulo binding order, with or without a write report. -/
 theorem apply_accepted_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.Store) (id : U64)
     (includeReport : Bool) (t : Spike.engine.Tx) (model : Store)
@@ -214,13 +214,16 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       let expected := advance model writes
       WP.spec (Spike.engine.Store.apply s id includeReport)
         (fun (result, after) =>
-          ∃ version reported index,
+          ∃ version reported index next,
             result = .Ok (.Applied version s.history.term reported)
             ∧ version.val = expected.head.version
             ∧ s.history.term.val = expected.term
             ∧ encodeReport encode reported = (if includeReport then writes else [])
+            ∧ FrameOrderEq (modelFrame encode after.history.index next) expected.head
+            ∧ IndexView after.history.index next.data
+                (indexRows after.history.index next.data)
             ∧ modelFrames after.history (modelFrame encode after.history.index)
-              = expected.history
+              = modelFrame encode after.history.index next :: model.history
             ∧ after.history.global.val = expected.global
             ∧ after.history.term.val = expected.term
             ∧ after.history.next_identity.val = expected.nextIdentity
@@ -229,9 +232,10 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ BranchValid after.history.log
             ∧ HistoryIndexValid after.history
             ∧ HistoryKeeps s.history after.history
+            ∧ after.history.log.frames.val = s.history.log.frames.val ++ [next]
             ∧ after.history.log.frames.val.map (modelFrame encode after.history.index)
               = s.history.log.frames.val.map (modelFrame encode s.history.index)
-                ++ [expected.head]) := by
+                ++ [modelFrame encode after.history.index next]) := by
   dsimp only
   unfold Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -299,17 +303,37 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             history := {s.history with log, index := arena, next_identity := identity}
             txs := back (id, {t with phase := .Applied version})} : Spike.engine.Store))) _
       rw [WP.spec_ok]
-      refine ⟨version, reported, ?_⟩
-      refine ⟨rfl, hv', hTerm.symm, hreported, ?_, hGlobal.symm,
-        hTerm.symm, ?_, i.val, hrow, ?_, logValid, ?_, ⟨?_, indexKept⟩, ?_⟩
+      dsimp only
+      refine ⟨
+        version,
+        reported,
+        rfl,
+        hv',
+        hTerm.symm,
+        hreported,
+        i.val,
+        next,
+        hnext,
+        view,
+        ?_,
+        hGlobal.symm,
+        hTerm.symm,
+        ?_,
+        hrow,
+        ?_,
+        logValid,
+        ?_,
+        ⟨?_, indexKept⟩,
+        archive,
+        ?_
+      ⟩
       · simp only [modelFrames, Spike.engine.History.activeFrames, hf, List.reverse_append,
           List.reverse_singleton, List.singleton_append,
           List.map_cons]
         have same := congrArg List.reverse (model_frame_retained_active encode indexed indexKept)
         simp only [← List.map_reverse] at same
         unfold modelFrames at hFrames
-        rw [same, ← hFrames, hnext]
-        rfl
+        rw [same, ← hFrames]
       · simpa [hone, hIdentity, advance] using hidentity
       · rw [hback.2]
         exact alloc.vec.Vec.set_val_eq _ _ _
@@ -321,8 +345,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
           rw [List.getElem?_eq_none (Nat.le_of_not_gt hn)] at saved
           cases saved
         exact (kept j bound).trans saved
-      · change log.frames.val.map (modelFrame encode arena) = _
-        rw [archive, List.map_append, List.map_singleton, hnext]
+      · rw [archive, List.map_append, List.map_singleton]
         congr 1
         apply List.map_congr_left
         intro f hfmem
@@ -522,8 +545,8 @@ theorem replay_next_matches_advance (encode : List U8 → String)
           (result = .Err .Disabled ∧ after = s)
           ∨ (result = .Ok ()
               ∧ ∃ next,
-                  modelFrame encode after.history.index next
-                    = (advance model (encodeReport encode writes)).head
+                  FrameOrderEq (modelFrame encode after.history.index next)
+                    (advance model (encodeReport encode writes)).head
                   ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
                   ∧ after.history.next_identity.val = s.history.next_identity.val + 1
                   ∧ after.history.term = s.history.term

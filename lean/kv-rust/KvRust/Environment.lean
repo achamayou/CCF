@@ -33,12 +33,11 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
       unfold store compactStore
       split <;> rfl
     refine ⟨h.nonempty, ?_, ?_, h.indexed, hcut.symm, ?_, ?_, h.valid,
-      h.indexValid.congr rfl rfl, ?_, h.revisions, h.nativeArchive, ?_, ?_⟩
+      h.indexValid.congr rfl rfl, h.revisions, h.nativeArchive, ?_, ?_⟩
     · rw [he']; exact h.frames
     · rw [he']; exact h.head
     · rw [he']; exact h.term
     · rw [he']; exact h.identity
-    · rw [he']; exact h.nativeShape
     · rw [he']; exact h.modelSub
     · rw [he']; exact h.modelArchive
   have rel := replace_history related.unique hattempts h hn (w' := w')
@@ -114,44 +113,8 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
             (fun f => decide (f.version ≤ cut.val)) := by
         rw [hindexKept, hmodel, hcut]
         rfl
-      have hFilterShape {fs : List Frame} {v c : Nat} (shape : Kv.Properties.History fs v)
-          (bound : c ≤ v) :
-          Kv.Properties.History (fs.filter fun f => decide (f.version ≤ c)) c := by
-        induction shape with
-        | zero =>
-            have hz : c = 0 := by omega
-            subst hz
-            exact .zero
-        | succ f n tail fv eff rest ih =>
-            by_cases hle : n + 1 ≤ c
-            · have heq : c = n + 1 := by omega
-              subst heq
-              have hKeep : (f :: tail).filter (fun g => decide (g.version ≤ n + 1)) = f :: tail := by
-                apply List.filter_eq_self.mpr
-                intro g hg
-                apply decide_eq_true
-                rcases List.mem_cons.mp hg with rfl | old
-                · omega
-                · have bounded (rows : List Frame) (k : Nat) (hr : Kv.Properties.History rows k)
-                      (x : Frame) (hx : x ∈ rows) : x.version ≤ k := by
-                    induction hr with
-                    | zero => rw [List.mem_singleton.mp hx]
-                    | succ f' n' t' fv' _ _ ih' =>
-                        rcases List.mem_cons.mp hx with rfl | o'
-                        · omega
-                        · exact Nat.le_trans (ih' o') (Nat.le_succ _)
-                  exact Nat.le_trans (bounded tail n rest g old) (Nat.le_succ _)
-              rw [hKeep]
-              exact .succ f n tail fv eff rest
-            · have hlt : c ≤ n := by omega
-              simp only [List.filter_cons, fv, hle, decide_false, Bool.false_eq_true, ite_false]
-              exact ih hlt
-      have hCutBound : cut.val ≤ s.head.version := by
-        have hreach := (Kv.Properties.reachable_store_invariants w sid s related.reachable hs).2.2.1
-        rw [hcut, ← hcutEq, rollbackCut]
-        exact max_le hreach (min_le_left _ _)
       have hvalid : HistoryMatches encode after.history store archive := by
-        refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, hlog, h.indexValid.congr hindexKept hkept, ?_, ?_,
+        refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, hlog, h.indexValid.congr hindexKept hkept, ?_,
           ?_, ?_, ?_⟩
         · simp [htake, List.take_eq_nil_iff, h.nonempty]
         · rw [hAfterFrames]
@@ -174,8 +137,6 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           rw [hterm]
         · change s.nextIdentity = after.history.next_identity.val
           rw [hidentity]; exact h.identity
-        · rw [hAfterFrames, hh]
-          exact hFilterShape h.nativeShape hCutBound
         · rw [hAfterFrames]
           exact h.revisions.filter _
         · rw [hkept, hindexKept, hidentity]

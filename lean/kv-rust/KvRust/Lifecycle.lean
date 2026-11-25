@@ -18,7 +18,7 @@ private abbrev NativeResult :=
 
 private abbrev NativeStep := NativeResult × Spike.engine.Store
 
-private def emptyFrame (root : Spike.radix.DualRoot) : Spike.engine.Frame :=
+private def emptyFrame (root : Spike.radix.RadixRoot) : Spike.engine.Frame :=
   {
     version := 0#u64
     data := root

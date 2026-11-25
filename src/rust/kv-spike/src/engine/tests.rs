@@ -312,7 +312,7 @@ fn sorted_publication_keeps_scan_order_and_pinned_values() {
             panic!("scan must return the published rows");
         };
         assert_eq!(rows.len(), 256);
-        for ((key, value), index) in rows.iter().zip((0..256_u16).rev()) {
+        for ((key, value), index) in rows.iter().zip(0..256_u16) {
             assert_eq!(key.as_slice(), index.to_be_bytes());
             assert_eq!(value.as_slice(), expected);
         }
@@ -382,7 +382,7 @@ fn bulk_replacement_requires_full_coverage_and_preserves_a_pinned_cut() {
     let Output::Entries(rows) = op(&mut store, 3, map, Operation::Scan) else {
         panic!("scan must return the replaced rows");
     };
-    let keys = (0..257_u16).rev().filter(|&key| key != 1);
+    let keys = (0..257_u16).filter(|&key| key != 1);
     assert_eq!(rows.len(), 256);
     for ((key, value), expected) in rows.iter().zip(keys) {
         assert_eq!(key.as_slice(), expected.to_be_bytes());

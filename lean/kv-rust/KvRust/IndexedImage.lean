@@ -52,22 +52,35 @@ private theorem append_image_row_refines (out : MapRows)
 
 /-- The extracted map materialization preserves the ordered, versioned rows. -/
 theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.Cell)
-    (root : Spike.radix.DualRoot) (rows : CellRows) (map : Spike.engine.Bytes)
+    (root : Spike.radix.RadixRoot) (rows : CellRows) (map : Spike.engine.Bytes)
     (view : IndexView index root rows) (valid : IndexValid index)
+    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
     (room : 18 * rows.length ≤ Usize.max)
     : WP.spec (Spike.engine.indexed_image index root map)
         (fun out => out.val = indexedImageRows rows map) := by
+  let selected := rows.filter fun r => decide (r.1.map.val = map.val)
+  have hSelImg : indexedImageRows selected map = indexedImageRows rows map := by
+    unfold selected indexedImageRows
+    clear view valid room
+    induction rows with
+    | nil => rfl
+    | cons r rest ih =>
+        by_cases hm : r.1.map.val = map.val <;> simp [hm, ih]
   unfold Spike.engine.indexed_image
-  apply WP.spec_bind (index_scan_refines index root rows view valid room)
+  apply WP.spec_bind (index_scan_map_refines index root rows map view valid mapRoom room)
   intro links ⟨length, load⟩
+  change links.val.length = selected.length at length
+  change ∀ (i : Nat) link, links.val[i]? = some link →
+    ∃ entry, selected[i]? = some entry ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry) at load
   apply WP.spec_bind
-    (Pₘ := fun out => out.val = indexedImageRows rows map)
+    (Pₘ := fun out => out.val = indexedImageRows selected map)
   · unfold Spike.engine.indexed_image_loop
-    apply loop.spec_decr_nat (fun (_, i) => rows.length - (i : Usize).val)
+    apply loop.spec_decr_nat (fun (_, i) => selected.length - (i : Usize).val)
       (fun (out, i) =>
-        i.val ≤ rows.length
-        ∧ out.val.length + (rows.length - i.val) ≤ Usize.max
-        ∧ out.val ++ indexedImageRows (rows.drop i.val) map = indexedImageRows rows map)
+        i.val ≤ selected.length
+        ∧ out.val.length + (selected.length - i.val) ≤ Usize.max
+        ∧ out.val ++ indexedImageRows (selected.drop i.val) map
+          = indexedImageRows selected map)
       _ _ _
     · rintro ⟨out, i⟩ ⟨hi, space, ordered⟩
       dsimp only at hi space ordered ⊢
@@ -96,22 +109,27 @@ theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.
             rw [WP.spec_ok]
             dsimp only
             refine ⟨⟨by omega, by omega, ?_⟩, by omega⟩
-            have within : i.val < rows.length := by omega
-            have rowEq : rows[i.val] = (address, cell) := by
+            have within : i.val < selected.length := by omega
+            have rowEq : selected[i.val] = (address, cell) := by
               rw [List.getElem?_eq_getElem within, Option.some.injEq] at modelRow
               exact modelRow
-            have drop : rows.drop i.val = [(address, cell)] ++ rows.drop j.val := by
+            have drop : selected.drop i.val = [(address, cell)] ++ selected.drop j.val := by
               rw [List.drop_eq_getElem_cons within, rowEq, show j.val = i.val + 1 by omega]
               rfl
             rw [hn.1, List.append_assoc, ← indexed_image_append, ← drop]
             exact ordered
-      · have hb : rows.length ≤ i.val := by
+      · have hb : selected.length ≤ i.val := by
           have no : ¬ i.val < (alloc.vec.Vec.len links).val := h
           omega
         rw [ite_eq_right h, WP.spec_ok]
         simpa [List.drop_eq_nil_of_le hb, indexedImageRows] using ordered
-    · simp [← length, alloc.vec.Vec.len_ineq links]
+    · have hcap := alloc.vec.Vec.len_ineq links
+      have h0 : (0#usize : Usize).val = 0 := rfl
+      simp only [h0, Nat.zero_le, Nat.sub_zero, List.drop_zero, true_and]
+      have hwc : (alloc.vec.Vec.with_capacity (Spike.engine.Bytes × Spike.engine.Cell) (alloc.vec.Vec.len links)).val = [] := by
+        simp [alloc.vec.Vec.with_capacity]
+      simp [hwc, ← length, hcap]
   · intro out eq
-    simpa using eq
+    simpa [hSelImg] using eq
 
 end KvRust

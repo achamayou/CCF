@@ -4,7 +4,7 @@ This opt-in package checks [a Rust prototype](../../src/rust/kv-spike) against t
 It is not linked into production CCF and does not change the existing Lean specification.
 
 The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, associative transaction state, and an append-only archive of version frames.
-Each frame holds a pair of persistent radix roots: one for address lookup and one for the model's prepend-on-write scan order.
+Each frame holds a single persistent radix root ordered by packed `(map_len, map, key)` bytes, supporting prefix-scoped map scans without maintaining a second chronology index.
 Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
 Compaction advances the global frontier and changes which map views can be acquired; it does not yet reclaim old frames.
 The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
