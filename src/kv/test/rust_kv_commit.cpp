@@ -8,63 +8,145 @@ namespace ccf::kv::rust_test
   CommitResult Store::commit(
     const TxID& id, std::unique_ptr<PendingTx> entry, bool committable)
   {
-    size_t epoch = 0;
+    std::lock_guard ordered(commit_lock);
+
+    std::vector<std::tuple<std::unique_ptr<PendingTx>, bool>>
+      contiguous_pending_txs;
+    Version previous_last_replicated = 0;
+    Version next_last_replicated = 0;
+    size_t previous_rollback_count = 0;
+    View replication_view = 0;
+    std::shared_ptr<Consensus> c;
+    std::shared_ptr<TxHistory> h;
+    std::shared_ptr<ILedgerChunker> ch;
+
     {
-      std::lock_guard lock(mutex);
-      if (term != id.view || id.seqno > reserved_through)
+      std::lock_guard lock(state_lock);
+      if (term != id.view)
       {
         return CommitResult::FAIL_NO_REPLICATE;
       }
-      epoch = rollback_count;
-    }
-    // The callback can publish a reserved transaction and roll back the store.
-    auto info = entry->call();
-    if (info.success != CommitResult::SUCCESS)
-    {
-      return info.success;
-    }
-    std::lock_guard ordered(commit_order);
-    std::unique_lock lock(mutex);
-    const auto slot = reserved_entries.find(id.seqno);
-    if (
-      term != id.view || epoch != rollback_count ||
-      slot == reserved_entries.end() ||
-      slot->second != std::make_pair(id.view, epoch))
-    {
-      return CommitResult::FAIL_NO_REPLICATE;
-    }
-    reserved_entries.erase(slot);
-    const auto size = info.data.size();
-    if (auto c = consensus)
-    {
-      if (history)
+
+      if (committable && id.seqno > last_committable)
       {
-        history->append_entry(
-          ccf::entry_leaf(
-            info.data, info.commit_evidence_digest, info.claims_digest),
-          id.view);
+        last_committable = id.seqno;
       }
-      BatchVector batch{
-        {id.seqno,
-         std::make_shared<std::vector<uint8_t>>(std::move(info.data)),
-         committable,
-         std::make_shared<ConsensusHookPtrs>(std::move(info.hooks))}};
-      lock.unlock();
-      const auto submitted = c->replicate(batch, id.view);
-      lock.lock();
-      if (!submitted || rollback_count != epoch || term != id.view)
+
+      if (pending_txs.empty() && id.seqno == last_replicated + 1)
+      {
+        // Fast path for the common in-order commit: avoid touching the map.
+        contiguous_pending_txs.emplace_back(std::move(entry), committable);
+      }
+      else
+      {
+        pending_txs.insert(
+          {id.seqno, std::make_tuple(std::move(entry), committable)});
+
+        for (Version offset = 1;; ++offset)
+        {
+          auto search = pending_txs.find(last_replicated + offset);
+          if (search == pending_txs.end())
+          {
+            break;
+          }
+          contiguous_pending_txs.emplace_back(std::move(search->second));
+          pending_txs.erase(search);
+        }
+      }
+
+      previous_rollback_count = rollback_count;
+      previous_last_replicated = last_replicated;
+      next_last_replicated = last_replicated + contiguous_pending_txs.size();
+      replication_view = term;
+      c = consensus;
+      h = history;
+      ch = chunker;
+    }
+
+    if (contiguous_pending_txs.empty())
+    {
+      return CommitResult::SUCCESS;
+    }
+
+    BatchVector batch;
+    if (c)
+    {
+      batch.reserve(contiguous_pending_txs.size());
+    }
+
+    size_t offset = 1;
+    for (auto& [pending_tx, entry_committable] : contiguous_pending_txs)
+    {
+      // Invoked without maps_lock/state_lock so reserved PendingTx::call() can
+      // create/commit a reserved transaction or trigger rollback safely.
+      auto info = pending_tx->call();
+      if (info.success != CommitResult::SUCCESS)
+      {
+        return info.success;
+      }
+
+      if (c)
+      {
+        auto data_shared =
+          std::make_shared<std::vector<uint8_t>>(std::move(info.data));
+        auto hooks_shared =
+          std::make_shared<ConsensusHookPtrs>(std::move(info.hooks));
+
+        if (h)
+        {
+          h->append_entry(
+            ccf::entry_leaf(
+              *data_shared, info.commit_evidence_digest, info.claims_digest),
+            replication_view);
+        }
+
+        if (ch)
+        {
+          std::lock_guard lock(state_lock);
+          if (
+            previous_rollback_count == rollback_count &&
+            replication_view == term)
+          {
+            ch->append_entry_size(data_shared->size());
+          }
+        }
+
+        batch.emplace_back(
+          previous_last_replicated + offset,
+          std::move(data_shared),
+          entry_committable,
+          std::move(hooks_shared));
+      }
+
+      ++offset;
+    }
+
+    if (c)
+    {
+      {
+        std::lock_guard lock(state_lock);
+        if (
+          previous_rollback_count != rollback_count || replication_view != term)
+        {
+          return CommitResult::FAIL_NO_REPLICATE;
+        }
+      }
+      if (!c->replicate(batch, replication_view))
       {
         return CommitResult::FAIL_NO_REPLICATE;
       }
-      if (chunker)
+    }
+
+    {
+      std::lock_guard lock(state_lock);
+      if (
+        last_replicated == previous_last_replicated &&
+        previous_rollback_count == rollback_count)
       {
-        chunker->append_entry_size(size);
+        last_replicated = next_last_replicated;
       }
     }
-    if (committable)
-    {
-      last_committable = std::max(last_committable, id.seqno);
-    }
+
     return CommitResult::SUCCESS;
   }
 
@@ -75,7 +157,7 @@ namespace ccf::kv::rust_test
       throw std::logic_error("Reserved transaction needs a version");
     }
     auto tx = create_tx();
-    std::lock_guard lock(mutex);
+    std::lock_guard lock(state_lock);
     tx.state->reserved = version;
     tx.state->reserve_epoch = rollback_count;
     return tx;
@@ -100,12 +182,6 @@ namespace ccf::kv::rust_test
     using Flag = CommittableTx::TxFlag;
     auto& s = *state;
     auto& store = s.store;
-    std::lock_guard ordered(store.commit_order);
-    std::unique_lock lock(store.mutex);
-    auto action = [&](Opcode op, Outcome outcome = Outcome::SUCCESS) {
-      return store.dispatch(
-        {.op = op, .attempt = s.id, .number = static_cast<uint64_t>(outcome)});
-    };
     auto result_only = [](CommitResult result) -> PendingTxInfo {
       return {result, {}, empty_claims(), {}, {}};
     };
@@ -117,47 +193,34 @@ namespace ccf::kv::rust_test
     {
       throw std::logic_error("Use the commit method for this transaction kind");
     }
-    auto pending = action(Opcode::PENDING_WRITES);
+
+    // Collect pending writes and run size pre-checks outside all store locks.
+    auto pending =
+      Store::wrap_reply(ccf_rust_kv_tx_pending_writes(s.native_tx));
     pending.require();
-    if (reserved)
+    if (reserved && pending.size == 0)
     {
-      if (pending.size == 0)
-      {
-        throw std::logic_error("Reserved transaction cannot be empty");
-      }
-      const auto id = *s.reserved;
-      if (s.reserve_epoch != store.rollback_count || id.view != store.term)
-      {
-        s.committing = true;
-        s.aborted = true;
-        s.version = id.seqno;
-        return result_only(CommitResult::FAIL_NO_REPLICATE);
-      }
-      if (
-        id.seqno <= store.head || id.seqno - store.head != 1 ||
-        id.seqno > store.reserved_through)
-      {
-        throw std::logic_error("Reserved transaction is not the next slot");
-      }
+      throw std::logic_error("Reserved transaction cannot be empty");
     }
-    else if (pending.size != 0 && store.reserved_through > store.head)
-    {
-      throw std::logic_error(
-        "A reserved slot must be filled before a normal write");
-    }
+
     MapWrites writes;
+    EncryptorPtr encryptor;
+    size_t max_entry_size = max_serialised_entry_size;
     if (pending.size != 0)
     {
       if (claims.empty())
       {
         throw std::logic_error("Missing claims");
       }
-      if (store.encryptor == nullptr)
+      {
+        std::lock_guard lock(store.state_lock);
+        encryptor = store.encryptor;
+        max_entry_size = store.max_entry_size;
+      }
+      if (encryptor == nullptr)
       {
         throw KvSerialiserException("No encryptor set");
       }
-      // CommitBegin freezes the pending writes, and Apply publishes that
-      // same set while the store mutex is held.
       writes = collect_writes(pending);
       pending.data.reset();
       if (!reserved)
@@ -173,7 +236,7 @@ namespace ccf::kv::rust_test
           return true;
         };
         size_t est = sizeof(SerialisedEntryHeader) +
-          store.encryptor->get_header_length() + sizeof(size_t);
+          encryptor->get_header_length() + sizeof(size_t);
         bool ok = checked_add(
           est,
           sizeof(uint8_t) + sizeof(Version) +
@@ -201,10 +264,10 @@ namespace ccf::kv::rust_test
             ok = checked_add(est, row_bytes);
           }
         }
-        if (!ok || est > store.max_entry_size)
+        if (!ok || est > max_entry_size)
         {
           SizeKvStoreSerialiser shape(
-            store.encryptor,
+            encryptor,
             {s.captured_term.value(), NoVersion},
             EntryType::WriteSetWithCommitEvidenceAndClaims,
             0,
@@ -212,88 +275,134 @@ namespace ccf::kv::rust_test
             claims);
           serialise_writes(shape, writes);
           const auto size = shape.get_serialised_size();
-          if (size > store.max_entry_size)
+          if (size > max_entry_size)
           {
             throw MaxTransactionSizeExceeded(
-              describe_serialised_entry_size_error(size, store.max_entry_size));
+              describe_serialised_entry_size_error(size, max_entry_size));
           }
         }
       }
     }
-    action(Opcode::COMMIT_BEGIN).require();
-    s.committing = true;
-    auto applied = action(Opcode::APPLY);
-    if (applied.status == Status::CONFLICT)
+
+    TxID id{};
+    size_t epoch = 0;
+    SerialisedEntryFlags entry_flags = 0;
+    ConsensusHookPtrs hooks;
+
     {
-      action(Opcode::COMMIT_RESULT, Outcome::CONFLICT).require();
+      std::scoped_lock lock(store.maps_lock, store.state_lock);
       if (reserved)
       {
-        throw std::logic_error("Failed to commit reserved transaction");
+        const auto reserved_id = *s.reserved;
+        if (
+          s.reserve_epoch != store.rollback_count ||
+          reserved_id.view != store.term)
+        {
+          s.committing = true;
+          s.aborted = true;
+          s.version = reserved_id.seqno;
+          return result_only(CommitResult::FAIL_NO_REPLICATE);
+        }
+        if (
+          reserved_id.seqno <= store.head ||
+          reserved_id.seqno - store.head != 1 ||
+          reserved_id.seqno > store.reserved_through)
+        {
+          throw std::logic_error("Reserved transaction is not the next slot");
+        }
       }
-      return result_only(CommitResult::FAIL_CONFLICT);
-    }
-    if (applied.status == Status::STALE_TERM)
-    {
-      action(Opcode::COMMIT_RESULT, Outcome::NO_REPLICATE).require();
-      return result_only(CommitResult::FAIL_NO_REPLICATE);
-    }
-
-    if (applied.status == Status::READ_ONLY)
-    {
-      if (
-        tx_flag_enabled(Flag::SNAPSHOT_AT_NEXT_SIGNATURE) &&
-        s.captured_term.has_value())
+      else if (!writes.empty() && store.reserved_through > store.head)
       {
-        store.snapshot_requested = true;
-        unset_tx_flag(Flag::SNAPSHOT_AT_NEXT_SIGNATURE);
+        throw std::logic_error(
+          "A reserved slot must be filled before a normal write");
       }
-      action(Opcode::COMMIT_RESULT).require();
-      s.version = NoVersion;
-      s.committed = true;
-      return result_only(CommitResult::SUCCESS);
-    }
-    applied.require();
-    store.head = applied.number;
-    store.last_view = applied.detail;
-    const TxID id{applied.detail, applied.number};
-    const auto epoch = store.rollback_count;
-    SerialisedEntryFlags entry_flags = 0;
-    if (tx_flag_enabled(Flag::LEDGER_CHUNK_BEFORE_THIS_TX))
-    {
-      entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_BEFORE;
-    }
-    if (!reserved)
-    {
-      store.apply_tx_flags_locked(
-        id.seqno,
-        tx_flag_enabled(Flag::LEDGER_CHUNK_AT_NEXT_SIGNATURE),
-        tx_flag_enabled(Flag::SNAPSHOT_AT_NEXT_SIGNATURE));
-    }
-    else if (store.mark_reserved_chunk_locked(id.seqno))
-    {
-      entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_AFTER;
+
+      if (!writes.empty())
+      {
+        encryptor = store.encryptor;
+        max_entry_size = store.max_entry_size;
+        if (encryptor == nullptr)
+        {
+          throw KvSerialiserException("No encryptor set");
+        }
+      }
+
+      s.committing = true;
+      auto applied = Store::wrap_reply(
+        ccf_rust_kv_tx_prepare_commit(store.native.get(), s.native_tx));
+      if (applied.status == Status::CONFLICT)
+      {
+        if (reserved)
+        {
+          throw std::logic_error("Failed to commit reserved transaction");
+        }
+        return result_only(CommitResult::FAIL_CONFLICT);
+      }
+      if (applied.status == Status::STALE_TERM)
+      {
+        return result_only(CommitResult::FAIL_NO_REPLICATE);
+      }
+      if (applied.status == Status::READ_ONLY)
+      {
+        if (
+          tx_flag_enabled(Flag::SNAPSHOT_AT_NEXT_SIGNATURE) &&
+          s.captured_term.has_value())
+        {
+          store.snapshot_requested.store(true, std::memory_order_release);
+          unset_tx_flag(Flag::SNAPSHOT_AT_NEXT_SIGNATURE);
+        }
+        s.version = NoVersion;
+        s.committed = true;
+        return result_only(CommitResult::SUCCESS);
+      }
+      applied.require();
+      store.head = applied.number;
+      store.last_view = applied.detail;
+      id = TxID{applied.detail, applied.number};
+      epoch = store.rollback_count;
+
+      if (tx_flag_enabled(Flag::LEDGER_CHUNK_BEFORE_THIS_TX))
+      {
+        entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_BEFORE;
+      }
+      if (!reserved)
+      {
+        store.apply_tx_flags_locked(
+          id.seqno,
+          tx_flag_enabled(Flag::LEDGER_CHUNK_AT_NEXT_SIGNATURE),
+          tx_flag_enabled(Flag::SNAPSHOT_AT_NEXT_SIGNATURE));
+      }
+      else if (store.mark_reserved_chunk_locked(id.seqno))
+      {
+        entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_AFTER;
+      }
+
+      hooks = store.record_commit_locked(id.seqno, writes);
     }
 
-    const auto evidence = store.encryptor->get_commit_evidence(id);
+    // Encryption, serialisation, commit evidence hashing, write-set observer,
+    // and consensus replication all run outside maps_lock and state_lock.
+    const auto evidence = encryptor->get_commit_evidence(id);
     auto evidence_digest = ccf::crypto::Sha256Hash(evidence);
     RawKvStoreSerialiser serialiser(
-      store.encryptor,
+      encryptor,
       id,
       EntryType::WriteSetWithCommitEvidenceAndClaims,
       entry_flags,
       evidence_digest,
       claims,
       false,
-      reserved ? max_serialised_entry_size : store.max_entry_size);
+      reserved ? max_serialised_entry_size : max_entry_size);
     serialise_writes(serialiser, writes);
-    auto hooks = store.record_commit(id.seqno, std::move(writes));
     auto data = serialiser.get_raw_data();
+
     if (reserved)
     {
-      action(Opcode::COMMIT_RESULT).require();
+      Store::wrap_reply(ccf_rust_kv_tx_finish(
+                          s.native_tx, static_cast<uint64_t>(Outcome::SUCCESS)))
+        .require();
       s.version = id.seqno;
       s.committed = true;
-      store.reserved_entries.emplace(id.seqno, std::make_pair(id.view, epoch));
       return {
         CommitResult::SUCCESS,
         std::move(data),
@@ -305,43 +414,36 @@ namespace ccf::kv::rust_test
     if (observer)
     {
       const auto digest = ccf::crypto::Sha256Hash(data.data(), data.size());
-      lock.unlock();
       observer(digest, evidence);
-      lock.lock();
     }
-    auto survives = [&]() {
-      return store.rollback_count == epoch && store.term == id.view;
-    };
-    bool submitted = survives();
-    const auto data_size = data.size();
-    if (auto consensus = store.consensus; consensus && submitted)
+
+    bool survived_pre_commit = true;
     {
-      if (store.history)
-      {
-        store.history->append_entry(
-          ccf::entry_leaf(data, evidence_digest, claims), id.view);
-      }
-      BatchVector batch{
-        {id.seqno,
-         std::make_shared<std::vector<uint8_t>>(std::move(data)),
-         false,
-         std::make_shared<ConsensusHookPtrs>(std::move(hooks))}};
-      lock.unlock();
-      submitted = consensus->replicate(batch, id.view);
-      lock.lock();
-      submitted = submitted && survives();
-      if (submitted && store.chunker)
-      {
-        store.chunker->append_entry_size(data_size);
-      }
+      std::lock_guard lock(store.state_lock);
+      survived_pre_commit =
+        (store.rollback_count == epoch && store.term == id.view);
     }
-    auto output = action(
-      Opcode::COMMIT_RESULT,
-      submitted ? Outcome::SUCCESS : Outcome::NO_REPLICATE);
+
+    ClaimsDigest claims_copy = claims;
+    const auto commit_result = survived_pre_commit ?
+      store.commit(
+        id,
+        std::make_unique<MovePendingTx>(
+          std::move(data),
+          std::move(claims_copy),
+          std::move(evidence_digest),
+          std::move(hooks)),
+        false) :
+      CommitResult::FAIL_NO_REPLICATE;
+
+    const auto outcome = commit_result == CommitResult::SUCCESS ?
+      Outcome::SUCCESS :
+      Outcome::NO_REPLICATE;
+    auto output = Store::wrap_reply(
+      ccf_rust_kv_tx_finish(s.native_tx, static_cast<uint64_t>(outcome)));
     output.require();
     s.version = output.number;
     s.committed = true;
-    return result_only(
-      submitted ? CommitResult::SUCCESS : CommitResult::FAIL_NO_REPLICATE);
+    return result_only(commit_result);
   }
 }

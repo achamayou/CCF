@@ -98,16 +98,23 @@ namespace ccf::kv::rust_test
   std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_unsafe_maps(
     Version version)
   {
+    std::shared_ptr<TxHistory> h;
+    std::shared_ptr<Consensus> c;
+    {
+      std::lock_guard lock(state_lock);
+      h = history;
+      c = consensus;
+    }
     auto r = dispatch({.op = Opcode::SNAPSHOT_MAPS, .number = version});
     r.require();
     auto snapshot = std::make_unique<StoreSnapshot>(version);
-    if (history)
+    if (h)
     {
-      snapshot->add_hash_at_snapshot(history->get_raw_leaf(version));
+      snapshot->add_hash_at_snapshot(h->get_raw_leaf(version));
     }
-    if (consensus)
+    if (c)
     {
-      snapshot->add_view_history(consensus->get_view_history(version));
+      snapshot->add_view_history(c->get_view_history(version));
     }
     for (size_t i = 0; i < r.size; ++i)
     {
@@ -130,15 +137,19 @@ namespace ccf::kv::rust_test
   std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_maps(
     Version version)
   {
-    std::lock_guard lock(mutex);
+    std::lock_guard lock(maps_lock);
     return snapshot_unsafe_maps(version);
   }
 
   std::vector<uint8_t> Store::serialise_snapshot(
     std::unique_ptr<AbstractStore::AbstractSnapshot> snapshot)
   {
-    std::lock_guard lock(mutex);
-    return snapshot->serialise(encryptor);
+    EncryptorPtr e;
+    {
+      std::lock_guard lock(state_lock);
+      e = encryptor;
+    }
+    return snapshot->serialise(e);
   }
 
   void Store::swap_private_maps(Store& source)
@@ -147,7 +158,8 @@ namespace ccf::kv::rust_test
     {
       throw std::logic_error("Cannot swap a Rust KV store with itself");
     }
-    std::scoped_lock lock(mutex, source.mutex);
+    std::scoped_lock maps_guard(maps_lock, source.maps_lock);
+    std::scoped_lock state_guard(state_lock, source.state_lock);
     if (source.head > head)
     {
       throw std::runtime_error(std::format(
@@ -245,7 +257,7 @@ namespace ccf::kv::rust_test
     std::optional<SnapshotPublicMaps>* capture,
     const SnapshotPublicMaps* reuse)
   {
-    std::lock_guard lock(mutex);
+    std::scoped_lock lock(maps_lock, state_lock);
     RawKvStoreDeserialiser decoder(
       encryptor, public_only ? std::make_optional(PUBLIC) : std::nullopt);
     Term read_term = 0;
@@ -346,7 +358,8 @@ namespace ccf::kv::rust_test
     }
     head = *version;
     reserved_through = head;
-    reserved_entries.clear();
+    last_replicated = head;
+    pending_txs.clear();
     global = *version;
     last_committable = *version;
     last_view = read_term;

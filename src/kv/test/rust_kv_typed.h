@@ -18,10 +18,10 @@ namespace ccf::kv::rust_test
   public:
     TypedHandle(
       Store& store,
-      uint64_t id,
+      NativeTx* native_tx,
       const std::string& name,
       const bool& committed) :
-      MapAccess(store, id, name, committed),
+      MapAccess(store, native_tx, name, committed),
       Read(static_cast<MapAccess&>(*this)),
       Write(static_cast<MapAccess&>(*this))
     {}

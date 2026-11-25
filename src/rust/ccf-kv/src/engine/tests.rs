@@ -911,3 +911,112 @@ fn compacted_metadata_elides_when_unneeded_and_preserves_rollback_lineage() {
     run(&mut s, Action::End(10));
     assert!(s.history.retained.is_empty());
 }
+
+#[test]
+fn detached_tx_preserves_compacted_metadata_and_concurrent_reads() {
+    let mut s = Store::new(1);
+    let mut writer = DetachedTx::new(1);
+    assert!(!writer.is_registered());
+    let (v0, t0, out) = s
+        .snapshot_and_acquire_detached(&mut writer, Bytes::copy_from(b"m"), None)
+        .unwrap();
+    assert_eq!((v0, t0), (0, 1));
+    assert!(matches!(out, Output::Acquired(0, 0)));
+    assert!(writer.is_registered());
+    writer
+        .stage_write(
+            Bytes::copy_from(b"m"),
+            Bytes::copy_from(b"k1"),
+            Some(Bytes::copy_from(b"v1")),
+        )
+        .unwrap();
+    assert_eq!(writer.pending_writes().unwrap().len(), 1);
+    assert!(matches!(
+        s.prepare_ccf_commit_detached(&mut writer).unwrap(),
+        CommitPreparation::Applied(1, 1)
+    ));
+    assert!(matches!(
+        writer.finish(Outcome::Success).unwrap(),
+        Output::Committed(Outcome::Success, 1)
+    ));
+    assert!(matches!(
+        writer
+            .inspect_finished(
+                &s,
+                Bytes::copy_from(b"m"),
+                Operation::Get(Bytes::copy_from(b"k1"), false),
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v1"
+    ));
+    s.end_detached(&mut writer);
+    assert!(!writer.is_registered());
+
+    // Two detached transactions share `&Store` concurrently across compaction.
+    let mut r1 = DetachedTx::new(2);
+    let mut r2 = DetachedTx::new(3);
+    s.snapshot_and_acquire_detached(&mut r1, Bytes::copy_from(b"m"), None)
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut r2, Bytes::copy_from(b"m"), None)
+        .unwrap();
+
+    // Advance and compact past v1 while r1 and r2 stay open.
+    let mut w2 = DetachedTx::new(4);
+    s.snapshot_and_acquire_detached(&mut w2, Bytes::copy_from(b"other"), None)
+        .unwrap();
+    w2.stage_write(
+        Bytes::copy_from(b"other"),
+        Bytes::copy_from(b"o"),
+        Some(Bytes::copy_from(b"x")),
+    )
+    .unwrap();
+    assert!(matches!(
+        s.prepare_ccf_commit_detached(&mut w2).unwrap(),
+        CommitPreparation::Applied(2, 1)
+    ));
+    w2.finish(Outcome::Success).unwrap();
+    s.end_detached(&mut w2);
+
+    assert!(matches!(s.compact_ccf(2), Output::Compacted(2)));
+    assert!(s.history.resolve_cut(1).is_some());
+
+    // Both detached readers observe via immutable `&Store` while staging writes locally.
+    assert!(matches!(
+        r1.operate(
+            &s,
+            Bytes::copy_from(b"m"),
+            Operation::Get(Bytes::copy_from(b"k1"), false),
+        )
+        .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v1"
+    ));
+    r2.stage_write(
+        Bytes::copy_from(b"m"),
+        Bytes::copy_from(b"k2"),
+        Some(Bytes::copy_from(b"v2")),
+    )
+    .unwrap();
+    assert!(matches!(
+        r2.operate(
+            &s,
+            Bytes::copy_from(b"m"),
+            Operation::Get(Bytes::copy_from(b"k2"), false),
+        )
+        .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v2"
+    ));
+
+    // Late acquisition on r1 against compacted v1 succeeds via retained metadata.
+    assert!(matches!(
+        s.snapshot_and_acquire_detached(&mut r1, Bytes::copy_from(b"late"), None)
+            .unwrap()
+            .2,
+        Output::Acquired(0, 0)
+    ));
+
+    // Ending both detached transactions prunes retained metadata completely.
+    s.end_detached(&mut r1);
+    assert!(s.history.resolve_cut(1).is_some());
+    s.end_detached(&mut r2);
+    assert!(s.history.retained.is_empty());
+}

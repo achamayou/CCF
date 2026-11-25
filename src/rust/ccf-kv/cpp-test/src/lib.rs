@@ -4,10 +4,37 @@
 //! C ABI for the opt-in C++ tests. This crate is not part of Aeneas extraction.
 
 use ccf_kv::engine::{
-    Action, Address, Bytes, CommitPreparation, Error, Operation, Outcome, Output, SnapshotMap,
-    Store, WriteSet,
+    Action, Address, Bytes, CommitPreparation, DetachedTx, Error, Operation, Outcome, Output,
+    SnapshotMap, Store, WriteSet,
 };
-use std::{ptr, slice};
+use std::{
+    ptr, slice,
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
+
+struct SharedStore {
+    inner: RwLock<Store>,
+}
+
+impl SharedStore {
+    fn new(term: u64) -> Self {
+        Self {
+            inner: RwLock::new(Store::new(term)),
+        }
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Store> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Store> {
+        self.inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 // These wire types correspond to src/kv/test/rust_kv_ffi.h.
 #[repr(C)]
@@ -180,28 +207,169 @@ impl Reply {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn ccf_rust_kv_new(term: u64) -> *mut Store {
-    Box::into_raw(Box::new(Store::new(term)))
+extern "C" fn ccf_rust_kv_new(term: u64) -> *mut SharedStore {
+    Box::into_raw(Box::new(SharedStore::new(term)))
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_delete(store: *mut Store) {
+unsafe extern "C" fn ccf_rust_kv_delete(store: *mut SharedStore) {
     // The caller transfers back the unique pointer returned by new.
     drop(unsafe { Box::from_raw(store) });
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) -> Reply {
-    // The test adapter has exclusive access to its live store for this call.
-    let store = unsafe { &mut *store };
-    if request.op == 22 {
-        return Reply::output(store.clear_idle().map(|()| Output::Unit));
+extern "C" fn ccf_rust_kv_tx_new(attempt: u64) -> *mut DetachedTx {
+    Box::into_raw(Box::new(DetachedTx::new(attempt)))
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_delete(store: *const SharedStore, tx: *mut DetachedTx) {
+    // The caller transfers back the unique pointer returned by tx_new.
+    let mut tx = unsafe { Box::from_raw(tx) };
+    if tx.is_registered() {
+        let store = unsafe { &*store };
+        store.write().end_detached(&mut tx);
     }
-    if request.op == 21 {
-        return Reply::output(store.snapshot_at_ccf(request.attempt, request.number));
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_write(
+    tx: *mut DetachedTx,
+    map: ByteView,
+    key: ByteView,
+    value: ByteView,
+) -> Status {
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key)), Ok(value)) = (
+        unsafe { map.optional() },
+        unsafe { key.optional() },
+        unsafe { value.optional() },
+    ) else {
+        return Status::InvalidRequest;
+    };
+    match tx.stage_write(map, key, value) {
+        Ok(()) => Status::Ok,
+        Err(Error::Disabled) => Status::Disabled,
+        Err(Error::Exhausted) => Status::Exhausted,
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_pending_writes(tx: *const DetachedTx) -> Reply {
+    let tx = unsafe { &*tx };
+    match tx.pending_writes() {
+        Ok(writes) => {
+            let mut reply = Reply::status(Status::Ok);
+            Reply::writes(&mut reply, writes);
+            reply
+        }
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_finish(tx: *mut DetachedTx, outcome: u64) -> Reply {
+    let tx = unsafe { &mut *tx };
+    let outcome = match outcome {
+        0 => Outcome::Success,
+        1 => Outcome::Conflict,
+        2 => Outcome::NoReplicate,
+        _ => return Reply::status(Status::InvalidRequest),
+    };
+    Reply::output(tx.finish(outcome))
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_snapshot_and_acquire(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    map: ByteView,
+    has_reserved: bool,
+    reserved_version: u64,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    let Ok(Some(map)) = (unsafe { map.optional() }) else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    let reserved = if has_reserved {
+        Some(reserved_version)
+    } else {
+        None
+    };
+    match store
+        .write()
+        .snapshot_and_acquire_detached(tx, map, reserved)
+    {
+        Ok((version, term, Output::Acquired(..))) => {
+            let mut reply = Reply::status(Status::Ok);
+            reply.number = version;
+            reply.detail = term;
+            reply
+        }
+        Ok((_, _, other)) => Reply::output(Ok(other)),
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_prepare_commit(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    match store.write().prepare_ccf_commit_detached(tx) {
+        Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
+        Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
+        Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => Reply::status(Status::StaleTerm),
+        Ok(CommitPreparation::Rejected(Outcome::Success)) => Reply::status(Status::InvalidRequest),
+        Ok(CommitPreparation::Applied(version, term)) => {
+            let mut reply = Reply::status(Status::Ok);
+            reply.number = version;
+            reply.detail = term;
+            reply
+        }
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_operate(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    request: Request,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    let inspect_finished = request.inspect_finished;
+    let Ok(Action::Operate(_, map, op)) = (unsafe { request.action() }) else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    if !inspect_finished {
+        if let Operation::Write(key, value) = op {
+            return match tx.stage_write(map, key, value) {
+                Ok(()) => Reply::status(Status::Ok),
+                Err(error) => Reply::output(Err(error)),
+            };
+        }
+    }
+    let guard = store.read();
+    if inspect_finished {
+        Reply::output(tx.inspect_finished(&guard, map, op))
+    } else {
+        Reply::output(tx.operate(&guard, map, op))
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_execute(store: *const SharedStore, request: Request) -> Reply {
+    let store = unsafe { &*store };
+    if request.op == 22 {
+        return Reply::output(store.write().clear_idle().map(|()| Output::Unit));
     }
     if request.op == 20 {
-        return match store.snapshot_maps(request.number) {
+        return match store.read().snapshot_maps(request.number) {
             Ok(maps) => {
                 let mut reply = Reply::status(Status::Ok);
                 reply.size = maps.len();
@@ -214,13 +382,17 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
     if request.op == 19 {
         return match unsafe { request.map.optional() } {
             Ok(Some(map)) => Reply::output(Ok(Output::Previous(
-                store.map_revision_at(request.number, &map),
+                store.read().map_revision_at(request.number, &map),
             ))),
             _ => Reply::status(Status::InvalidRequest),
         };
     }
+    let mut guard = store.write();
+    if request.op == 21 {
+        return Reply::output(guard.snapshot_at_ccf(request.attempt, request.number));
+    }
     if request.op == 18 {
-        return match store.pending_writes(request.attempt) {
+        return match guard.pending_writes(request.attempt) {
             Ok(writes) => {
                 let mut reply = Reply::status(Status::Ok);
                 Reply::writes(&mut reply, writes);
@@ -230,7 +402,7 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
         };
     }
     if request.op == 6 {
-        return match store.prepare_ccf_commit(request.attempt) {
+        return match guard.prepare_ccf_commit(request.attempt) {
             Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
             Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
             Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => {
@@ -251,12 +423,12 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
     let inspect_finished = request.inspect_finished;
     match unsafe { request.action() } {
         Ok(Action::Operate(t, m, op)) if inspect_finished => {
-            Reply::output(store.inspect_finished(t, m, op))
+            Reply::output(guard.inspect_finished(t, m, op))
         }
         Ok(_) if inspect_finished => Reply::status(Status::InvalidRequest),
-        Ok(Action::Acquire(t, m)) => Reply::output(store.acquire_ccf(t, m)),
-        Ok(Action::Compact(version)) => Reply::output(Ok(store.compact_ccf(version))),
-        Ok(action) => Reply::output(store.execute(action)),
+        Ok(Action::Acquire(t, m)) => Reply::output(guard.acquire_ccf(t, m)),
+        Ok(Action::Compact(version)) => Reply::output(Ok(guard.compact_ccf(version))),
+        Ok(action) => Reply::output(guard.execute(action)),
         Err(()) => Reply::status(Status::InvalidRequest),
     }
 }
@@ -319,7 +491,7 @@ unsafe fn borrow_array<'a, T>(data: *const T, size: usize) -> Result<&'a [T], ()
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_install_snapshot(
-    store: *mut Store,
+    store: *const SharedStore,
     version: u64,
     maps: *const SnapshotInput,
     size: usize,
@@ -350,7 +522,7 @@ unsafe extern "C" fn ccf_rust_kv_install_snapshot(
             cells,
         });
     }
-    match unsafe { &mut *store }.install_snapshot(version, maps) {
+    match unsafe { &*store }.write().install_snapshot(version, maps) {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,
@@ -359,8 +531,8 @@ unsafe extern "C" fn ccf_rust_kv_install_snapshot(
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_swap_recovery_maps(
-    target: *mut Store,
-    source: *mut Store,
+    target: *const SharedStore,
+    source: *const SharedStore,
     names: *const ByteView,
     size: usize,
 ) -> Status {
@@ -377,8 +549,17 @@ unsafe extern "C" fn ccf_rust_kv_swap_recovery_maps(
         };
         names.push(name);
     }
-    // The adapter holds both store locks and has already filtered public maps.
-    match unsafe { &mut *target }.swap_recovery_maps(unsafe { &mut *source }, names) {
+    // Lock in canonical pointer order to prevent AB/BA deadlock.
+    let result = if (target as usize) < (source as usize) {
+        let mut target_guard = unsafe { &*target }.write();
+        let mut source_guard = unsafe { &*source }.write();
+        target_guard.swap_recovery_maps(&mut source_guard, names)
+    } else {
+        let mut source_guard = unsafe { &*source }.write();
+        let mut target_guard = unsafe { &*target }.write();
+        target_guard.swap_recovery_maps(&mut source_guard, names)
+    };
+    match result {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,
@@ -434,7 +615,7 @@ fn empty_view() -> ByteView {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_replay(
-    store: *mut Store,
+    store: *const SharedStore,
     version: u64,
     entries: *const Entry,
     size: usize,
@@ -454,8 +635,10 @@ unsafe extern "C" fn ccf_rust_kv_replay(
         };
         writes.push((Address { map, key }, value));
     }
-    // As with execute, the C++ adapter serializes access to the store.
-    match unsafe { &mut *store }.replay_ccf(version, writes, track_deletes) {
+    match unsafe { &*store }
+        .write()
+        .replay_ccf(version, writes, track_deletes)
+    {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,

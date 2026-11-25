@@ -1585,6 +1585,88 @@ pub enum CommitPreparation {
     Applied(Version, Term),
 }
 
+/// Thread-owned transaction state for concurrent adapters. Staged writes and
+/// pending-write inspection require no store lock, reads borrow `&Store`, and
+/// only snapshot/acquire, apply, and teardown borrow `&mut Store`.
+pub struct DetachedTx {
+    id: Attempt,
+    tx: Tx,
+    registered: bool,
+}
+
+impl DetachedTx {
+    pub fn new(id: Attempt) -> Self {
+        Self {
+            id,
+            tx: Tx::new(),
+            registered: false,
+        }
+    }
+
+    pub fn is_registered(&self) -> bool {
+        self.registered
+    }
+
+    pub fn stage_write(
+        &mut self,
+        map: Bytes,
+        key: Bytes,
+        value: Option<Bytes>,
+    ) -> Result<(), Error> {
+        if !matches!(self.tx.phase, Phase::Active) || self.tx.views.index(&map).is_none() {
+            return Err(Error::Disabled);
+        }
+        stage_write(
+            &mut self.tx.pending,
+            Address { map, key },
+            Write::from_option(value),
+        );
+        Ok(())
+    }
+
+    pub fn pending_writes(&self) -> Result<WriteSet, Error> {
+        if !matches!(self.tx.phase, Phase::Active) {
+            return Err(Error::Disabled);
+        }
+        Ok(reported_writes(&self.tx.pending))
+    }
+
+    pub fn operate(&mut self, store: &Store, map: Bytes, op: Operation) -> Result<Output, Error> {
+        self.tx.operate(&store.history, map, op)
+    }
+
+    pub fn inspect_finished(
+        &self,
+        store: &Store,
+        map: Bytes,
+        op: Operation,
+    ) -> Result<Output, Error> {
+        if !matches!(self.tx.phase, Phase::Finished)
+            || matches!(op, Operation::Write(..) | Operation::Clear)
+        {
+            return Err(Error::Disabled);
+        }
+        let mut view = self.tx.clone();
+        view.phase = Phase::Active;
+        view.operate(&store.history, map, op)
+    }
+
+    pub fn finish(&mut self, outcome: Outcome) -> Result<Output, Error> {
+        let assigned = match self.tx.phase {
+            Phase::Applied(v) if !matches!(outcome, Outcome::Conflict) => v,
+            Phase::Committing
+                if !matches!(outcome, Outcome::Success)
+                    || (self.tx.pending.0.is_empty() && !self.tx.unavailable) =>
+            {
+                0
+            }
+            _ => return Err(Error::Disabled),
+        };
+        self.tx.phase = Phase::Finished;
+        Ok(Output::Committed(outcome, assigned))
+    }
+}
+
 pub struct Store {
     history: History,
     txs: Assoc<Attempt, Tx>,
@@ -2235,6 +2317,163 @@ impl Store {
         };
         t.phase = Phase::Finished;
         Ok(Output::Committed(outcome, assigned))
+    }
+
+    fn acquire_ccf_tx(&mut self, t: &mut Tx, map: Bytes) -> Result<Output, Error> {
+        let Some(snapshot) = t.snapshot else {
+            return Err(Error::Disabled);
+        };
+        if !matches!(t.phase, Phase::Active) || t.views.index(&map).is_some() {
+            return Err(Error::Disabled);
+        }
+        let Some(local_ref) = self.history.resolve_cut(snapshot.version) else {
+            t.unavailable = true;
+            return Ok(Output::Unavailable);
+        };
+        if let Some(global) = self.recovery_views.get(&map) {
+            let local = self.history.read_cut(local_ref);
+            let birth = local.births.get(&map);
+            if birth.is_some() {
+                let revision = local.revision(&map);
+                let local_data = local.data;
+                if revision.version < global.revision {
+                    t.unavailable = true;
+                    return Ok(Output::Unavailable);
+                }
+                let local_root = self.history.retained_data(snapshot.version, local_data);
+                self.history.index.retain_root(local_root);
+                t.views.set(
+                    map,
+                    View {
+                        birth,
+                        revision,
+                        local: PinnedImage::Root(local_root),
+                        global: Some(PinnedImage::Recovered(global.image)),
+                    },
+                );
+                return Ok(Output::Acquired(revision.version, global.revision));
+            }
+        }
+        t.acquire(&mut self.history, map)
+    }
+
+    /// Capture a snapshot (if not yet captured) and acquire `map` for a
+    /// thread-owned `DetachedTx`, mirroring its snapshot and view-stamp
+    /// metadata in `self.txs` for compaction and retained-frame pruning.
+    pub fn snapshot_and_acquire_detached(
+        &mut self,
+        tx: &mut DetachedTx,
+        map: Bytes,
+        reserved_version: Option<Version>,
+    ) -> Result<(Version, Term, Output), Error> {
+        if !matches!(tx.tx.phase, Phase::Active) {
+            return Err(Error::Disabled);
+        }
+        if tx.tx.snapshot.is_none() {
+            if self.txs.index(&tx.id).is_some() {
+                return Err(Error::Disabled);
+            }
+            let version = match reserved_version {
+                Some(v) => {
+                    if v < self.history.log.active_at(0).version || v > self.history.head().version
+                    {
+                        return Err(Error::Disabled);
+                    }
+                    v
+                }
+                None => self.history.head().version,
+            };
+            let snap = Snapshot {
+                version,
+                term: self.history.term,
+            };
+            tx.tx.snapshot = Some(snap);
+            let mut stub = Tx::new();
+            stub.snapshot = Some(snap);
+            self.txs.set(tx.id, stub);
+            tx.registered = true;
+        }
+        let Some(snap) = tx.tx.snapshot else {
+            return Err(Error::Disabled);
+        };
+        let out = self.acquire_ccf_tx(&mut tx.tx, map)?;
+        if matches!(out, Output::Acquired(..)) {
+            if let Some(i) = self.txs.index(&tx.id) {
+                let (m_ref, v_ref) = &tx.tx.views.0[0];
+                self.txs.0[i].1.views.set(
+                    m_ref.clone(),
+                    View {
+                        birth: v_ref.birth,
+                        revision: v_ref.revision,
+                        local: PinnedImage::Empty,
+                        global: None,
+                    },
+                );
+            }
+        }
+        Ok((snap.version, snap.term, out))
+    }
+
+    /// Validate and locally apply a thread-owned `DetachedTx`.
+    pub fn prepare_ccf_commit_detached(
+        &mut self,
+        tx: &mut DetachedTx,
+    ) -> Result<CommitPreparation, Error> {
+        if !matches!(tx.tx.phase, Phase::Active) {
+            return Err(Error::Disabled);
+        }
+        tx.tx.phase = Phase::Committing;
+        if tx.tx.unavailable || tx.tx.has_concurrent_map_creation(self.history.head()) {
+            tx.tx.phase = Phase::Finished;
+            return Ok(CommitPreparation::Rejected(Outcome::Conflict));
+        }
+        if tx.tx.pending.0.is_empty() {
+            tx.tx.phase = Phase::Finished;
+            return Ok(CommitPreparation::ReadOnly);
+        }
+        if let Some(snapshot) = tx.tx.snapshot {
+            if snapshot.term != self.history.term {
+                let outcome = if tx.tx.valid_lineage(&self.history)
+                    && tx.tx.valid_dependencies(&self.history)
+                {
+                    Outcome::NoReplicate
+                } else {
+                    Outcome::Conflict
+                };
+                tx.tx.phase = Phase::Finished;
+                return Ok(CommitPreparation::Rejected(outcome));
+            }
+        }
+        if !tx.tx.can_apply(&self.history) {
+            tx.tx.phase = Phase::Finished;
+            return Ok(CommitPreparation::Rejected(Outcome::Conflict));
+        }
+        let head = self.history.head();
+        if head.version == u64::MAX || self.history.next_identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+        let version = head.version + 1;
+        let next = self
+            .history
+            .prepare_frame(version, self.history.next_identity, &tx.tx.pending);
+        self.history.log.append(next);
+        self.history.next_identity += 1;
+        self.history.index.retire_budget(RETIRE_BUDGET);
+        tx.tx.phase = Phase::Applied(version);
+        Ok(CommitPreparation::Applied(version, self.history.term))
+    }
+
+    /// Release all pinned roots held by `tx`, unregister its metadata stub,
+    /// prune unneeded retained frames, and drain the retirement budget.
+    pub fn end_detached(&mut self, tx: &mut DetachedTx) {
+        release_tx_pins(&mut self.history.index, &tx.tx);
+        tx.tx.views = Assoc::new();
+        if tx.registered {
+            erase_attempt(&mut self.txs, tx.id);
+            tx.registered = false;
+            self.history.prune_retained(&self.txs);
+        }
+        self.history.index.retire_budget(RETIRE_BUDGET);
     }
 }
 

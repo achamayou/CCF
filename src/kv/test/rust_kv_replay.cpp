@@ -32,7 +32,7 @@ namespace ccf::kv::rust_test
 
     ApplyResult apply(bool track_deletes_on_missing_keys) override
     {
-      std::lock_guard lock(store.mutex);
+      std::scoped_lock lock(store.maps_lock, store.state_lock);
       RawKvStoreDeserialiser decoder(
         store.encryptor,
         public_only ? std::make_optional(SecurityDomain::PUBLIC) :
@@ -149,12 +149,13 @@ namespace ccf::kv::rust_test
       store.head = id.seqno;
       store.last_view = id.view;
       store.reserved_through = id.seqno;
+      store.last_replicated = id.seqno;
       if (replace)
       {
         ++store.rollback_count;
         store.last_committable = std::min(store.last_committable, id.seqno - 1);
-        store.snapshot_requested = false;
-        store.reserved_entries.clear();
+        store.snapshot_requested.store(false, std::memory_order_release);
+        store.pending_txs.clear();
         for (auto& [_, deltas] : store.map_deltas)
         {
           deltas.erase(deltas.lower_bound(id.seqno), deltas.end());
@@ -168,7 +169,7 @@ namespace ccf::kv::rust_test
           store.chunker->rolled_back_to(id.seqno - 1);
         }
       }
-      hooks = store.record_commit(id.seqno, std::move(writes));
+      hooks = store.record_commit_locked(id.seqno, writes);
       claims = decoder.consume_claims_digest();
       evidence = decoder.consume_commit_evidence_digest();
       if (signature)

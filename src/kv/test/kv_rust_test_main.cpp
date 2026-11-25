@@ -3,8 +3,11 @@
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "kv/test/kv_test_store.h"
+#include "kv/test/stub_consensus.h"
 
+#include <atomic>
 #include <doctest/doctest.h>
+#include <thread>
 #include <vector>
 
 TEST_CASE("Rust KV adapter preserves empty byte strings and range bounds")
@@ -138,4 +141,126 @@ TEST_CASE("Rust KV store implements AbstractStore lifecycle and snapshot hooks")
   REQUIRE_THROWS_AS(
     abstract.get_map_unsafe(1, "public:abstract"), std::logic_error);
   REQUIRE_THROWS_AS(abstract.add_dynamic_map(1, nullptr), std::logic_error);
+}
+
+TEST_CASE("Rust KV Store::commit reorders and batches out-of-order entries")
+{
+  using namespace ccf::kv;
+
+  class RecordingConsensus : public test::PrimaryStubConsensus
+  {
+  public:
+    std::vector<std::vector<Version>> batches;
+
+    bool replicate(const BatchVector& entries, ccf::View view) override
+    {
+      std::vector<Version> seqnos;
+      for (const auto& [v, _data, _committable, _hooks] : entries)
+      {
+        seqnos.push_back(v);
+      }
+      batches.push_back(std::move(seqnos));
+      return test::PrimaryStubConsensus::replicate(entries, view);
+    }
+  };
+
+  test::TestStore store;
+  auto consensus = std::make_shared<RecordingConsensus>();
+  store.set_consensus(consensus);
+  store.initialise_term(1);
+
+  auto make_entry = [](uint8_t tag) {
+    return std::make_unique<MovePendingTx>(
+      std::vector<uint8_t>{tag},
+      ccf::empty_claims(),
+      ccf::crypto::Sha256Hash{},
+      ConsensusHookPtrs{});
+  };
+
+  // Arriving out-of-order: seqno 2 buffers and returns SUCCESS immediately.
+  REQUIRE(store.commit({1, 2}, make_entry(2), false) == CommitResult::SUCCESS);
+  CHECK(consensus->batches.empty());
+
+  // Arriving seqno 1 drains [1, 2] together as one contiguous batch.
+  REQUIRE(store.commit({1, 1}, make_entry(1), true) == CommitResult::SUCCESS);
+  REQUIRE(consensus->batches.size() == 1);
+  CHECK(consensus->batches[0] == std::vector<Version>{1, 2});
+
+  // Stale-term commit is rejected without buffering.
+  CHECK(
+    store.commit({0, 3}, make_entry(3), false) ==
+    CommitResult::FAIL_NO_REPLICATE);
+  CHECK(consensus->batches.size() == 1);
+}
+
+TEST_CASE(
+  "Rust KV adapter runs concurrent reads and writes while another commit "
+  "observes")
+{
+  using namespace ccf::kv;
+  test::TestStore store;
+  auto consensus = std::make_shared<test::PrimaryStubConsensus>();
+  store.set_consensus(consensus);
+  const Map<std::string, std::string> map("public:concurrent");
+  store.initialise_term(1);
+
+  {
+    auto tx = store.create_tx();
+    tx.rw(map)->put("seed", "ok");
+    REQUIRE(tx.commit() == CommitResult::SUCCESS);
+  }
+
+  std::atomic<bool> in_observer{false};
+  std::atomic<bool> readers_done{false};
+
+  auto writer_thread = std::thread([&]() {
+    auto tx = store.create_tx();
+    tx.rw(map)->put("writer", "v2");
+    auto observer = [&](const ccf::crypto::Sha256Hash&, const std::string&) {
+      in_observer.store(true, std::memory_order_release);
+      while (!readers_done.load(std::memory_order_acquire))
+      {
+        std::this_thread::yield();
+      }
+    };
+    REQUIRE(tx.commit(ccf::empty_claims(), observer) == CommitResult::SUCCESS);
+  });
+
+  while (!in_observer.load(std::memory_order_acquire))
+  {
+    std::this_thread::yield();
+  }
+
+  // While the writer is paused inside its write-set observer, multiple threads
+  // must be able to read, write, and commit concurrently without blocking.
+  constexpr size_t worker_count = 4;
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  for (size_t i = 0; i < worker_count; ++i)
+  {
+    workers.emplace_back([&, i]() {
+      auto rtx = store.create_read_only_tx();
+      auto* h = rtx.ro(map);
+      CHECK(h->get("seed") == "ok");
+      CHECK(h->get("writer") == "v2");
+
+      auto wtx = store.create_tx();
+      auto* wh = wtx.rw<Map<std::string, std::string>>(
+        "public:worker_" + std::to_string(i));
+      for (size_t k = 0; k < 16; ++k)
+      {
+        wh->put("k" + std::to_string(k), "v");
+      }
+      REQUIRE(wtx.commit() == CommitResult::SUCCESS);
+    });
+  }
+  for (auto& w : workers)
+  {
+    w.join();
+  }
+
+  readers_done.store(true, std::memory_order_release);
+  writer_thread.join();
+  CHECK(store.current_version() == 2 + worker_count);
+  CHECK(consensus->number_of_replicas() == 2 + worker_count);
 }

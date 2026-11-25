@@ -13,6 +13,7 @@
 #include "kv/test/rust_kv_ffi.h"
 #include "kv/version_v.h"
 
+#include <atomic>
 #include <limits>
 #include <map>
 #include <memory>
@@ -22,7 +23,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <typeindex>
+#include <unordered_map>
 #include <utility>
 
 namespace ccf::kv::untyped
@@ -138,8 +141,15 @@ namespace ccf::kv::rust_test
   class ReadOnlyTx;
   class ReplayEntry;
 
-  // The test facade serializes access to the Rust store. Each Tx and its
-  // handles must still be used by a single thread.
+  // Concurrent Rust KV adapter. Each Tx owns its detached Rust Tx state so
+  // staged writes are lock-free and reads share the Rust RwLock concurrently.
+  // Lock hierarchy (strictly non-recursive, always acquired in this order):
+  //   1. commit_lock     - pending_txs reorder buffer & consensus replication
+  //   2. compaction_lock - compact() ordering & global hook delivery
+  //   3. maps_lock       - store-wide structural barriers (lock_maps/apply/
+  //                        compact/rollback/replay/snapshot)
+  //   4. state_lock      - C++ metadata fields (versions, hooks, pending_txs)
+  //   5. Rust RwLock     - innermost lock inside NativeStore
   class Store : public AbstractStore
   {
   public:
@@ -164,16 +174,19 @@ namespace ccf::kv::rust_test
 
   private:
     friend class Tx;
+    friend class MapAccess;
     friend class ReplayEntry;
 
-    mutable std::recursive_mutex mutex;
-    std::mutex commit_order;
-    std::mutex compaction_order;
+    std::mutex commit_lock;
+    std::mutex compaction_lock;
+    std::mutex maps_lock;
+    mutable std::mutex state_lock;
     std::unique_ptr<NativeStore, decltype(&ccf_rust_kv_delete)> native{
       ccf_rust_kv_new(0), &ccf_rust_kv_delete};
-    uint64_t next_attempt = 0;
+    std::atomic<uint64_t> next_attempt{0};
     Version head = 0;
     Version reserved_through = 0;
+    Version last_replicated = 0;
     Version global = 0;
     View term = 0;
     View last_view = 0;
@@ -183,10 +196,11 @@ namespace ccf::kv::rust_test
     std::shared_ptr<Consensus> consensus;
     std::shared_ptr<TxHistory> history;
     size_t max_entry_size = max_serialised_entry_size;
-    bool snapshot_requested = false;
+    std::atomic<bool> snapshot_requested{false};
     std::shared_ptr<ILedgerChunker> chunker;
     SnapshotterPtr snapshotter;
-    std::map<Version, std::pair<View, size_t>> reserved_entries;
+    std::unordered_map<Version, std::tuple<std::unique_ptr<PendingTx>, bool>>
+      pending_txs;
     std::map<std::string, untyped::MapHook> local_hooks;
     std::map<std::string, untyped::CommitHook> global_hooks;
 
@@ -198,9 +212,8 @@ namespace ccf::kv::rust_test
 
     std::map<std::string, std::map<Version, MapDelta>> map_deltas;
 
-    Response dispatch(Request request)
+    static Response wrap_reply(Reply reply)
     {
-      const auto reply = ccf_rust_kv_execute(native.get(), request);
       return {
         reply.status,
         reply.number,
@@ -209,8 +222,13 @@ namespace ccf::kv::rust_test
         {reply.data, &ccf_rust_kv_reply_delete}};
     }
 
+    Response dispatch(Request request) const
+    {
+      return wrap_reply(ccf_rust_kv_execute(native.get(), request));
+    }
+
     std::optional<Version> map_revision_at(
-      Version version, const std::string& name)
+      Version version, const std::string& name) const
     {
       auto r = dispatch(
         {.op = Opcode::MAP_REVISION, .number = version, .map = bytes(name)});
@@ -222,10 +240,14 @@ namespace ccf::kv::rust_test
       return r.number;
     }
 
-    ConsensusHookPtrs record_commit(Version version, MapWrites&& maps)
+    // Called under state_lock immediately after APPLY. Records map_deltas
+    // atomically with version publication and returns matching local hooks so
+    // callers can invoke them outside locks if needed.
+    ConsensusHookPtrs record_commit_locked(
+      Version version, const MapWrites& maps)
     {
       ConsensusHookPtrs hooks;
-      for (auto& [name, writes] : maps)
+      for (const auto& [name, writes] : maps)
       {
         if (auto it = local_hooks.find(name);
             it != local_hooks.end() && it->second)
@@ -248,7 +270,7 @@ namespace ccf::kv::rust_test
         }
         if (has_put || map_revision_at(version, name) == version)
         {
-          map_deltas[name].emplace(version, MapDelta{std::move(writes)});
+          map_deltas[name].emplace(version, MapDelta{writes});
         }
       }
       return hooks;
@@ -269,7 +291,7 @@ namespace ccf::kv::rust_test
       const bool chunk = chunker && chunker->is_chunk_end_requested(version);
       const bool snapshot = snapshotter ?
         snapshotter->record_committable(version) :
-        snapshot_requested;
+        snapshot_requested.load(std::memory_order_acquire);
       return chunk || snapshot;
     }
 
@@ -291,7 +313,7 @@ namespace ccf::kv::rust_test
       }
       if (snapshot)
       {
-        snapshot_requested = true;
+        snapshot_requested.store(true, std::memory_order_release);
       }
     }
 
@@ -339,22 +361,22 @@ namespace ccf::kv::rust_test
 
     void lock_map_set() override
     {
-      mutex.lock();
+      maps_lock.lock();
     }
 
     void unlock_map_set() override
     {
-      mutex.unlock();
+      maps_lock.unlock();
     }
 
     void lock_maps() override
     {
-      mutex.lock();
+      maps_lock.lock();
     }
 
     void unlock_maps() override
     {
-      mutex.unlock();
+      maps_lock.unlock();
     }
 
     std::shared_ptr<AbstractMap> get_map(
@@ -380,62 +402,62 @@ namespace ccf::kv::rust_test
 
     std::shared_ptr<Consensus> get_consensus() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return consensus;
     }
 
     std::shared_ptr<TxHistory> get_history() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return history;
     }
 
     std::shared_ptr<ILedgerChunker> get_chunker() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return chunker;
     }
 
     EncryptorPtr get_encryptor() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return encryptor;
     }
 
     Version current_version() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return std::max(head, reserved_through);
     }
 
     Version compacted_version() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return global;
     }
 
     View commit_view() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return term;
     }
 
     TxID current_txid() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return {last_view, std::max(head, reserved_through)};
     }
 
     std::pair<TxID, Term> current_txid_and_commit_term() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return {{last_view, std::max(head, reserved_through)}, term};
     }
 
     std::optional<std::tuple<Version, Version>> next_version(
       Term expected_commit_term) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       if (term != expected_commit_term)
       {
         return std::nullopt;
@@ -452,7 +474,7 @@ namespace ccf::kv::rust_test
 
     void initialise_term(View view) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       if (term != 0)
       {
         throw std::logic_error("Commit term is already initialised");
@@ -467,49 +489,47 @@ namespace ccf::kv::rust_test
 
     void set_encryptor(const EncryptorPtr& e)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       encryptor = e;
     }
 
     void set_consensus(const std::shared_ptr<Consensus>& c)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       consensus = c;
     }
 
     void set_history(const std::shared_ptr<TxHistory>& h)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       history = h;
     }
 
     void set_chunker(const std::shared_ptr<ILedgerChunker>& c)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       chunker = c;
     }
 
     void set_snapshotter(const SnapshotterPtr& s)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       snapshotter = s;
     }
 
     bool flag_enabled(AbstractStore::StoreFlag flag) override
     {
-      std::lock_guard lock(mutex);
       return flag_enabled_unsafe(flag);
     }
 
     bool flag_enabled_unsafe(AbstractStore::StoreFlag flag) const override
     {
       return flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE &&
-        snapshot_requested;
+        snapshot_requested.load(std::memory_order_acquire);
     }
 
     void set_flag(AbstractStore::StoreFlag flag) override
     {
-      std::lock_guard lock(mutex);
       set_flag_unsafe(flag);
     }
 
@@ -517,7 +537,7 @@ namespace ccf::kv::rust_test
     {
       if (flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE)
       {
-        snapshot_requested = true;
+        snapshot_requested.store(true, std::memory_order_release);
       }
     }
 
@@ -525,7 +545,7 @@ namespace ccf::kv::rust_test
     {
       if (flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE)
       {
-        snapshot_requested = false;
+        snapshot_requested.store(false, std::memory_order_release);
       }
     }
 
@@ -536,7 +556,7 @@ namespace ccf::kv::rust_test
       bool force_chunk,
       bool snapshot) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       if (term != expected_term || rollback_count != expected_rollback_count)
       {
         return false;
@@ -550,7 +570,7 @@ namespace ccf::kv::rust_test
       View expected_term,
       Version expected_rollback_count) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       if (term != expected_term || rollback_count != expected_rollback_count)
       {
         return std::nullopt;
@@ -560,7 +580,7 @@ namespace ccf::kv::rust_test
 
     bool should_create_ledger_chunk(Version version) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return should_create_ledger_chunk_locked(version);
     }
 
@@ -571,7 +591,7 @@ namespace ccf::kv::rust_test
 
     TxID next_txid() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       const auto current = std::max(head, reserved_through);
       if (current == std::numeric_limits<Version>::max())
       {
@@ -590,126 +610,127 @@ namespace ccf::kv::rust_test
       {
         throw std::logic_error("Maximum transaction size is not representable");
       }
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       max_entry_size = limit;
     }
 
     size_t get_max_transaction_size() const override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return max_entry_size;
     }
 
     bool has_map_at(Version version, const std::string& name)
     {
-      std::lock_guard lock(mutex);
       return map_revision_at(version, name).has_value();
     }
 
     bool check_rollback_count(Version expected) override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return rollback_count == expected;
     }
 
     size_t committable_gap() override
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       return std::max(head, reserved_through) - last_committable;
     }
 
     void clear()
     {
-      std::lock_guard ordered(commit_order);
-      std::lock_guard lock(mutex);
+      std::scoped_lock lock(
+        commit_lock, compaction_lock, maps_lock, state_lock);
       dispatch({.op = Opcode::CLEAR_STORE}).require();
       head = NoVersion;
       global = NoVersion;
       reserved_through = NoVersion;
+      last_replicated = NoVersion;
       last_committable = NoVersion;
       term = 0;
       last_view = 0;
       ++rollback_count;
-      snapshot_requested = false;
-      reserved_entries.clear();
+      snapshot_requested.store(false, std::memory_order_release);
+      pending_txs.clear();
       map_deltas.clear();
     }
 
     void set_map_hook(const std::string& name, untyped::MapHook hook)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       local_hooks.insert_or_assign(name, std::move(hook));
     }
 
     void unset_map_hook(const std::string& name)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       local_hooks.erase(name);
     }
 
     void set_global_hook(const std::string& name, untyped::CommitHook hook)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       global_hooks.insert_or_assign(name, std::move(hook));
     }
 
     void unset_global_hook(const std::string& name)
     {
-      std::lock_guard lock(mutex);
+      std::lock_guard lock(state_lock);
       global_hooks.erase(name);
     }
 
     void compact(Version v) override
     {
-      std::lock_guard ordered(compaction_order);
-      std::unique_lock lock(mutex);
-      if (chunker)
-      {
-        chunker->compacted_to(v);
-      }
-      if (snapshotter)
-      {
-        snapshotter->commit(v, consensus && consensus->is_primary());
-      }
-      auto r = dispatch({.op = Opcode::COMPACT, .number = v});
-      r.require();
-      global = r.number;
-      if (v > head || v < global)
-      {
-        return;
-      }
-      if (history)
-      {
-        history->compact(global);
-      }
+      std::lock_guard ordered(compaction_lock);
       std::vector<std::tuple<untyped::CommitHook, Version, untyped::Write>>
         callbacks;
-      for (auto& [name, changes] : map_deltas)
       {
-        auto end = changes.upper_bound(global);
-        if (end == changes.begin())
+        std::scoped_lock lock(maps_lock, state_lock);
+        if (chunker)
         {
-          continue;
+          chunker->compacted_to(v);
         }
-        const auto hook = global_hooks.find(name);
-        if (hook != global_hooks.end() && hook->second)
+        if (snapshotter)
         {
-          for (auto it = changes.begin(); it != end; ++it)
+          snapshotter->commit(v, consensus && consensus->is_primary());
+        }
+        auto r = dispatch({.op = Opcode::COMPACT, .number = v});
+        r.require();
+        global = r.number;
+        if (v > head || v < global)
+        {
+          return;
+        }
+        if (history)
+        {
+          history->compact(global);
+        }
+        for (auto& [name, changes] : map_deltas)
+        {
+          auto end = changes.upper_bound(global);
+          if (end == changes.begin())
           {
-            if (!it->second.delivered)
+            continue;
+          }
+          const auto hook = global_hooks.find(name);
+          if (hook != global_hooks.end() && hook->second)
+          {
+            for (auto it = changes.begin(); it != end; ++it)
             {
-              callbacks.emplace_back(
-                hook->second, it->first, it->second.writes);
-              it->second.delivered = true;
-              std::erase_if(it->second.writes, [](const auto& row) {
-                return !row.second.has_value();
-              });
+              if (!it->second.delivered)
+              {
+                callbacks.emplace_back(
+                  hook->second, it->first, it->second.writes);
+                it->second.delivered = true;
+                std::erase_if(it->second.writes, [](const auto& row) {
+                  return !row.second.has_value();
+                });
+              }
             }
           }
+          changes.erase(changes.begin(), std::prev(end));
         }
-        changes.erase(changes.begin(), std::prev(end));
       }
-      lock.unlock();
       for (const auto& [hook, version, writes] : callbacks)
       {
         hook(version, writes);
@@ -718,7 +739,7 @@ namespace ccf::kv::rust_test
 
     void rollback(const TxID& txid, View new_term) override
     {
-      std::lock_guard lock(mutex);
+      std::scoped_lock lock(maps_lock, state_lock);
       auto r = dispatch(
         {.op = Opcode::ROLLBACK, .attempt = new_term, .number = txid.seqno});
       if (r.status == Status::ROLLBACK_REJECTED)
@@ -738,14 +759,14 @@ namespace ccf::kv::rust_test
       if (std::max(head, reserved_through) < old_head)
       {
         ++rollback_count;
+        last_replicated = head;
         last_committable = std::min(last_committable, head);
-        snapshot_requested = false;
+        snapshot_requested.store(false, std::memory_order_release);
         if (encryptor != nullptr)
         {
           encryptor->rollback(head);
         }
-        reserved_entries.erase(
-          reserved_entries.upper_bound(head), reserved_entries.end());
+        pending_txs.clear();
       }
       if (chunker)
       {
@@ -759,12 +780,6 @@ namespace ccf::kv::rust_test
       {
         changes.erase(changes.upper_bound(head), changes.end());
       }
-    }
-
-    Response execute(Request request)
-    {
-      std::lock_guard lock(mutex);
-      return dispatch(request);
     }
   };
 
@@ -807,33 +822,51 @@ namespace ccf::kv::rust_test
   class MapAccess : public HandleBase
   {
     Store& store;
-    uint64_t attempt;
+    NativeTx* native_tx;
     std::string name;
     const bool& committed;
 
   public:
     MapAccess(
       Store& store_,
-      uint64_t attempt_,
+      NativeTx* native_tx_,
       const std::string& name_,
       const bool& committed_) :
       store(store_),
-      attempt(attempt_),
+      native_tx(native_tx_),
       name(name_),
       committed(committed_)
     {}
 
+    void write(ByteView key, ByteView value = {})
+    {
+      if (committed)
+      {
+        throw std::logic_error("Unexpected Rust KV status 1");
+      }
+      const auto status =
+        ccf_rust_kv_tx_write(native_tx, bytes(name), key, value);
+      if (status != Status::OK)
+      {
+        throw std::logic_error(
+          "Unexpected Rust KV status " +
+          std::to_string(static_cast<unsigned>(status)));
+      }
+    }
+
     Response operate(
       Opcode op, ByteView key = {}, ByteView value = {}, bool global = false)
     {
-      return store.execute(
+      return Store::wrap_reply(ccf_rust_kv_tx_operate(
+        store.native.get(),
+        native_tx,
         {.op = op,
          .inspect_finished = committed,
-         .attempt = attempt,
+         .attempt = 0,
          .number = global,
          .map = bytes(name),
          .key = key,
-         .value = value});
+         .value = value}));
     }
   };
 
@@ -1003,17 +1036,13 @@ namespace ccf::kv::rust_test
 
     void put(const Key& key, const Value& value)
     {
-      access
-        .operate(
-          Opcode::WRITE,
-          bytes(Keys::to_serialised(key)),
-          bytes(Values::to_serialised(value)))
-        .require();
+      access.write(
+        bytes(Keys::to_serialised(key)), bytes(Values::to_serialised(value)));
     }
 
     void remove(const Key& key)
     {
-      access.operate(Opcode::WRITE, bytes(Keys::to_serialised(key))).require();
+      access.write(bytes(Keys::to_serialised(key)));
     }
 
     void clear()
@@ -1028,10 +1057,10 @@ namespace ccf::kv::rust_test
   public:
     Handle(
       Store& store,
-      uint64_t id,
+      NativeTx* native_tx,
       const std::string& name,
       const bool& committed) :
-      MapAccess(store, id, name, committed),
+      MapAccess(store, native_tx, name, committed),
       ReadHandle<M>(static_cast<MapAccess&>(*this)),
       WriteHandle<M>(static_cast<MapAccess&>(*this))
     {}
@@ -1060,6 +1089,7 @@ namespace ccf::kv::rust_test
     {
       Store& store;
       uint64_t id;
+      NativeTx* native_tx;
       std::vector<HandleSlot> handles;
       std::optional<View> captured_term;
       std::optional<TxID> read_txid;
@@ -1071,15 +1101,15 @@ namespace ccf::kv::rust_test
       std::optional<Version> version;
       CommittableTx::TxFlags flags = 0;
 
-      State(Store& store_, uint64_t id_) : store(store_), id(id_)
-      {
-        store.execute({.op = Opcode::BEGIN, .attempt = id}).require();
-      }
+      State(Store& store_, uint64_t id_) :
+        store(store_),
+        id(id_),
+        native_tx(ccf_rust_kv_tx_new(id_))
+      {}
 
       ~State()
       {
-        // END is enabled for every existing attempt, even after commit.
-        store.execute({.op = Opcode::END, .attempt = id}).require();
+        ccf_rust_kv_tx_delete(store.native.get(), native_tx);
       }
     };
 
@@ -1120,32 +1150,30 @@ namespace ccf::kv::rust_test
         throw std::logic_error("Cannot acquire a new handle after commit");
       }
       parse_map_name(name);
-      std::lock_guard lock(s.store.mutex);
-      if (!s.captured_term.has_value())
-      {
-        auto snapshot = s.reserved ?
-          s.store.dispatch(
-            {.op = Opcode::SNAPSHOT_AT,
-             .attempt = s.id,
-             .number = s.reserved->seqno - 1}) :
-          s.store.dispatch({.op = Opcode::SNAPSHOT, .attempt = s.id});
-        snapshot.require();
-        s.captured_term = snapshot.detail;
-        s.read_txid = TxID{s.store.last_view, snapshot.number};
-      }
       // Typed and untyped handles share the single native acquisition.
       if (!map_acquired)
       {
-        auto r = s.store.dispatch(
-          {.op = Opcode::ACQUIRE, .attempt = s.id, .map = bytes(name)});
+        std::lock_guard lock(s.store.state_lock);
+        auto r = Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+          s.store.native.get(),
+          s.native_tx,
+          bytes(name),
+          s.reserved.has_value(),
+          s.reserved ? s.reserved->seqno - 1 : 0));
         if (r.status == Status::UNAVAILABLE)
         {
           throw CompactedVersionConflict(
             "Cannot acquire a compacted Rust KV map: " + name);
         }
         r.require();
+        if (!s.captured_term.has_value())
+        {
+          s.captured_term = r.detail;
+          s.read_txid = TxID{s.store.last_view, r.number};
+        }
       }
-      auto handle = std::make_unique<Full>(s.store, s.id, name, s.committed);
+      auto handle =
+        std::make_unique<Full>(s.store, s.native_tx, name, s.committed);
       auto* raw = handle.get();
       s.handles.push_back({name, type, std::move(handle)});
       return raw;
@@ -1253,16 +1281,12 @@ namespace ccf::kv::rust_test
 
   inline Tx Store::create_tx()
   {
-    uint64_t attempt = 0;
+    const auto previous = next_attempt.fetch_add(1, std::memory_order_relaxed);
+    if (previous == std::numeric_limits<uint64_t>::max())
     {
-      std::lock_guard lock(mutex);
-      if (next_attempt == std::numeric_limits<uint64_t>::max())
-      {
-        throw std::overflow_error("Rust KV test attempt counter exhausted");
-      }
-      attempt = ++next_attempt;
+      throw std::overflow_error("Rust KV test attempt counter exhausted");
     }
-    return Tx(*this, attempt);
+    return Tx(*this, previous + 1);
   }
 
   inline ReadOnlyTx Store::create_read_only_tx()
