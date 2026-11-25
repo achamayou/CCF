@@ -3,7 +3,8 @@
 
 module
 
-public import KvRust.RadixDual
+public import KvRust.RadixAddress
+public import KvRust.Assoc
 public import KvRust.RadixBatch
 
 @[expose] public section
@@ -14,19 +15,19 @@ open Aeneas.Std
 
 /-- Single-arena radix view whose bindings are canonically sorted in strictly
 increasing byte-key order. -/
-structure SingleView {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (bindings : List (List U8 × U32))
+structure SingleView {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (bindings : List (List U8 × U32))
     : Prop where
   lookup : ∃ height, RadixTree arena.values.dirs.val height root bindings
   values : RadixRows arena.values.rows.val bindings
   sorted : bindings.Pairwise radixKeyLt
 
-def singleBindings {V : Type} (arena : Spike.radix.SingleRadix V)
+def singleBindings {V : Type} (arena : CcfKv.radix.SingleRadix V)
     (bindings : List (List U8 × U32))
     : List (List U8 × V) :=
   radixBindings arena.values.rows.val bindings
 
-theorem radix_tree_perm {dirs : List (Option Spike.radix.RadixDir)}
+theorem radix_tree_perm {dirs : List (Option CcfKv.radix.RadixDir)}
     {height : Nat} {root : U32} {a b : List (List U8 × U32)}
     (tree : RadixTree dirs height root a) (perm : a.Perm b)
     : RadixTree dirs height root b := by
@@ -42,7 +43,7 @@ theorem radix_tree_perm {dirs : List (Option Spike.radix.RadixDir)}
       intro slot hslot
       exact ih slot hslot (perm.filter _)
 
-theorem radix_rows_perm {V : Type} {rows : List (Option (Spike.radix.RadixRow V))}
+theorem radix_rows_perm {V : Type} {rows : List (Option (CcfKv.radix.RadixRow V))}
     {a b : List (List U8 × U32)}
     (valid : RadixRows rows a) (perm : a.Perm b)
     : RadixRows rows b :=
@@ -234,8 +235,8 @@ private theorem filter_range_perm {α : Type} (xs : List α) (f : α → Nat) (n
       exact hsplit.trans (hsub.append_right _)
 
 private theorem radix_tree_perm_unique {V : Type}
-    {dirs : List (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))}
+    {dirs : List (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))}
     {ha hb : Nat} {root : U32} {a b : List (List U8 × U32)}
     (ta : RadixTree dirs ha root a) (tb : RadixTree dirs hb root b)
     (ra : RadixRows rows a) (rb : RadixRows rows b)
@@ -297,17 +298,17 @@ private theorem radix_tree_perm_unique {V : Type}
                   (ihl (fun t ht => hl t (List.mem_cons_of_mem _ ht)))
           exact haP.trans ((hflat _ hslot).trans hbP.symm)
 
-theorem single_view_unique {V : Type} {arena : Spike.radix.SingleRadix V}
-    {root : Spike.radix.RadixRoot} {a b : List (List U8 × U32)}
+theorem single_view_unique {V : Type} {arena : CcfKv.radix.SingleRadix V}
+    {root : CcfKv.radix.RadixRoot} {a b : List (List U8 × U32)}
     (va : SingleView arena root a) (vb : SingleView arena root b)
     : a = b := by
   obtain ⟨_, ta⟩ := va.lookup
   obtain ⟨_, tb⟩ := vb.lookup
   exact radixKeyLt_perm_eq va.sorted vb.sorted (radix_tree_perm_unique ta tb va.values vb.values)
 
-theorem single_retains_views {V : Type} (before after : Spike.radix.SingleRadix V)
+theorem single_retains_views {V : Type} (before after : CcfKv.radix.SingleRadix V)
     (kept : ArenaKeeps before.values after.values)
-    (root : Spike.radix.RadixRoot) (bindings : List (List U8 × U32))
+    (root : CcfKv.radix.RadixRoot) (bindings : List (List U8 × U32))
     (view : SingleView before root bindings)
     : SingleView after root bindings
       ∧ singleBindings after bindings = singleBindings before bindings := by
@@ -327,20 +328,20 @@ theorem single_retains_views {V : Type} (before after : Spike.radix.SingleRadix 
     rw [saved, hkept]
   exact ⟨⟨⟨height, htree⟩, hrows, view.sorted⟩, hbind⟩
 
-theorem single_empty_root_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    : WP.spec (Spike.radix.SingleRadix.empty_root arena)
+theorem single_empty_root_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    : WP.spec (CcfKv.radix.SingleRadix.empty_root arena)
         (fun root => SingleView arena root []) := by
-  unfold Spike.radix.SingleRadix.empty_root
+  unfold CcfKv.radix.SingleRadix.empty_root
   rw [WP.spec_ok]
   exact ⟨⟨0, .empty 0⟩, (fun _ h => by cases h), List.Pairwise.nil⟩
 
-theorem single_get_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (key : Slice U8) (bindings : List (List U8 × U32))
+theorem single_get_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (key : Slice U8) (bindings : List (List U8 × U32))
     (view : SingleView arena root bindings)
-    : WP.spec (Spike.radix.SingleRadix.get arena root key)
+    : WP.spec (CcfKv.radix.SingleRadix.get arena root key)
         (· = Kv.Model.find (singleBindings arena bindings) key.val) := by
   obtain ⟨height, tree⟩ := view.lookup
-  unfold Spike.radix.SingleRadix.get
+  unfold CcfKv.radix.SingleRadix.get
   apply WP.spec_mono
     (radix_get_refines _ _ key height root bindings
       (by simpa [alloc.vec.Vec.deref] using tree)
@@ -348,11 +349,11 @@ theorem single_get_refines {V : Type} (arena : Spike.radix.SingleRadix V)
   intro result found
   simpa [singleBindings, alloc.vec.Vec.deref] using found
 
-theorem single_scan_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (bindings : List (List U8 × U32))
+theorem single_scan_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (bindings : List (List U8 × U32))
     (view : SingleView arena root bindings) (valid : ArenaValid arena.values)
     (room : 18 * bindings.length ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.scan_links arena root)
+    : WP.spec (CcfKv.radix.SingleRadix.scan_links arena root)
         (fun links => links.val = bindings.map Prod.snd) := by
   obtain ⟨height, tree⟩ := view.lookup
   obtain ⟨fuel, leaves, plan, hpermL⟩ :=
@@ -363,7 +364,7 @@ theorem single_scan_refines {V : Type} (arena : Spike.radix.SingleRadix V)
   have hlenL : leaves.length = bindings.length := by
     simpa [List.length_map] using hpermL.length_eq
   have comp := radix_compressed_of_knowledge arena.values.dirs _ valid.knowledge
-  unfold Spike.radix.SingleRadix.scan_links
+  unfold CcfKv.radix.SingleRadix.scan_links
   apply WP.spec_mono
     (radix_scan_leaves_lex_refines (alloc.vec.Vec.deref arena.values.dirs)
       (alloc.vec.Vec.deref arena.values.rows) height root bindings
@@ -375,11 +376,11 @@ theorem single_scan_refines {V : Type} (arena : Spike.radix.SingleRadix V)
   have heq : ordered = bindings := radixKeyLt_perm_eq hsort view.sorted hperm
   simpa [heq] using hres
 
-theorem single_scan_up_to_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (limit : Usize) (bindings : List (List U8 × U32))
+theorem single_scan_up_to_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (limit : Usize) (bindings : List (List U8 × U32))
     (view : SingleView arena root bindings) (valid : ArenaValid arena.values)
     (room : 18 * bindings.length ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.scan_links_up_to arena root limit)
+    : WP.spec (CcfKv.radix.SingleRadix.scan_links_up_to arena root limit)
         (fun links => links.val = (bindings.map Prod.snd).take limit.val) := by
   obtain ⟨height, tree⟩ := view.lookup
   obtain ⟨fuel, leaves, plan, hpermL⟩ :=
@@ -390,7 +391,7 @@ theorem single_scan_up_to_refines {V : Type} (arena : Spike.radix.SingleRadix V)
   have hlenL : leaves.length = bindings.length := by
     simpa [List.length_map] using hpermL.length_eq
   have comp := radix_compressed_of_knowledge arena.values.dirs _ valid.knowledge
-  unfold Spike.radix.SingleRadix.scan_links_up_to
+  unfold CcfKv.radix.SingleRadix.scan_links_up_to
   apply WP.spec_mono
     (radix_scan_leaves_lex_up_to_refines (alloc.vec.Vec.deref arena.values.dirs)
       (alloc.vec.Vec.deref arena.values.rows) height root limit bindings
@@ -402,12 +403,12 @@ theorem single_scan_up_to_refines {V : Type} (arena : Spike.radix.SingleRadix V)
   have heq : ordered = bindings := radixKeyLt_perm_eq hsort view.sorted hperm
   simpa [heq] using hres
 
-theorem single_scan_row_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (link : U32) (row : Spike.radix.RadixRow V) (tagged : 2147483648 < link.val)
+theorem single_scan_row_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (link : U32) (row : CcfKv.radix.RadixRow V) (tagged : 2147483648 < link.val)
     (saved : radixRow arena.values.rows.val link = some row)
-    : WP.spec (Spike.radix.SingleRadix.scan_row arena link)
+    : WP.spec (CcfKv.radix.SingleRadix.scan_row arena link)
         (fun out => out.1.val = row.key.val ∧ out.2 = row.value) := by
-  unfold Spike.radix.SingleRadix.scan_row
+  unfold CcfKv.radix.SingleRadix.scan_row
   apply WP.spec_bind
     (radix_row_at_matches (alloc.vec.Vec.deref arena.values.rows) link row tagged
       (by simpa [alloc.vec.Vec.deref] using saved))
@@ -419,9 +420,9 @@ theorem single_scan_row_refines {V : Type} (arena : Spike.radix.SingleRadix V)
 /-! ### Prefix-scoped subtree descent and scan -/
 
 private theorem has_prefix_matches (key pfx : Slice U8)
-    : WP.spec (Spike.radix.has_prefix key pfx)
+    : WP.spec (CcfKv.radix.has_prefix key pfx)
         (fun out => out = decide (pfx.val <+: key.val)) := by
-  unfold Spike.radix.has_prefix
+  unfold CcfKv.radix.has_prefix
   have kl : (Slice.len key).val = key.val.length := Slice.len_val _
   have pl : (Slice.len pfx).val = pfx.val.length := Slice.len_val _
   by_cases hshort : Slice.len key < Slice.len pfx
@@ -436,14 +437,14 @@ private theorem has_prefix_matches (key pfx : Slice U8)
     have hge : pfx.val.length ≤ key.val.length := by
       have : ¬ (Slice.len key).val < (Slice.len pfx).val := hshort
       omega
-    unfold Spike.radix.has_prefix_loop
+    unfold CcfKv.radix.has_prefix_loop
     apply loop.spec_decr_nat (fun i : Usize => pfx.val.length - i.val)
       (fun i =>
         i.val ≤ pfx.val.length
         ∧ ∀ j, j < i.val → key.val[j]? = pfx.val[j]?)
       _ _ _
     · intro i ⟨hi, hmatch⟩
-      unfold Spike.radix.has_prefix_loop.body
+      unfold CcfKv.radix.has_prefix_loop.body
       have one : (1#usize : Usize).val = 1 := rfl
       by_cases run : i < Slice.len pfx
       · have hilt : i.val < pfx.val.length := by rwa [← pl]
@@ -567,11 +568,11 @@ private theorem sublist_filter_eq {α : Type} {p : α → Bool} {sub full : List
         exact hall x (List.mem_cons_of_mem _ hx)
       · exact hndRest
 
-private theorem directory_spec (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (node : U32) (dir : Spike.radix.RadixDir)
+private theorem directory_spec (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (node : U32) (dir : CcfKv.radix.RadixDir)
     (hpos : 0 < node.val) (hlive : dirs.val[node.val - 1]? = some (some dir))
-    : WP.spec (Spike.radix.directory (alloc.vec.Vec.deref dirs) node) (· = dir) := by
-  unfold Spike.radix.directory
+    : WP.spec (CcfKv.radix.directory (alloc.vec.Vec.deref dirs) node) (· = dir) := by
+  unfold CcfKv.radix.directory
   have one : (1#u32 : U32).val = 1 := rfl
   apply WP.spec_bind (U32.sub_spec (x := node) (y := 1#u32) (by omega))
   intro idx hidx
@@ -597,8 +598,8 @@ private theorem directory_spec (dirs : alloc.vec.Vec (Option Spike.radix.RadixDi
   rw [hsome, WP.spec_ok]
 
 theorem find_prefix_subtree_refines {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : alloc.vec.Vec (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : alloc.vec.Vec (Option (CcfKv.radix.RadixRow V)))
     (height : Nat) (root : U32) (pfx : Slice U8) (bindings : List (List U8 × U32))
     (tree : RadixTree dirs.val height root bindings)
     (valid : RadixRows rows.val bindings)
@@ -607,13 +608,13 @@ theorem find_prefix_subtree_refines {V : Type}
     (compressed : RadixCompressed dirs.val (radixKeyOf rows.val))
     (prefixRoom : 2 * pfx.val.length ≤ Usize.max)
     : WP.spec
-        (Spike.radix.find_prefix_subtree (alloc.vec.Vec.deref dirs)
+        (CcfKv.radix.find_prefix_subtree (alloc.vec.Vec.deref dirs)
           (alloc.vec.Vec.deref rows) root pfx)
         (fun sub =>
           ∃ h,
             RadixTree dirs.val h sub
               (bindings.filter fun row => decide (pfx.val <+: row.1))) := by
-  unfold Spike.radix.find_prefix_subtree
+  unfold CcfKv.radix.find_prefix_subtree
   have pl : (Slice.len pfx).val = pfx.val.length := Slice.len_val _
   have two : (2#usize : Usize).val = 2 := rfl
   apply WP.spec_bind
@@ -627,7 +628,7 @@ theorem find_prefix_subtree_refines {V : Type}
     intro heq; rw [heq] at h; exact radixKeyLt_irrefl _ h
   have hLoop :
       WP.spec
-        (Spike.radix.find_prefix_subtree_loop (alloc.vec.Vec.deref dirs) pfx prefixDigits root)
+        (CcfKv.radix.find_prefix_subtree_loop (alloc.vec.Vec.deref dirs) pfx prefixDigits root)
         (fun node =>
           ∃ h sub,
             RadixTree dirs.val h node sub
@@ -635,7 +636,7 @@ theorem find_prefix_subtree_refines {V : Type}
             ∧ (∀ e ∈ bindings, pfx.val <+: e.1 → e ∈ sub)
             ∧ (node ≠ 0#u32 → node < 2147483648#u32 →
                 ∃ dir, dirs.val[node.val - 1]? = some (some dir) ∧ prefixDigits.val ≤ dir.digit.val)) := by
-    unfold Spike.radix.find_prefix_subtree_loop
+    unfold CcfKv.radix.find_prefix_subtree_loop
     have hInv :
         ∃ h sub,
           RadixTree dirs.val h root sub
@@ -653,16 +654,16 @@ theorem find_prefix_subtree_refines {V : Type}
           ∧ (∀ e ∈ bindings, pfx.val <+: e.1 → e ∈ sub))
       _ _ _
     · intro node ⟨h, sub, htree, hsub, hmem⟩
-      unfold Spike.radix.find_prefix_subtree_loop.body
+      unfold CcfKv.radix.find_prefix_subtree_loop.body
       by_cases hnz : node != 0#u32
       · rw [ite_eq_left hnz]
         have hnodePos : 0 < node.val := by
           have hne : node ≠ 0#u32 := bne_iff_ne.mp hnz
           have : node.val ≠ 0 := fun hz => hne (UScalar.eq_of_val_eq hz)
           omega
-        by_cases hlow : node < Spike.radix.RADIX_LEAF_TAG
+        by_cases hlow : node < CcfKv.radix.RADIX_LEAF_TAG
         · rw [ite_eq_left hlow]
-          have hltTag : node < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hlow
+          have hltTag : node < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hlow
           cases htree with
           | empty _ => exact (bne_iff_ne.mp hnz rfl).elim
           | leaf _ _ _ tagged => exact (not_lt_of_ge tagged hltTag).elim
@@ -724,7 +725,7 @@ theorem find_prefix_subtree_refines {V : Type}
                 exact ⟨⟨h', _, htreeNext, hsubNext, hmemNext⟩, hdec⟩
         · rw [ite_eq_right hlow, WP.spec_ok]
           refine ⟨h, sub, htree, hsub, hmem, fun _ hlt => ?_⟩
-          have : ¬ node < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hlow
+          have : ¬ node < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hlow
           exact (this hlt).elim
       · rw [ite_eq_right hnz, WP.spec_ok]
         have hzero : node = 0#u32 := by
@@ -757,16 +758,16 @@ theorem find_prefix_subtree_refines {V : Type}
     have hvalidSub : RadixRows rows.val sub := fun e he => valid e (hsub.subset he)
     have hrepSpec :
         WP.spec
-          (if node < Spike.radix.RADIX_LEAF_TAG then do
-              let rd ← Spike.radix.directory (alloc.vec.Vec.deref dirs) node
+          (if node < CcfKv.radix.RADIX_LEAF_TAG then do
+              let rd ← CcfKv.radix.directory (alloc.vec.Vec.deref dirs) node
               Result.ok rd.first
             else Result.ok node)
           (fun rep =>
             ∃ rk, (rk, rep) ∈ sub
               ∧ (∀ e ∈ sub, (pfx.val <+: e.1) ↔ (pfx.val <+: rk))) := by
-      by_cases hlow : node < Spike.radix.RADIX_LEAF_TAG
+      by_cases hlow : node < CcfKv.radix.RADIX_LEAF_TAG
       · rw [ite_eq_left hlow]
-        have hltTag : node < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hlow
+        have hltTag : node < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hlow
         obtain ⟨dir, hlive, hdigGe⟩ := hstop hzero hltTag
         have hnodePos : 0 < node.val := by
           have : node.val ≠ 0 := fun hz => hzero (UScalar.eq_of_val_eq hz)
@@ -792,7 +793,7 @@ theorem find_prefix_subtree_refines {V : Type}
           exact hall i hi
       · rw [ite_eq_right hlow, WP.spec_ok]
         have hgeTag : (2147483648#u32 : U32) ≤ node := by
-          have : ¬ node < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hlow
+          have : ¬ node < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hlow
           exact le_of_not_gt this
         cases htree with
         | empty _ => exact (hzero rfl).elim
@@ -833,18 +834,18 @@ theorem find_prefix_subtree_refines {V : Type}
         rw [hfiltNil]
         exact ⟨0, .empty 0⟩
 
-theorem single_scan_prefix_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (pfx : Slice U8) (bindings : List (List U8 × U32))
+theorem single_scan_prefix_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (pfx : Slice U8) (bindings : List (List U8 × U32))
     (view : SingleView arena root bindings) (valid : ArenaValid arena.values)
     (prefixRoom : 2 * pfx.val.length ≤ Usize.max)
     (scanRoom : 18 * bindings.length ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.scan_prefix_links arena root pfx)
+    : WP.spec (CcfKv.radix.SingleRadix.scan_prefix_links arena root pfx)
         (fun links =>
           links.val
           = (bindings.filter fun row => decide (pfx.val <+: row.1)).map Prod.snd) := by
   obtain ⟨height, tree⟩ := view.lookup
   have comp := radix_compressed_of_knowledge arena.values.dirs _ valid.knowledge
-  unfold Spike.radix.SingleRadix.scan_prefix_links Spike.radix.scan_prefix_leaves
+  unfold CcfKv.radix.SingleRadix.scan_prefix_links CcfKv.radix.scan_prefix_leaves
   apply WP.spec_bind
     (find_prefix_subtree_refines arena.values.dirs arena.values.rows height root pfx
       bindings tree view.values view.sorted valid.directories comp prefixRoom)

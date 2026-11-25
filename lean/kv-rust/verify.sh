@@ -26,14 +26,14 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 generated="$proof_dir/KvRust/Extracted"
 mkdir -p "$proof_dir/.lake" "$generated"
-llbc="$proof_dir/.lake/ccf_kv_spike.llbc"
+llbc="$proof_dir/.lake/ccf_kv.llbc"
 (
-  cd "$proof_dir/../../src/rust/kv-spike"
+  cd "$proof_dir/../../src/rust/ccf-kv"
   "$aeneas_root/charon/bin/charon" cargo --preset=aeneas --sysroot=default --dest-file="$llbc"
 )
 rm -f -- "$generated/TypesExternal_Template.lean" "$generated/FunsExternal_Template.lean"
 "$aeneas_root/bin/aeneas" -backend lean -split-files -abort-on-error \
-  -dest "$proof_dir" -subdir KvRust/Extracted -namespace Spike "$llbc"
+  -dest "$proof_dir" -subdir KvRust/Extracted -namespace CcfKv "$llbc"
 if [[ -e "$generated/TypesExternal_Template.lean" || -e "$generated/FunsExternal_Template.lean" ]]; then
   echo "Unexpected opaque Rust dependency; see the generated templates in $generated" >&2
   exit 1
@@ -41,14 +41,14 @@ fi
 
 cd "$proof_dir"
 lake build --wfail
-for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
-  KvRust.Correspondence KvRust.Assoc KvRust.BranchLog KvRust.History KvRust.Keys KvRust.Publication \
+for module in KvRust.Extracted.Types KvRust.Extracted.Funs \
+  KvRust.Assoc KvRust.BranchLog KvRust.History KvRust.Keys KvRust.Publication \
   KvRust.KvIndex KvRust.IndexedHistory KvRust.IndexedImage KvRust.IndexedPublication \
   KvRust.SortedPublication \
   KvRust.Validation KvRust.Lineage KvRust.Apply KvRust.Advance KvRust.Acquire \
   KvRust.OrderEquivalence KvRust.PendingWrites KvRust.PinnedImage KvRust.Point \
-  KvRust.Radix KvRust.RadixAddress KvRust.RadixBatch KvRust.RadixDual \
-  KvRust.RadixDualBatch KvRust.RadixLiveness KvRust.RadixSingle KvRust.RadixSingleReclaim \
+  KvRust.Radix KvRust.RadixAddress KvRust.RadixBatch \
+  KvRust.RadixLiveness KvRust.RadixSingle KvRust.RadixSingleReclaim \
   KvRust.RetainedCuts KvRust.RetireQueue \
   KvRust.Range KvRust.Scan KvRust.Relation KvRust.Lifecycle \
   KvRust.LifecycleRefinement KvRust.Environment KvRust.ApplyRefinement \

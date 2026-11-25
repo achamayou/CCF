@@ -13,9 +13,9 @@ open Aeneas.Std
 
 /-- Copying bytes at the native API boundary preserves their full contents. -/
 theorem bytes_copy_from (bytes : Slice U8)
-    : WP.spec (Spike.engine.Bytes.copy_from bytes)
+    : WP.spec (CcfKv.engine.Bytes.copy_from bytes)
         (fun copy => copy.val = bytes.val) := by
-  unfold Spike.engine.Bytes.copy_from
+  unfold CcfKv.engine.Bytes.copy_from
   apply WP.spec_bind (alloc.slice.Slice.to_vec_spec core.clone.CloneU8 bytes (fun _ _ => rfl))
   intro copy hc
   rw [WP.spec_ok]
@@ -60,14 +60,14 @@ private theorem order_at_end (a b : List U8) (i : Nat)
       simp [List.drop_eq_nil_of_le ha', List.drop_eq_nil_of_le hb', byteOrder, hab, hba]
 
 /-- The extracted comparator terminates with the unsigned lexicographic order of the byte lists. -/
-theorem bytes_compare (a b : Spike.engine.Bytes)
-    : WP.spec (Spike.engine.Bytes.compare a b)
+theorem bytes_compare (a b : CcfKv.engine.Bytes)
+    : WP.spec (CcfKv.engine.Bytes.compare a b)
         (fun r => r = byteOrder (alloc.vec.Vec.val a) (alloc.vec.Vec.val b)) := by
   let xs := alloc.vec.Vec.val a
   let ys := alloc.vec.Vec.val b
-  unfold Spike.engine.Bytes.compare Spike.engine.Bytes.compare_loop
+  unfold CcfKv.engine.Bytes.compare CcfKv.engine.Bytes.compare_loop
   apply loop.spec_decr_nat
-    (fun (p : Spike.engine.Bytes × Spike.engine.Bytes × Usize) => xs.length - p.2.2.val)
+    (fun (p : CcfKv.engine.Bytes × CcfKv.engine.Bytes × Usize) => xs.length - p.2.2.val)
     (fun p => p.1 = a ∧ p.2.1 = b ∧ p.2.2.val ≤ xs.length ∧ p.2.2.val ≤ ys.length
       ∧ byteOrder (xs.drop p.2.2.val) (ys.drop p.2.2.val) = byteOrder xs ys)
     _ _ _
@@ -78,7 +78,7 @@ theorem bytes_compare (a b : Spike.engine.Bytes)
     have hlb : (alloc.vec.Vec.len b).val = ys.length := alloc.vec.Vec.len_val b
     have hlen := alloc.vec.Vec.len_ineq a
     have hone : (1#usize : Usize).val = 1 := rfl
-    unfold Spike.engine.Bytes.compare_loop.body
+    unfold CcfKv.engine.Bytes.compare_loop.body
     by_cases hai : i < alloc.vec.Vec.len a <;> by_cases hbi : i < alloc.vec.Vec.len b
     · have ha' : i.val < xs.length := by
         rw [← hla]
@@ -131,11 +131,11 @@ theorem bytes_compare (a b : Spike.engine.Bytes)
           simp [hlt, hgt, show 0#i8 = byteOrder xs ys by simpa [hl, hg] using hend]; rfl
   · simp
 
-private theorem bytes_same_slice (a b : Spike.engine.Bytes)
-    : Spike.engine.Bytes.same_slice a b
+private theorem bytes_same_slice (a b : CcfKv.engine.Bytes)
+    : CcfKv.engine.Bytes.same_slice a b
       = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
-  simp only [Spike.engine.Bytes.same_slice,
-    Spike.engine.Bytes.as_slice, bind_ok]
+  simp only [CcfKv.engine.Bytes.same_slice,
+    CcfKv.engine.Bytes.as_slice, bind_ok]
   let result := core.slice.cmp.PartialEqSlice.eq core.cmp.PartialEqU8
     (alloc.vec.Vec.deref a) (alloc.vec.Vec.deref b)
   have h := core.slice.cmp.PartialEqSlice.eq_homo_spec core.cmp.PartialEqU8
@@ -152,17 +152,17 @@ private theorem bytes_same_slice (a b : Spike.engine.Bytes)
   | div => simp [hr] at h
 
 /-- Equality used by extracted lookups is equality of byte contents. -/
-theorem bytes_same (a b : Spike.engine.Bytes)
-    : Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a b
+theorem bytes_same (a b : CcfKv.engine.Bytes)
+    : CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same a b
       = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
-  simpa only [Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same]
+  simpa only [CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same]
     using bytes_same_slice a b
 
-private theorem bytes_same_key (a b : Spike.engine.Bytes)
-    : Spike.engine.Bytes.same_key a b = .ok (decide (a.val = b.val)) := by
-  have proved : WP.spec (Spike.engine.Bytes.same_key a b)
+private theorem bytes_same_key (a b : CcfKv.engine.Bytes)
+    : CcfKv.engine.Bytes.same_key a b = .ok (decide (a.val = b.val)) := by
+  have proved : WP.spec (CcfKv.engine.Bytes.same_key a b)
       (· = decide (a.val = b.val)) := by
-    unfold Spike.engine.Bytes.same_key
+    unfold CcfKv.engine.Bytes.same_key
     let lenA := alloc.vec.Vec.len a
     let lenB := alloc.vec.Vec.len b
     have hlenA : lenA.val = a.val.length := alloc.vec.Vec.len_val a
@@ -212,19 +212,19 @@ private theorem bytes_same_key (a b : Spike.engine.Bytes)
     · have different : a.val ≠ b.val := fun h =>
         sameSize (lengths.mpr (congrArg List.length h))
       simp [show alloc.vec.Vec.len a ≠ alloc.vec.Vec.len b from sameSize, different]
-  cases hr : Spike.engine.Bytes.same_key a b using Result.cases with
+  cases hr : CcfKv.engine.Bytes.same_key a b using Result.cases with
   | ret result => simpa [hr, Result.ok.injEq] using proved
   | vis _ _ => simp [hr] at proved
   | div => simp [hr] at proved
 
 /-- Both components of an address use byte-content equality. -/
-theorem address_same (a b : Spike.engine.Address)
-    : Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same a b
+theorem address_same (a b : CcfKv.engine.Address)
+    : CcfKv.engine.Address.Insts.Ccf_kvEngineKey.same a b
       = .ok
           (decide
             (alloc.vec.Vec.val a.map = alloc.vec.Vec.val b.map
               ∧ alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key)) := by
-  unfold Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same
+  unfold CcfKv.engine.Address.Insts.Ccf_kvEngineKey.same
   by_cases h : alloc.vec.Vec.val a.key = alloc.vec.Vec.val b.key
   · simp [bytes_same_key, bytes_same_slice, h]
   · simp [bytes_same_key, h]

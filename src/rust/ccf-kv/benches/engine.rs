@@ -4,7 +4,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use ccf_kv_spike::engine::{Action, Bytes, Operation, Outcome, Output, Store};
+use ccf_kv::engine::{Action, Bytes, Operation, Outcome, Output, Store};
 
 const SAMPLES: usize = 9;
 const ATTEMPT: u64 = 1;

@@ -13,13 +13,13 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Non-empty radix roots retained directly by a pinned image handle. -/
-def pinPins : Spike.engine.PinnedImage → List U32
+def pinPins : CcfKv.engine.PinnedImage → List U32
   | .Root root => if root = 0#u32 then [] else [root]
   | _ => []
 
 theorem pin_preserved_of_pins {before after : CellIndex} {pins : List U32}
     (preserved : IndexPreservesPins before after pins)
-    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+    (map : CcfKv.engine.Bytes) (pin : CcfKv.engine.PinnedImage)
     (inPins : ∀ r ∈ pinPins pin, r ∈ pins) (live : PinLive before pin)
     : PinLive after pin ∧ pinImage after map pin = pinImage before map pin := by
   cases pin with
@@ -39,7 +39,7 @@ theorem pin_preserved_of_pins {before after : CellIndex} {pins : List U32}
 
 theorem pin_preserved {before after : CellIndex}
     (preserved : IndexKeeps before after)
-    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+    (map : CcfKv.engine.Bytes) (pin : CcfKv.engine.PinnedImage)
     (live : PinLive before pin)
     : PinLive after pin ∧ pinImage after map pin = pinImage before map pin := by
   cases pin with
@@ -53,25 +53,25 @@ theorem pin_preserved {before after : CellIndex}
         by simp [pinImage, hrows]
       ⟩
 
-theorem clone_pin (pin : Spike.engine.PinnedImage)
-    : Spike.engine.PinnedImage.Insts.CoreCloneClone.clone pin = .ok pin := by
-  cases pin <;> simp [Spike.engine.PinnedImage.Insts.CoreCloneClone.clone, clone_assoc,
-    Spike.radix.RadixRoot.Insts.CoreCloneClone.clone]
+theorem clone_pin (pin : CcfKv.engine.PinnedImage)
+    : CcfKv.engine.PinnedImage.Insts.CoreCloneClone.clone pin = .ok pin := by
+  cases pin <;> simp [CcfKv.engine.PinnedImage.Insts.CoreCloneClone.clone, clone_assoc,
+    CcfKv.radix.RadixRoot.Insts.CoreCloneClone.clone]
 
-def HistoryScanRoom (history : Spike.engine.History) : Prop :=
-  ∀ (i : Nat) (frame : Spike.engine.Frame),
+def HistoryScanRoom (history : CcfKv.engine.History) : Prop :=
+  ∀ (i : Nat) (frame : CcfKv.engine.Frame),
     history.log.frames.val[i]? = some frame
     → 18 * (indexRows history.index frame.data).length ≤ Usize.max
 
 theorem release_pin_refines (index : CellIndex) (restPins : List U32)
-    (pin : Spike.engine.PinnedImage)
+    (pin : CcfKv.engine.PinnedImage)
     (live : IndexLiveness index (pinPins pin ++ restPins))
     (queueRoom
       : 2 * (index.values.dirs.val.length + index.values.rows.val.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.engine.release_pin index pin)
+    : WP.spec (CcfKv.engine.release_pin index pin)
         (fun after =>
           after.values = index.values ∧ IndexLiveness after restPins) := by
-  unfold Spike.engine.release_pin
+  unfold CcfKv.engine.release_pin
   cases pin with
   | Empty =>
       rw [WP.spec_ok]
@@ -85,20 +85,20 @@ theorem release_pin_refines (index : CellIndex) (restPins : List U32)
       exact index_release_root_refines index restPins root hlive queueRoom
 
 /-- Materializing entries from a pinned handle copies precisely its key/value pairs in order. -/
-theorem pin_entries_refines (history : Spike.engine.History)
-    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+theorem pin_entries_refines (history : CcfKv.engine.History)
+    (map : CcfKv.engine.Bytes) (pin : CcfKv.engine.PinnedImage)
     (live : PinLive history.index pin) (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
     (space : PinScanRoom history.index pin)
-    : WP.spec (Spike.engine.PinnedImage.entries pin history map)
+    : WP.spec (CcfKv.engine.PinnedImage.entries pin history map)
         (fun rows =>
           rows.val.map (fun (k, v) => (k.val, v.val))
           = (pinImage history.index map pin).map (fun (k, c) => (k, c.value))) := by
-  unfold Spike.engine.PinnedImage.entries
+  unfold CcfKv.engine.PinnedImage.entries
   cases pin with
   | Empty => simp [alloc.vec.Vec.new, pinImage]
   | Root root =>
-      unfold Spike.engine.indexed_entries
+      unfold CcfKv.engine.indexed_entries
       apply WP.spec_bind
         (index_scan_map_refines history.index root (indexRows history.index root) map
           live valid mapRoom space)
@@ -107,8 +107,8 @@ theorem pin_entries_refines (history : Spike.engine.History)
       change links.val.length = selected.length at hlen
       change ∀ (i : Nat) link, links.val[i]? = some link →
         ∃ entry, selected[i]? = some entry ∧
-          WP.spec (Spike.kv_index.AddressIndex.scan_row history.index link) (· = entry) at hload
-      unfold Spike.engine.indexed_entries_loop
+          WP.spec (CcfKv.kv_index.AddressIndex.scan_row history.index link) (· = entry) at hload
+      unfold CcfKv.engine.indexed_entries_loop
       have hcap := alloc.vec.Vec.len_ineq links
       have hlenV : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -124,7 +124,7 @@ theorem pin_entries_refines (history : Spike.engine.History)
           _ _ _
         · rintro ⟨out, i⟩ ⟨hi, hinv⟩
           dsimp only at hi hinv ⊢
-          unfold Spike.engine.indexed_entries_loop.body
+          unfold CcfKv.engine.indexed_entries_loop.body
           by_cases run : i < alloc.vec.Vec.len links
           · have hlt : i.val < links.val.length := by rwa [← hlenV]
             have his : i.val < selected.length := by omega
@@ -145,10 +145,10 @@ theorem pin_entries_refines (history : Spike.engine.History)
               have hmem : (a', c') ∈ selected := List.mem_of_getElem? hat
               exact of_decide_eq_true (List.mem_filter.mp hmem).2
             change WP.spec (do
-              let out1 ← Spike.engine.append_entry_row out a' c' map
+              let out1 ← CcfKv.engine.append_entry_row out a' c' map
               let i1 ← i + 1#usize
               Result.ok (ControlFlow.cont (out1, i1))) _
-            unfold Spike.engine.append_entry_row
+            unfold CcfKv.engine.append_entry_row
             simp only [bytes_same, hOnMap, decide_true, bind_ok, ite_true, clone_bytes]
             apply WP.spec_bind (alloc.vec.Vec.push_spec out (a'.key, c'.value) (by omega))
             intro out1 hout1
@@ -181,7 +181,7 @@ theorem pin_entries_refines (history : Spike.engine.History)
               · simp [hm, indexedCellData, image, byteAddr, ih]
         exact hproj (indexRows history.index root)
   | Recovered rows =>
-      unfold Spike.engine.PinnedImage.entries_loop
+      unfold CcfKv.engine.PinnedImage.entries_loop
       have hcap := alloc.vec.Vec.len_ineq rows
       have hlenV : (alloc.vec.Vec.len rows).val = rows.val.length := alloc.vec.Vec.len_val rows
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -197,7 +197,7 @@ theorem pin_entries_refines (history : Spike.engine.History)
           _ _ _
         · rintro ⟨out, i⟩ ⟨hi, hinv⟩
           dsimp only at hi hinv ⊢
-          unfold Spike.engine.PinnedImage.entries_loop.body
+          unfold CcfKv.engine.PinnedImage.entries_loop.body
           by_cases run : i < alloc.vec.Vec.len rows
           · have hlt : i.val < rows.val.length := by rwa [← hlenV]
             have houtLen : out.val.length = i.val := by
@@ -230,14 +230,14 @@ theorem pin_entries_refines (history : Spike.engine.History)
         simp [pinImage, byteImage, byteCell, List.map_map, Function.comp_def]
 
 /-- Measuring the size of a pinned handle returns the exact number of keys on `map`. -/
-theorem pin_size_refines (history : Spike.engine.History)
-    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+theorem pin_size_refines (history : CcfKv.engine.History)
+    (map : CcfKv.engine.Bytes) (pin : CcfKv.engine.PinnedImage)
     (live : PinLive history.index pin) (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
     (space : PinScanRoom history.index pin)
-    : WP.spec (Spike.engine.PinnedImage.size pin history map)
+    : WP.spec (CcfKv.engine.PinnedImage.size pin history map)
         (fun count => count.val = (pinImage history.index map pin).length) := by
-  unfold Spike.engine.PinnedImage.size
+  unfold CcfKv.engine.PinnedImage.size
   cases pin with
   | Empty => simp [pinImage]
   | Recovered rows =>
@@ -269,24 +269,6 @@ theorem pin_size_refines (history : Spike.engine.History)
               exact ih
       exact hlenEq (indexRows history.index root)
 
-/-- Materializing a pinned root handle copies precisely its selected ordered map. -/
-theorem pin_materialize_refines (history : Spike.engine.History)
-    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
-    (live : PinLive history.index pin) (valid : IndexValid history.index)
-    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
-    (space : PinScanRoom history.index pin)
-    : WP.spec (Spike.engine.PinnedImage.materialize pin history map)
-        (fun rows => byteImage rows = pinImage history.index map pin) := by
-  unfold Spike.engine.PinnedImage.materialize
-  cases pin with
-  | Empty => simp [Spike.engine.Assoc.new, byteImage, pinImage]
-  | Recovered rows => simp [clone_assoc, pinImage]
-  | Root root =>
-      apply WP.spec_mono (indexed_image_refines history.index root _ map live valid mapRoom space)
-      intro rows h
-      simp only [byteImage, h, pinImage]
-      exact indexed_image_projects _ _
-
 private theorem find_in_image {M K V : Type} [DecidableEq M] [DecidableEq K]
     (db : DB M K V) (map : M) (key : K)
     : find (image db map) key = find db (map, key) := by
@@ -301,25 +283,25 @@ private theorem find_in_image {M K V : Type} [DecidableEq M] [DecidableEq K]
       · have diff : (m, k) ≠ (map, key) := fun h => onMap (congrArg Prod.fst h)
         simpa [image, find, onMap, diff] using ih
 
-local instance pinDecidableEqBytes : DecidableEq Spike.engine.Bytes :=
+local instance pinDecidableEqBytes : DecidableEq CcfKv.engine.Bytes :=
   fun a b =>
     decidable_of_iff (a.val = b.val) ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
 /-- A borrowed point read agrees with a lookup after exact map materialization. -/
-theorem pin_point_refines (history : Spike.engine.History)
-    (address : Spike.engine.Address) (pin : Spike.engine.PinnedImage)
+theorem pin_point_refines (history : CcfKv.engine.History)
+    (address : CcfKv.engine.Address) (pin : CcfKv.engine.PinnedImage)
     (live : PinLive history.index pin)
     (space : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.PinnedImage.point pin history address)
+    : WP.spec (CcfKv.engine.PinnedImage.point pin history address)
         (fun cell =>
           cell.map byteCell
           = find (pinImage history.index address.map pin) address.key.val) := by
-  unfold Spike.engine.PinnedImage.point
+  unfold CcfKv.engine.PinnedImage.point
   cases pin with
   | Empty => simp [pinImage, find]
   | Recovered rows =>
-      apply WP.spec_mono (assoc_get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-        Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone
+      apply WP.spec_mono (assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+        CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Cell.Insts.CoreCloneClone
         rows address.key (fun k => key_same k address.key) clone_cell)
       intro found he
       rw [pinImage, byteImage, find_projected _ _ _ _ (fun _ _ => alloc.vec.Vec.ext _ _), he]
@@ -329,23 +311,23 @@ theorem pin_point_refines (history : Spike.engine.History)
       cases found <;> simp [clone_cell, pinImage, find_in_image, byteAddr] at he ⊢ <;>
         exact he
 
-def viewPins (view : Spike.engine.View) : List U32 :=
+def viewPins (view : CcfKv.engine.View) : List U32 :=
   pinPins view.local
   ++ (match view.global with
       | none => []
       | some g => pinPins g)
 
-def txPins (t : Spike.engine.Tx) : List U32 :=
+def txPins (t : CcfKv.engine.Tx) : List U32 :=
   t.views.val.flatMap fun (_, v) => viewPins v
 
-def txsPins (txs : List (U64 × Spike.engine.Tx)) : List U32 :=
+def txsPins (txs : List (U64 × CcfKv.engine.Tx)) : List U32 :=
   txs.flatMap fun (_, t) => txPins t
 
-def storePins (s : Spike.engine.Store) : List U32 :=
+def storePins (s : CcfKv.engine.Store) : List U32 :=
   framePins s.history.log.frames.val ++ txsPins s.txs.val
 
-theorem txsPins_set_same_views (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
-    (id : U64) (t t' : Spike.engine.Tx)
+theorem txsPins_set_same_views (txs : List (U64 × CcfKv.engine.Tx)) (i : Nat)
+    (id : U64) (t t' : CcfKv.engine.Tx)
     (hget : txs[i]? = some (id, t)) (hviews : t'.views = t.views)
     : txsPins (txs.set i (id, t')) = txsPins txs := by
   induction txs generalizing i with
@@ -363,8 +345,8 @@ theorem txsPins_set_same_views (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
           simp only [List.set_cons_succ, txsPins, List.flatMap_cons] at hsub ⊢
           rw [hsub]
 
-theorem txsPins_set_add_view (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
-    (id : U64) (t t' : Spike.engine.Tx) (m : Spike.engine.Bytes) (v : Spike.engine.View)
+theorem txsPins_set_add_view (txs : List (U64 × CcfKv.engine.Tx)) (i : Nat)
+    (id : U64) (t t' : CcfKv.engine.Tx) (m : CcfKv.engine.Bytes) (v : CcfKv.engine.View)
     (hget : txs[i]? = some (id, t)) (hviews : t'.views.val = (m, v) :: t.views.val)
     : (txsPins (txs.set i (id, t'))).Perm (viewPins v ++ txsPins txs) := by
   induction txs generalizing i with
@@ -390,8 +372,8 @@ theorem txsPins_set_add_view (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
               (viewPins v ++ (txPins hd.2 ++ txsPins tl)) := by rw [List.append_assoc]
           exact h1.trans (h2.trans (h3.trans h4))
 
-theorem txsPins_split_at (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
-    (id : U64) (t : Spike.engine.Tx) (hget : txs[i]? = some (id, t))
+theorem txsPins_split_at (txs : List (U64 × CcfKv.engine.Tx)) (i : Nat)
+    (id : U64) (t : CcfKv.engine.Tx) (hget : txs[i]? = some (id, t))
     : (txsPins txs).Perm (txPins t ++ txsPins (txs.eraseIdx i)) := by
   induction txs generalizing i with
   | nil => simp at hget
@@ -416,15 +398,15 @@ theorem txsPins_split_at (txs : List (U64 × Spike.engine.Tx)) (i : Nat)
               (txPins t ++ (txPins hd.2 ++ txsPins (tl.eraseIdx j))) := by rw [List.append_assoc]
           exact h1.trans (h2.trans (h3.trans h4))
 
-theorem release_tx_pins_refines (index : CellIndex) (tx : Spike.engine.Tx)
+theorem release_tx_pins_refines (index : CellIndex) (tx : CcfKv.engine.Tx)
     (restPins : List U32)
     (live : IndexLiveness index (txPins tx ++ restPins))
     (queueRoom
       : 2 * (index.values.dirs.val.length + index.values.rows.val.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.engine.release_tx_pins index tx)
+    : WP.spec (CcfKv.engine.release_tx_pins index tx)
         (fun after =>
           after.values = index.values ∧ IndexLiveness after restPins) := by
-  unfold Spike.engine.release_tx_pins Spike.engine.release_tx_pins_loop
+  unfold CcfKv.engine.release_tx_pins CcfKv.engine.release_tx_pins_loop
   let total := tx.views.val.length
   let tailPins (k : Nat) : List U32 :=
     (tx.views.val.drop k).flatMap fun (_, v) => viewPins v
@@ -436,7 +418,7 @@ theorem release_tx_pins_refines (index : CellIndex) (tx : Spike.engine.Tx)
     _ _ _
   · rintro ⟨cur, i⟩ ⟨hi, hvals, hlive⟩
     dsimp only at hi hvals hlive ⊢
-    unfold Spike.engine.release_tx_pins_loop.body
+    unfold CcfKv.engine.release_tx_pins_loop.body
     have hlen : (alloc.vec.Vec.len tx.views).val = total := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq tx.views
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -462,7 +444,7 @@ theorem release_tx_pins_refines (index : CellIndex) (tx : Spike.engine.Tx)
       have hglob : WP.spec
           (match view.global with
             | none => Result.ok cur1
-            | some g => Spike.engine.release_pin cur1 g)
+            | some g => CcfKv.engine.release_pin cur1 g)
           (fun cur2 => cur2.values = index.values ∧ IndexLiveness cur2 (tailPins (i.val + 1) ++ restPins)) := by
         cases hg : view.global with
         | none =>

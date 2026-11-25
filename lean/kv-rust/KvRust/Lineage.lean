@@ -14,11 +14,11 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Preserve both coordinates of a map's revision or birth identity. -/
-def modelStamp (s : Spike.engine.Stamp) : Stamp :=
+def modelStamp (s : CcfKv.engine.Stamp) : Stamp :=
   {version := s.version.val, identity := s.identity.val}
 
 /-- Project the map metadata. Data is supplied separately by the store relation. -/
-def modelMetadata (encode : Spike.engine.Bytes → String) (f : Spike.engine.Frame)
+def modelMetadata (encode : CcfKv.engine.Bytes → String) (f : CcfKv.engine.Frame)
     : Frame :=
   {
     version := f.version.val
@@ -26,77 +26,77 @@ def modelMetadata (encode : Spike.engine.Bytes → String) (f : Spike.engine.Fra
     revisions := f.revisions.val.map fun (m, s) => (encode m, modelStamp s)
   }
 
-local instance : DecidableEq Spike.engine.Bytes :=
+local instance : DecidableEq CcfKv.engine.Bytes :=
   fun a b =>
     decidable_of_iff (alloc.vec.Vec.val a = alloc.vec.Vec.val b)
       ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
 /-- The extracted byte key comparison implements decidable equality. -/
-theorem key_same [DecidableEq Spike.engine.Bytes] (a b : Spike.engine.Bytes)
-    : Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a b = .ok (decide (a = b)) := by
+theorem key_same [DecidableEq CcfKv.engine.Bytes] (a b : CcfKv.engine.Bytes)
+    : CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same a b = .ok (decide (a = b)) := by
   rw [bytes_same, Result.ok.injEq]
   exact decide_eq_decide.mpr ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
-private theorem stamp_same (a b : Spike.engine.Stamp)
-    : Spike.engine.Stamp.same a b = .ok (modelStamp a == modelStamp b) := by
+private theorem stamp_same (a b : CcfKv.engine.Stamp)
+    : CcfKv.engine.Stamp.same a b = .ok (modelStamp a == modelStamp b) := by
   have hv : a.version.val = b.version.val ↔ a.version = b.version :=
     ⟨UScalar.eq_of_val_eq, congrArg (fun v : U64 => v.val)⟩
   have hi : a.identity.val = b.identity.val ↔ a.identity = b.identity :=
     ⟨UScalar.eq_of_val_eq, congrArg (fun v : U64 => v.val)⟩
-  change Spike.engine.Stamp.same a b =
+  change CcfKv.engine.Stamp.same a b =
     .ok ((a.version.val == b.version.val) && (a.identity.val == b.identity.val))
   by_cases h : a.version = b.version
-  · simp [Spike.engine.Stamp.same, h, ← hi]
+  · simp [CcfKv.engine.Stamp.same, h, ← hi]
     by_cases he : a.identity.val = b.identity.val <;> simp [he]
-  · simp [Spike.engine.Stamp.same, h, hv]
+  · simp [CcfKv.engine.Stamp.same, h, hv]
 
 /-- Extracted stamp lookup commutes with the map-name and stamp projections. -/
-theorem stamps_find (encode : Spike.engine.Bytes → String)
+theorem stamps_find (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Stamp)
-    (m : Spike.engine.Bytes)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.Stamp)
+    (m : CcfKv.engine.Bytes)
     : WP.spec
-        (Spike.engine.Assoc.get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
           rows m)
         (fun r =>
           r.map modelStamp
           = find (rows.val.map fun (k, s) => (encode k, modelStamp s)) (encode m)) := by
   apply WP.spec_mono
-    (assoc_get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-      Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone rows m
+    (assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+      CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone rows m
       (fun a => key_same a m) (fun _ => rfl))
   intro r hr
   rw [hr, find_projected rows.val m encode modelStamp inj]
 
 /-- The extracted revision lookup uses the same zero stamp for absent revisions as the model. -/
-theorem revision_matches_model (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
-    : WP.spec (Spike.engine.Frame.revision f m)
+theorem revision_matches_model (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (f : CcfKv.engine.Frame) (m : CcfKv.engine.Bytes)
+    : WP.spec (CcfKv.engine.Frame.revision f m)
         (fun r => modelStamp r = revision (modelMetadata encode f) (encode m)) := by
-  unfold Spike.engine.Frame.revision
+  unfold CcfKv.engine.Frame.revision
   apply WP.spec_bind (stamps_find encode inj f.revisions m)
   intro r hr
   unfold revision
   change WP.spec _ (fun s => modelStamp s =
     (find (f.revisions.val.map fun (k, stamp) => (encode k, modelStamp stamp)) (encode m)).getD {})
   rw [← hr]
-  cases r <;> simp [Spike.engine.Stamp.zero, modelStamp]
+  cases r <;> simp [CcfKv.engine.Stamp.zero, modelStamp]
 
 /-- Boolean match of a native frame's live metadata against a map's birth and revision stamps. -/
-def frameMatches (encode : Spike.engine.Bytes → String) (f : Spike.engine.Frame)
-    (m : Spike.engine.Bytes) (b : Option Spike.engine.Stamp) (r : Spike.engine.Stamp)
+def frameMatches (encode : CcfKv.engine.Bytes → String) (f : CcfKv.engine.Frame)
+    (m : CcfKv.engine.Bytes) (b : Option CcfKv.engine.Stamp) (r : CcfKv.engine.Stamp)
     : Bool :=
   f.meta_live
   && (find (modelMetadata encode f).births (encode m) == b.map modelStamp)
   && (revision (modelMetadata encode f) (encode m) == modelStamp r)
 
-theorem frame_matches (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
-    (b : Option Spike.engine.Stamp) (r : Spike.engine.Stamp)
-    : WP.spec (Spike.engine.Frame.matches_lineage f m b r)
+theorem frame_matches (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (f : CcfKv.engine.Frame) (m : CcfKv.engine.Bytes)
+    (b : Option CcfKv.engine.Stamp) (r : CcfKv.engine.Stamp)
+    : WP.spec (CcfKv.engine.Frame.matches_lineage f m b r)
         (fun result => result = frameMatches encode f m b r) := by
-  unfold Spike.engine.Frame.matches_lineage frameMatches
+  unfold CcfKv.engine.Frame.matches_lineage frameMatches
   cases hm : f.meta_live with
   | false => simp
   | true =>
@@ -109,7 +109,7 @@ theorem frame_matches (encode : Spike.engine.Bytes → String)
             | some _ => Result.ok false
           | some x => match b with
             | none => Result.ok false
-            | some y => Spike.engine.Stamp.same x y)
+            | some y => CcfKv.engine.Stamp.same x y)
           (fun result => result = (a.map modelStamp == b.map modelStamp)) := by
         cases a <;> cases b <;> simp [stamp_same]
       apply WP.spec_bind hb
@@ -124,15 +124,15 @@ theorem frame_matches (encode : Spike.engine.Bytes → String)
           simp [stamp_same, hactual]
 
 /-- Exact specification of `History.map_lineage` over live-metadata active frames. -/
-theorem map_lineage_live_spec (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (m : Spike.engine.Bytes)
-    (birth : Option Spike.engine.Stamp) (rev : Spike.engine.Stamp)
+theorem map_lineage_live_spec (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (m : CcfKv.engine.Bytes)
+    (birth : Option CcfKv.engine.Stamp) (rev : CcfKv.engine.Stamp)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.map_lineage s m birth rev)
+    : WP.spec (CcfKv.engine.History.map_lineage s m birth rev)
         (fun result =>
           result = s.activeFrames.any (fun f => frameMatches encode f m birth rev)) := by
-  let matchesFrame := fun f : Spike.engine.Frame => frameMatches encode f m birth rev
-  unfold Spike.engine.History.map_lineage Spike.engine.History.map_lineage_loop
+  let matchesFrame := fun f : CcfKv.engine.Frame => frameMatches encode f m birth rev
+  unfold CcfKv.engine.History.map_lineage CcfKv.engine.History.map_lineage_loop
   apply WP.spec_bind (branch_active_len s.log valid)
   intro count hlen
   change count.val = s.activeFrames.length at hlen
@@ -142,7 +142,7 @@ theorem map_lineage_live_spec (encode : Spike.engine.Bytes → String)
       ∧ (s.activeFrames.take i.val).any matchesFrame = s.activeFrames.any matchesFrame)
     _ _ _
   · intro i ⟨bound, hinv⟩
-    unfold Spike.engine.History.map_lineage_loop.body
+    unfold CcfKv.engine.History.map_lineage_loop.body
     have hone : (1#usize : Usize).val = 1 := rfl
     by_cases h : (0#usize : Usize) < i
     · have pos : 0 < i.val := h
@@ -179,9 +179,9 @@ theorem map_lineage_live_spec (encode : Spike.engine.Bytes → String)
 
 /-- Search precisely the surviving branch for a frame with both of the captured map identities,
 when all active frames retain live metadata. -/
-theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (m : Spike.engine.Bytes)
-    (birth : Option Spike.engine.Stamp) (rev : Spike.engine.Stamp)
+theorem map_lineage_matches_model (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (m : CcfKv.engine.Bytes)
+    (birth : Option CcfKv.engine.Stamp) (rev : CcfKv.engine.Stamp)
     (model : Store) (captured : Frame)
     (hBirth : find captured.births (encode m) = birth.map modelStamp)
     (hRev : revision captured (encode m) = modelStamp rev)
@@ -191,9 +191,9 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
             (fun f => (find f.births (encode m), revision f (encode m))))
     (hMetaLive : ∀ f ∈ s.activeFrames, f.meta_live = true)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.map_lineage s m birth rev)
+    : WP.spec (CcfKv.engine.History.map_lineage s m birth rev)
         (fun result => result = mapLineage model captured (encode m)) := by
-  let matchesFrame := fun f : Spike.engine.Frame =>
+  let matchesFrame := fun f : CcfKv.engine.Frame =>
     (find (modelMetadata encode f).births (encode m) == birth.map modelStamp) &&
       (revision (modelMetadata encode f) (encode m) == modelStamp rev)
   have hmodel : mapLineage model captured (encode m) = s.activeFrames.any matchesFrame := by
@@ -222,8 +222,8 @@ def capturedStamps (view : String × GlobalView) : String × Option Stamp × Sta
   (view.1, find view.2.current.births view.1, revision view.2.current view.1)
 
 /-- Project the Rust map name, birth and revision from an acquired view. -/
-def viewStamps (encode : Spike.engine.Bytes → String)
-    (view : Spike.engine.Bytes × Spike.engine.View)
+def viewStamps (encode : CcfKv.engine.Bytes → String)
+    (view : CcfKv.engine.Bytes × CcfKv.engine.View)
     : String × Option Stamp × Stamp :=
   (encode view.1, view.2.birth.map modelStamp, modelStamp view.2.revision)
 
@@ -234,8 +234,8 @@ def stampsOnBranch (model : Store) (stamps : String × Option Stamp × Stamp) : 
 
 /-- The extracted lineage check covers every acquired map and distinguishes reused versions,
 provided every acquired view still has a live-metadata match whenever the model branch matches. -/
-theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (t : Spike.engine.Tx)
+theorem acquired_lineage_matches_model (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (t : CcfKv.engine.Tx)
     (model : Store) (tx : Tx)
     (hViewLive
       : ∀ row ∈ t.views.val,
@@ -244,7 +244,7 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
           = stampsOnBranch model (viewStamps encode row))
     (hViews : tx.globalViews.map capturedStamps = t.views.val.map (viewStamps encode))
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.Tx.valid_lineage t s)
+    : WP.spec (CcfKv.engine.Tx.valid_lineage t s)
         (fun r =>
           r = tx.globalViews.all (fun (m, view) => mapLineage model view.current m)) := by
   let check := stampsOnBranch model ∘ viewStamps encode
@@ -255,11 +255,11 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
       mapLineage]
       using h.symm
   rw [← hall]
-  unfold Spike.engine.Tx.valid_lineage Spike.engine.Tx.valid_lineage_loop
+  unfold CcfKv.engine.Tx.valid_lineage CcfKv.engine.Tx.valid_lineage_loop
   apply loop.spec_decr_nat (fun (i : Usize) => t.views.val.length - i.val)
     (fun i => (t.views.val.drop i.val).all check = t.views.val.all check) _ _ _
   · intro i hinv
-    unfold Spike.engine.Tx.valid_lineage_loop.body
+    unfold CcfKv.engine.Tx.valid_lineage_loop.body
     have hlen : (alloc.vec.Vec.len t.views).val = t.views.val.length := alloc.vec.Vec.len_val _
     have hbound := alloc.vec.Vec.len_ineq t.views
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -269,7 +269,7 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec t.views i hi)
       rintro ⟨m, view⟩ hv
       change WP.spec (do
-        let b ← Spike.engine.History.map_lineage s m view.birth view.revision
+        let b ← CcfKv.engine.History.map_lineage s m view.birth view.revision
         if b then
           let next ← i + 1#usize
           Result.ok (ControlFlow.cont next)
@@ -300,9 +300,9 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
 
 /-- The extracted engine and the executable KV model agree on commit eligibility for related states. -/
 theorem can_apply_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (t : Spike.engine.Tx)
-    (model : Store) (tx : Tx) (prior : List Spike.engine.Frame)
-    (head : Spike.engine.Frame) (hHead : s.activeFrames = prior ++ [head])
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (t : CcfKv.engine.Tx)
+    (model : Store) (tx : Tx) (prior : List CcfKv.engine.Frame)
+    (head : CcfKv.engine.Frame) (hHead : s.activeFrames = prior ++ [head])
     (hViewLive
       : ∀ row ∈ t.views.val,
           s.activeFrames.any
@@ -326,12 +326,12 @@ theorem can_apply_matches_model (encode : List U8 → String)
     (hEmpty : t.snapshot = none → t.views.val = [])
     (hUnavailable : tx.unavailable = t.unavailable)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.Tx.can_apply t s) (fun r => r = canApply model tx) := by
+    : WP.spec (CcfKv.engine.Tx.can_apply t s) (fun r => r = canApply model tx) := by
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
   have hl := acquired_lineage_matches_model (encode ∘ alloc.vec.Vec.val) hinj
     s t model tx hViewLive hViews valid
-  have hd : WP.spec (Spike.engine.Tx.valid_dependencies t s)
+  have hd : WP.spec (CcfKv.engine.Tx.valid_dependencies t s)
       (fun r => r = validates model.head.data tx.normal.deps) := by
     have hv := validates_encoding encode inj (indexedCellData rows)
       (t.deps.val.map (byteDependency s.index))
@@ -343,14 +343,14 @@ theorem can_apply_matches_model (encode : List U8 → String)
     exact validate_dependencies_matches_model t s head rows indexView indexValid
       (by simp [history_head s prior head hHead valid]) room
   have hcheck : WP.spec (do
-      let b ← Spike.engine.Tx.valid_lineage t s
-      if b then Spike.engine.Tx.valid_dependencies t s else Result.ok false)
+      let b ← CcfKv.engine.Tx.valid_lineage t s
+      if b then CcfKv.engine.Tx.valid_dependencies t s else Result.ok false)
       (fun r => r = (tx.globalViews.all (fun (m, view) => mapLineage model view.current m)
         && validates model.head.data tx.normal.deps)) := by
     apply WP.spec_bind hl
     intro b hb
     cases b <;> simp [← hb, hd]
-  unfold Spike.engine.Tx.can_apply
+  unfold CcfKv.engine.Tx.can_apply
   by_cases hu : t.unavailable = true
   · simp [hu, canApply, hUnavailable]
   · simp only [hu]
@@ -377,15 +377,15 @@ theorem can_apply_matches_model (encode : List U8 → String)
             · have ht' : s.term.val ≠ snap.term.val := fun h => ht (htermEq.mp h)
               simp [ht, ht', hu', canApply, hUnavailable, validLineage, hms, hTerm, hst]
 
-private theorem view_needs_frame_spec (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (row : Spike.engine.Bytes × Spike.engine.View)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.view_needs_frame row frame globalFrame)
+private theorem view_needs_frame_spec (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (row : CcfKv.engine.Bytes × CcfKv.engine.View)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.view_needs_frame row frame globalFrame)
         (fun r =>
           r
           = (frameMatches encode frame row.1 row.2.birth row.2.revision
               && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision)) := by
-  unfold Spike.engine.view_needs_frame
+  unfold CcfKv.engine.view_needs_frame
   rcases row with ⟨m, v⟩
   apply WP.spec_bind (frame_matches encode inj frame m v.birth v.revision)
   intro b hb
@@ -397,11 +397,11 @@ private theorem view_needs_frame_spec (encode : Spike.engine.Bytes → String)
       intro b1 hb1
       simp [← hb, ← hb1]
 
-private theorem tx_needs_frame_loop0_spec (encode : Spike.engine.Bytes → String)
+private theorem tx_needs_frame_loop0_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode)
-    (views : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.tx_needs_frame_loop0 views frame globalFrame 0#usize)
+    (views : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.tx_needs_frame_loop0 views frame globalFrame 0#usize)
         (fun r =>
           r
           = views.val.any
@@ -409,17 +409,17 @@ private theorem tx_needs_frame_loop0_spec (encode : Spike.engine.Bytes → Strin
                 frameMatches encode frame row.1 row.2.birth row.2.revision
                 && !frameMatches encode globalFrame row.1 row.2.birth
                       row.2.revision)) := by
-  let pred := fun row : Spike.engine.Bytes × Spike.engine.View =>
+  let pred := fun row : CcfKv.engine.Bytes × CcfKv.engine.View =>
     frameMatches encode frame row.1 row.2.birth row.2.revision
       && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision
-  unfold Spike.engine.tx_needs_frame_loop0
+  unfold CcfKv.engine.tx_needs_frame_loop0
   apply loop.spec_decr_nat
-    (fun s : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View × Usize =>
+    (fun s : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View × Usize =>
       views.val.length - s.2.val)
     (fun s => s.1 = views ∧ (views.val.drop s.2.val).any pred = views.val.any pred) _ _ _
   · rintro ⟨a, i⟩ ⟨ha, hinv⟩
     subst ha
-    unfold Spike.engine.tx_needs_frame_loop0.body
+    unfold CcfKv.engine.tx_needs_frame_loop0.body
     dsimp only
     have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
     have hbound := alloc.vec.Vec.len_ineq a
@@ -454,12 +454,12 @@ private theorem tx_needs_frame_loop0_spec (encode : Spike.engine.Bytes → Strin
       simpa [pred, List.drop_eq_nil_of_le hi] using hinv
   · exact ⟨rfl, by simp⟩
 
-private theorem tx_needs_frame_loop1_spec (encode : Spike.engine.Bytes → String)
+private theorem tx_needs_frame_loop1_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode)
-    (views : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
-    (frame globalFrame : Spike.engine.Frame)
+    (views : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
+    (frame globalFrame : CcfKv.engine.Frame)
     : WP.spec
-        (Spike.engine.tx_needs_frame_loop1 views frame.version frame.data frame.revisions
+        (CcfKv.engine.tx_needs_frame_loop1 views frame.version frame.data frame.revisions
           frame.births frame.meta_live globalFrame 0#usize)
         (fun r =>
           r
@@ -468,17 +468,17 @@ private theorem tx_needs_frame_loop1_spec (encode : Spike.engine.Bytes → Strin
                 frameMatches encode frame row.1 row.2.birth row.2.revision
                 && !frameMatches encode globalFrame row.1 row.2.birth
                       row.2.revision)) := by
-  let pred := fun row : Spike.engine.Bytes × Spike.engine.View =>
+  let pred := fun row : CcfKv.engine.Bytes × CcfKv.engine.View =>
     frameMatches encode frame row.1 row.2.birth row.2.revision
       && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision
-  unfold Spike.engine.tx_needs_frame_loop1
+  unfold CcfKv.engine.tx_needs_frame_loop1
   apply loop.spec_decr_nat
-    (fun s : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View × Usize =>
+    (fun s : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View × Usize =>
       views.val.length - s.2.val)
     (fun s => s.1 = views ∧ (views.val.drop s.2.val).any pred = views.val.any pred) _ _ _
   · rintro ⟨a, i⟩ ⟨ha, hinv⟩
     subst ha
-    unfold Spike.engine.tx_needs_frame_loop1.body
+    unfold CcfKv.engine.tx_needs_frame_loop1.body
     dsimp only
     have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
     have hbound := alloc.vec.Vec.len_ineq a
@@ -490,7 +490,7 @@ private theorem tx_needs_frame_loop1_spec (encode : Spike.engine.Bytes → Strin
       intro row hrow
       have hframeEq :
           ({ version := frame.version, data := frame.data, revisions := frame.revisions,
-             births := frame.births, meta_live := frame.meta_live } : Spike.engine.Frame) = frame := by
+             births := frame.births, meta_live := frame.meta_live } : CcfKv.engine.Frame) = frame := by
         cases frame; rfl
       rw [hframeEq]
       apply WP.spec_bind (view_needs_frame_spec encode inj row frame globalFrame)
@@ -518,10 +518,10 @@ private theorem tx_needs_frame_loop1_spec (encode : Spike.engine.Bytes → Strin
       simpa [pred, List.drop_eq_nil_of_le hi] using hinv
   · exact ⟨rfl, by simp⟩
 
-theorem tx_needs_frame_spec (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (tx : Spike.engine.Tx)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.tx_needs_frame tx frame globalFrame)
+theorem tx_needs_frame_spec (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (tx : CcfKv.engine.Tx)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.tx_needs_frame tx frame globalFrame)
         (fun r =>
           r
           = ((match tx.snapshot with
@@ -532,7 +532,7 @@ theorem tx_needs_frame_spec (encode : Spike.engine.Bytes → String)
                     frameMatches encode frame row.1 row.2.birth row.2.revision
                     && !frameMatches encode globalFrame row.1 row.2.birth
                           row.2.revision))) := by
-  unfold Spike.engine.tx_needs_frame
+  unfold CcfKv.engine.tx_needs_frame
   cases hs : tx.snapshot with
   | none =>
       simpa using tx_needs_frame_loop0_spec encode inj tx.views frame globalFrame
@@ -542,11 +542,11 @@ theorem tx_needs_frame_spec (encode : Spike.engine.Bytes → String)
       · simp only [hv, ite_false, decide_false, Bool.false_or]
         exact tx_needs_frame_loop1_spec encode inj tx.views frame globalFrame
 
-theorem txs_need_frame_spec (encode : Spike.engine.Bytes → String)
+theorem txs_need_frame_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode)
-    (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.txs_need_frame txs frame globalFrame)
+    (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.txs_need_frame txs frame globalFrame)
         (fun r =>
           r
           = txs.val.any
@@ -559,7 +559,7 @@ theorem txs_need_frame_spec (encode : Spike.engine.Bytes → String)
                       frameMatches encode frame row.1 row.2.birth row.2.revision
                       && !frameMatches encode globalFrame row.1 row.2.birth
                             row.2.revision))) := by
-  let pred := fun entry : U64 × Spike.engine.Tx =>
+  let pred := fun entry : U64 × CcfKv.engine.Tx =>
     (match entry.2.snapshot with
       | none => false
       | some snap => decide (snap.version = frame.version))
@@ -567,13 +567,13 @@ theorem txs_need_frame_spec (encode : Spike.engine.Bytes → String)
         (fun row =>
           frameMatches encode frame row.1 row.2.birth row.2.revision
           && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision)
-  unfold Spike.engine.txs_need_frame Spike.engine.txs_need_frame_loop
+  unfold CcfKv.engine.txs_need_frame CcfKv.engine.txs_need_frame_loop
   apply loop.spec_decr_nat
-    (fun s : Spike.engine.Assoc U64 Spike.engine.Tx × Usize => txs.val.length - s.2.val)
+    (fun s : CcfKv.engine.Assoc U64 CcfKv.engine.Tx × Usize => txs.val.length - s.2.val)
     (fun s => s.1 = txs ∧ (txs.val.drop s.2.val).any pred = txs.val.any pred) _ _ _
   · rintro ⟨a, i⟩ ⟨ha, hinv⟩
     subst ha
-    unfold Spike.engine.txs_need_frame_loop.body
+    unfold CcfKv.engine.txs_need_frame_loop.body
     dsimp only
     have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
     have hbound := alloc.vec.Vec.len_ineq a
@@ -610,12 +610,12 @@ theorem txs_need_frame_spec (encode : Spike.engine.Bytes → String)
 
 /-- When `txs_need_frame` returns `false`, no live transaction snapshots `frame.version`
 or depends exclusively on `frame` (without `globalFrame` also matching) for lineage. -/
-theorem txs_need_frame_false_spec (encode : Spike.engine.Bytes → String)
+theorem txs_need_frame_false_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode)
-    (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
-    (frame globalFrame : Spike.engine.Frame)
-    (hFalse : Spike.engine.txs_need_frame txs frame globalFrame = .ok false)
-    : ∀ (id : U64) (t : Spike.engine.Tx),
+    (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
+    (frame globalFrame : CcfKv.engine.Frame)
+    (hFalse : CcfKv.engine.txs_need_frame txs frame globalFrame = .ok false)
+    : ∀ (id : U64) (t : CcfKv.engine.Tx),
         (id, t) ∈ txs.val
         → (∀ snap, t.snapshot = some snap → snap.version ≠ frame.version)
           ∧ (∀ bm bv,

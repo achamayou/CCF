@@ -17,7 +17,7 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Translate every single-store native input into an action of the original model. -/
-def modelAction (encode : List U8 → String) (sid : Nat) : Spike.engine.Action → Action
+def modelAction (encode : List U8 → String) (sid : Nat) : CcfKv.engine.Action → Action
   | .Begin id => .txCreate sid id.val
   | .End id => .txEnd sid id.val
   | .SetTerm term => .setTerm sid term.val
@@ -31,15 +31,15 @@ def modelAction (encode : List U8 → String) (sid : Nat) : Spike.engine.Action 
   | .Rollback cut term => .rollback sid cut.val term.val
 
 /-- Capacity for retirement queue operations on reclamation paths (`End`, `Compact`, `Rollback`). -/
-def QueueRoom (n : Spike.engine.Store) : Prop :=
+def QueueRoom (n : CcfKv.engine.Store) : Prop :=
   2 * (n.history.index.values.dirs.val.length + n.history.index.values.rows.val.length)
     + 1
   ≤ Usize.max
 
 /-- Exclude overflow of Rust counters and length arithmetic; the reference uses unbounded sizes. -/
 def FitsAction (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State)
-    : Spike.engine.Action → Prop
+    (n : CcfKv.engine.Store) (w : State)
+    : CcfKv.engine.Action → Prop
   | .Begin id => find n.txs.val id = none → n.txs.val.length < Usize.max
   | .End _ => QueueRoom n
   | .Acquire id _ => FitsAcquire n id
@@ -54,9 +54,9 @@ returning identical observations except that scans and apply reports may permute
 A reference rejection leaves the native store unchanged. -/
 theorem execute_matches (encode : List U8 → String) (inj : Function.Injective encode)
     (order : PreservesByteOrder encode) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (action : Spike.engine.Action)
+    (n : CcfKv.engine.Store) (w : State) (action : CcfKv.engine.Action)
     (rel : StateMatches encode sid n w) (room : FitsAction encode sid n w action)
-    : WP.spec (Spike.engine.Store.execute n action)
+    : WP.spec (CcfKv.engine.Store.execute n action)
         (StepMatches encode sid (modelAction encode sid action) n
           (execute w (modelAction encode sid action))) := by
   cases action with
@@ -85,7 +85,7 @@ def OptionOutputMatches (action : Action) : Option Output → Option Output → 
 
 /-- Relate two complete trace output lists step by step against their input actions. -/
 def TraceOutputsMatch (encode : List U8 → String) (sid : Nat)
-    : List Spike.engine.Action → List (Option Output) → List (Option Output) → Prop
+    : List CcfKv.engine.Action → List (Option Output) → List (Option Output) → Prop
   | [], [], [] => True
   | a :: actions, x :: xs, y :: ys =>
       OptionOutputMatches (modelAction encode sid a) x y
@@ -94,7 +94,7 @@ def TraceOutputsMatch (encode : List U8 → String) (sid : Nat)
 
 /-- Project an externally visible result, including the rejected-action marker. -/
 def observeResult (encode : List U8 → String)
-    : core.result.Result Spike.engine.Output Spike.engine.Error → Option Output
+    : core.result.Result CcfKv.engine.Output CcfKv.engine.Error → Option Output
   | .Ok out => some (modelOutput encode out)
   | .Err _ => none
 
@@ -105,28 +105,28 @@ def modelNext (w : State) (result : Option (State × Output)) : State :=
 /-- A sequence is in bounds when each requested transition can be represented.
 This predicate does not assume that native steps succeed, or that their outputs or states agree. -/
 def FitsTrace (encode : List U8 → String) (sid : Nat)
-    : List Spike.engine.Action → Spike.engine.Store → State → Prop
+    : List CcfKv.engine.Action → CcfKv.engine.Store → State → Prop
   | [], _, _ => True
   | a :: rest, n, w =>
       FitsAction encode sid n w a
       ∧ ∀ r,
-          Spike.engine.Store.execute n a = .ok r
+          CcfKv.engine.Store.execute n a = .ok r
           → FitsTrace encode sid rest r.2
               (modelNext w (execute w (modelAction encode sid a)))
 
 /-- Fold the actual extracted dispatcher, retaining every action's visible result. -/
 def runNative (encode : List U8 → String)
-    : List Spike.engine.Action → Spike.engine.Store
-      → Result (Spike.engine.Store × List (Option Output))
+    : List CcfKv.engine.Action → CcfKv.engine.Store
+      → Result (CcfKv.engine.Store × List (Option Output))
   | [], n => .ok (n, [])
   | a :: rest, n => do
-      let (result, next) ← Spike.engine.Store.execute n a
+      let (result, next) ← CcfKv.engine.Store.execute n a
       let (after, outputs) ← runNative encode rest next
       Result.ok (after, observeResult encode result :: outputs)
 
 /-- Fold the original KV model over the same inputs. -/
 def runReference (encode : List U8 → String) (sid : Nat)
-    : List Spike.engine.Action → State → State × List (Option Output)
+    : List CcfKv.engine.Action → State → State × List (Option Output)
   | [], w => (w, [])
   | a :: rest, w =>
       let result := execute w (modelAction encode sid a)
@@ -143,7 +143,7 @@ private theorem returned {α : Type} {r : Result α} {p : α → Prop} (h : WP.s
 /-- All finite in-bounds runs from related states return matching observations and end related. -/
 theorem run_matches (encode : List U8 → String) (inj : Function.Injective encode)
     (order : PreservesByteOrder encode) (sid : Nat)
-    (actions : List Spike.engine.Action) (n : Spike.engine.Store) (w : State)
+    (actions : List CcfKv.engine.Action) (n : CcfKv.engine.Store) (w : State)
     (rel : StateMatches encode sid n w) (room : FitsTrace encode sid actions n w)
     : WP.spec (runNative encode actions n)
         (fun (after, outputs) =>
@@ -191,8 +191,8 @@ theorem run_matches (encode : List U8 → String) (inj : Function.Injective enco
 
 /-- Construct a native store and run any finite in-bounds action trace against the original model. -/
 theorem initialized_run_matches (sid : Nat) (term : U64)
-    (actions : List Spike.engine.Action)
-    : WP.spec (Spike.engine.Store.new term)
+    (actions : List CcfKv.engine.Action)
+    : WP.spec (CcfKv.engine.Store.new term)
         (fun n =>
           ∃ w,
             execute {} (.storeCreate sid term.val) = some (w, .unit)

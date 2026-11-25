@@ -13,7 +13,7 @@ namespace KvRust
 
 open Aeneas.Std
 
-abbrev NativeRetireQueue := Spike.retire_queue.RetireQueue
+abbrev NativeRetireQueue := CcfKv.retire_queue.RetireQueue
 
 def retirementSlot (capacity head offset : Nat) : Nat :=
   if offset < capacity - head then head + offset else offset - (capacity - head)
@@ -45,10 +45,10 @@ private theorem retirement_slot_shift {capacity head offset : Nat}
 
 private theorem retirement_slot_matches (queue : NativeRetireQueue) (offset : Usize)
     (head : queue.head.val ≤ queue.slots.val.length)
-    : WP.spec (Spike.retire_queue.RetireQueue.slot queue offset)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.slot queue offset)
         (fun i =>
           i.val = retirementSlot queue.slots.val.length queue.head.val offset.val) := by
-  unfold Spike.retire_queue.RetireQueue.slot
+  unfold CcfKv.retire_queue.RetireQueue.slot
   have length : (alloc.vec.Vec.len queue.slots).val = queue.slots.val.length :=
     alloc.vec.Vec.len_val queue.slots
   have space := alloc.vec.Vec.len_ineq queue.slots
@@ -71,22 +71,22 @@ private theorem retirement_slot_matches (queue : NativeRetireQueue) (offset : Us
     simpa [retirementSlot, right, eq] using hi.1
 
 theorem retirement_queue_new
-    : WP.spec Spike.retire_queue.RetireQueue.new
+    : WP.spec CcfKv.retire_queue.RetireQueue.new
         (fun queue => RetirementQueueView queue []) := by
-  rw [Spike.retire_queue.RetireQueue.new, WP.spec_ok]
+  rw [CcfKv.retire_queue.RetireQueue.new, WP.spec_ok]
   exact ⟨rfl, by simp, by simp, by simp, by simp⟩
 
 theorem retirement_queue_len (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries)
-    : WP.spec (Spike.retire_queue.RetireQueue.impl.len queue)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.impl.len queue)
         (fun n => n.val = entries.length) := by
-  rw [Spike.retire_queue.RetireQueue.impl.len, WP.spec_ok]
+  rw [CcfKv.retire_queue.RetireQueue.impl.len, WP.spec_ok]
   exact view.size
 
 theorem retirement_queue_is_empty (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries)
-    : WP.spec (Spike.retire_queue.RetireQueue.is_empty queue) (· = entries.isEmpty) := by
-  rw [Spike.retire_queue.RetireQueue.is_empty, WP.spec_ok]
+    : WP.spec (CcfKv.retire_queue.RetireQueue.is_empty queue) (· = entries.isEmpty) := by
+  rw [CcfKv.retire_queue.RetireQueue.is_empty, WP.spec_ok]
   have empty : queue.len = 0#usize ↔ entries = [] := by
     rw [← List.length_eq_zero_iff, ← view.size]
     exact ⟨fun h => h ▸ rfl, fun h => UScalar.eq_of_val_eq h⟩
@@ -94,9 +94,9 @@ theorem retirement_queue_is_empty (queue : NativeRetireQueue) (entries : List U3
 
 theorem retirement_queue_get (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries) (offset : Usize)
-    : WP.spec (Spike.retire_queue.RetireQueue.get queue offset)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.get queue offset)
         (fun found => found = entries[offset.val]?) := by
-  unfold Spike.retire_queue.RetireQueue.get
+  unfold CcfKv.retire_queue.RetireQueue.get
   have len := view.size
   have room := view.capacity
   by_cases run : offset < queue.len
@@ -121,10 +121,10 @@ theorem retirement_queue_get (queue : NativeRetireQueue) (entries : List U32)
 
 theorem retirement_queue_pop (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries)
-    : WP.spec (Spike.retire_queue.RetireQueue.pop_front queue)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.pop_front queue)
         (fun (item, after) =>
           item = entries.head? ∧ RetirementQueueView after entries.tail) := by
-  unfold Spike.retire_queue.RetireQueue.pop_front
+  unfold CcfKv.retire_queue.RetireQueue.pop_front
   have size := view.size
   have capacity := view.capacity
   have zero : (0#usize : Usize).val = 0 := rfl
@@ -174,19 +174,19 @@ theorem retirement_queue_pop (queue : NativeRetireQueue) (entries : List U32)
 private theorem retirement_copy (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries) (capacity : Usize)
     : WP.spec
-        (Spike.retire_queue.RetireQueue.grow_loop queue.slots queue.head queue.len
+        (CcfKv.retire_queue.RetireQueue.grow_loop queue.slots queue.head queue.len
           (alloc.vec.Vec.with_capacity U32 capacity) 0#usize)
         (fun out => out.val = entries) := by
   have size := view.size
   have room := view.capacity
   have maxSize := alloc.vec.Vec.len_ineq queue.slots
-  unfold Spike.retire_queue.RetireQueue.grow_loop
+  unfold CcfKv.retire_queue.RetireQueue.grow_loop
   apply loop.spec_decr_nat (fun (_, i) => entries.length - (i : Usize).val)
     (fun (out, i) => i.val ≤ entries.length ∧ out.val = entries.take i.val)
     _ _ _
   · rintro ⟨out, i⟩ ⟨hi, written⟩
     dsimp only at hi written ⊢
-    unfold Spike.retire_queue.RetireQueue.grow_loop.body
+    unfold CcfKv.retire_queue.RetireQueue.grow_loop.body
     by_cases run : i < queue.len
     · have h : i.val < queue.len.val := run
       have within : i.val < entries.length := by omega
@@ -224,11 +224,11 @@ private theorem retirement_copy (queue : NativeRetireQueue) (entries : List U32)
 private theorem retirement_grow (queue : NativeRetireQueue) (entries : List U32)
     (view : RetirementQueueView queue entries)
     (room : 2 * queue.slots.val.length + 1 ≤ Usize.max)
-    : WP.spec (Spike.retire_queue.RetireQueue.grow queue)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.grow queue)
         (fun after =>
           RetirementQueueView after entries
           ∧ after.len.val < after.slots.val.length) := by
-  unfold Spike.retire_queue.RetireQueue.grow
+  unfold CcfKv.retire_queue.RetireQueue.grow
   have two : (2#usize : Usize).val = 2 := rfl
   have one : (1#usize : Usize).val = 1 := rfl
   have zero : (0#usize : Usize).val = 0 := rfl
@@ -287,9 +287,9 @@ theorem retirement_queue_push (queue : NativeRetireQueue) (entries : List U32)
     (room
       : queue.len.val = queue.slots.val.length
         → 2 * queue.slots.val.length + 1 ≤ Usize.max)
-    : WP.spec (Spike.retire_queue.RetireQueue.push_back queue link)
+    : WP.spec (CcfKv.retire_queue.RetireQueue.push_back queue link)
         (fun after => RetirementQueueView after (entries ++ [link])) := by
-  unfold Spike.retire_queue.RetireQueue.push_back
+  unfold CcfKv.retire_queue.RetireQueue.push_back
   apply WP.spec_bind (Pₘ := fun prepared : NativeRetireQueue =>
     RetirementQueueView prepared entries ∧ prepared.len.val < prepared.slots.val.length)
   · have size : (alloc.vec.Vec.len queue.slots).val = queue.slots.val.length :=
@@ -362,12 +362,12 @@ theorem release_owner_schedules (count : U32) (queue : NativeRetireQueue)
       : owners.count link = 0
         → queue.len.val = queue.slots.val.length
         → 2 * queue.slots.val.length + 1 ≤ Usize.max)
-    : WP.spec (Spike.retire_queue.release_owner count queue link)
+    : WP.spec (CcfKv.retire_queue.release_owner count queue link)
         (fun (next, after) =>
           next.val = owners.count link
           ∧ RetirementQueueView after
               (if owners.count link = 0 then entries ++ [link] else entries)) := by
-  unfold Spike.retire_queue.release_owner
+  unfold CcfKv.retire_queue.release_owner
   apply WP.spec_bind (release_reference_matches count link owners exactCount)
   rintro ⟨last, next⟩ ⟨test, correct⟩
   change last = decide (owners.count link = 0) at test
@@ -394,7 +394,7 @@ def retirementSchedule {S : Type} (tick : S → Option S) : Nat → S → Nat ×
 
 /-- The extracted driver performs the exact bounded schedule for any worker
 that refines one tick. This does not on its own establish a worker's accounting. -/
-theorem retire_at_most_refines {T S : Type} (worker : Spike.retire_queue.RetireStep T)
+theorem retire_at_most_refines {T S : Type} (worker : CcfKv.retire_queue.RetireStep T)
     (initial : T) (project : T → S) (valid : T → Prop) (tick : S → Option S)
     (initialValid : valid initial) (budget : Usize)
     (step
@@ -407,14 +407,14 @@ theorem retire_at_most_refines {T S : Type} (worker : Spike.retire_queue.RetireS
                     tick (project current) = some (project next)
                   else
                     tick (project current) = none ∧ project next = project current))
-    : WP.spec (Spike.retire_queue.retire_at_most worker initial budget)
+    : WP.spec (CcfKv.retire_queue.retire_at_most worker initial budget)
         (fun (completed, after) =>
           valid after
           ∧ completed.val ≤ budget.val
           ∧ (completed.val, project after)
             = retirementSchedule tick budget.val (project initial)) := by
   let expected := retirementSchedule tick budget.val (project initial)
-  unfold Spike.retire_queue.retire_at_most Spike.retire_queue.retire_at_most_loop
+  unfold CcfKv.retire_queue.retire_at_most CcfKv.retire_queue.retire_at_most_loop
   apply loop.spec_decr_nat (fun (_, i) => budget.val - (i : Usize).val)
     (fun (current, i) =>
       valid current ∧ i.val ≤ budget.val
@@ -423,7 +423,7 @@ theorem retire_at_most_refines {T S : Type} (worker : Spike.retire_queue.RetireS
     _ _ _
   · rintro ⟨current, i⟩ ⟨ready, within, agrees⟩
     dsimp only at ready within agrees ⊢
-    unfold Spike.retire_queue.retire_at_most_loop.body
+    unfold CcfKv.retire_queue.retire_at_most_loop.body
     have one : (1#usize : Usize).val = 1 := rfl
     by_cases run : i < budget
     · have h : i.val < budget.val := run

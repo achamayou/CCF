@@ -25,7 +25,7 @@ private theorem branch_nodup_ne {ids : List Usize} (huniq : ids.Nodup)
   have hfin : (⟨i, hiLt⟩ : Fin ids.length) = ⟨j, hjLt⟩ := h (hiGet.trans hjGet.symm)
   exact hne (congrArg Fin.val hfin)
 
-private theorem branch_values_getElem? {T : Type} (log : Spike.branch_log.BranchLog T)
+private theorem branch_values_getElem? {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log) (i : Nat) (id : Usize) (f : T)
     (hbr : log.branch.val[i]? = some id) (hf : log.frames.val[id.val]? = some f)
     : (branchValues log)[i]? = some f := by
@@ -51,7 +51,7 @@ private theorem branch_values_getElem? {T : Type} (log : Spike.branch_log.Branch
 /-- Compaction advances the modeled frontier, may release compacted roots and elide unneeded
 compacted metadata, and runs bounded retirement. -/
 theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
-    (sid : Nat) (native : Spike.engine.Store) (w : State) (cut : U64)
+    (sid : Nat) (native : CcfKv.engine.Store) (w : State) (cut : U64)
     (related : StateMatches encode sid native w)
     (queueRoom
       : 2
@@ -59,14 +59,14 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
                 + native.history.index.values.rows.val.length)
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.Store.execute native (.Compact cut))
+    : WP.spec (CcfKv.engine.Store.execute native (.Compact cut))
         (StepMatches encode sid (.compact sid cut.val) native
           (execute w (.compact sid cut.val))) := by
   obtain ⟨s, natArchive, archive, hs, h, hMeta, hattempts⟩ := related.history
   obtain ⟨prior, head, hframes, hhead⟩ := h.split
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind
     (history_compact native.history cut native.txs s prior head (txsPins native.txs.val)
       hframes h.global h.globalBound hhead.version.symm h.indexed h.valid h.unique
@@ -105,11 +105,11 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
     have hget0 : native.history.activeFrames[i]? = some f := by
       have := branch_values_getElem? native.history.log h.valid i id f
         (List.getElem?_eq_getElem hbrLen) hf
-      simpa [Spike.engine.History.activeFrames] using this
+      simpa [CcfKv.engine.History.activeFrames] using this
     have hget1 : afterHist.activeFrames[i]? = some f' := by
       have := branch_values_getElem? afterHist.log hvalid' i id f'
         (by rw [hbr]; exact List.getElem?_eq_getElem hbrLen) hf'
-      simpa [Spike.engine.History.activeFrames] using this
+      simpa [CcfKv.engine.History.activeFrames] using this
     have hf0 : native.history.activeFrames[i]'hi' = f :=
       Option.some.inj ((List.getElem?_eq_getElem hi').symm.trans hget0)
     have hf1 : afterHist.activeFrames[i]'hi = f' :=
@@ -174,7 +174,7 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
       have hfVer : f.version.val = pos := by
         have hget : native.history.activeFrames[pos]? = some f := by
           have := branch_values_getElem? native.history.log h.valid pos id f hpos0 hf0
-          simpa [Spike.engine.History.activeFrames] using this
+          simpa [CcfKv.engine.History.activeFrames] using this
         have hfEq : native.history.activeFrames[pos]'hposActLt = f :=
           Option.some.inj ((List.getElem?_eq_getElem hposActLt).symm.trans hget)
         rw [← hfEq]
@@ -214,7 +214,7 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
       have hfVer : f.version.val = pos := by
         have hget : native.history.activeFrames[pos]? = some f := by
           have := branch_values_getElem? native.history.log h.valid pos id f hpos0 hf0
-          simpa [Spike.engine.History.activeFrames] using this
+          simpa [CcfKv.engine.History.activeFrames] using this
         have hfEq : native.history.activeFrames[pos]'hposActLt = f :=
           Option.some.inj ((List.getElem?_eq_getElem hposActLt).symm.trans hget)
         rw [← hfEq]
@@ -271,7 +271,7 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
           rw [hfalseData, WP.spec_ok] at hs1
           have hs2 := txs_need_frame_spec (encode ∘ alloc.vec.Vec.val) hinj native.txs
             f globalFrame
-          cases hres : Spike.engine.txs_need_frame native.txs f globalFrame
+          cases hres : CcfKv.engine.txs_need_frame native.txs f globalFrame
             using Result.cases with
           | vis _ _ => rw [hres] at hs2; simp at hs2
           | div => rw [hres] at hs2; simp at hs2
@@ -314,7 +314,7 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
     · rw [he']; exact h.modelArchive
   have rel := replace_history (n' := next) related.unique hattempts hn hmetaAfter hlive'
     hstore rfl rfl hreach hpres' (fun _ hm => hm) (fun _ hm => hm)
-  change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.Compacted result), next)) _
+  change WP.spec (Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Compacted result), next)) _
   rw [WP.spec_ok, he]
   exact ⟨
     .Compacted result,
@@ -326,7 +326,7 @@ theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injec
 /-- Rollback preserves the irrevocable prefix, releases and retires rolled-back frame roots
 and metadata, and does not rewrite the attempts' captured cuts. -/
 theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
-    (native : Spike.engine.Store) (w : State) (requested term : U64)
+    (native : CcfKv.engine.Store) (w : State) (requested term : U64)
     (related : StateMatches encode sid native w)
     (queueRoom
       : 2
@@ -334,7 +334,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
                 + native.history.index.values.rows.val.length)
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.Store.execute native (.Rollback requested term))
+    : WP.spec (CcfKv.engine.Store.execute native (.Rollback requested term))
         (StepMatches encode sid (.rollback sid requested.val term.val) native
           (execute w (.rollback sid requested.val term.val))) := by
   obtain ⟨s, natArchive, archive, hs, h, hMeta, hattempts⟩ := related.history
@@ -356,7 +356,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           simp
         rw [he] at hh
         exact hh
-      unfold Spike.engine.Store.execute
+      unfold CcfKv.engine.Store.execute
       apply WP.spec_bind
         (history_rollback native.history requested term prior head
           (txsPins native.txs.val) hframes hindex
@@ -395,7 +395,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         have hget : native.history.activeFrames[i]? = some f := by
           have := branch_values_getElem? native.history.log h.valid i id f
             (List.getElem?_eq_getElem hi) (List.getElem?_eq_getElem hidLt)
-          simpa [Spike.engine.History.activeFrames] using this
+          simpa [CcfKv.engine.History.activeFrames] using this
         have hfEq : native.history.activeFrames[i]'hi' = f :=
           Option.some.inj ((List.getElem?_eq_getElem hi').symm.trans hget)
         rw [hmeta, ← hfEq]
@@ -490,7 +490,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         rcases hdata with hd | h0
         · exact Or.inr ⟨i, f, List.getElem?_eq_getElem hiLt, hd⟩
         · exact Or.inl h0
-      have hsurviving : ∀ (pos : Nat) (id : Usize) (f : Spike.engine.Frame),
+      have hsurviving : ∀ (pos : Nat) (id : Usize) (f : CcfKv.engine.Frame),
           pos < cut.val + 1
           → native.history.log.branch.val[pos]? = some id
           → native.history.log.frames.val[id.val]? = some f
@@ -627,7 +627,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
             have hgfCut0 : natArchive[fidCut.val]? = some gfCut := List.getElem?_eq_getElem hgfCutLt
             have hnfCutAct : native.history.activeFrames[cut.val]? = some nfCut := by
               have := branch_values_getElem? native.history.log h.valid cut.val fidCut nfCut hfidCut0 hnfCut0
-              simpa [Spike.engine.History.activeFrames] using this
+              simpa [CcfKv.engine.History.activeFrames] using this
             have hcutActLt : cut.val < native.history.activeFrames.length := by
               rwa [branch_values_length native.history.log h.valid]
             have hnfCutVer : nfCut.version.val = cut.val := by
@@ -787,7 +787,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
       have rel := replace_history (n' := {native with history := afterHist})
         related.unique hattempts hvalid hmetaAfter hlive' hstore rfl rfl reach hpres'
         (fun _ hm => hm) (fun _ hm => hm)
-      change WP.spec (Result.ok (out, ({native with history := afterHist} : Spike.engine.Store))) _
+      change WP.spec (Result.ok (out, ({native with history := afterHist} : CcfKv.engine.Store))) _
       rw [WP.spec_ok, he, hout]
       exact ⟨.RolledBack cut, rfl, rfl, rel⟩
 

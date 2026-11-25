@@ -14,7 +14,7 @@ open Kv.Model
 
 /-- The two constructors establish the relation from empty state. -/
 theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
-    : WP.spec (Spike.engine.Store.new term)
+    : WP.spec (CcfKv.engine.Store.new term)
         (fun n =>
           ∃ w,
             execute {} (.storeCreate sid term.val) = some (w, .unit)
@@ -54,7 +54,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
   · simp [htx]
 
 private theorem lifecycle_observation (encode : List U8 → String)
-    (r : core.result.Result Spike.engine.Output Spike.engine.Error) (out : Output)
+    (r : core.result.Result CcfKv.engine.Output CcfKv.engine.Error) (out : Output)
     (h : lifecycleOutput r = some out)
     : ∃ v, r = .Ok v ∧ modelOutput encode v = out := by
   cases r with
@@ -64,9 +64,9 @@ private theorem lifecycle_observation (encode : List U8 → String)
       cases v <;> cases h <;> rfl
 
 private theorem refinement_of_lifecycle_post (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (action : Action)
-    (r : core.result.Result Spike.engine.Output Spike.engine.Error × Spike.engine.Store)
-    (rel : StateMatches encode sid n w) (post : State → Spike.engine.Store → Prop)
+    (n : CcfKv.engine.Store) (w : State) (action : Action)
+    (r : core.result.Result CcfKv.engine.Output CcfKv.engine.Error × CcfKv.engine.Store)
+    (rel : StateMatches encode sid n w) (post : State → CcfKv.engine.Store → Prop)
     (hp : LifecycleModelPost n (execute w action) post r)
     (success
       : ∀ w' out,
@@ -99,7 +99,7 @@ private theorem assoc_find_mem {K V : Type} [DecidableEq K] {rows : Assoc K V} {
         exact List.mem_cons_of_mem _ (ih h)
 
 private theorem related_row (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64) (action : Action)
+    (n : CcfKv.engine.Store) (w : State) (id : U64) (action : Action)
     {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
     (hhist : HistoryMatches encode n.history s natArchive archive)
@@ -111,8 +111,8 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
     (h : StateMatches encode sid n w)
     (op
       : Result
-          (core.result.Result Spike.engine.Output Spike.engine.Error
-            × Spike.engine.Store))
+          (core.result.Result CcfKv.engine.Output CcfKv.engine.Error
+            × CcfKv.engine.Store))
     (before
       : WP.spec op
           (LifecycleModelPost n (execute w action)
@@ -168,7 +168,7 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
     (fun _ hm => hm)
 
 private theorem lookup_for_lifecycle (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64)
+    (n : CcfKv.engine.Store) (w : State) (id : U64)
     {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
     (hattempts
@@ -188,8 +188,8 @@ private theorem lookup_for_lifecycle (encode : List U8 → String) (sid : Nat)
 
 /-- Commit initiation preserves the shared state relation. -/
 theorem commit_begin_step_matches (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
-    : WP.spec (Spike.engine.Store.execute n (.CommitBegin id))
+    (n : CcfKv.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
+    : WP.spec (CcfKv.engine.Store.execute n (.CommitBegin id))
         (StepMatches encode sid (.commitBegin sid id.val) n
           (execute w (.commitBegin sid id.val))) := by
   obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
@@ -225,9 +225,9 @@ theorem commit_begin_step_matches (encode : List U8 → String) (sid : Nat)
 
 /-- Commit completion preserves the relation even when replication fails. -/
 theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64) (result : Spike.engine.Outcome)
+    (n : CcfKv.engine.Store) (w : State) (id : U64) (result : CcfKv.engine.Outcome)
     (h : StateMatches encode sid n w)
-    : WP.spec (Spike.engine.Store.execute n (.CommitResult id result))
+    : WP.spec (CcfKv.engine.Store.execute n (.CommitResult id result))
         (StepMatches encode sid (.commitResult sid id.val (modelOutcome result)) n
           (execute w (.commitResult sid id.val (modelOutcome result)))) := by
   obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
@@ -284,8 +284,8 @@ theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
 
 /-- Explicit snapshot capture agrees on both guards and frozen metadata. -/
 theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
-    : WP.spec (Spike.engine.Store.execute n (.Snapshot id))
+    (n : CcfKv.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
+    : WP.spec (CcfKv.engine.Store.execute n (.Snapshot id))
         (StepMatches encode sid (.snapshot sid id.val) n
           (execute w (.snapshot sid id.val))) := by
   obtain ⟨s, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
@@ -335,8 +335,8 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
 
 /-- A term update does not alter the history frames or any frozen attempts. -/
 theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (term : U64) (h : StateMatches encode sid n w)
-    : WP.spec (Spike.engine.Store.execute n (.SetTerm term))
+    (n : CcfKv.engine.Store) (w : State) (term : U64) (h : StateMatches encode sid n w)
+    : WP.spec (CcfKv.engine.Store.execute n (.SetTerm term))
         (StepMatches encode sid (.setTerm sid term.val) n
           (execute w (.setTerm sid term.val))) := by
   obtain ⟨s, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
@@ -397,9 +397,9 @@ private theorem erase_missing {K V : Type} [DecidableEq K] (rows : Assoc K V) (k
 
 /-- Begin agrees with the model's duplicate-ID check and creates a related empty attempt. -/
 theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
-    (n : Spike.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
+    (n : CcfKv.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
     (room : find n.txs.val id = none → n.txs.val.length < Usize.max)
-    : WP.spec (Spike.engine.Store.execute n (.Begin id))
+    : WP.spec (CcfKv.engine.Store.execute n (.Begin id))
         (StepMatches encode sid (.txCreate sid id.val) n
           (execute w (.txCreate sid id.val))) := by
   obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
@@ -457,7 +457,7 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
 /-- End releases the attempt's pins, erases its row, opportunistically elides compacted
 snapshot metadata, and retires freed nodes, or rejects without mutation. -/
 theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
-    (sid : Nat) (n : Spike.engine.Store) (w : State) (id : U64)
+    (sid : Nat) (n : CcfKv.engine.Store) (w : State) (id : U64)
     (h : StateMatches encode sid n w)
     (queueRoom
       : 2
@@ -465,7 +465,7 @@ theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective
                 + n.history.index.values.rows.val.length)
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.Store.execute n (.End id))
+    : WP.spec (CcfKv.engine.Store.execute n (.End id))
         (StepMatches encode sid (.txEnd sid id.val) n
           (execute w (.txEnd sid id.val))) := by
   obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
@@ -482,7 +482,7 @@ theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective
     hframesLen, hn, hlive', hpres, globalId, globalFrame, hglBr, hglBefore, hglAfter, hslots⟩ reach
   have hpresFrames : IndexPreservesPins n.history.index r.2.history.index
       (framePins r.2.history.log.frames.val ++ txsPins r.2.txs.val) := hpres
-  have hslotAt : ∀ (k : Nat) (f' : Spike.engine.Frame),
+  have hslotAt : ∀ (k : Nat) (f' : CcfKv.engine.Frame),
       r.2.history.log.frames.val[k]? = some f'
       → ∃ f, n.history.log.frames.val[k]? = some f
         ∧ f'.version = f.version
@@ -491,7 +491,7 @@ theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective
             ∨ (f'.meta_live = false
                 ∧ f.version.val < n.history.global.val
                 ∧ n.history.reuse_compacted_images = true
-                ∧ Spike.engine.txs_need_frame r.2.txs f globalFrame = .ok false)) := by
+                ∧ CcfKv.engine.txs_need_frame r.2.txs f globalFrame = .ok false)) := by
     intro k f' hf'
     have hkLt : k < n.history.log.frames.val.length := by
       rw [← hframesLen]; exact (List.getElem?_eq_some_iff.mp hf').1

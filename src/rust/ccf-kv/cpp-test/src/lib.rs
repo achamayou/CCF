@@ -3,7 +3,7 @@
 
 //! C ABI for the opt-in C++ tests. This crate is not part of Aeneas extraction.
 
-use ccf_kv_spike::engine::{
+use ccf_kv::engine::{
     Action, Address, Bytes, CommitPreparation, Error, Operation, Outcome, Output, SnapshotMap,
     Store, WriteSet,
 };

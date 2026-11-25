@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
-name = "ccf-kv-spike"
+name = "ccf-kv-cpp-test"
+version = "0.1.0"
+dependencies = [
+ "ccf-kv",
+]
+
+[[package]]
+name = "ccf-kv"
 version = "0.1.0"

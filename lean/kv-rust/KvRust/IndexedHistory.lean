@@ -12,27 +12,27 @@ namespace KvRust
 open Aeneas.Std
 
 /-- Every archived slot has a valid view, not just the slots on the current branch. -/
-structure HistoryIndexValid (history : Spike.engine.History) : Prop where
+structure HistoryIndexValid (history : CcfKv.engine.History) : Prop where
   index : IndexValid history.index
   archived
-    : ∀ (i : Nat) (frame : Spike.engine.Frame),
+    : ∀ (i : Nat) (frame : CcfKv.engine.Frame),
         history.log.frames.val[i]? = some frame
         → IndexView history.index frame.data (indexRows history.index frame.data)
 
-theorem HistoryIndexValid.active {history : Spike.engine.History}
-    (valid : HistoryIndexValid history) (frame : Spike.engine.Frame)
+theorem HistoryIndexValid.active {history : CcfKv.engine.History}
+    (valid : HistoryIndexValid history) (frame : CcfKv.engine.Frame)
     (active : frame ∈ history.activeFrames)
     : IndexView history.index frame.data (indexRows history.index frame.data) := by
   obtain ⟨id, _, saved⟩ := List.mem_filterMap.mp active
   exact valid.archived id.val frame saved
 
-theorem HistoryIndexValid.head {history : Spike.engine.History}
-    (valid : HistoryIndexValid history) (prior : List Spike.engine.Frame)
-    (frame : Spike.engine.Frame) (split : history.activeFrames = prior ++ [frame])
+theorem HistoryIndexValid.head {history : CcfKv.engine.History}
+    (valid : HistoryIndexValid history) (prior : List CcfKv.engine.Frame)
+    (frame : CcfKv.engine.Frame) (split : history.activeFrames = prior ++ [frame])
     : IndexView history.index frame.data (indexRows history.index frame.data) :=
   valid.active frame (by simp [split])
 
-theorem HistoryIndexValid.congr {before after : Spike.engine.History}
+theorem HistoryIndexValid.congr {before after : CcfKv.engine.History}
     (valid : HistoryIndexValid before) (sameIndex : after.index = before.index)
     (sameArchive : after.log.frames = before.log.frames)
     : HistoryIndexValid after := by
@@ -42,23 +42,23 @@ theorem HistoryIndexValid.congr {before after : Spike.engine.History}
   exact valid.archived i frame (by simpa only [sameArchive] using saved)
 
 /-- A persistent history update preserves both the frame slots and their storage roots. -/
-structure HistoryKeeps (before after : Spike.engine.History) : Prop where
+structure HistoryKeeps (before after : CcfKv.engine.History) : Prop where
   slots : FrameSlotsPreserved before after
   index : IndexKeeps before.index after.index
 
-theorem HistoryKeeps.of_same {before after : Spike.engine.History}
+theorem HistoryKeeps.of_same {before after : CcfKv.engine.History}
     (sameSlots : after.log.frames = before.log.frames)
     (sameIndex : after.index = before.index)
     : HistoryKeeps before after :=
   ⟨FrameSlotsPreserved.of_same before after sameSlots, sameIndex.symm ▸ .refl _⟩
 
-theorem HistoryKeeps.rows {before after : Spike.engine.History}
+theorem HistoryKeeps.rows {before after : CcfKv.engine.History}
     (kept : HistoryKeeps before after) (valid : HistoryIndexValid before) (i : Nat)
-    (frame : Spike.engine.Frame) (saved : before.log.frames.val[i]? = some frame)
+    (frame : CcfKv.engine.Frame) (saved : before.log.frames.val[i]? = some frame)
     : indexRows after.index frame.data = indexRows before.index frame.data :=
   index_rows_eq (index_keeps_view kept.index _ _ (valid.archived i frame saved))
 
-theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History}
+theorem HistoryIndexValid.of_preserves_pins {before after : CcfKv.engine.History}
     {extraPins : List U32}
     (valid : HistoryIndexValid before)
     (liveAfter : IndexValid after.index)
@@ -66,10 +66,10 @@ theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History
       : IndexPreservesPins before.index after.index
           (framePins after.log.frames.val ++ extraPins))
     (slots
-      : ∀ (i : Nat) (f' : Spike.engine.Frame),
+      : ∀ (i : Nat) (f' : CcfKv.engine.Frame),
           after.log.frames.val[i]? = some f'
           → f'.data = 0#u32
-            ∨ ∃ (j : Nat) (f : Spike.engine.Frame),
+            ∨ ∃ (j : Nat) (f : CcfKv.engine.Frame),
                 before.log.frames.val[j]? = some f ∧ f'.data = f.data)
     : HistoryIndexValid after := by
   refine ⟨liveAfter, ?_⟩
@@ -77,7 +77,7 @@ theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History
   rcases slots i f' hf' with h0 | ⟨j, f, hf, hdata⟩
   · have hemp : IndexView after.index 0#u32 [] := by
       have h := index_empty_root_refines after.index
-      unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+      unfold CcfKv.kv_index.AddressIndex.empty_root CcfKv.radix.SingleRadix.empty_root at h
       rw [WP.spec_ok] at h
       exact h.2
     rw [h0, index_rows_eq hemp]
@@ -85,7 +85,7 @@ theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History
   · by_cases hzero : f'.data = 0#u32
     · have hemp : IndexView after.index 0#u32 [] := by
         have h := index_empty_root_refines after.index
-        unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+        unfold CcfKv.kv_index.AddressIndex.empty_root CcfKv.radix.SingleRadix.empty_root at h
         rw [WP.spec_ok] at h
         exact h.2
       rw [hzero, index_rows_eq hemp]
@@ -99,7 +99,7 @@ theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History
 
 /-- Project the entire extracted frame into the executable model. -/
 noncomputable def modelFrame (encode : List U8 → String) (index : CellIndex)
-    (frame : Spike.engine.Frame)
+    (frame : CcfKv.engine.Frame)
     : Kv.Model.Frame :=
   {
     modelMetadata (encode ∘ alloc.vec.Vec.val) frame with
@@ -107,13 +107,13 @@ noncomputable def modelFrame (encode : List U8 → String) (index : CellIndex)
   }
 
 /-- Ghost active branch frames derived from the immutable ghost native archive. -/
-def natModelFrames (log : Spike.branch_log.BranchLog Spike.engine.Frame)
+def natModelFrames (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame)
     (natArchive : List Kv.Model.Frame)
     : List Kv.Model.Frame :=
   log.branch.val.reverse.filterMap fun id => natArchive[id.val]?
 
 /-- A native frame agrees on all metadata fields with its ghost archive entry. -/
-def FrameMetaEq (encode : List U8 → String) (nf : Spike.engine.Frame)
+def FrameMetaEq (encode : List U8 → String) (nf : CcfKv.engine.Frame)
     (gf : Kv.Model.Frame)
     : Prop :=
   gf.version = nf.version.val
@@ -121,14 +121,14 @@ def FrameMetaEq (encode : List U8 → String) (nf : Spike.engine.Frame)
   ∧ gf.births = (modelMetadata (encode ∘ alloc.vec.Vec.val) nf).births
 
 theorem frame_meta_eq_modelFrame (encode : List U8 → String) (index : CellIndex)
-    (nf : Spike.engine.Frame)
+    (nf : CcfKv.engine.Frame)
     : FrameMetaEq encode nf (modelFrame encode index nf) :=
   ⟨rfl, rfl, rfl⟩
 
 /-- Alignment between the native frame archive (whose compacted/rolled-back
 entries may have `data = 0#u32` and elided metadata when `meta_live = false`)
 and the immutable ghost native archive `natArchive`. -/
-structure ArchiveAligned (encode : List U8 → String) (history : Spike.engine.History)
+structure ArchiveAligned (encode : List U8 → String) (history : CcfKv.engine.History)
     (natArchive : List Kv.Model.Frame)
     : Prop where
   len : natArchive.length = history.log.frames.val.length
@@ -157,7 +157,7 @@ structure ArchiveAligned (encode : List U8 → String) (history : Spike.engine.H
         → (history.reuse_compacted_images = true → history.global.val ≤ nf.version.val)
         → modelFrame encode history.index nf = gf
 
-theorem natModelFrames_length {log : Spike.branch_log.BranchLog Spike.engine.Frame}
+theorem natModelFrames_length {log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
     {natArchive : List Kv.Model.Frame} (valid : BranchValid log)
     (hlen : natArchive.length = log.frames.val.length)
     : (natModelFrames log natArchive).length = log.branch.val.length := by
@@ -172,7 +172,7 @@ theorem natModelFrames_length {log : Spike.branch_log.BranchLog Spike.engine.Fra
   rw [hl _ (fun id hid => hlen.symm ▸ valid.2 id (List.mem_reverse.mp hid)), List.length_reverse]
 
 theorem natModelFrames_append
-    {before after : Spike.branch_log.BranchLog Spike.engine.Frame}
+    {before after : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
     {natArchive : List Kv.Model.Frame} {gf : Kv.Model.Frame} {id : Usize}
     (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
     (hid : id.val = before.frames.val.length)
@@ -215,7 +215,7 @@ private theorem list_filter_is_take {α : Type} (xs : List α) (p : α → Bool)
             simpa using he
           simp [hhead, ih n htail]
 
-theorem natModelFrames_take {before after : Spike.branch_log.BranchLog Spike.engine.Frame}
+theorem natModelFrames_take {before after : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
     {natArchive : List Kv.Model.Frame} {n : Nat}
     (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
     (hbr : after.branch.val = before.branch.val.take n)
@@ -285,7 +285,7 @@ theorem natModelFrames_take {before after : Spike.branch_log.BranchLog Spike.eng
   exact decide_eq_decide.mpr (by omega)
 
 theorem ArchiveAligned.of_preserves_pins {encode : List U8 → String}
-    {before after : Spike.engine.History} {natArchive : List Kv.Model.Frame}
+    {before after : CcfKv.engine.History} {natArchive : List Kv.Model.Frame}
     {extraPins : List U32}
     (aligned : ArchiveAligned encode before natArchive)
     (validBefore : HistoryIndexValid before)
@@ -321,8 +321,8 @@ theorem ArchiveAligned.of_preserves_pins {encode : List U8 → String}
   simpa only [modelFrame, hrows] using hmf0
 
 theorem ArchiveAligned.append {encode : List U8 → String}
-    {before after : Spike.engine.History} {natArchive : List Kv.Model.Frame}
-    {nfNew : Spike.engine.Frame} {idNew : Usize} {extraPins : List U32}
+    {before after : CcfKv.engine.History} {natArchive : List Kv.Model.Frame}
+    {nfNew : CcfKv.engine.Frame} {idNew : Usize} {extraPins : List U32}
     (aligned : ArchiveAligned encode before natArchive)
     (validBefore : HistoryIndexValid before)
     (validLogBefore : BranchValid before.log)
@@ -437,14 +437,14 @@ theorem ArchiveAligned.append {encode : List U8 → String}
       rfl
 
 theorem model_frame_retained (encode : List U8 → String) {before after : CellIndex}
-    (kept : IndexKeeps before after) (frame : Spike.engine.Frame)
+    (kept : IndexKeeps before after) (frame : CcfKv.engine.Frame)
     (view : IndexView before frame.data (indexRows before frame.data))
     : modelFrame encode after frame = modelFrame encode before frame := by
   have same := index_rows_eq (index_keeps_view kept _ _ view)
   simp only [modelFrame, same]
 
 theorem model_frame_retained_active (encode : List U8 → String)
-    {history : Spike.engine.History} {arena : CellIndex}
+    {history : CcfKv.engine.History} {arena : CellIndex}
     (valid : HistoryIndexValid history) (kept : IndexKeeps history.index arena)
     : history.activeFrames.map (modelFrame encode arena)
       = history.activeFrames.map (modelFrame encode history.index) := by
@@ -452,9 +452,9 @@ theorem model_frame_retained_active (encode : List U8 → String)
   intro frame mem
   exact model_frame_retained encode kept frame (valid.active frame mem)
 
-theorem HistoryIndexValid.append {before after : Spike.engine.History}
+theorem HistoryIndexValid.append {before after : CcfKv.engine.History}
     (valid : HistoryIndexValid before) (kept : IndexKeeps before.index after.index)
-    (live : IndexValid after.index) (frame : Spike.engine.Frame)
+    (live : IndexValid after.index) (frame : CcfKv.engine.Frame)
     (view : IndexView after.index frame.data (indexRows after.index frame.data))
     (archive : after.log.frames.val = before.log.frames.val ++ [frame])
     : HistoryIndexValid after := by
@@ -514,7 +514,7 @@ theorem encKeyLt_perm_eq {encode : List U8 → String}
           subst hxy
           exact congrArg (List.cons x) (ih hxs hys (List.Perm.cons_inv perm))
 
-private theorem packed_same_map_lt {a b : Spike.engine.Address}
+private theorem packed_same_map_lt {a b : CcfKv.engine.Address}
     (hmap : a.map.val = b.map.val) (hlt : packedAddress a < packedAddress b)
     : a.key.val < b.key.val := by
   have hbo : byteOrder (packedAddress a) (packedAddress b) < 0#i8 := (byteOrder_lt _ _).mpr hlt
@@ -528,7 +528,7 @@ private theorem packed_same_map_lt {a b : Spike.engine.Address}
   exact (byteOrder_lt _ _).mp hbo
 
 theorem modelFrame_image_sorted {encode : List U8 → String}
-    (inj : Function.Injective encode) (index : CellIndex) (frame : Spike.engine.Frame)
+    (inj : Function.Injective encode) (index : CellIndex) (frame : CcfKv.engine.Frame)
     (view : IndexView index frame.data (indexRows index frame.data)) (m : String)
     : (Kv.Model.image (modelFrame encode index frame).data m).Pairwise
         (encKeyLt encode) := by
@@ -572,7 +572,7 @@ theorem modelFrame_image_sorted {encode : List U8 → String}
 /-- Under single-radix storage, any two valid frames whose projected map images
 are permutations of each other have identical map images. -/
 theorem modelFrame_image_eq_of_perm {encode : List U8 → String}
-    (inj : Function.Injective encode) (index : CellIndex) (f1 f2 : Spike.engine.Frame)
+    (inj : Function.Injective encode) (index : CellIndex) (f1 f2 : CcfKv.engine.Frame)
     (v1 : IndexView index f1.data (indexRows index f1.data))
     (v2 : IndexView index f2.data (indexRows index f2.data)) (m : String)
     (perm

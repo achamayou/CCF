@@ -13,39 +13,39 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-local instance : DecidableEq Spike.engine.Address :=
+local instance : DecidableEq CcfKv.engine.Address :=
   fun a b =>
     decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
 /-- The extracted dispatcher finds the first live attempt with the given ID. -/
-theorem tx_index (s : Spike.engine.Store) (id : U64)
-    : WP.spec (Spike.engine.Store.tx_index s id)
+theorem tx_index (s : CcfKv.engine.Store) (id : U64)
+    : WP.spec (CcfKv.engine.Store.tx_index s id)
         (fun result =>
           match result with
           | .Err e => e = .Disabled ∧ find s.txs.val id = none
           | .Ok i =>
               ∃ t, s.txs.val[i.val]? = some (id, t) ∧ find s.txs.val id = some t) := by
-  unfold Spike.engine.Store.tx_index
-  apply WP.spec_bind (assoc_index Spike.U64.Insts.Ccf_kv_spikeEngineKey s.txs id (fun _ => rfl))
+  unfold CcfKv.engine.Store.tx_index
+  apply WP.spec_bind (assoc_index CcfKv.U64.Insts.Ccf_kvEngineKey s.txs id (fun _ => rfl))
   intro result h
   cases result <;> simp [h]
 
 /-- Rejected local application preserves the entire store, including attempt state. -/
-theorem apply_rejected_keeps_store (s : Spike.engine.Store) (id : U64)
+theorem apply_rejected_keeps_store (s : CcfKv.engine.Store) (id : U64)
     (rejected
       : ∀ t,
           find s.txs.val id = some t
           → t.phase = .Committing
           → t.pending.val ≠ []
-          → WP.spec (Spike.engine.Tx.can_apply t s.history) (fun r => r = false))
-    : Spike.engine.Store.execute s (.Apply id) = Result.ok (.Err .Disabled, s) := by
-  apply (show WP.spec (Spike.engine.Store.execute s (.Apply id))
+          → WP.spec (CcfKv.engine.Tx.can_apply t s.history) (fun r => r = false))
+    : CcfKv.engine.Store.execute s (.Apply id) = Result.ok (.Err .Disabled, s) := by
+  apply (show WP.spec (CcfKv.engine.Store.execute s (.Apply id))
       (fun r => r = (.Err .Disabled, s)) → _ from fun h => by
-    cases hr : Spike.engine.Store.execute s (.Apply id) using Result.cases with
+    cases hr : CcfKv.engine.Store.execute s (.Apply id) using Result.cases with
     | ret r => simpa [hr] using h
     | vis _ _ => simp [hr] at h
     | div => simp [hr] at h)
-  unfold Spike.engine.Store.execute Spike.engine.Store.apply
+  unfold CcfKv.engine.Store.execute CcfKv.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
   intro index hindex
   cases index with
@@ -72,9 +72,9 @@ theorem apply_rejected_keeps_store (s : Spike.engine.Store) (id : U64)
             intro _ hr
             simp [hr]
 
-private abbrev ReportRow := Spike.engine.Address × Option Spike.engine.Bytes
+private abbrev ReportRow := CcfKv.engine.Address × Option CcfKv.engine.Bytes
 
-private def reportRow (row : Spike.engine.Address × Spike.engine.Write) : ReportRow :=
+private def reportRow (row : CcfKv.engine.Address × CcfKv.engine.Write) : ReportRow :=
   (
     row.1,
     match row.2 with
@@ -82,20 +82,20 @@ private def reportRow (row : Spike.engine.Address × Spike.engine.Write) : Repor
     | .Remove => none
   )
 
-private theorem report_one (row : Spike.engine.Address × Spike.engine.Write)
-    : Spike.engine.reported_write row = .ok (reportRow row) := by
+private theorem report_one (row : CcfKv.engine.Address × CcfKv.engine.Write)
+    : CcfKv.engine.reported_write row = .ok (reportRow row) := by
   obtain ⟨a, w⟩ := row
-  cases w <;> simp [Spike.engine.reported_write, reportRow, clone_address, clone_bytes]
+  cases w <;> simp [CcfKv.engine.reported_write, reportRow, clone_address, clone_bytes]
 
 private theorem report_writes
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
-    : WP.spec (Spike.engine.reported_writes pending)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
+    : WP.spec (CcfKv.engine.reported_writes pending)
         (fun r => r.val = pending.val.map reportRow) := by
-  unfold Spike.engine.reported_writes Spike.engine.reported_writes_loop
+  unfold CcfKv.engine.reported_writes CcfKv.engine.reported_writes_loop
   apply loop.spec_decr_nat
     (fun
         (p
-          : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write
+          : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write
             × alloc.vec.Vec ReportRow
             × Usize) =>
       pending.val.length - p.2.2.val)
@@ -107,7 +107,7 @@ private theorem report_writes
   · rintro ⟨p, out, i⟩ ⟨hp, hi, hdata⟩
     dsimp only at hp hi hdata ⊢
     subst p
-    unfold Spike.engine.reported_writes_loop.body
+    unfold CcfKv.engine.reported_writes_loop.body
     have hlen : (alloc.vec.Vec.len pending).val = pending.val.length := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq pending
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -136,15 +136,15 @@ private theorem report_writes
 
 /-- Encode the reported write set in the same way as the model's staged writes. -/
 def encodeReport (encode : List U8 → String)
-    (rows : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
+    (rows : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
     : Pending :=
   rows.val.map
     fun (addr, v) =>
       (encodeAddr encode (byteAddr addr), v.map (encode ∘ alloc.vec.Vec.val))
 
 private theorem report_matches (encode : List U8 → String)
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
-    : WP.spec (Spike.engine.reported_writes pending)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
+    : WP.spec (CcfKv.engine.reported_writes pending)
         (fun reported =>
           encodeReport encode reported
           = encodeWrites encode (byteWrites pending.val)) := by
@@ -157,10 +157,10 @@ private theorem report_matches (encode : List U8 → String)
 
 private theorem optional_report_matches (encode : List U8 → String)
     (pending
-      : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (includeReport : Bool)
+      : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write) (includeReport : Bool)
     : WP.spec
         (if includeReport then
-            Spike.engine.reported_writes pending
+            CcfKv.engine.reported_writes pending
           else
             .ok (alloc.vec.Vec.new ReportRow))
         (fun reported =>
@@ -174,8 +174,8 @@ private theorem optional_report_matches (encode : List U8 → String)
   · simpa using report_matches encode pending
 
 /-- The operands of an accepted application fit the machine counters and vector operations. -/
-structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
-    (t : Spike.engine.Tx) (pinsCount : Nat)
+structure ApplyCapacity (s : CcfKv.engine.History) (head : CcfKv.engine.Frame)
+    (t : CcfKv.engine.Tx) (pinsCount : Nat)
     : Prop where
   /-- The next version does not overflow. -/
   version : head.version.val < U64.max
@@ -198,13 +198,13 @@ structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
 /-- Accepted local application publishes the frame modulo binding order, preserves
 all surviving pins across bounded retirement, and updates the ghost native archive. -/
 theorem apply_accepted_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.Store) (id : U64)
-    (includeReport : Bool) (t : Spike.engine.Tx) (model : Store)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (id : U64)
+    (includeReport : Bool) (t : CcfKv.engine.Tx) (model : Store)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (natArchive : List Frame)
     (hTx : find s.txs.val id = some t) (hPhase : t.phase = .Committing)
     (hWrites : t.pending.val ≠ [])
-    (hEligible : WP.spec (Spike.engine.Tx.can_apply t s.history) (fun r => r = true))
+    (hEligible : WP.spec (CcfKv.engine.Tx.can_apply t s.history) (fun r => r = true))
     (hHead : s.history.activeFrames = prior ++ [head])
     (hFrames : model.history = natModelFrames s.history.log natArchive)
     (hModelHead : model.head = modelFrame encode s.history.index head)
@@ -218,7 +218,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
     (live : IndexLiveness s.history.index (storePins s))
     : let writes := encodeWrites encode (byteWrites t.pending.val)
       let expected := advance model writes
-      WP.spec (Spike.engine.Store.apply s id includeReport)
+      WP.spec (CcfKv.engine.Store.apply s id includeReport)
         (fun (result, after) =>
           ∃ version reported index next,
             result = .Ok (.Applied version s.history.term reported)
@@ -251,7 +251,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
                 ∧ after.history.log.branch.val = s.history.log.branch.val ++ [idNew])
             ∧ next.meta_live = true) := by
   dsimp only
-  unfold Spike.engine.Store.apply
+  unfold CcfKv.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
   intro r hr
   cases r with
@@ -324,19 +324,19 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         omega
       apply WP.spec_bind
         (index_retire_budget_refines arena (framePins log.frames.val ++ txsPins s.txs.val)
-          Spike.engine.RETIRE_BUDGET harenaLive2 hqArena)
+          CcfKv.engine.RETIRE_BUDGET harenaLive2 hqArena)
       rintro ⟨_, ai⟩ ⟨aiLive, aiPres, _, _⟩
       obtain ⟨idx, hget⟩ := List.getElem?_eq_some_iff.mp hrow
       apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec s.txs i idx)
       rintro ⟨row, back⟩ hback
       have hrow' : row = (id, t) := hback.1.trans hget
       subst row
-      let afterHist : Spike.engine.History :=
+      let afterHist : CcfKv.engine.History :=
         { s.history with log, index := ai, next_identity := identity }
       let afterTxs := back (id, { t with phase := .Applied version })
-      let afterStore : Spike.engine.Store := { s with history := afterHist, txs := afterTxs }
+      let afterStore : CcfKv.engine.Store := { s with history := afterHist, txs := afterTxs }
       change WP.spec (Result.ok
-        (core.result.Result.Ok (Spike.engine.Output.Applied version s.history.term reported),
+        (core.result.Result.Ok (CcfKv.engine.Output.Applied version s.history.term reported),
           afterStore)) _
       rw [WP.spec_ok]
       dsimp only
@@ -418,15 +418,15 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
 
 /-- The wire-size preflight reads exactly the write set used by the KV model. -/
 theorem pending_writes_match (encode : List U8 → String)
-    (s : Spike.engine.Store) (id : U64) (t : Spike.engine.Tx)
+    (s : CcfKv.engine.Store) (id : U64) (t : CcfKv.engine.Tx)
     (hTx : find s.txs.val id = some t) (hPhase : t.phase = .Active)
-    : WP.spec (Spike.engine.Store.pending_writes s id)
+    : WP.spec (CcfKv.engine.Store.pending_writes s id)
         (fun result =>
           ∃ writes,
             result = .Ok writes
             ∧ encodeReport encode writes
               = encodeWrites encode (byteWrites t.pending.val)) := by
-  unfold Spike.engine.Store.pending_writes
+  unfold CcfKv.engine.Store.pending_writes
   apply WP.spec_bind (tx_index s id)
   intro index hindex
   cases index with
@@ -444,15 +444,15 @@ theorem pending_writes_match (encode : List U8 → String)
 
 /-- A gap or duplicate version is rejected before changing the store. -/
 theorem replay_next_rejects_wrong_version
-    (s : Spike.engine.Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (s : CcfKv.engine.Store) (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hHead : s.history.activeFrames = prior ++ [head])
     (hVersion : head.version.val < U64.max)
     (hIdentity : s.history.next_identity.val < U64.max)
     (requested : U64)
-    (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
+    (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
     (wrong : requested.val ≠ head.version.val + 1)
     (valid : BranchValid s.history.log)
-    : WP.spec (Spike.engine.Store.replay_next s requested writes)
+    : WP.spec (CcfKv.engine.Store.replay_next s requested writes)
         (fun r => r = (.Err .Disabled, s)) := by
   have hmax : core.num.U64.MAX.val = U64.max := by rw [U64.max_eq]; rfl
   have hv : head.version ≠ core.num.U64.MAX := fun he => by
@@ -464,16 +464,16 @@ theorem replay_next_rejects_wrong_version
   have hone : (1#u64 : U64).val = 1 := rfl
   have hroom : head.version.val + (1#u64 : U64).val ≤ U64.max := by omega
   have rejection : WP.spec
-      (Spike.engine.Store.prepare_replay head.version s.history.next_identity requested writes)
+      (CcfKv.engine.Store.prepare_replay head.version s.history.next_identity requested writes)
       (fun r => r = .Err .Disabled) := by
-    simp only [Spike.engine.Store.prepare_replay, hv, hi, ite_false]
+    simp only [CcfKv.engine.Store.prepare_replay, hv, hi, ite_false]
     apply WP.spec_bind (U64.add_spec hroom)
     intro v hval
     have hne : requested ≠ v := fun he => by
       have he' := congrArg (fun x : U64 => x.val) he
       omega
     simp [hne]
-  unfold Spike.engine.Store.replay_next Spike.engine.Store.replay_indexed
+  unfold CcfKv.engine.Store.replay_next CcfKv.engine.Store.replay_indexed
   simp only [history_head s.history prior head hHead valid, bind_ok]
   apply WP.spec_bind rejection
   intro r hr
@@ -481,7 +481,7 @@ theorem replay_next_rejects_wrong_version
   simp [core.result.Result.Insts.CoreOpsTry.branch,
     core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
 
-def replayRow (row : Spike.engine.Address × Option Spike.engine.Bytes) : IndexWrite :=
+def replayRow (row : CcfKv.engine.Address × Option CcfKv.engine.Bytes) : IndexWrite :=
   (
     row.1,
     match row.2 with
@@ -491,8 +491,8 @@ def replayRow (row : Spike.engine.Address × Option Spike.engine.Bytes) : IndexW
 
 private theorem prepare_replay_matches (previous identity version : U64)
     (hVersion : version.val = previous.val + 1) (hI : identity.val < U64.max)
-    (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
-    : WP.spec (Spike.engine.Store.prepare_replay previous identity version writes)
+    (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
+    : WP.spec (CcfKv.engine.Store.prepare_replay previous identity version writes)
         (fun result =>
           result = .Err .Disabled
           ∨ ∃ pending,
@@ -507,7 +507,7 @@ private theorem prepare_replay_matches (previous identity version : U64)
     omega
   have hone : (1#u64 : U64).val = 1 := rfl
   have hroom : previous.val + (1#u64 : U64).val ≤ U64.max := by omega
-  unfold Spike.engine.Store.prepare_replay
+  unfold CcfKv.engine.Store.prepare_replay
   simp only [hv, hi, ite_false]
   apply WP.spec_bind (U64.add_spec hroom)
   intro v hv'
@@ -516,11 +516,11 @@ private theorem prepare_replay_matches (previous identity version : U64)
     omega
   subst v
   simp only [bne_self_eq_false, Bool.false_eq_true, ite_false,
-    Spike.engine.Assoc.new, bind_ok]
-  unfold Spike.engine.Store.prepare_replay_loop
+    CcfKv.engine.Assoc.new, bind_ok]
+  unfold CcfKv.engine.Store.prepare_replay_loop
   ·
     apply loop.spec_decr_nat
-      (fun (p : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write × Usize) =>
+      (fun (p : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write × Usize) =>
         writes.val.length - p.2.val)
       (fun (pending, j) =>
         pending.val.length = j.val
@@ -528,7 +528,7 @@ private theorem prepare_replay_matches (previous identity version : U64)
       _ _ _
     · rintro ⟨pending, j⟩ ⟨hj, hrows⟩
       dsimp only at hj hrows ⊢
-      unfold Spike.engine.Store.prepare_replay_loop.body
+      unfold CcfKv.engine.Store.prepare_replay_loop.body
       have hlen : (alloc.vec.Vec.len writes).val = writes.val.length :=
         alloc.vec.Vec.len_val writes
       have hcap := alloc.vec.Vec.len_ineq writes
@@ -539,7 +539,7 @@ private theorem prepare_replay_matches (previous identity version : U64)
         apply WP.spec_bind (alloc.vec.Vec.index_usize_spec writes j hlt)
         rintro ⟨addr, value⟩ hrow
         apply WP.spec_bind
-          (assoc_index Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey pending addr
+          (assoc_index CcfKv.engine.Address.Insts.Ccf_kvEngineKey pending addr
             (fun k => compare_address k addr))
         intro found _
         cases found with
@@ -547,10 +547,10 @@ private theorem prepare_replay_matches (previous identity version : U64)
         | none =>
             have hwrite :
                 (match value with
-                | none => Result.ok Spike.engine.Write.Remove
+                | none => Result.ok CcfKv.engine.Write.Remove
                 | some bytes => do
-                    let b ← Spike.engine.Bytes.Insts.CoreCloneClone.clone bytes
-                    Result.ok (Spike.engine.Write.Put b))
+                    let b ← CcfKv.engine.Bytes.Insts.CoreCloneClone.clone bytes
+                    Result.ok (CcfKv.engine.Write.Put b))
                 = .ok (replayRow (addr, value)).2 := by
               cases value <;> simp [replayRow, clone_bytes]
             simp only [core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true,
@@ -558,10 +558,10 @@ private theorem prepare_replay_matches (previous identity version : U64)
             change WP.spec (do
               let write ←
                 match value with
-                | none => Result.ok Spike.engine.Write.Remove
+                | none => Result.ok CcfKv.engine.Write.Remove
                 | some bytes => do
-                    let b ← Spike.engine.Bytes.Insts.CoreCloneClone.clone bytes
-                    Result.ok (Spike.engine.Write.Put b)
+                    let b ← CcfKv.engine.Bytes.Insts.CoreCloneClone.clone bytes
+                    Result.ok (CcfKv.engine.Write.Put b)
               let next ← alloc.vec.Vec.push pending (addr, write)
               let nextj ← j + 1#usize
               Result.ok (ControlFlow.cont (next, nextj))) _
@@ -586,13 +586,13 @@ private theorem prepare_replay_matches (previous identity version : U64)
 
 /-- Ordinary replay leaves the store unchanged on rejection, or appends the specified frame. -/
 theorem replay_next_matches_advance (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.Store) (model : Store)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (model : Store)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hHead : s.history.activeFrames = prior ++ [head])
     (hModelHead : model.head = modelFrame encode s.history.index head)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (version : U64) (hVersion : version.val = head.version.val + 1)
-    (writes : alloc.vec.Vec (Spike.engine.Address × Option Spike.engine.Bytes))
+    (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
     (hF : s.history.activeFrames.length < Usize.max)
     (hI : s.history.next_identity.val < U64.max)
     (hD
@@ -605,7 +605,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     (valid : BranchValid s.history.log) (indexed : HistoryIndexValid s.history)
     (live : IndexLiveness s.history.index (storePins s))
     (archiveRoom : s.history.log.frames.val.length < Usize.max)
-    : WP.spec (Spike.engine.Store.replay_next s version writes)
+    : WP.spec (CcfKv.engine.Store.replay_next s version writes)
         (fun (result, after) =>
           (result = .Err .Disabled ∧ after = s)
           ∨ (result = .Ok ()
@@ -621,14 +621,14 @@ theorem replay_next_matches_advance (encode : List U8 → String)
                   ∧ HistoryIndexValid after.history
                   ∧ IndexLiveness after.history.index (storePins after)
                   ∧ HistoryKeeps s.history after.history)) := by
-  unfold Spike.engine.Store.replay_next Spike.engine.Store.replay_indexed
+  unfold CcfKv.engine.Store.replay_next CcfKv.engine.Store.replay_indexed
   simp only [history_head s.history prior head hHead valid, bind_ok]
   apply WP.spec_bind (prepare_replay_matches head.version s.history.next_identity
     version hVersion hI writes)
   rintro r (rfl | ⟨pending, rfl, hp⟩)
   · simp [core.result.Result.Insts.CoreOpsTry.branch,
       core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
-  · simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok, Spike.engine.Store.append_replay,
+  · simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok, CcfKv.engine.Store.append_replay,
       Bool.false_eq_true, ite_false, Aeneas.Std.bind_assoc]
     have hlength : pending.val.length = writes.val.length := by simp [hp]
     have hWrite : encodeWrites encode (byteWrites pending.val) = encodeReport encode writes := by
@@ -651,8 +651,8 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _, _⟩
     change prepared = {s.history with index := arena} at same
     subst prepared
-    let publish (log : Spike.branch_log.BranchLog Spike.engine.Frame) (identity : U64)
-        : Spike.engine.Store :=
+    let publish (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame) (identity : U64)
+        : CcfKv.engine.Store :=
       { s with
         history := { s.history with
           log
@@ -661,7 +661,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
           reuse_compacted_images := false } }
     change WP.spec (Aeneas.Std.bind
       (do
-        let (_, log) ← Spike.branch_log.BranchLog.append s.history.log next
+        let (_, log) ← CcfKv.branch_log.BranchLog.append s.history.log next
         let identity ← s.history.next_identity + 1#u64
         Result.ok (publish log identity))
       (fun updated => Result.ok (core.result.Result.Ok (), updated))) _

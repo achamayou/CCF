@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-//! Routing for the experimental persistent radix index.
+//! Routing and persistent arena storage for the radix index.
 
 use crate::retire_queue::{RetireQueue, release_owner};
 
@@ -22,11 +22,6 @@ pub fn address_key(map: &[u8], key: &[u8]) -> Vec<u8> {
     encoded.extend_from_slice(map);
     encoded.extend_from_slice(key);
     encoded
-}
-
-/// Lexicographic enumeration of these keys visits newer stamps first.
-pub fn reverse_stamp_key(stamp: u64) -> Vec<u8> {
-    (!stamp).to_be_bytes().to_vec()
 }
 
 /// Zero is the end-of-key symbol; the high and low nibbles occupy 1..=16.
@@ -577,142 +572,6 @@ fn check_leaf<'a, V>(rows: &'a [Option<RadixRow<V>>], leaf: u32, key: &[u8]) -> 
     }
 }
 
-fn matching_leaf<V>(
-    dirs: &[Option<RadixDir>],
-    rows: &[Option<RadixRow<V>>],
-    root: u32,
-    key: &[u8],
-) -> Option<u32> {
-    let leaf = find_leaf(dirs, root, key);
-    if leaf == 0 || check_leaf(rows, leaf, key).is_none() {
-        None
-    } else {
-        Some(leaf)
-    }
-}
-
-fn edit_order(order: &[u32], removed: Option<u32>, added: Option<u32>) -> Vec<u32> {
-    let mut next = Vec::new();
-    if let Some(leaf) = added {
-        next.push(leaf);
-    }
-    let mut i = 0;
-    while i < order.len() {
-        let leaf = order[i];
-        let keep = match removed {
-            None => true,
-            Some(old) => old != leaf,
-        };
-        if keep {
-            next.push(leaf);
-        }
-        i += 1;
-    }
-    next
-}
-
-#[derive(Clone, Copy)]
-pub struct Root(usize);
-
-struct OrderedRoot {
-    lookup: u32,
-    order: Vec<u32>,
-}
-
-/// Persistent lookup and scan roots. Pass handles only to their issuing arena.
-/// This prototype retains every version without reclamation.
-pub struct OrderedRadix<V> {
-    dirs: Vec<Option<RadixDir>>,
-    rows: Vec<Option<RadixRow<V>>>,
-    free_dirs: Vec<usize>,
-    free_rows: Vec<usize>,
-    path: Vec<(u32, usize)>,
-    roots: Vec<OrderedRoot>,
-}
-
-impl<V> OrderedRadix<V> {
-    pub fn new() -> Self {
-        let mut roots = Vec::new();
-        roots.push(OrderedRoot {
-            lookup: 0,
-            order: Vec::new(),
-        });
-        Self {
-            dirs: Vec::new(),
-            rows: Vec::new(),
-            free_dirs: Vec::new(),
-            free_rows: Vec::new(),
-            path: Vec::new(),
-            roots,
-        }
-    }
-
-    pub fn empty_root(&self) -> Root {
-        Root(0)
-    }
-
-    pub fn get(&self, root: Root, key: &[u8]) -> Option<&V> {
-        get(&self.dirs, &self.rows, self.roots[root.0].lookup, key)
-    }
-
-    pub fn put(&mut self, root: Root, row: RadixRow<V>) -> Root {
-        let prior = &self.roots[root.0];
-        let (lookup, added, removed) = put(
-            &mut self.dirs,
-            &mut self.free_dirs,
-            &mut self.rows,
-            &mut self.free_rows,
-            &mut self.path,
-            prior.lookup,
-            row,
-        );
-        let order = edit_order(&prior.order, removed, Some(added));
-        self.add_root(lookup, order)
-    }
-
-    pub fn remove(&mut self, root: Root, key: &[u8]) -> Root {
-        let prior = &self.roots[root.0];
-        let removed = matching_leaf(&self.dirs, &self.rows, prior.lookup, key);
-        if removed.is_none() {
-            return root;
-        }
-        let lookup = remove(
-            &mut self.dirs,
-            &mut self.free_dirs,
-            &self.rows,
-            &mut self.path,
-            prior.lookup,
-            key,
-        );
-        let order = edit_order(&prior.order, removed, None);
-        self.add_root(lookup, order)
-    }
-
-    pub fn scan_len(&self, root: Root) -> usize {
-        self.roots[root.0].order.len()
-    }
-
-    pub fn scan_at(&self, root: Root, i: usize) -> Option<&RadixRow<V>> {
-        let order = &self.roots[root.0].order;
-        if i >= order.len() {
-            return None;
-        }
-        Some(row_at(&self.rows, order[i]))
-    }
-
-    fn add_root(&mut self, lookup: u32, order: Vec<u32>) -> Root {
-        let index = self.roots.len();
-        self.roots.push(OrderedRoot { lookup, order });
-        Root(index)
-    }
-}
-
-impl<V> Default for OrderedRadix<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 struct Arena<V> {
     dirs: Vec<Option<RadixDir>>,
     rows: Vec<Option<RadixRow<V>>>,
@@ -730,29 +589,6 @@ impl<V> Arena<V> {
             free_rows: Vec::new(),
             path: Vec::new(),
         }
-    }
-
-    fn put(&mut self, root: u32, row: RadixRow<V>) -> (u32, u32, Option<u32>) {
-        put(
-            &mut self.dirs,
-            &mut self.free_dirs,
-            &mut self.rows,
-            &mut self.free_rows,
-            &mut self.path,
-            root,
-            row,
-        )
-    }
-
-    fn remove(&mut self, root: u32, key: &[u8]) -> u32 {
-        remove(
-            &mut self.dirs,
-            &mut self.free_dirs,
-            &self.rows,
-            &mut self.path,
-            root,
-            key,
-        )
     }
 }
 
@@ -1152,240 +988,19 @@ impl<V> Default for SingleRadix<V> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct DualRoot {
-    lookup: u32,
-    order: u32,
-}
-
-impl DualRoot {
-    #[allow(dead_code)]
-    pub(crate) fn is_empty(self) -> bool {
-        self.lookup == 0 && self.order == 0
-    }
-}
-
-struct Stamped<V> {
-    stamp: u64,
-    value: V,
-}
-
-/// Persistent ordered storage with a byte-key radix and a write-stamp radix.
-/// The two roots refer to the issuing arena, which is currently append-only.
-pub struct DualRadix<V> {
-    values: Arena<Stamped<V>>,
-    order: Arena<u32>,
-    last: u64,
-}
-
-impl<V> DualRadix<V> {
-    pub fn new() -> Self {
-        Self {
-            values: Arena::new(),
-            order: Arena::new(),
-            last: 0,
-        }
-    }
-
-    pub fn empty_root(&self) -> DualRoot {
-        DualRoot {
-            lookup: 0,
-            order: 0,
-        }
-    }
-
-    /// Stage a value leaf and its stamp leaf without publishing a directory.
-    pub fn stage_batch_leaf(&mut self, row: RadixRow<V>) -> (u32, u32) {
-        assert!(self.last < u64::MAX, "radix stamp capacity");
-        let stamp = self.last + 1;
-        let lookup = link_at(
-            allocate(
-                &mut self.values.rows,
-                &mut self.values.free_rows,
-                RadixRow {
-                    key: row.key,
-                    value: Stamped {
-                        stamp,
-                        value: row.value,
-                    },
-                },
-            ),
-            true,
-        );
-        let order = link_at(
-            allocate(
-                &mut self.order.rows,
-                &mut self.order.free_rows,
-                RadixRow {
-                    key: reverse_stamp_key(stamp),
-                    value: lookup,
-                },
-            ),
-            true,
-        );
-        self.last = stamp;
-        (lookup, order)
-    }
-
-    /// Publish two lists of staged leaves. Each list must be in increasing
-    /// byte-key order in its own arena.
-    pub fn publish_batch_leaves(&mut self, lookup: &[u32], order: &[u32]) -> DualRoot {
-        let lookup = build_sorted(
-            &mut self.values.dirs,
-            &mut self.values.free_dirs,
-            &self.values.rows,
-            lookup,
-        );
-        let order = build_sorted(
-            &mut self.order.dirs,
-            &mut self.order.free_dirs,
-            &self.order.rows,
-            order,
-        );
-        DualRoot { lookup, order }
-    }
-
-    /// Publish an unpublished image whose rows are present and in strictly
-    /// increasing key order, from oldest to newest write.
-    pub fn build_sorted_batch(&mut self, mut rows: Vec<Option<RadixRow<V>>>) -> DualRoot {
-        let n = rows.len();
-        let mut lookup = Vec::with_capacity(n);
-        let mut order = Vec::new();
-        order.resize(n, 0);
-        let mut i = 0;
-        while i < n {
-            let row = match rows[i].take() {
-                Some(row) => row,
-                None => panic!("missing sorted batch row"),
-            };
-            let (leaf, stamp) = self.stage_batch_leaf(row);
-            lookup.push(leaf);
-            order[n - 1 - i] = stamp;
-            i += 1;
-        }
-        self.publish_batch_leaves(&lookup, &order)
-    }
-
-    pub fn get(&self, root: DualRoot, key: &[u8]) -> Option<&V> {
-        match get(&self.values.dirs, &self.values.rows, root.lookup, key) {
-            Some(cell) => Some(&cell.value),
-            None => None,
-        }
-    }
-
-    pub fn put(&mut self, root: DualRoot, row: RadixRow<V>) -> DualRoot {
-        assert!(self.last < u64::MAX, "radix stamp capacity");
-        let stamp = self.last + 1;
-        let (lookup, leaf, old) = self.values.put(
-            root.lookup,
-            RadixRow {
-                key: row.key,
-                value: Stamped {
-                    stamp,
-                    value: row.value,
-                },
-            },
-        );
-        let mut order = root.order;
-        if let Some(old) = old {
-            let previous = row_at(&self.values.rows, old).value.stamp;
-            order = self.order.remove(order, &reverse_stamp_key(previous));
-        }
-        let (order, _, _) = self.order.put(
-            order,
-            RadixRow {
-                key: reverse_stamp_key(stamp),
-                value: leaf,
-            },
-        );
-        self.last = stamp;
-        DualRoot { lookup, order }
-    }
-
-    pub fn remove(&mut self, root: DualRoot, key: &[u8]) -> DualRoot {
-        match get(&self.values.dirs, &self.values.rows, root.lookup, key) {
-            None => root,
-            Some(row) => {
-                let order = self.order.remove(root.order, &reverse_stamp_key(row.stamp));
-                let lookup = self.values.remove(root.lookup, key);
-                DualRoot { lookup, order }
-            }
-        }
-    }
-
-    pub fn scan_links(&self, root: DualRoot) -> Vec<u32> {
-        self.scan_links_up_to(root, usize::MAX)
-    }
-
-    pub fn scan_links_up_to(&self, root: DualRoot, limit: usize) -> Vec<u32> {
-        let mut links = scan_leaves_up_to(&self.order.dirs, root.order, limit);
-        let mut i = 0;
-        while i < links.len() {
-            links[i] = row_at(&self.order.rows, links[i]).value;
-            i += 1;
-        }
-        links
-    }
-
-    /// Otherwise private link decoding for the storage benchmark.
-    pub fn scan_row(&self, link: u32) -> (&[u8], &V) {
-        let row = row_at(&self.values.rows, link);
-        (&row.key, &row.value.value)
-    }
-}
-
-impl<V> Default for DualRadix<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sorted_dual_batch_stamps_newest_first_and_keeps_old_roots() {
-        let mut arena = DualRadix::new();
-        let old = arena.put(
-            arena.empty_root(),
-            RadixRow {
-                key: b"a".to_vec(),
-                value: 9,
-            },
-        );
-        let keys: [&[u8]; 4] = [b"", b"a", b"a\0", b"\xff"];
-        let prepared = keys
-            .iter()
-            .enumerate()
-            .map(|(i, key)| {
-                Some(RadixRow {
-                    key: key.to_vec(),
-                    value: i,
-                })
-            })
-            .collect();
-        let next = arena.build_sorted_batch(prepared);
-        for (i, key) in keys.iter().enumerate() {
-            assert_eq!(arena.get(next, key), Some(&i));
-        }
-        let observed = arena
-            .scan_links(next)
-            .into_iter()
-            .map(|link| arena.scan_row(link).0)
-            .collect::<Vec<_>>();
-        assert_eq!(observed, keys.into_iter().rev().collect::<Vec<_>>());
-        assert_eq!(arena.get(old, b"a"), Some(&9));
-        assert_eq!(arena.get(old, b"a\0"), None);
-        let empty = arena.build_sorted_batch(Vec::new());
-        assert!(arena.scan_links(empty).is_empty());
-        assert_eq!(arena.get(next, b"a"), Some(&1));
-    }
-
-    #[test]
     fn sorted_batch_handles_prefixes_and_keeps_the_old_root() {
         let mut arena = Arena::new();
-        let (old, _, _) = arena.put(
+        let (old, _, _) = put(
+            &mut arena.dirs,
+            &mut arena.free_dirs,
+            &mut arena.rows,
+            &mut arena.free_rows,
+            &mut arena.path,
             0,
             RadixRow {
                 key: b"a".to_vec(),
@@ -1425,52 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn dual_radix_keeps_write_order_after_fork_and_removal() {
-        let mut arena = DualRadix::new();
-        let mut write = |root, key: &[u8], value| {
-            arena.put(
-                root,
-                RadixRow {
-                    key: key.into(),
-                    value,
-                },
-            )
-        };
-        let first = DualRoot {
-            lookup: 0,
-            order: 0,
-        };
-        let base = write(first, b"a", 1);
-        let base = write(base, b"", 2);
-        let base = write(base, b"aa", 3);
-        let replaced = write(base, b"a", 4);
-        let fork = write(base, b"\xff", 5);
-        let removed = arena.remove(replaced, b"");
-        let unchanged = arena.remove(removed, b"absent");
-        let scan = |root| {
-            arena
-                .scan_links(root)
-                .into_iter()
-                .map(|link| {
-                    let (key, value) = arena.scan_row(link);
-                    (key, *value)
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(scan(first), []);
-        assert_eq!(scan(base), [(b"aa".as_slice(), 3), (b"", 2), (b"a", 1)]);
-        assert_eq!(scan(replaced), [(b"a".as_slice(), 4), (b"aa", 3), (b"", 2)]);
-        assert_eq!(scan(removed), [(b"a".as_slice(), 4), (b"aa", 3)]);
-        assert_eq!(
-            scan(fork),
-            [(b"\xff".as_slice(), 5), (b"aa", 3), (b"", 2), (b"a", 1)]
-        );
-        assert_eq!(scan(unchanged), scan(removed));
-        assert_eq!(arena.get(removed, b""), None);
-        assert_eq!(arena.get(base, b""), Some(&2));
-    }
-
-    #[test]
     fn address_encoding_distinguishes_empty_maps_and_prefix_boundaries() {
         assert_eq!(address_key(b"", b""), [0; 8]);
         assert_eq!(
@@ -1479,44 +1048,6 @@ mod tests {
         );
         assert_ne!(address_key(b"a\0", b"\xff"), address_key(b"a", b"\0\xff"));
         assert_ne!(address_key(b"", b"\0"), address_key(b"\0", b""));
-    }
-
-    #[test]
-    fn ordered_roots_preserve_write_order_across_replacement_and_forks() {
-        let mut arena = OrderedRadix::new();
-        let empty = arena.empty_root();
-        let mut insert = |root, key: &[u8], value| {
-            arena.put(
-                root,
-                RadixRow {
-                    key: key.into(),
-                    value,
-                },
-            )
-        };
-        let old = insert(empty, b"a", 1);
-        let old = insert(old, b"", 2);
-        let old = insert(old, b"aa", 3);
-        let replaced = insert(old, b"a", 4);
-        let fork = arena.remove(old, b"");
-        let unchanged = arena.remove(fork, b"missing");
-        assert_eq!(unchanged.0, fork.0);
-        let scan = |root| {
-            (0..arena.scan_len(root))
-                .map(|i| {
-                    let row = arena.scan_at(root, i).unwrap();
-                    (row.key.as_ref(), row.value)
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(scan(empty), []);
-        assert_eq!(scan(old), [(b"aa".as_slice(), 3), (b"", 2), (b"a", 1)]);
-        assert_eq!(scan(replaced), [(b"a".as_slice(), 4), (b"aa", 3), (b"", 2)]);
-        assert_eq!(scan(fork), [(b"aa".as_slice(), 3), (b"a", 1)]);
-        assert!(arena.scan_at(old, 3).is_none());
-        assert_eq!(arena.get(replaced, b"a"), Some(&4));
-        assert_eq!(arena.get(old, b"a"), Some(&1));
-        assert_eq!(arena.get(fork, b""), None);
     }
 
     /// Test every pair of byte values, both at the root and below a common prefix.

@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the Apache 2.0 License.
 
-set(KV_RUST_TEST_CRATE "${CCF_DIR}/src/rust/kv-spike/cpp-test")
+set(KV_RUST_TEST_CRATE "${CCF_DIR}/src/rust/ccf-kv/cpp-test")
 set(KV_RUST_TEST_CARGO_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo/kv-rust-tests")
 set(
   KV_RUST_TEST_LIBRARY

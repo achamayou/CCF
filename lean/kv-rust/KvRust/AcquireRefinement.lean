@@ -13,7 +13,7 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Capacity for inserting one new map handle and retaining its radix root references. -/
-def FitsAcquire (n : Spike.engine.Store) (id : U64) : Prop :=
+def FitsAcquire (n : CcfKv.engine.Store) (id : U64) : Prop :=
   ∀ t,
     find n.txs.val id = some t
     → t.views.val.length < Usize.max
@@ -39,7 +39,7 @@ private theorem capture_current (s : Store) (snap : Snapshot) (m : String)
   by_cases h : (find (captureLocal s snap m).births m).isNone <;> simp [captureGlobal, h]
 
 private theorem acquire_observation (encode : List U8 → String)
-    (output : core.result.Result Spike.engine.Output Spike.engine.Error) (obs : Output)
+    (output : core.result.Result CcfKv.engine.Output CcfKv.engine.Error) (obs : Output)
     (h : modelAcquisition output = some obs)
     : ∃ out, output = .Ok out ∧ modelOutput encode out = obs := by
   cases output with
@@ -49,7 +49,7 @@ private theorem acquire_observation (encode : List U8 → String)
       cases out <;> cases h <;> rfl
 
 private theorem native_view_present (encode : List U8 → String) (sid : Nat)
-    (index : CellIndex) (natArchive archive : List Frame) (t : Spike.engine.Tx)
+    (index : CellIndex) (natArchive archive : List Frame) (t : CcfKv.engine.Tx)
     (tx : Tx) (view : GlobalView) (key : String)
     (rel : AttemptMatches encode sid index natArchive archive t tx)
     (hf : find tx.globalViews key = some view)
@@ -70,8 +70,8 @@ private theorem atCut_in_archive {s : Store} {archive : List Frame}
 
 private theorem updated_relation (encode : List U8 → String) (sid : Nat)
     (oldIndex newIndex : CellIndex) (natArchive archive : List Frame) (s : Store)
-    (snap : Snapshot) (rustSnap : Spike.engine.Snapshot) (key : String)
-    (t t' : Spike.engine.Tx) (tx tx' : Tx)
+    (snap : Snapshot) (rustSnap : CcfKv.engine.Snapshot) (key : String)
+    (t t' : CcfKv.engine.Tx) (tx tx' : Tx)
     (rel : AttemptMatches encode sid oldIndex natArchive archive t tx)
     (hvals : newIndex.values = oldIndex.values) (hSnap : t.snapshot = some rustSnap)
     (hFreshModel : find tx.globalViews key = none)
@@ -112,7 +112,7 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
   by_cases ha : available s snap key
   · rw [ite_eq_left ha] at hn hm
     have hnone : t'.snapshot = some rustSnap := by
-      simpa only [hSnap] using congrArg Spike.engine.Tx.snapshot hn
+      simpa only [hSnap] using congrArg CcfKv.engine.Tx.snapshot hn
     have hFreshNative : find (rustPinnedViews encode oldIndex t.views) key = none := by
       have hr := rel.views.find key
       rw [projected_view_missing tx.globalViews key hFreshModel] at hr
@@ -120,7 +120,7 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
       | none => rfl
       | some _ => rw [h] at hr; cases hr
     have hdepsEq : pointDeps encode newIndex t' = pointDeps encode oldIndex t := by
-      have hdt : t'.deps = t.deps := by simpa using congrArg Spike.engine.Tx.deps hn
+      have hdt : t'.deps = t.deps := by simpa using congrArg CcfKv.engine.Tx.deps hn
       unfold pointDeps
       rw [hdt]
       congr 1
@@ -197,7 +197,7 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
             cases hpv
           exact ⟨pv, (otherViews m hne).trans hpv, hexp⟩
     · intro mp pin hmem
-      have hdt : t'.deps = t.deps := by simpa using congrArg Spike.engine.Tx.deps hn
+      have hdt : t'.deps = t.deps := by simpa using congrArg CcfKv.engine.Tx.deps hn
       rw [hdt] at hmem
       obtain ⟨row, hrow, hmEq, hpEq⟩ := rel.depsPins mp pin hmem
       exact ⟨row, viewsKeep row hrow, hmEq, hpEq⟩
@@ -225,9 +225,9 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
 
 /-- Lazy acquisition preserves the relation, including stale and duplicate acquisition guards. -/
 theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
-    (sid : Nat) (n : Spike.engine.Store) (w : State) (id : U64) (m : Spike.engine.Bytes)
+    (sid : Nat) (n : CcfKv.engine.Store) (w : State) (id : U64) (m : CcfKv.engine.Bytes)
     (rel : StateMatches encode sid n w) (room : FitsAcquire n id)
-    : WP.spec (Spike.engine.Store.execute n (.Acquire id m))
+    : WP.spec (CcfKv.engine.Store.execute n (.Acquire id m))
         (StepMatches encode sid (.acquire sid id.val (encode (alloc.vec.Vec.val m))) n
           (execute w (.acquire sid id.val (encode (alloc.vec.Vec.val m))))) := by
   obtain ⟨s, natArchive, archive, hs, hh, hMeta, hattempts⟩ := rel.history
@@ -236,7 +236,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
   have refuse (bad : ∀ t, find n.txs.val id = some t →
       t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history.index t.views) key).isSome)
       (hm : execute w (.acquire sid id.val key) = none) :
-      WP.spec (Spike.engine.Store.execute n (.Acquire id m))
+      WP.spec (CcfKv.engine.Store.execute n (.Acquire id m))
         (StepMatches encode sid (.acquire sid id.val key) n (execute w (.acquire sid id.val key))) := by
     rw [hm]
     exact execute_acquire_disabled encode inj n id m bad
@@ -251,7 +251,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
       have bad (p : Prop) (hp : p) (why : p →
           t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history.index t.views) key).isSome)
           (hm : execute w (.acquire sid id.val key) = none) :
-          WP.spec (Spike.engine.Store.execute n (.Acquire id m))
+          WP.spec (CcfKv.engine.Store.execute n (.Acquire id m))
             (StepMatches encode sid (.acquire sid id.val key) n (execute w (.acquire sid id.val key))) :=
         refuse (fun other hOther => (Option.some.inj (hn.symm.trans hOther)) ▸ why hp) hm
       cases hns : t.snapshot with
@@ -294,7 +294,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                             = rustSnap.version.val := by omega
                         rw [hmin] at hfid
                         have hmemTx : (id, t) ∈ n.txs.val := by
-                          have hfm : ∀ (xs : List (U64 × Spike.engine.Tx)),
+                          have hfm : ∀ (xs : List (U64 × CcfKv.engine.Tx)),
                               find xs id = some t → (id, t) ∈ xs := by
                             intro xs
                             induction xs with
@@ -343,17 +343,17 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                         Or.inr ⟨i, f', hlog ▸ hf', rfl⟩)
                     have halignedAfter : ArchiveAligned encode after.history natArchive :=
                       hh.aligned.of_preserves_pins hh.indexValid hpres
-                        (congrArg Spike.branch_log.BranchLog.branch hlog)
-                        (congrArg Spike.branch_log.BranchLog.frames hlog)
+                        (congrArg CcfKv.branch_log.BranchLog.branch hlog)
+                        (congrArg CcfKv.branch_log.BranchLog.frames hlog)
                         hglobal hreuse
                     have hhistAfter : HistoryMatches encode after.history s natArchive archive :=
                       { hh with
-                        nonempty := by unfold Spike.engine.History.activeFrames; rw [hlog]; exact hh.nonempty
+                        nonempty := by unfold CcfKv.engine.History.activeFrames; rw [hlog]; exact hh.nonempty
                         frames := by rw [hlog]; exact hh.frames
-                        indexed := by unfold Spike.engine.History.activeFrames; rw [hlog]; exact hh.indexed
+                        indexed := by unfold CcfKv.engine.History.activeFrames; rw [hlog]; exact hh.indexed
                         global := by rw [hglobal]; exact hh.global
                         globalBound := by
-                          unfold Spike.engine.History.activeFrames
+                          unfold CcfKv.engine.History.activeFrames
                           rw [hglobal, hlog]
                           exact hh.globalBound
                         term := by rw [hterm]; exact hh.term
@@ -367,9 +367,9 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                     have hsnapEqT : tAfter.snapshot = t.snapshot := by
                       by_cases ha : available s snap key
                       · rw [ite_eq_left ha] at han
-                        simpa using congrArg Spike.engine.Tx.snapshot han
+                        simpa using congrArg CcfKv.engine.Tx.snapshot han
                       · rw [ite_eq_right ha] at han
-                        simpa using congrArg Spike.engine.Tx.snapshot han
+                        simpa using congrArg CcfKv.engine.Tx.snapshot han
                     have hmetaAfter : StoreMetaLive encode after natArchive := by
                       refine ⟨?_, ?_⟩
                       · intro id' t' snap' fid' nf' hmem hsnap' hfid' hnf'

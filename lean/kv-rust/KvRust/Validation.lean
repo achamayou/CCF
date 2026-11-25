@@ -14,171 +14,100 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-local instance : DecidableEq Spike.engine.Address :=
+local instance : DecidableEq CcfKv.engine.Address :=
   fun a b =>
     decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
 /-- Extracted cell lookup computes the model's point observation on the committed data. -/
-theorem data_lookup (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
-    (addr : Spike.engine.Address)
+theorem data_lookup (db : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Cell)
+    (addr : CcfKv.engine.Address)
     : WP.spec
-        (Spike.engine.Assoc.get Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Address.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.get CcfKv.engine.Address.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Address.Insts.CoreCloneClone CcfKv.engine.Cell.Insts.CoreCloneClone
           db addr)
         (fun result => result.map byteCell = find (byteData db) (byteAddr addr)) := by
   apply WP.spec_mono
-    (assoc_get Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey
-      Spike.engine.Address.Insts.CoreCloneClone Spike.engine.Cell.Insts.CoreCloneClone db addr
+    (assoc_get CcfKv.engine.Address.Insts.Ccf_kvEngineKey
+      CcfKv.engine.Address.Insts.CoreCloneClone CcfKv.engine.Cell.Insts.CoreCloneClone db addr
       (fun a => compare_address a addr) clone_cell)
   intro result hr
   rw [hr, byteData, find_projected db.val addr byteAddr byteCell (fun _ _ => byteAddr_inj)]
 
-theorem index_data_lookup (index : CellIndex) (root : Spike.radix.RadixRoot)
-    (rows : CellRows) (view : IndexView index root rows) (addr : Spike.engine.Address)
+theorem index_data_lookup (index : CellIndex) (root : CcfKv.radix.RadixRoot)
+    (rows : CellRows) (view : IndexView index root rows) (addr : CcfKv.engine.Address)
     (space : 8 + addr.map.val.length + addr.key.val.length ≤ Usize.max)
-    : WP.spec (Spike.kv_index.AddressIndex.get index root addr)
+    : WP.spec (CcfKv.kv_index.AddressIndex.get index root addr)
         (fun out => out.map byteCell = find (indexedCellData rows) (byteAddr addr)) := by
   apply WP.spec_mono (index_get_refines index root rows view addr space)
   intro out same
   rw [same, indexedCellData, find_projected rows addr byteAddr byteCell (fun _ _ => byteAddr_inj)]
 
 /-- Cell comparison includes the version, so the same value written twice is not the same cell. -/
-theorem cell_same (a b : Spike.engine.Cell)
-    : Spike.engine.Cell.same a b = .ok (decide (byteCell a = byteCell b)) := by
+theorem cell_same (a b : CcfKv.engine.Cell)
+    : CcfKv.engine.Cell.same a b = .ok (decide (byteCell a = byteCell b)) := by
   have hversion : a.version.val = b.version.val ↔ a.version = b.version :=
     ⟨UScalar.eq_of_val_eq, congrArg (fun v : U64 => v.val)⟩
   by_cases hv : a.version = b.version
-  · simp [Spike.engine.Cell.same, hv, bytes_same, byteCell]
-  · simp [Spike.engine.Cell.same, hv, byteCell, hversion]
+  · simp [CcfKv.engine.Cell.same, hv, bytes_same, byteCell]
+  · simp [CcfKv.engine.Cell.same, hv, byteCell, hversion]
 
 /-- Point dependencies accept exactly the unchanged cell or unchanged absence. -/
 theorem point_dependency_matches_model
-    (index : CellIndex) (root : Spike.radix.RadixRoot)
+    (index : CellIndex) (root : CcfKv.radix.RadixRoot)
     (rows : CellRows) (view : IndexView index root rows)
-    (addr : Spike.engine.Address) (expected : Option Spike.engine.Cell)
+    (addr : CcfKv.engine.Address) (expected : Option CcfKv.engine.Cell)
     (space : 8 + addr.map.val.length + addr.key.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Dependency.holds (.Key addr expected) index root)
+    : WP.spec (CcfKv.engine.Dependency.holds (.Key addr expected) index root)
         (fun r =>
           r
           = (Dependency.key (byteAddr addr) (expected.map byteCell)).holds
               (indexedCellData rows)) := by
-  unfold Spike.engine.Dependency.holds
+  unfold CcfKv.engine.Dependency.holds
   apply WP.spec_bind (index_data_lookup index root rows view addr space)
   intro lookup h
   cases lookup <;> cases expected <;> simp [Dependency.holds, ← h, cell_same]
 
-private abbrev Rows := alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Cell)
+private abbrev Rows := alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Cell)
 
 /-- Project the ordered map image used to record a scan dependency. -/
-def byteImage (rows : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Cell))
+def byteImage (rows : alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Cell))
     : Assoc (List U8) (Cell (List U8)) :=
   rows.val.map fun (k, c) => (alloc.vec.Vec.val k, byteCell c)
 
-private def imageRows (rows : List (Spike.engine.Address × Spike.engine.Cell))
-    (m : Spike.engine.Bytes)
+private def imageRows (rows : List (CcfKv.engine.Address × CcfKv.engine.Cell))
+    (m : CcfKv.engine.Bytes)
     : Assoc (List U8) (Cell (List U8)) :=
   image (rows.map fun (a, c) => (byteAddr a, byteCell c)) (alloc.vec.Vec.val m)
 
-private theorem image_append (rows next : List (Spike.engine.Address × Spike.engine.Cell))
-    (m : Spike.engine.Bytes)
+private theorem image_append (rows next : List (CcfKv.engine.Address × CcfKv.engine.Cell))
+    (m : CcfKv.engine.Bytes)
     : imageRows (rows ++ next) m = imageRows rows m ++ imageRows next m := by
   simp [imageRows, image, List.filterMap_append]
 
-private theorem image_copy (out : Rows) (row : Spike.engine.Address × Spike.engine.Cell)
-    (m : Spike.engine.Bytes) (hcap : out.val.length < Usize.max)
-    : WP.spec (Spike.engine.copy_if_on_map out row m)
-        (fun r =>
-          byteImage r = byteImage out ++ imageRows [row] m
-          ∧ r.val.length ≤ out.val.length + 1) := by
-  obtain ⟨a, c⟩ := row
-  unfold Spike.engine.copy_if_on_map
-  change WP.spec (do
-    let same ← Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a.map m
-    if same then
-      let k ← Spike.engine.Bytes.Insts.CoreCloneClone.clone a.key
-      let v ← Spike.engine.Cell.Insts.CoreCloneClone.clone c
-      alloc.vec.Vec.push out (k, v)
-    else Result.ok out) _
-  by_cases h : alloc.vec.Vec.val a.map = alloc.vec.Vec.val m
-  · simp only [bytes_same, h, decide_true, bind_ok, ite_true, clone_bytes, clone_cell]
-    apply WP.spec_mono (alloc.vec.Vec.push_spec out (a.key, c) hcap)
-    intro next hn
-    simp [byteImage, hn, imageRows, image, byteAddr, h]
-  · simp [bytes_same, h, imageRows, image, byteAddr]
-
-/-- Extracted image construction has the same ordered cells as the model. -/
-theorem image_matches_model
-    (db : Spike.engine.Assoc Spike.engine.Address Spike.engine.Cell)
-    (m : Spike.engine.Bytes)
-    : WP.spec (Spike.engine.image db m)
-        (fun r => byteImage r = image (byteData db) (alloc.vec.Vec.val m)) := by
-  unfold Spike.engine.image
-  apply WP.spec_bind
-    (Pₘ := fun r => byteImage r = imageRows db.val m)
-  · unfold Spike.engine.image_loop
-    apply loop.spec_decr_nat (fun (_, _, i) => db.val.length - (i : Usize).val)
-      (fun (rows, out, i) => rows = db ∧ i.val ≤ db.val.length
-        ∧ out.val.length + (db.val.length - i.val) ≤ Usize.max
-        ∧ byteImage out ++ imageRows (db.val.drop i.val) m = imageRows db.val m)
-      _ _ _
-    · rintro ⟨rows, out, i⟩ ⟨hr, hi, hs, he⟩
-      dsimp only at hr hi hs he ⊢
-      subst rows
-      unfold Spike.engine.image_loop.body
-      have hlen : (alloc.vec.Vec.len db).val = db.val.length := alloc.vec.Vec.len_val db
-      have hcap := alloc.vec.Vec.len_ineq db
-      have hone : (1#usize : Usize).val = 1 := rfl
-      by_cases h : i < alloc.vec.Vec.len db
-      · have hb : i.val < db.val.length := by rw [← hlen]; exact h
-        rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
-        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec db i hb)
-        intro row hrow
-        apply WP.spec_bind (image_copy out row m (by omega))
-        intro next hn
-        have hinc : i.val + (1#usize : Usize).val ≤ Usize.max := by omega
-        apply WP.spec_bind (Usize.add_spec hinc)
-        intro j hj
-        have hj' : j.val = i.val + 1 := by omega
-        simp only [WP.spec_ok]
-        refine ⟨⟨True.intro, by omega, by omega, ?_⟩, by omega⟩
-        have hdrop : db.val.drop i.val = [row] ++ db.val.drop j.val := by
-          rw [hj', List.drop_eq_getElem_cons hb, ← hrow]
-          rfl
-        rw [hn.1, List.append_assoc, ← image_append, ← hdrop]
-        exact he
-      · have hb : db.val.length ≤ i.val := by
-          rw [← hlen]
-          exact Nat.le_of_not_gt h
-        rw [ite_eq_right h, WP.spec_ok]
-        simpa [List.drop_eq_nil_of_le hb, imageRows, image] using he
-    · simp [byteImage]
-  · intro r hr
-    simpa [imageRows, byteData] using hr
-
 /-- Whether a pinned image handle's radix root has a valid view in `index`. -/
-def PinLive (index : CellIndex) : Spike.engine.PinnedImage → Prop
+def PinLive (index : CellIndex) : CcfKv.engine.PinnedImage → Prop
   | .Root root => IndexView index root (indexRows index root)
   | _ => True
 
 /-- The byte-level map image represented by a pinned image handle. -/
-noncomputable def pinImage (index : CellIndex) (map : Spike.engine.Bytes)
-    : Spike.engine.PinnedImage → Assoc (List U8) (Cell (List U8))
+noncomputable def pinImage (index : CellIndex) (map : CcfKv.engine.Bytes)
+    : CcfKv.engine.PinnedImage → Assoc (List U8) (Cell (List U8))
   | .Empty => []
   | .Root root => image (indexedCellData (indexRows index root)) map.val
   | .Recovered rows => byteImage rows
 
 /-- Capacity required to scan a pinned image handle in `index`. -/
-def PinScanRoom (index : CellIndex) : Spike.engine.PinnedImage → Prop
+def PinScanRoom (index : CellIndex) : CcfKv.engine.PinnedImage → Prop
   | .Root root => 18 * (indexRows index root).length ≤ Usize.max
   | _ => True
 
 /-- The streaming check compares the ordered map image without constructing it. -/
 private theorem indexed_same_image_matches
-    (index : CellIndex) (root : Spike.radix.RadixRoot) (db : CellRows)
+    (index : CellIndex) (root : CcfKv.radix.RadixRoot) (db : CellRows)
     (view : IndexView index root db) (valid : IndexValid index)
-    (space : 18 * db.length ≤ Usize.max) (m : Spike.engine.Bytes)
+    (space : 18 * db.length ≤ Usize.max) (m : CcfKv.engine.Bytes)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max) (expected : Rows)
-    : WP.spec (Spike.engine.indexed_same_image index root m expected)
+    : WP.spec (CcfKv.engine.indexed_same_image index root m expected)
         (fun r => r = decide (imageRows db m = byteImage expected)) := by
   let selected := db.filter fun r => decide (r.1.map.val = m.val)
   have hSelImg : imageRows selected m = imageRows db m := by
@@ -197,12 +126,12 @@ private theorem indexed_same_image_matches
     | cons r rest ih =>
         obtain ⟨a, c⟩ := r
         by_cases hm : a.map.val = m.val <;> simp [hm, byteAddr]
-  unfold Spike.engine.indexed_same_image
+  unfold CcfKv.engine.indexed_same_image
   apply WP.spec_bind (index_scan_map_refines index root db m view valid mapRoom space)
   intro links ⟨len, load⟩
   change links.val.length = selected.length at len
   change ∀ (i : Nat) link, links.val[i]? = some link →
-    ∃ entry, selected[i]? = some entry ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry) at load
+    ∃ entry, selected[i]? = some entry ∧ WP.spec (CcfKv.kv_index.AddressIndex.scan_row index link) (· = entry) at load
   have hlen : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
   have elen : (alloc.vec.Vec.len expected).val = expected.val.length := alloc.vec.Vec.len_val expected
   by_cases hneLen : alloc.vec.Vec.len links != alloc.vec.Vec.len expected
@@ -220,7 +149,7 @@ private theorem indexed_same_image_matches
       exact hdiff this
     simp [hnot]
   · rw [ite_eq_right hneLen]
-    unfold Spike.engine.indexed_same_image_loop
+    unfold CcfKv.engine.indexed_same_image_loop
     let agrees : Prop := imageRows selected m = byteImage expected
     have hAgreesEq : agrees ↔ imageRows db m = byteImage expected := by rw [← hSelImg]
     apply WP.spec_mono (P₀ := fun r => r = decide agrees)
@@ -231,7 +160,7 @@ private theorem indexed_same_image_matches
         _ _ _
       · rintro ⟨i, j⟩ ⟨hj, inv⟩
         dsimp only at hj inv ⊢
-        unfold Spike.engine.indexed_same_image_loop.body
+        unfold CcfKv.engine.indexed_same_image_loop.body
         have hcap := alloc.vec.Vec.len_ineq links
         have ecap := alloc.vec.Vec.len_ineq expected
         have one : (1#usize : Usize).val = 1 := rfl
@@ -248,13 +177,13 @@ private theorem indexed_same_image_matches
           rintro ⟨a, v⟩ eq
           subst entry
           change WP.spec (do
-            let next ← Spike.engine.match_indexed_row a v m expected j
+            let next ← CcfKv.engine.match_indexed_row a v m expected j
             match next with
             | none => Result.ok (ControlFlow.done false)
             | some j' =>
                 let i' ← i + 1#usize
                 Result.ok (ControlFlow.cont (i', j'))) _
-          unfold Spike.engine.match_indexed_row
+          unfold CcfKv.engine.match_indexed_row
           rw [List.getElem?_eq_getElem inside, Option.some.injEq] at atEntry
           have step : selected.drop i.val = [(a, v)] ++ selected.drop (i.val + 1) := by
             rw [List.drop_eq_getElem_cons inside, atEntry]
@@ -288,7 +217,7 @@ private theorem indexed_same_image_matches
               change WP.spec (do
                 let next ←
                   if a.key.val = k.val then do
-                    let b ← Spike.engine.Cell.same v c
+                    let b ← CcfKv.engine.Cell.same v c
                     if b then
                       let j' ← j + 1#usize
                       Result.ok (some j')
@@ -361,7 +290,7 @@ private theorem indexed_same_image_matches
       rw [hr]
       exact decide_eq_decide.mpr hAgreesEq
 
-private theorem imageRows_filter_eq (db : CellRows) (m : Spike.engine.Bytes)
+private theorem imageRows_filter_eq (db : CellRows) (m : CcfKv.engine.Bytes)
     : imageRows (db.filter fun r => decide (r.1.map.val = m.val)) m = imageRows db m := by
   unfold imageRows image
   induction db with
@@ -370,7 +299,7 @@ private theorem imageRows_filter_eq (db : CellRows) (m : Spike.engine.Bytes)
       obtain ⟨a, c⟩ := r
       by_cases hm : a.map.val = m.val <;> simpa [hm, byteAddr] using ih
 
-private theorem imageRows_filter_length (db : CellRows) (m : Spike.engine.Bytes)
+private theorem imageRows_filter_length (db : CellRows) (m : CcfKv.engine.Bytes)
     : (imageRows (db.filter fun r => decide (r.1.map.val = m.val)) m).length
       = (db.filter fun r => decide (r.1.map.val = m.val)).length := by
   unfold imageRows image
@@ -386,15 +315,15 @@ private theorem imageRows_filter_length (db : CellRows) (m : Spike.engine.Bytes)
         exact ih
 
 private theorem indexed_same_map_roots_matches
-    (index : CellIndex) (leftRoot rightRoot : Spike.radix.RadixRoot)
+    (index : CellIndex) (leftRoot rightRoot : CcfKv.radix.RadixRoot)
     (dbL dbR : CellRows)
     (viewL : IndexView index leftRoot dbL) (viewR : IndexView index rightRoot dbR)
     (valid : IndexValid index)
     (spaceL : 18 * dbL.length ≤ Usize.max) (spaceR : 18 * dbR.length ≤ Usize.max)
-    (m : Spike.engine.Bytes) (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
-    : WP.spec (Spike.engine.indexed_same_map_roots index leftRoot rightRoot m)
+    (m : CcfKv.engine.Bytes) (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
+    : WP.spec (CcfKv.engine.indexed_same_map_roots index leftRoot rightRoot m)
         (fun r => r = decide (imageRows dbL m = imageRows dbR m)) := by
-  unfold Spike.engine.indexed_same_map_roots
+  unfold CcfKv.engine.indexed_same_map_roots
   by_cases hSameRoot : leftRoot = rightRoot
   · subst hSameRoot
     have hdb : dbL = dbR := index_view_unique viewL viewR
@@ -416,9 +345,9 @@ private theorem indexed_same_map_roots_matches
     change linksL.val.length = selL.length at lenL
     change linksR.val.length = selR.length at lenR
     change ∀ (i : Nat) link, linksL.val[i]? = some link →
-      ∃ entry, selL[i]? = some entry ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry) at loadL
+      ∃ entry, selL[i]? = some entry ∧ WP.spec (CcfKv.kv_index.AddressIndex.scan_row index link) (· = entry) at loadL
     change ∀ (i : Nat) link, linksR.val[i]? = some link →
-      ∃ entry, selR[i]? = some entry ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry) at loadR
+      ∃ entry, selR[i]? = some entry ∧ WP.spec (CcfKv.kv_index.AddressIndex.scan_row index link) (· = entry) at loadR
     have hlenL : (alloc.vec.Vec.len linksL).val = linksL.val.length := alloc.vec.Vec.len_val linksL
     have hlenR : (alloc.vec.Vec.len linksR).val = linksR.val.length := alloc.vec.Vec.len_val linksR
     by_cases hneLen : alloc.vec.Vec.len linksL != alloc.vec.Vec.len linksR
@@ -442,7 +371,7 @@ private theorem indexed_same_map_roots_matches
           exact hneLen (bne_iff_ne.mpr hne)
         have hval := congrArg (fun x : Usize => x.val) heq
         omega
-      unfold Spike.engine.indexed_same_map_roots_loop
+      unfold CcfKv.engine.indexed_same_map_roots_loop
       let agrees : Prop := imageRows selL m = imageRows selR m
       have hAgreesEq : agrees ↔ imageRows dbL m = imageRows dbR m := by rw [← hImgL, ← hImgR]
       apply WP.spec_mono (P₀ := fun r => r = decide agrees)
@@ -452,7 +381,7 @@ private theorem indexed_same_map_roots_matches
             agrees ↔ imageRows (selL.drop i.val) m = imageRows (selR.drop i.val) m)
           _ _ _
         · intro i inv
-          unfold Spike.engine.indexed_same_map_roots_loop.body
+          unfold CcfKv.engine.indexed_same_map_roots_loop.body
           have hcap := alloc.vec.Vec.len_ineq linksL
           have one : (1#usize : Usize).val = 1 := rfl
           by_cases run : i < alloc.vec.Vec.len linksL
@@ -495,15 +424,15 @@ private theorem indexed_same_map_roots_matches
                 ∧ imageRows (selL.drop (i.val + 1)) m = imageRows (selR.drop (i.val + 1)) m := by
               rw [inv, stepL, stepR]
               simp [and_assoc]
-            have hSameLink : WP.spec (Spike.engine.same_map_link index leafL leafR)
+            have hSameLink : WP.spec (CcfKv.engine.same_map_link index leafL leafR)
                 (fun b => b = decide (entryL.1.key.val = entryR.1.key.val
                   ∧ byteCell entryL.2 = byteCell entryR.2)) := by
-              unfold Spike.engine.same_map_link
+              unfold CcfKv.engine.same_map_link
               by_cases hlr : leafL = leafR
               · subst hlr
                 rw [ite_eq_left rfl, WP.spec_ok]
                 have hEntEq : entryL = entryR := by
-                  cases hsr : Spike.kv_index.AddressIndex.scan_row index leafL
+                  cases hsr : CcfKv.kv_index.AddressIndex.scan_row index leafL
                     using Result.cases with
                   | ret v =>
                       rw [hsr, WP.spec_ok] at readL readR
@@ -553,18 +482,18 @@ private theorem indexed_same_map_roots_matches
 
 /-- Extracted whole-map dependencies detect inserts, deletions and version changes. -/
 theorem map_dependency_matches_model
-    (index : CellIndex) (root : Spike.radix.RadixRoot) (db : CellRows)
+    (index : CellIndex) (root : CcfKv.radix.RadixRoot) (db : CellRows)
     (view : IndexView index root db) (valid : IndexValid index)
     (space : 18 * db.length ≤ Usize.max)
-    (m : Spike.engine.Bytes) (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
-    (expected : Spike.engine.PinnedImage)
+    (m : CcfKv.engine.Bytes) (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
+    (expected : CcfKv.engine.PinnedImage)
     (pinLive : PinLive index expected) (pinRoom : PinScanRoom index expected)
-    : WP.spec (Spike.engine.Dependency.holds (.Map m expected) index root)
+    : WP.spec (CcfKv.engine.Dependency.holds (.Map m expected) index root)
         (fun r =>
           r
           = (Dependency.map (alloc.vec.Vec.val m) (pinImage index m expected)).holds
               (indexedCellData db)) := by
-  unfold Spike.engine.Dependency.holds
+  unfold CcfKv.engine.Dependency.holds
   cases expected with
   | Empty =>
       apply WP.spec_bind (index_scan_map_refines index root db m view valid mapRoom space)
@@ -592,11 +521,11 @@ theorem map_dependency_matches_model
 
 /-- Project an extracted dependency into the existing KV model. -/
 noncomputable def byteDependency (index : CellIndex)
-    : Spike.engine.Dependency → Dependency (List U8) (List U8) (List U8)
+    : CcfKv.engine.Dependency → Dependency (List U8) (List U8) (List U8)
   | .Key addr expected => .key (byteAddr addr) (expected.map byteCell)
   | .Map m expected => .map (alloc.vec.Vec.val m) (pinImage index m expected)
 
-def DependencyRoom (index : CellIndex) (db : CellRows) : Spike.engine.Dependency → Prop
+def DependencyRoom (index : CellIndex) (db : CellRows) : CcfKv.engine.Dependency → Prop
   | .Key a _ => 8 + a.map.val.length + a.key.val.length ≤ Usize.max
   | .Map m expected =>
       18 * db.length ≤ Usize.max
@@ -605,10 +534,10 @@ def DependencyRoom (index : CellIndex) (db : CellRows) : Spike.engine.Dependency
       ∧ PinScanRoom index expected
 
 private theorem dependency_matches_model (index : CellIndex)
-    (root : Spike.radix.RadixRoot) (db : CellRows) (view : IndexView index root db)
-    (valid : IndexValid index) (d : Spike.engine.Dependency)
+    (root : CcfKv.radix.RadixRoot) (db : CellRows) (view : IndexView index root db)
+    (valid : IndexValid index) (d : CcfKv.engine.Dependency)
     (room : DependencyRoom index db d)
-    : WP.spec (Spike.engine.Dependency.holds d index root)
+    : WP.spec (CcfKv.engine.Dependency.holds d index root)
         (fun r =>
           r = (byteDependency index d).holds (indexedCellData db)) := by
   cases d with
@@ -619,23 +548,23 @@ private theorem dependency_matches_model (index : CellIndex)
 
 /-- The extracted OCC read-set check accepts exactly the dependencies accepted by the model. -/
 theorem validate_dependencies_matches_model
-    (t : Spike.engine.Tx) (history : Spike.engine.History) (head : Spike.engine.Frame)
+    (t : CcfKv.engine.Tx) (history : CcfKv.engine.History) (head : CcfKv.engine.Frame)
     (db : CellRows) (view : IndexView history.index head.data db)
     (valid : IndexValid history.index)
-    (read : WP.spec (Spike.engine.History.head history) (· = head))
+    (read : WP.spec (CcfKv.engine.History.head history) (· = head))
     (room : ∀ d ∈ t.deps.val, DependencyRoom history.index db d)
-    : WP.spec (Spike.engine.Tx.valid_dependencies t history)
+    : WP.spec (CcfKv.engine.Tx.valid_dependencies t history)
         (fun r =>
           r
           = validates (indexedCellData db)
               (t.deps.val.map (byteDependency history.index))) := by
-  let checks := fun (deps : List Spike.engine.Dependency) =>
+  let checks := fun (deps : List CcfKv.engine.Dependency) =>
     validates (indexedCellData db) (deps.map (byteDependency history.index))
-  unfold Spike.engine.Tx.valid_dependencies Spike.engine.Tx.valid_dependencies_loop
+  unfold CcfKv.engine.Tx.valid_dependencies CcfKv.engine.Tx.valid_dependencies_loop
   apply loop.spec_decr_nat (fun (i : Usize) => t.deps.val.length - i.val)
     (fun i => checks (t.deps.val.drop i.val) = checks t.deps.val) _ _ _
   · intro i hinv
-    unfold Spike.engine.Tx.valid_dependencies_loop.body
+    unfold CcfKv.engine.Tx.valid_dependencies_loop.body
     have hlen : (alloc.vec.Vec.len t.deps).val = t.deps.val.length := alloc.vec.Vec.len_val t.deps
     have hcap := alloc.vec.Vec.len_ineq t.deps
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -773,17 +702,17 @@ theorem validates_encoding (encode : List U8 → String) (inj : Function.Injecti
 
 /-- Rust appends dependencies while the model prepends them. -/
 noncomputable def pointDeps (encode : List U8 → String) (index : CellIndex)
-    (t : Spike.engine.Tx)
+    (t : CcfKv.engine.Tx)
     : List (Dependency String String String) :=
   (t.deps.val.map (encodeDependency encode ∘ byteDependency index)).reverse
 
 /-- On an ordinary branch, the extracted OCC check implements the relaxed
 dependency contract for captured images that still have a surviving origin. -/
 theorem validate_dependencies_by_contents (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : Spike.engine.Tx)
-    (history : Spike.engine.History) (head : Spike.engine.Frame) (db : CellRows)
+    (inj : Function.Injective encode) (t : CcfKv.engine.Tx)
+    (history : CcfKv.engine.History) (head : CcfKv.engine.Frame) (db : CellRows)
     (view : IndexView history.index head.data db) (valid : IndexValid history.index)
-    (read : WP.spec (Spike.engine.History.head history) (· = head))
+    (read : WP.spec (CcfKv.engine.History.head history) (· = head))
     (room : ∀ d ∈ t.deps.val, DependencyRoom history.index db d) (frames : List Frame)
     (current model : Frame) (shape : Kv.Properties.History frames current.version)
     (present : current ∈ frames)
@@ -794,7 +723,7 @@ theorem validate_dependencies_by_contents (encode : List U8 → String)
       : List.Forall₂ DependencyOrderEq (pointDeps encode history.index t) reference)
     (origins
       : ∀ d ∈ pointDeps encode history.index t, DependencyHasOrigin frames current d)
-    : WP.spec (Spike.engine.Tx.valid_dependencies t history)
+    : WP.spec (CcfKv.engine.Tx.valid_dependencies t history)
         (fun r => r = reference.all (holdsByContents model.data)) := by
   apply WP.spec_mono
     (validate_dependencies_matches_model t history head db view valid read room)

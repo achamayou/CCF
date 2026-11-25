@@ -11,15 +11,15 @@ namespace KvRust
 
 open Aeneas.Std
 
-abbrev PendingWrite := Spike.engine.Address × Spike.engine.Write
+abbrev PendingWrite := CcfKv.engine.Address × CcfKv.engine.Write
 
-def pendingAddressLt (a b : Spike.engine.Address) : Prop :=
+def pendingAddressLt (a b : CcfKv.engine.Address) : Prop :=
   a.key.val < b.key.val ∨ (a.key.val = b.key.val ∧ a.map.val < b.map.val)
 
 def PendingSorted (rows : List PendingWrite) : Prop :=
   rows.Pairwise (fun a b => pendingAddressLt b.1 a.1)
 
-private theorem pending_lt_irrefl (a : Spike.engine.Address)
+private theorem pending_lt_irrefl (a : CcfKv.engine.Address)
     : ¬ pendingAddressLt a a := by
   simp [pendingAddressLt]
 
@@ -31,7 +31,7 @@ theorem PendingSorted.unique {rows : List PendingWrite} (sorted : PendingSorted 
   intro left right lt eq
   exact pending_lt_irrefl _ (eq ▸ lt)
 
-private theorem pending_lt_trans {a b c : Spike.engine.Address}
+private theorem pending_lt_trans {a b c : CcfKv.engine.Address}
     (ab : pendingAddressLt a b) (bc : pendingAddressLt b c)
     : pendingAddressLt a c := by
   rcases ab with ab | ⟨eqAB, ab⟩ <;> rcases bc with bc | ⟨eqBC, bc⟩
@@ -49,13 +49,13 @@ private theorem byte_order_zero (a b : List U8) : byteOrder a b = 0#i8 ↔ a = b
 private theorem byte_order_pos (a b : List U8) : 0#i8 < byteOrder a b ↔ b < a := by
   rw [← not_le, byteOrder_le, not_le]
 
-private theorem pending_order_refines (a b : Spike.engine.Address)
-    : WP.spec (Spike.engine.pending_key_order a b)
+private theorem pending_order_refines (a b : CcfKv.engine.Address)
+    : WP.spec (CcfKv.engine.pending_key_order a b)
         (fun order =>
           (order = 0#i8 ↔ a = b)
           ∧ (0#i8 < order ↔ pendingAddressLt b a)
           ∧ (order < 0#i8 ↔ pendingAddressLt a b)) := by
-  unfold Spike.engine.pending_key_order
+  unfold CcfKv.engine.pending_key_order
   apply WP.spec_bind (bytes_compare a.key b.key)
   intro order keyCompare
   subst order
@@ -83,11 +83,11 @@ private theorem pending_order_refines (a b : Spike.engine.Address)
     simp only [pendingAddressLt, reverse, same, false_and, or_false]
     exact ⟨iff_of_false nonzero diff, byte_order_pos _ _, byteOrder_lt _ _⟩
 
-local instance pendingAddressEquality : DecidableEq Spike.engine.Address :=
+local instance pendingAddressEquality : DecidableEq CcfKv.engine.Address :=
   fun a b => decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
 private theorem sorted_edit (rows left right : List PendingWrite)
-    (address : Spike.engine.Address) (write : Spike.engine.Write)
+    (address : CcfKv.engine.Address) (write : CcfKv.engine.Write)
     (rest : PendingSorted (left ++ right))
     (older : ∀ row ∈ left, pendingAddressLt address row.1)
     (newer : ∀ row ∈ right, pendingAddressLt row.1 address)
@@ -105,7 +105,7 @@ private theorem sorted_edit (rows left right : List PendingWrite)
   · rw [Kv.Model.set, contents]
     exact List.perm_middle
 
-private theorem erase_ordered (address : Spike.engine.Address) (rows : List PendingWrite)
+private theorem erase_ordered (address : CcfKv.engine.Address) (rows : List PendingWrite)
     (diff : ∀ row ∈ rows, row.1 ≠ address)
     : Kv.Model.erase rows address = rows := by
   exact List.filter_eq_self.mpr fun row present => bne_iff_ne.mpr (diff row present)
@@ -120,7 +120,7 @@ private theorem split_pending_insert (xs : List PendingWrite) (i : Nat) (x : Pen
       | zero => rfl
       | succ i => simp [List.insertIdx_succ_cons, ih _ (by simpa using within)]
 
-private theorem prefix_before {rows : List PendingWrite} {address : Spike.engine.Address}
+private theorem prefix_before {rows : List PendingWrite} {address : CcfKv.engine.Address}
     (cut : Nat)
     (before
       : ∀ i (inRows : i < rows.length), i < cut → pendingAddressLt address rows[i].1)
@@ -131,7 +131,7 @@ private theorem prefix_before {rows : List PendingWrite} {address : Spike.engine
   rw [← read, List.getElem_take]
   exact before i (by omega) (by omega)
 
-private theorem suffix_after {rows : List PendingWrite} {address : Spike.engine.Address}
+private theorem suffix_after {rows : List PendingWrite} {address : CcfKv.engine.Address}
     (cut : Nat)
     (after : ∀ i (inRows : i < rows.length), cut ≤ i → pendingAddressLt rows[i].1 address)
     : ∀ row ∈ rows.drop cut, pendingAddressLt row.1 address := by
@@ -142,8 +142,8 @@ private theorem suffix_after {rows : List PendingWrite} {address : Spike.engine.
   exact after (cut + i) (by omega) (by omega)
 
 private theorem sorted_replacement (rows : List PendingWrite)
-    (sorted : PendingSorted rows) (address : Spike.engine.Address)
-    (write : Spike.engine.Write) (i : Nat) (inside : i < rows.length)
+    (sorted : PendingSorted rows) (address : CcfKv.engine.Address)
+    (write : CcfKv.engine.Write) (i : Nat) (inside : i < rows.length)
     (found : rows[i].1 = address)
     : PendingSorted (rows.set i (address, write))
       ∧ (rows.set i (address, write)).Perm (Kv.Model.set rows address write) := by
@@ -172,7 +172,7 @@ private theorem sorted_replacement (rows : List PendingWrite)
   exact sorted_edit rows _ _ address write rest front back eraseEq
 
 private theorem sorted_insertion (rows : List PendingWrite) (sorted : PendingSorted rows)
-    (address : Spike.engine.Address) (write : Spike.engine.Write) (i : Nat)
+    (address : CcfKv.engine.Address) (write : CcfKv.engine.Write) (i : Nat)
     (older : ∀ row ∈ rows.take i, pendingAddressLt address row.1)
     (newer : ∀ row ∈ rows.drop i, pendingAddressLt row.1 address)
     : PendingSorted (rows.take i ++ (address, write) :: rows.drop i)
@@ -191,13 +191,13 @@ private theorem sorted_insertion (rows : List PendingWrite) (sorted : PendingSor
 /-- Key-ordered staging keeps one final value or tombstone per address and
 changes only the order of the write set compared with the list model. -/
 theorem stage_write_by_key_refines (rows : alloc.vec.Vec PendingWrite)
-    (address : Spike.engine.Address) (write : Spike.engine.Write)
+    (address : CcfKv.engine.Address) (write : CcfKv.engine.Write)
     (sorted : PendingSorted rows.val) (room : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.stage_write rows address write)
+    : WP.spec (CcfKv.engine.stage_write rows address write)
         (fun next =>
           PendingSorted next.val
           ∧ next.val.Perm (Kv.Model.set rows.val address write)) := by
-  unfold Spike.engine.stage_write
+  unfold CcfKv.engine.stage_write
   apply WP.spec_bind (Pₘ := fun next : alloc.vec.Vec PendingWrite =>
     PendingSorted next.val ∧ next.val.Perm (Kv.Model.set rows.val address write))
   swap
@@ -208,13 +208,13 @@ theorem stage_write_by_key_refines (rows : alloc.vec.Vec PendingWrite)
   let before := fun cut => ∀ i (hi : i < length), i < cut → pendingAddressLt address rows.val[i].1
   let after := fun cut => ∀ i (hi : i < length), cut ≤ i → pendingAddressLt rows.val[i].1 address
   have compare := List.pairwise_iff_getElem.mp sorted
-  unfold Spike.engine.stage_write_loop
+  unfold CcfKv.engine.stage_write_loop
   apply loop.spec_decr_nat (fun (lo, hi) => (hi : Usize).val - (lo : Usize).val)
     (fun (lo, hi) => lo.val ≤ hi.val ∧ hi.val ≤ length ∧ before lo.val ∧ after hi.val) _ _
     _
   · rintro ⟨lo, hi⟩ ⟨ordered, bounded, frontInv, backInv⟩
     dsimp only at ordered bounded frontInv backInv ⊢
-    unfold Spike.engine.stage_write_loop.body
+    unfold CcfKv.engine.stage_write_loop.body
     by_cases run : lo < hi
     · rw [ite_eq_left run]
       have hrun : lo.val < hi.val := run
@@ -233,7 +233,7 @@ theorem stage_write_by_key_refines (rows : alloc.vec.Vec PendingWrite)
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec rows mid inside)
       rintro ⟨key, value⟩ read
       change WP.spec (do
-        let order ← Spike.engine.pending_key_order key address
+        let order ← CcfKv.engine.pending_key_order key address
         if order = 0#i8 then _ else _) _
       apply WP.spec_bind (pending_order_refines key address)
       intro order ⟨zero, pos, neg⟩

@@ -105,20 +105,20 @@ theorem byteOrder_lt_encoded {encode : List U8 → String}
   (byteOrder_lt a b).trans (order a b)
 
 /-- Project an optional native range endpoint to the model. -/
-def encodeBound (encode : List U8 → String) (bound : Option Spike.engine.Bytes)
+def encodeBound (encode : List U8 → String) (bound : Option CcfKv.engine.Bytes)
     : Option String :=
   bound.map fun b => encode b.val
 
 /-- Project the entries without changing their order. -/
 def encodeEntries (encode : List U8 → String)
-    (rows : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
+    (rows : alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Bytes))
     : Assoc String String :=
   rows.val.map fun (k, v) => (encode k.val, encode v.val)
 
 /-- The extracted two-bound guard agrees with the model's empty-range test. -/
 theorem range_empty_guard {encode : List U8 → String} (order : PreservesByteOrder encode)
-    (lower upper : Spike.engine.Bytes)
-    : WP.spec (Spike.engine.Bytes.compare lower upper)
+    (lower upper : CcfKv.engine.Bytes)
+    : WP.spec (CcfKv.engine.Bytes.compare lower upper)
         (fun cmp =>
           decide (cmp ≥ 0#i8)
           = emptyRange (encodeBound encode (some lower))
@@ -145,7 +145,7 @@ theorem inRange_of_emptyRange {lower upper : Option String}
             simp [inRange, hu]
           · simp [inRange, hl]
 
-private abbrev Bytes := Spike.engine.Bytes
+private abbrev Bytes := CcfKv.engine.Bytes
 private abbrev Row := Bytes × Bytes
 private abbrev Entries := alloc.vec.Vec Row
 
@@ -153,18 +153,18 @@ private def rowKey (encode : List U8 → String) (row : Row) : String := encode 
 
 private theorem insertion_index_spec {encode : List U8 → String}
     (order : PreservesByteOrder encode) (entries : Entries) (key : Bytes)
-    : WP.spec (Spike.engine.insertion_index entries key)
+    : WP.spec (CcfKv.engine.insertion_index entries key)
         (fun pos =>
           pos.val ≤ entries.val.length
           ∧ (∀ row ∈ entries.val.take pos.val, rowKey encode row < encode key.val)
           ∧ ∀ h : pos.val < entries.val.length,
               encode key.val ≤ rowKey encode entries.val[pos.val]) := by
-  unfold Spike.engine.insertion_index Spike.engine.insertion_index_loop
+  unfold CcfKv.engine.insertion_index CcfKv.engine.insertion_index_loop
   apply loop.spec_decr_nat (fun pos : Usize => entries.val.length - pos.val)
     (fun pos => pos.val ≤ entries.val.length ∧
       ∀ row ∈ entries.val.take pos.val, rowKey encode row < encode key.val) _ _ _
   · intro pos ⟨hpos, hprefix⟩
-    unfold Spike.engine.insertion_index_loop.body
+    unfold CcfKv.engine.insertion_index_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length :=
       alloc.vec.Vec.len_val entries
     have hcap := alloc.vec.Vec.len_ineq entries
@@ -175,7 +175,7 @@ private theorem insertion_index_spec {encode : List U8 → String}
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec entries pos hb)
       rintro ⟨k, v⟩ hrow
       change WP.spec (do
-        let cmp ← Spike.engine.Bytes.compare k key
+        let cmp ← CcfKv.engine.Bytes.compare k key
         if cmp < 0#i8 then
           let next ← pos + 1#usize
           Result.ok (ControlFlow.cont next)
@@ -256,7 +256,7 @@ private theorem insert_row {encode : List U8 → String}
     (sorted : out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b))
     : WP.spec
         (do
-          let pos ← Spike.engine.insertion_index out row.1
+          let pos ← CcfKv.engine.insertion_index out row.1
           if pos = alloc.vec.Vec.len out then
             alloc.vec.Vec.push out row
           else
@@ -290,9 +290,9 @@ private theorem insert_row {encode : List U8 → String}
     exact WP.spec_mono (alloc.vec.Vec.insert_spec out pos row hlt hcap) hpost
 
 private theorem compare_ok (a b : Bytes)
-    : Spike.engine.Bytes.compare a b = .ok (byteOrder a.val b.val) := by
+    : CcfKv.engine.Bytes.compare a b = .ok (byteOrder a.val b.val) := by
   have h := bytes_compare a b
-  cases heq : Spike.engine.Bytes.compare a b using Result.cases with
+  cases heq : CcfKv.engine.Bytes.compare a b using Result.cases with
   | ret cmp => simpa [heq] using h
   | vis _ _ => simp [heq] at h
   | div => simp [heq] at h
@@ -311,7 +311,7 @@ private def checkLower {V : Type} (lower : Option Bytes) (row : Bytes × V)
   | none => Result.ok (row, true)
   | some l => do
       let (k, _) := row
-      let cmp ← Spike.engine.Bytes.compare l k
+      let cmp ← CcfKv.engine.Bytes.compare l k
       Result.ok (row, decide (cmp ≤ 0#i8))
 
 private def checkUpper {V : Type} (upper : Option Bytes) (row : Bytes × V)
@@ -320,7 +320,7 @@ private def checkUpper {V : Type} (upper : Option Bytes) (row : Bytes × V)
   | none => Result.ok (row, true)
   | some u => do
       let (k, _) := row
-      let cmp ← Spike.engine.Bytes.compare k u
+      let cmp ← CcfKv.engine.Bytes.compare k u
       Result.ok (row, decide (cmp < 0#i8))
 
 private def rangeRow {V : Type} (project : V → Bytes) (row : Bytes × V) : Row :=
@@ -353,10 +353,10 @@ private theorem upper_result {V : Type} {encode : List U8 → String}
         (Bool.decide_congr (byteOrder_lt_encoded order k.val u.val))
 
 private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
+    (order : PreservesByteOrder encode) (inst : CcfKv.engine.RangeValue V)
     (project : V → Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
     (entries : alloc.vec.Vec (Bytes × V)) (lower upper : Option Bytes)
-    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
+    : WP.spec (CcfKv.engine.ordered_range inst entries lower upper)
         (fun out =>
           out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b)
           ∧ out.val.Perm
@@ -368,7 +368,7 @@ private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
   let projected := entries.val.map (rangeRow project)
   change WP.spec _ (fun out : Entries => out.val.Pairwise (fun a b => rowKey encode a ≤ rowKey encode b) ∧
     out.val.Perm (projected.filter accepts))
-  unfold Spike.engine.ordered_range Spike.engine.ordered_range_loop
+  unfold CcfKv.engine.ordered_range CcfKv.engine.ordered_range_loop
   apply loop.spec_decr_nat (fun (p : Entries × Usize) => entries.val.length - p.2.val)
     (fun (out, i) =>
       out.val.length ≤ i.val
@@ -378,7 +378,7 @@ private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
     _ _ _
   · rintro ⟨out, i⟩ ⟨hsize, hsorted, hperm⟩
     dsimp only at hsize hsorted hperm ⊢
-    unfold Spike.engine.ordered_range_loop.body
+    unfold CcfKv.engine.ordered_range_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length :=
       alloc.vec.Vec.len_val entries
     have hcap := alloc.vec.Vec.len_ineq entries
@@ -394,10 +394,10 @@ private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
         let hi ← checkUpper upper lo.1
         let result ← if lo.2 then
           if hi.2 then
-            let pos ← Spike.engine.insertion_index out hi.1.1
-            let k ← Spike.engine.Bytes.Insts.CoreCloneClone.clone hi.1.1
+            let pos ← CcfKv.engine.insertion_index out hi.1.1
+            let k ← CcfKv.engine.Bytes.Insts.CoreCloneClone.clone hi.1.1
             let v ← inst.range_value hi.1.2
-            let v' ← Spike.engine.Bytes.Insts.CoreCloneClone.clone v
+            let v' ← CcfKv.engine.Bytes.Insts.CoreCloneClone.clone v
             if pos = alloc.vec.Vec.len out then
               alloc.vec.Vec.push out (k, v')
             else
@@ -448,18 +448,18 @@ private theorem ordered_range_perm {V : Type} {encode : List U8 → String}
   · simp
 
 def encodeRangeEntries {V : Type} (encode : List U8 → String)
-    (project : V → Spike.engine.Bytes) (entries : List (Spike.engine.Bytes × V))
+    (project : V → CcfKv.engine.Bytes) (entries : List (CcfKv.engine.Bytes × V))
     : Assoc String String :=
   entries.map fun (k, v) => (encode k.val, encode (project v).val)
 
 /-- The extracted range projects values only for selected rows and returns them in exact key order. -/
 theorem ordered_range_projected {V : Type} {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
-    (project : V → Spike.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
-    (entries : alloc.vec.Vec (Spike.engine.Bytes × V))
-    (lower upper : Option Spike.engine.Bytes)
+    (order : PreservesByteOrder encode) (inst : CcfKv.engine.RangeValue V)
+    (project : V → CcfKv.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
+    (entries : alloc.vec.Vec (CcfKv.engine.Bytes × V))
+    (lower upper : Option CcfKv.engine.Bytes)
     (unique : ((encodeRangeEntries encode project entries.val).map Prod.fst).Nodup)
-    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
+    : WP.spec (CcfKv.engine.ordered_range inst entries lower upper)
         (fun out =>
           encodeEntries encode out
           = ((encodeRangeEntries encode project entries.val).filter
@@ -491,11 +491,11 @@ theorem ordered_range_projected {V : Type} {encode : List U8 → String}
     (List.mem_of_mem_filter (hm.subset hb)) (_root_.Std.le_antisymm hab hba)
 
 theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder encode)
-    (entries : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
-    (lower upper : Option Spike.engine.Bytes)
+    (entries : alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Bytes))
+    (lower upper : Option CcfKv.engine.Bytes)
     (unique : ((encodeEntries encode entries).map Prod.fst).Nodup)
     : WP.spec
-        (Spike.engine.ordered_range Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue
+        (CcfKv.engine.ordered_range CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue
           entries lower upper)
         (fun out =>
           encodeEntries encode out
@@ -508,13 +508,13 @@ theorem ordered_range {encode : List U8 → String} (order : PreservesByteOrder 
 
 /-- An unordered input image still produces the exact canonical range result. -/
 theorem ordered_range_by_contents {V : Type} {encode : List U8 → String}
-    (order : PreservesByteOrder encode) (inst : Spike.engine.RangeValue V)
-    (project : V → Spike.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
-    (entries : alloc.vec.Vec (Spike.engine.Bytes × V)) (reference : Assoc String String)
-    (lower upper : Option Spike.engine.Bytes)
+    (order : PreservesByteOrder encode) (inst : CcfKv.engine.RangeValue V)
+    (project : V → CcfKv.engine.Bytes) (value : ∀ v, inst.range_value v = .ok (project v))
+    (entries : alloc.vec.Vec (CcfKv.engine.Bytes × V)) (reference : Assoc String String)
+    (lower upper : Option CcfKv.engine.Bytes)
     (unique : Kv.Properties.Unique reference)
     (related : (encodeRangeEntries encode project entries.val).Perm reference)
-    : WP.spec (Spike.engine.ordered_range inst entries lower upper)
+    : WP.spec (CcfKv.engine.ordered_range inst entries lower upper)
         (fun out =>
           encodeEntries encode out
           = (reference.filter
@@ -531,15 +531,15 @@ theorem ordered_range_by_contents {V : Type} {encode : List U8 → String}
 /-- Even without a uniqueness hypothesis, an empty model interval yields no extracted rows. -/
 theorem ordered_range_empty {encode : List U8 → String}
     (order : PreservesByteOrder encode)
-    (entries : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
-    (lower upper : Option Spike.engine.Bytes)
+    (entries : alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Bytes))
+    (lower upper : Option CcfKv.engine.Bytes)
     (empty : emptyRange (encodeBound encode lower) (encodeBound encode upper) = true)
     : WP.spec
-        (Spike.engine.ordered_range Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue
+        (CcfKv.engine.ordered_range CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue
           entries lower upper)
         (fun out => out.val = []) := by
   apply WP.spec_mono
-    (ordered_range_perm order Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue id
+    (ordered_range_perm order CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue id
       (fun _ => rfl) entries lower upper)
   intro out ⟨_, hp⟩
   have identity : entries.val.map (rangeRow id) = entries.val := by

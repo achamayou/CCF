@@ -4,7 +4,6 @@
 module
 
 public import KvRust.IndexedPublication
-public import KvRust.RadixDualBatch
 
 @[expose] public section
 
@@ -12,10 +11,10 @@ namespace KvRust
 
 open Aeneas.Std
 
-local instance batchAddressEquality : DecidableEq Spike.engine.Address :=
+local instance batchAddressEquality : DecidableEq CcfKv.engine.Address :=
   fun a b => decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
-abbrev BatchRow := Spike.radix.RadixRow (Spike.kv_index.Binding Spike.engine.Cell)
+abbrev BatchRow := CcfKv.radix.RadixRow (CcfKv.kv_index.Binding CcfKv.engine.Cell)
 
 private def sourceRow (version : U64) (entry : IndexWrite) :=
   (
@@ -24,7 +23,7 @@ private def sourceRow (version : U64) (entry : IndexWrite) :=
     | .Put value =>
         some
           ({ address := entry.1, value := {value, version} }
-            : Spike.kv_index.Binding Spike.engine.Cell)
+            : CcfKv.kv_index.Binding CcfKv.engine.Cell)
     | .Remove => none
   )
 
@@ -88,7 +87,7 @@ private theorem batch_image_fold (version : U64) (writes : List IndexWrite)
                 intro cell hm equal
                 have present : (packedAddress cell.1,
                       ({address := cell.1, value := cell.2} :
-                        Spike.kv_index.Binding Spike.engine.Cell)) ∈
+                        CcfKv.kv_index.Binding CcfKv.engine.Cell)) ∈
                     more.map (fun row => (row.key.val, row.value)) := by
                   rw [related]
                   exact List.mem_map_of_mem hm
@@ -110,10 +109,10 @@ private theorem batch_image_fold (version : U64) (writes : List IndexWrite)
               rw [sameKey, sameValue, erased]
               exact congrArg (List.cons _) related
 
-private theorem single_map_increasing_refines (a b : Spike.engine.Address)
-    : WP.spec (Spike.engine.single_map_increasing a b)
+private theorem single_map_increasing_refines (a b : CcfKv.engine.Address)
+    : WP.spec (CcfKv.engine.single_map_increasing a b)
         (fun yes => yes = true → packedAddress a < packedAddress b) := by
-  simp only [Spike.engine.single_map_increasing, bytes_same, bind_ok]
+  simp only [CcfKv.engine.single_map_increasing, bytes_same, bind_ok]
   by_cases hm : a.map.val = b.map.val
   · simp only [hm, decide_true, ite_true]
     apply WP.spec_bind (bytes_compare a.key b.key)
@@ -142,12 +141,12 @@ private def Prepared (version : U64) (writes : List IndexWrite)
   ∃ rows, PreparedRows version writes batch rows
 
 private theorem prepared_push (version : U64) (writes : List IndexWrite)
-    (a : Spike.engine.Address) (value : Spike.engine.Bytes)
+    (a : CcfKv.engine.Address) (value : CcfKv.engine.Bytes)
     (batch next : alloc.vec.Vec (Option BatchRow)) (row : BatchRow)
     (before : Prepared version writes batch)
     (step : next.val = batch.val ++ [some row])
     (ordered
-      : ((a, Spike.engine.Write.Put value) :: writes).Pairwise
+      : ((a, CcfKv.engine.Write.Put value) :: writes).Pairwise
           (fun a b => packedAddress b.1 < packedAddress a.1))
     (key : row.key.val = packedAddress a)
     (payload : row.value = {address := a, value := {value, version}})
@@ -173,23 +172,23 @@ private theorem prepared_length {version : U64} {writes : List IndexWrite}
   exact ⟨by rw [p.owned, List.length_map, size], size⟩
 
 private theorem prepare_sorted_batch_refines
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write) (version : U64)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
-    : WP.spec (Spike.engine.prepare_sorted_batch pending version)
+    : WP.spec (CcfKv.engine.prepare_sorted_batch pending version)
         (fun result =>
           ∀ batch, result = some batch → Prepared version pending.val batch) := by
-  unfold Spike.engine.prepare_sorted_batch Spike.engine.prepare_sorted_batch_loop
+  unfold CcfKv.engine.prepare_sorted_batch CcfKv.engine.prepare_sorted_batch_loop
   let len := alloc.vec.Vec.len pending
   have lenEq : len.val = pending.val.length := alloc.vec.Vec.len_val _
   change WP.spec (loop (fun (batch, i) =>
-    Spike.engine.prepare_sorted_batch_loop.body pending version len batch i)
+    CcfKv.engine.prepare_sorted_batch_loop.body pending version len batch i)
     (alloc.vec.Vec.with_capacity (Option BatchRow) len, len)) _
   apply loop.spec_decr_nat (fun (_, i) => (i : Usize).val)
     (fun (batch, i) => i.val ≤ len.val ∧ Prepared version (pending.val.drop i.val) batch)
     _ _ _
   · rintro ⟨batch, i⟩ ⟨within, ready⟩
     dsimp only at within ready ⊢
-    unfold Spike.engine.prepare_sorted_batch_loop.body
+    unfold CcfKv.engine.prepare_sorted_batch_loop.body
     by_cases run : (0#usize : Usize) < i
     · have hpos : 0 < i.val := run
       have one : (1#usize : Usize).val = 1 := rfl
@@ -231,7 +230,7 @@ private theorem prepare_sorted_batch_refines
         apply WP.spec_bind (alloc.vec.Vec.index_usize_spec pending i hi)
         rintro ⟨pa, pw⟩ readPrev
         change WP.spec (do
-          let check ← Spike.engine.single_map_increasing pa a
+          let check ← CcfKv.engine.single_map_increasing pa a
           if check then _ else _) _
         apply WP.spec_bind (single_map_increasing_refines pa a)
         intro check passed
@@ -258,7 +257,7 @@ private theorem prepare_sorted_batch_refines
         | Put value =>
             simp only [clone_address, clone_bytes, bind_ok]
             apply WP.spec_bind (index_batch_row_refines a
-              ({value, version} : Spike.engine.Cell) fits)
+              ({value, version} : CcfKv.engine.Cell) fits)
             intro row ⟨key, payload, _⟩
             have rowLen : (alloc.vec.Vec.len row.key).val = row.key.val.length :=
               alloc.vec.Vec.len_val _
@@ -294,7 +293,7 @@ private theorem sorted_batch_publishes (index : CellIndex) (pins : List U32)
     (large : 256 ≤ pending.length)
     (peak : Nat) (peakSize : pending.length ≤ peak)
     (space : IndexBatchRoom index pins.length peak pending.length)
-    : WP.spec (Spike.kv_index.AddressIndex.build_sorted_batch index batch)
+    : WP.spec (CcfKv.kv_index.AddressIndex.build_sorted_batch index batch)
         (fun (root, after) =>
           (∃ out,
             IndexView after root out
@@ -340,7 +339,7 @@ private theorem sorted_batch_publishes (index : CellIndex) (pins : List U32)
       (show 0 < pending.length by omega)
     have bound := space.refs
     omega
-  unfold Spike.kv_index.AddressIndex.build_sorted_batch
+  unfold CcfKv.kv_index.AddressIndex.build_sorted_batch
   apply WP.spec_bind
     (single_build_sorted_batch_refines index batch rows pins live info.owned ordered 112
       hDepth hKeys hDirRoom hRowRoom hRefRoom)
@@ -372,9 +371,9 @@ private theorem sorted_batch_publishes (index : CellIndex) (pins : List U32)
     rw [size] at h2
     exact h2
 
-theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.RadixRoot)
+theorem sorted_publication_refines (index : CellIndex) (root base : CcfKv.radix.RadixRoot)
     (rows : CellRows)
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write) (version : U64)
     (pins : List U32)
     (view : IndexView index root rows) (live : IndexLiveness index pins)
     (hrootPin : root = 0#u32 ∨ root ∈ pins)
@@ -387,7 +386,7 @@ theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.
         ∨ (base = 0#u32
             ∧ IndexView index base []
             ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
-    : WP.spec (Spike.engine.publish_selected index base pending version)
+    : WP.spec (CcfKv.engine.publish_selected index base pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out
@@ -399,7 +398,7 @@ theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.
               pending.val.length) := by
   have fallback := indexed_publish_selected index root base rows pending version pins
     view live hrootPin space addresses chosen
-  unfold Spike.engine.publish_selected Spike.radix.RadixRoot.is_empty
+  unfold CcfKv.engine.publish_selected CcfKv.radix.RadixRoot.is_empty
   by_cases emptyBase : base = 0#u32
   · subst emptyBase
     simp only [decide_true, bind_ok, ite_true]
@@ -412,7 +411,7 @@ theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.
       | some batch =>
           have empty : IndexView index 0#u32 [] := by
             have h := index_empty_root_refines index
-            unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+            unfold CcfKv.kv_index.AddressIndex.empty_root CcfKv.radix.SingleRadix.empty_root at h
             rw [WP.spec_ok] at h
             exact h.2
           have cover : ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst := by

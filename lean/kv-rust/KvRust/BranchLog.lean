@@ -14,19 +14,19 @@ namespace KvRust
 open Aeneas.Std
 
 /-- Every active offset resolves to a live, immutable frame. -/
-def BranchValid {T : Type} (log : Spike.branch_log.BranchLog T) : Prop :=
+def BranchValid {T : Type} (log : CcfKv.branch_log.BranchLog T) : Prop :=
   log.branch.val ≠ [] ∧ ∀ id ∈ log.branch.val, id.val < log.frames.val.length
 
 /-- No frame ID appears twice on the active branch. -/
-def BranchUnique {T : Type} (log : Spike.branch_log.BranchLog T) : Prop :=
+def BranchUnique {T : Type} (log : CcfKv.branch_log.BranchLog T) : Prop :=
   log.branch.val.Nodup
 
-theorem branch_new_unique {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_new_unique {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (h : log.branch.val = [0#usize])
     : BranchUnique log := by
   simp [BranchUnique, h]
 
-theorem branch_append_unique {T : Type} {log after : Spike.branch_log.BranchLog T}
+theorem branch_append_unique {T : Type} {log after : CcfKv.branch_log.BranchLog T}
     (valid : BranchValid log) (unique : BranchUnique log)
     {id : Usize} (hid : id.val = log.frames.val.length)
     (hbranch : after.branch.val = log.branch.val ++ [id])
@@ -40,7 +40,7 @@ theorem branch_append_unique {T : Type} {log after : Spike.branch_log.BranchLog 
   rw [heq, hid] at hlt
   exact Nat.lt_irrefl _ hlt
 
-theorem branch_rewind_unique {T : Type} {log after : Spike.branch_log.BranchLog T}
+theorem branch_rewind_unique {T : Type} {log after : CcfKv.branch_log.BranchLog T}
     (unique : BranchUnique log) {n : Nat}
     (hbranch : after.branch.val = log.branch.val.take n)
     : BranchUnique after := by
@@ -48,10 +48,10 @@ theorem branch_rewind_unique {T : Type} {log after : Spike.branch_log.BranchLog 
   rw [hbranch]
   exact unique.sublist (List.take_sublist _ _)
 
-def branchValues {T : Type} (log : Spike.branch_log.BranchLog T) : List T :=
+def branchValues {T : Type} (log : CcfKv.branch_log.BranchLog T) : List T :=
   log.branch.val.filterMap fun id => log.frames.val[id.val]?
 
-theorem branch_values_length {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_values_length {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log)
     : (branchValues log).length = log.branch.val.length := by
   have hl (ids : List Usize) (live : ∀ id ∈ ids, id.val < log.frames.val.length) :
@@ -63,25 +63,25 @@ theorem branch_values_length {T : Type} (log : Spike.branch_log.BranchLog T)
           ih (fun i hm => live i (List.mem_cons_of_mem _ hm))]
   exact hl _ valid.2
 
-theorem branch_values_capacity {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_values_capacity {T : Type} (log : CcfKv.branch_log.BranchLog T)
     : (branchValues log).length ≤ Usize.max :=
   (List.length_filterMap_le _ _).trans (alloc.vec.Vec.len_ineq _)
 
-theorem branch_active_len {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_active_len {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log)
-    : WP.spec (Spike.branch_log.BranchLog.active_len log)
+    : WP.spec (CcfKv.branch_log.BranchLog.active_len log)
         (fun n => n.val = (branchValues log).length) := by
-  simp [Spike.branch_log.BranchLog.active_len, branch_values_length log valid]
+  simp [CcfKv.branch_log.BranchLog.active_len, branch_values_length log valid]
 
 theorem branch_new_refines {T : Type} (base : T)
-    : WP.spec (Spike.branch_log.BranchLog.new base)
+    : WP.spec (CcfKv.branch_log.BranchLog.new base)
         (fun log =>
           BranchValid log
           ∧ branchValues log = [base]
           ∧ log.frames.val = [base]
           ∧ log.branch.val = [0#usize]) := by
   have room : 0 < Usize.max := by scalar_tac
-  unfold Spike.branch_log.BranchLog.new
+  unfold CcfKv.branch_log.BranchLog.new
   apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new T) base room)
   intro frames hf
   apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new Usize) 0#usize room)
@@ -89,11 +89,11 @@ theorem branch_new_refines {T : Type} (base : T)
   rw [WP.spec_ok]
   simp [BranchValid, branchValues, hf, hb]
 
-theorem branch_resolve_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_resolve_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (offset : Usize)
-    : WP.spec (Spike.branch_log.BranchLog.resolve log offset)
+    : WP.spec (CcfKv.branch_log.BranchLog.resolve log offset)
         (· = log.branch.val[offset.val]?) := by
-  unfold Spike.branch_log.BranchLog.resolve
+  unfold CcfKv.branch_log.BranchLog.resolve
   have len : (alloc.vec.Vec.len log.branch).val = log.branch.val.length := alloc.vec.Vec.len_val _
   by_cases inside : offset < alloc.vec.Vec.len log.branch
   · rw [ite_eq_left inside, alloc.vec.Vec.index_slice_index]
@@ -105,11 +105,11 @@ theorem branch_resolve_refines {T : Type} (log : Spike.branch_log.BranchLog T)
     have past : log.branch.val.length ≤ offset.val := by rw [← len]; exact Nat.le_of_not_gt inside
     rw [List.getElem?_eq_none past]
 
-theorem branch_read_refines {T : Type} (log : Spike.branch_log.BranchLog T)
-    (id : Spike.branch_log.FrameId) (frame : T)
+theorem branch_read_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
+    (id : CcfKv.branch_log.FrameId) (frame : T)
     (saved : log.frames.val[id.val]? = some frame)
-    : WP.spec (Spike.branch_log.BranchLog.read log id) (· = frame) := by
-  unfold Spike.branch_log.BranchLog.read
+    : WP.spec (CcfKv.branch_log.BranchLog.read log id) (· = frame) := by
+  unfold CcfKv.branch_log.BranchLog.read
   rw [alloc.vec.Vec.index_slice_index]
   have inside : id.val < log.frames.val.length := by
     by_contra absent
@@ -134,10 +134,10 @@ private theorem indexed_branch_values {T : Type} (frames : List T) (ids : List U
             List.getElem?_cons_succ]
           exact ih (fun i hm => live i (List.mem_cons_of_mem _ hm)) offset
 
-theorem branch_active_at {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_active_at {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log) (i : Usize) (frame : T)
     (saved : (branchValues log)[i.val]? = some frame)
-    : WP.spec (Spike.branch_log.BranchLog.active_at log i) (· = frame) := by
+    : WP.spec (CcfKv.branch_log.BranchLog.active_at log i) (· = frame) := by
   have inside : i.val < log.branch.val.length := by
     by_contra outside
     have hn : (branchValues log).length ≤ i.val := by
@@ -145,7 +145,7 @@ theorem branch_active_at {T : Type} (log : Spike.branch_log.BranchLog T)
       exact Nat.le_of_not_gt outside
     rw [List.getElem?_eq_none hn] at saved
     cases saved
-  unfold Spike.branch_log.BranchLog.active_at
+  unfold CcfKv.branch_log.BranchLog.active_at
   rw [alloc.vec.Vec.index_slice_index]
   apply WP.spec_bind (alloc.vec.Vec.index_usize_spec log.branch i inside)
   intro id he
@@ -156,9 +156,9 @@ theorem branch_active_at {T : Type} (log : Spike.branch_log.BranchLog T)
 
 /-- A requested offset past the last surviving frame selects the current head.
 The handle still identifies the immutable value, not just its branch offset. -/
-theorem branch_cut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_cut_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log) (offset : U64)
-    : WP.spec (Spike.branch_log.BranchLog.at_cut log offset)
+    : WP.spec (CcfKv.branch_log.BranchLog.at_cut log offset)
         (fun id =>
           ∃ frame,
             log.frames.val[id.val]? = some frame
@@ -169,7 +169,7 @@ theorem branch_cut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
   have pos : 0 < log.branch.val.length := List.length_pos_iff.mpr valid.1
   have cap := alloc.vec.Vec.len_ineq log.branch
   have one : (1#usize : Usize).val = 1 := rfl
-  unfold Spike.branch_log.BranchLog.at_cut
+  unfold CcfKv.branch_log.BranchLog.at_cut
   apply WP.spec_bind
     (Usize.sub_spec (x := alloc.vec.Vec.len log.branch) (y := 1#usize) (by omega))
   intro head hp
@@ -216,9 +216,9 @@ theorem branch_cut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
     List.getElem?_eq_getElem slot]
 
 /-- `at_cut` returns the exact frame ID stored at `min offset (branch.len - 1)`. -/
-theorem branch_cut_id_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_cut_id_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log) (offset : U64)
-    : WP.spec (Spike.branch_log.BranchLog.at_cut log offset)
+    : WP.spec (CcfKv.branch_log.BranchLog.at_cut log offset)
         (fun id =>
           log.branch.val[min offset.val (log.branch.val.length - 1)]? = some id) := by
   let last := log.branch.val.length - 1
@@ -226,7 +226,7 @@ theorem branch_cut_id_refines {T : Type} (log : Spike.branch_log.BranchLog T)
   have pos : 0 < log.branch.val.length := List.length_pos_iff.mpr valid.1
   have cap := alloc.vec.Vec.len_ineq log.branch
   have one : (1#usize : Usize).val = 1 := rfl
-  unfold Spike.branch_log.BranchLog.at_cut
+  unfold CcfKv.branch_log.BranchLog.at_cut
   apply WP.spec_bind
     (Usize.sub_spec (x := alloc.vec.Vec.len log.branch) (y := 1#usize) (by omega))
   intro head hp
@@ -260,15 +260,15 @@ theorem branch_cut_id_refines {T : Type} (log : Spike.branch_log.BranchLog T)
   rw [WP.spec_ok, ← hindex, List.getElem?_eq_getElem hi, hid]
 
 /-- Resolving and borrowing gives the same frame as indexing the active projection. -/
-theorem branch_observe_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_observe_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (valid : BranchValid log) (offset : Usize)
     : WP.spec
         (do
-          let id ← Spike.branch_log.BranchLog.resolve log offset
+          let id ← CcfKv.branch_log.BranchLog.resolve log offset
           match id with
           | none => Result.ok none
           | some id =>
-              let frame ← Spike.branch_log.BranchLog.read log id
+              let frame ← CcfKv.branch_log.BranchLog.read log id
               Result.ok (some frame))
         (· = (branchValues log)[offset.val]?) := by
   have agrees := indexed_branch_values log.frames.val log.branch.val valid.2 offset.val
@@ -287,10 +287,10 @@ theorem branch_observe_refines {T : Type} (log : Spike.branch_log.BranchLog T)
       rw [WP.spec_ok, hframe, Option.bind_some, live]
 
 /-- Append extends the logical branch and retains the value of every previously issued ID. -/
-theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (frame : T)
+theorem branch_append_refines {T : Type} (log : CcfKv.branch_log.BranchLog T) (frame : T)
     (valid : BranchValid log) (room : log.frames.val.length < Usize.max)
     (branchRoom : log.branch.val.length < Usize.max)
-    : WP.spec (Spike.branch_log.BranchLog.append log frame)
+    : WP.spec (CcfKv.branch_log.BranchLog.append log frame)
         (fun (id, after) =>
           BranchValid after
           ∧ branchValues after = branchValues log ++ [frame]
@@ -300,7 +300,7 @@ theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (f
               previous < id.val → after.frames.val[previous]? = log.frames.val[previous]?)
           ∧ after.frames.val = log.frames.val ++ [frame]
           ∧ after.branch.val = log.branch.val ++ [id]) := by
-  unfold Spike.branch_log.BranchLog.append
+  unfold CcfKv.branch_log.BranchLog.append
   apply WP.spec_bind (alloc.vec.Vec.push_spec log.frames frame room)
   intro frames hf
   apply WP.spec_bind
@@ -352,9 +352,9 @@ private theorem branch_take_values {T : Type} (frames : List T) (ids : List Usiz
       cases count <;> simp [List.getElem?_eq_getElem bound, rest]
 
 /-- Rewind changes only the active branch. A failed rewind does not change anything. -/
-theorem branch_rewind_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+theorem branch_rewind_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     (offset : Usize) (valid : BranchValid log)
-    : WP.spec (Spike.branch_log.BranchLog.rewind log offset)
+    : WP.spec (CcfKv.branch_log.BranchLog.rewind log offset)
         (fun (ok, after) =>
           ok = decide (offset.val < log.branch.val.length)
           ∧ BranchValid after
@@ -364,7 +364,7 @@ theorem branch_rewind_refines {T : Type} (log : Spike.branch_log.BranchLog T)
               ∧ after.branch.val = log.branch.val.take (offset.val + 1)
             else
               after = log) := by
-  unfold Spike.branch_log.BranchLog.rewind
+  unfold CcfKv.branch_log.BranchLog.rewind
   have len : (alloc.vec.Vec.len log.branch).val = log.branch.val.length := alloc.vec.Vec.len_val _
   have cap := alloc.vec.Vec.len_ineq log.branch
   by_cases past : offset ≥ alloc.vec.Vec.len log.branch
@@ -398,16 +398,16 @@ theorem branch_rewind_refines {T : Type} (log : Spike.branch_log.BranchLog T)
       rw [take, branch_take_values _ _ valid.2]
       rfl
 
-theorem branch_read_mut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
-    (id : Spike.branch_log.FrameId) (frame : T)
+theorem branch_read_mut_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
+    (id : CcfKv.branch_log.FrameId) (frame : T)
     (saved : log.frames.val[id.val]? = some frame)
-    : WP.spec (Spike.branch_log.BranchLog.read_mut log id)
+    : WP.spec (CcfKv.branch_log.BranchLog.read_mut log id)
         (fun (got, back) =>
           got = frame
           ∧ ∀ next,
               (back next).branch = log.branch
               ∧ (back next).frames.val = log.frames.val.set id.val next) := by
-  unfold Spike.branch_log.BranchLog.read_mut
+  unfold CcfKv.branch_log.BranchLog.read_mut
   rw [alloc.vec.Vec.index_mut_slice_index]
   have inside : id.val < log.frames.val.length := by
     by_contra absent

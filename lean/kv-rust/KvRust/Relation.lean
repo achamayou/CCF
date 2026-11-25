@@ -14,14 +14,14 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Project the native commit lifecycle without changing its applied version. -/
-def modelPhase : Spike.engine.Phase → Phase
+def modelPhase : CcfKv.engine.Phase → Phase
   | .Active => .active
   | .Committing => .committing
   | .Applied version => .applied version.val
   | .Finished => .finished
 
 /-- An inactive native phase disables active-only reference operations. -/
-theorem model_phase_inactive (p : Spike.engine.Phase) (h : p ≠ .Active)
+theorem model_phase_inactive (p : CcfKv.engine.Phase) (h : p ≠ .Active)
     : (modelPhase p != .active) = true := by
   cases p with
   | Active => exact (h rfl).elim
@@ -30,13 +30,13 @@ theorem model_phase_inactive (p : Spike.engine.Phase) (h : p ≠ .Active)
   | Finished => rfl
 
 /-- Commit outcomes distinguish a conflict from a failure to replicate. -/
-def modelOutcome : Spike.engine.Outcome → Outcome
+def modelOutcome : CcfKv.engine.Outcome → Outcome
   | .Success => .success
   | .Conflict => .conflict
   | .NoReplicate => .noReplicate
 
 /-- Encode native observations as reference results. -/
-def modelOutput (encode : List U8 → String) : Spike.engine.Output → Output
+def modelOutput (encode : List U8 → String) : CcfKv.engine.Output → Output
   | .Unit => .unit
   | .Snapshot v g t => .snapshot v.val g.val t.val
   | .Acquired v g => .acquired v.val g.val
@@ -53,7 +53,7 @@ def modelOutput (encode : List U8 → String) : Spike.engine.Output → Output
   | .RollbackRejected => .rollbackRejected
 
 /-- The native transaction stores only the version and term of the captured frame. -/
-def modelSnapshot (r : Spike.engine.Snapshot) : Nat × Nat := (r.version.val, r.term.val)
+def modelSnapshot (r : CcfKv.engine.Snapshot) : Nat × Nat := (r.version.val, r.term.val)
 
 /-- Read metadata relevant to the engine; the model retains the complete frame. -/
 def snapshotCut (s : Snapshot) : Nat × Nat := (s.current.version, s.term)
@@ -61,7 +61,7 @@ def snapshotCut (s : Snapshot) : Nat × Nat := (s.current.version, s.term)
 /-- The two attempts differ in representation, write/image order, and the model-only normal operation log. -/
 structure AttemptMatches (encode : List U8 → String) (sid : Nat)
     (index : CellIndex) (natArchive archive : List Frame)
-    (native : Spike.engine.Tx) (model : Tx)
+    (native : CcfKv.engine.Tx) (model : Tx)
     : Prop where
   /-- The model attempt belongs to the represented store. -/
   store : model.store = sid
@@ -103,7 +103,7 @@ structure AttemptMatches (encode : List U8 → String) (sid : Nat)
 /-- The native active offsets project via the ghost archive to frames matching the
 model's newest-first branch modulo order. -/
 structure HistoryMatches (encode : List U8 → String)
-    (native : Spike.engine.History) (model : Store) (natArchive archive : List Frame)
+    (native : CcfKv.engine.History) (model : Store) (natArchive archive : List Frame)
     : Prop where
   /-- The initial frame is retained. -/
   nonempty : native.activeFrames ≠ []
@@ -135,27 +135,27 @@ structure HistoryMatches (encode : List U8 → String)
 /-- Active-branch metadata liveness for live transactions: every live snapshot frame
 still on the active branch retains live metadata, and every acquired view whose stamps
 match any ghost active frame still matches some active frame with `meta_live = true`. -/
-structure StoreMetaLive (encode : List U8 → String) (native : Spike.engine.Store)
+structure StoreMetaLive (encode : List U8 → String) (native : CcfKv.engine.Store)
     (natArchive : List Frame)
     : Prop where
   snapLive
-    : ∀ (id : U64) (t : Spike.engine.Tx) (snap : Spike.engine.Snapshot) (fid : Usize)
-        (nf : Spike.engine.Frame),
+    : ∀ (id : U64) (t : CcfKv.engine.Tx) (snap : CcfKv.engine.Snapshot) (fid : Usize)
+        (nf : CcfKv.engine.Frame),
         (id, t) ∈ native.txs.val
         → t.snapshot = some snap
         → native.history.log.branch.val[snap.version.val]? = some fid
         → native.history.log.frames.val[fid.val]? = some nf
         → nf.meta_live = true
   viewLive
-    : ∀ (id : U64) (t : Spike.engine.Tx) (bm : Spike.engine.Bytes)
-        (bv : Spike.engine.View) (off : Nat) (fid : Usize) (gf : Frame),
+    : ∀ (id : U64) (t : CcfKv.engine.Tx) (bm : CcfKv.engine.Bytes)
+        (bv : CcfKv.engine.View) (off : Nat) (fid : Usize) (gf : Frame),
         (id, t) ∈ native.txs.val
         → (bm, bv) ∈ t.views.val
         → native.history.log.branch.val[off]? = some fid
         → natArchive[fid.val]? = some gf
         → (find gf.births (encode bm.val) == bv.birth.map modelStamp) = true
         → (revision gf (encode bm.val) == modelStamp bv.revision) = true
-        → ∃ (off' : Nat) (fid' : Usize) (nf' : Spike.engine.Frame),
+        → ∃ (off' : Nat) (fid' : Usize) (nf' : CcfKv.engine.Frame),
             native.history.log.branch.val[off']? = some fid'
             ∧ native.history.log.frames.val[fid'.val]? = some nf'
             ∧ frameMatches (encode ∘ alloc.vec.Vec.val) nf' bm bv.birth bv.revision = true
@@ -163,7 +163,7 @@ structure StoreMetaLive (encode : List U8 → String) (native : Spike.engine.Sto
 /-- The single Rust store represents one live store in the reference transition system,
 with exact refcounted liveness over all active frame and transaction pins. -/
 structure StateMatches (encode : List U8 → String) (sid : Nat)
-    (native : Spike.engine.Store) (model : State)
+    (native : CcfKv.engine.Store) (model : State)
     : Prop where
   /-- Find the represented store, its ghost and model frame archives, and related live attempts. -/
   history
@@ -182,8 +182,8 @@ structure StateMatches (encode : List U8 → String) (sid : Nat)
   reachable : transitionSystem.Reachable model
 
 theorem frameMatches_congr_meta {encode : List U8 → String}
-    {f1 f2 : Spike.engine.Frame} {m : Spike.engine.Bytes}
-    {b : Option Spike.engine.Stamp} {r : Spike.engine.Stamp}
+    {f1 f2 : CcfKv.engine.Frame} {m : CcfKv.engine.Bytes}
+    {b : Option CcfKv.engine.Stamp} {r : CcfKv.engine.Stamp}
     (hb : f1.births = f2.births) (hr : f1.revisions = f2.revisions)
     (hm : f1.meta_live = f2.meta_live)
     : frameMatches (encode ∘ alloc.vec.Vec.val) f1 m b r
@@ -191,7 +191,7 @@ theorem frameMatches_congr_meta {encode : List U8 → String}
   simp only [frameMatches, modelMetadata, revision, hb, hr, hm]
 
 /-- Reading the active branch at offset `off` resolves via `branch[off]?` into `frames`. -/
-theorem branch_active_getElem? (log : Spike.branch_log.BranchLog Spike.engine.Frame)
+theorem branch_active_getElem? (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame)
     (valid : BranchValid log) (off : Nat)
     : (branchValues log)[off]?
       = log.branch.val[off]?.bind (fun id => log.frames.val[id.val]?) := by
@@ -211,8 +211,8 @@ theorem branch_active_getElem? (log : Spike.branch_log.BranchLog Spike.engine.Fr
 /-- Shared preservation lemma for `StoreMetaLive` across metadata elision (`End` and `Compact`). -/
 theorem store_meta_live_after_elision {encode : List U8 → String}
     (inj : Function.Injective encode)
-    {before after : Spike.engine.Store} {natArchive : List Frame}
-    {offG : Nat} {globalId : Usize} {globalFrame : Spike.engine.Frame}
+    {before after : CcfKv.engine.Store} {natArchive : List Frame}
+    {offG : Nat} {globalId : Usize} {globalFrame : CcfKv.engine.Frame}
     (metaLive : StoreMetaLive encode before natArchive)
     (hIndexed
       : ∀ i (hi : i < before.history.activeFrames.length),
@@ -223,7 +223,7 @@ theorem store_meta_live_after_elision {encode : List U8 → String}
     (hglBr : before.history.log.branch.val[offG]? = some globalId)
     (hglAfter : after.history.log.frames.val[globalId.val]? = some globalFrame)
     (hSlots
-      : ∀ (k : Nat) (f : Spike.engine.Frame),
+      : ∀ (k : Nat) (f : CcfKv.engine.Frame),
           before.history.log.frames.val[k]? = some f
           → ∃ f',
               after.history.log.frames.val[k]? = some f'
@@ -232,7 +232,7 @@ theorem store_meta_live_after_elision {encode : List U8 → String}
                     ∧ f'.revisions = f.revisions
                     ∧ f'.meta_live = f.meta_live)
                   ∨ (f'.meta_live = false
-                      ∧ Spike.engine.txs_need_frame after.txs f globalFrame = .ok false)))
+                      ∧ CcfKv.engine.txs_need_frame after.txs f globalFrame = .ok false)))
     : StoreMetaLive encode after natArchive := by
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
@@ -279,7 +279,7 @@ theorem store_meta_live_after_elision {encode : List U8 → String}
         hspec.2 bm bv hvm hmatch⟩
 
 /-- Retrieve the exact split used by the extracted history proofs. -/
-theorem HistoryMatches.split {encode : List U8 → String} {n : Spike.engine.History}
+theorem HistoryMatches.split {encode : List U8 → String} {n : CcfKv.engine.History}
     {s : Store} {natArchive archive : List Frame}
     (h : HistoryMatches encode n s natArchive archive)
     : ∃ prior head,
@@ -297,7 +297,7 @@ theorem HistoryMatches.split {encode : List U8 → String} {n : Spike.engine.His
     have hgfSaved : natArchive[headId.val]? = some gfHead := List.getElem?_eq_getElem hheadIdLtG
     have hactSplit : n.activeFrames =
         (priorIds.filterMap fun id => n.log.frames.val[id.val]?) ++ [head] := by
-      unfold Spike.engine.History.activeFrames branchValues
+      unfold CcfKv.engine.History.activeFrames branchValues
       rw [hbr', List.filterMap_append, List.filterMap_cons, List.filterMap_nil, hheadSaved]
     have hactLen : n.activeFrames.length = priorIds.length + 1 := by
       rw [branch_values_length n.log h.valid, hbr', List.length_append, List.length_singleton]
@@ -335,13 +335,13 @@ theorem HistoryMatches.split {encode : List U8 → String} {n : Spike.engine.His
 
 /-- A native attempt and its reference counterpart are found together by the real lookup. -/
 theorem lookup_of_attempts {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Store} {w : State} {s : Store} {natArchive archive : List Frame}
+    {n : CcfKv.engine.Store} {w : State} {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
     (attempts
       : ∀ id : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val id) (find w.txs id.val))
-    {id : U64} {t : Spike.engine.Tx} (ht : find n.txs.val id = some t)
+    {id : U64} {t : CcfKv.engine.Tx} (ht : find n.txs.val id = some t)
     : ∃ tx,
         lookupTx w sid id.val = some (s, tx)
         ∧ AttemptMatches encode sid n.history.index natArchive archive t tx := by
@@ -357,7 +357,7 @@ theorem lookup_of_attempts {encode : List U8 → String} {sid : Nat}
 
 /-- A missing native attempt also has no reference binding. -/
 theorem lookup_missing_of_attempts {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Store} {w : State} {natArchive archive : List Frame}
+    {n : CcfKv.engine.Store} {w : State} {natArchive archive : List Frame}
     (attempts
       : ∀ id : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
@@ -372,7 +372,7 @@ theorem lookup_missing_of_attempts {encode : List U8 → String} {sid : Nat}
 
 /-- Relate lookup results for one live attempt, including absent attempts. -/
 theorem lookupRelated_of_attempts {encode : List U8 → String} {sid : Nat}
-    {n : Spike.engine.Store} {w : State} {s : Store} {natArchive archive : List Frame}
+    {n : CcfKv.engine.Store} {w : State} {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
     (attempts
       : ∀ id : U64,
@@ -396,7 +396,7 @@ theorem lookupRelated_of_attempts {encode : List U8 → String} {sid : Nat}
 
 /-- A handle that is not yet acquired cannot already occur in the reference log. -/
 theorem AttemptMatches.fresh_log {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
     {m : String} (missing : find t.globalViews m = none)
     : t.normal.log.all (fun op => op.map != m) = true := by
@@ -409,25 +409,25 @@ theorem AttemptMatches.fresh_log {encode : List U8 → String} {sid : Nat}
 
 /-- The duplicated model image is read from the local, not global, part of the handle. -/
 theorem AttemptMatches.localImage {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
     {m : String} {v : GlobalView} (hv : find t.globalViews m = some v)
     : image v.current.data m = image t.data m := by rw [h.data m, hv]; rfl
 
 /-- Changing commit phase leaves the rest of the attempt relation intact. -/
 theorem AttemptMatches.withPhase {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
-    (p : Spike.engine.Phase)
+    (p : CcfKv.engine.Phase)
     : AttemptMatches encode sid index natArchive archive {n with phase := p}
         {t with phase := modelPhase p} :=
   {h with phase := rfl}
 
 /-- Snapshot capture adds only the frozen metadata. -/
 theorem AttemptMatches.withSnapshot {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
-    (native : Spike.engine.Snapshot) (model : Snapshot)
+    (native : CcfKv.engine.Snapshot) (model : Snapshot)
     (hCut : snapshotCut model = modelSnapshot native)
     : AttemptMatches encode sid index natArchive archive {n with snapshot := some native}
         {t with snapshot := some model} :=
@@ -473,7 +473,7 @@ theorem lookup_owner {w : State} {sid tid : Nat} {s : Store} {tx : Tx}
 
 /-- Relate the stamp portions of matching captured views for the eligibility theorem. -/
 theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
     : t.globalViews.map capturedStamps
       = n.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)) :=
@@ -481,7 +481,7 @@ theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
 
 private theorem pointDeps_preserved_of_pins (encode : List U8 → String)
     {before after : CellIndex} {pins : List U32}
-    (pres : IndexPreservesPins before after pins) (n : Spike.engine.Tx)
+    (pres : IndexPreservesPins before after pins) (n : CcfKv.engine.Tx)
     (inPins : ∀ row ∈ n.views.val, ∀ r ∈ viewPins row.2, r ∈ pins)
     (live : ViewsLive before n.views) (dp : DepsPinsInViews n)
     : pointDeps encode after n = pointDeps encode before n := by
@@ -503,7 +503,7 @@ private theorem pointDeps_preserved_of_pins (encode : List U8 → String)
 theorem AttemptMatches.withPreservedPins {encode : List U8 → String} {sid : Nat}
     {before after : CellIndex} {pins : List U32}
     {natArchive natArchive' archive archive' : List Frame}
-    {n : Spike.engine.Tx} {t : Tx}
+    {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid before natArchive archive n t)
     (pres : IndexPreservesPins before after pins)
     (inPins : ∀ row ∈ n.views.val, ∀ r ∈ viewPins row.2, r ∈ pins)
@@ -533,7 +533,7 @@ theorem AttemptMatches.withPreservedPins {encode : List U8 → String} {sid : Na
 
 theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
     {before after : CellIndex} {natArchive natArchive' archive archive' : List Frame}
-    {n : Spike.engine.Tx} {t : Tx}
+    {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid before natArchive archive n t)
     (kept : IndexKeeps before after)
     (natSub : ∀ f ∈ natArchive, f ∈ natArchive')
@@ -570,8 +570,8 @@ theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
           | map m expected => rwa [views]
   }
 
-private theorem find_tx_pins_in_store {s : Spike.engine.Store} {q : U64}
-    {t : Spike.engine.Tx} (hf : find s.txs.val q = some t)
+private theorem find_tx_pins_in_store {s : CcfKv.engine.Store} {q : U64}
+    {t : CcfKv.engine.Tx} (hf : find s.txs.val q = some t)
     : ∀ row ∈ t.views.val, ∀ r ∈ viewPins row.2, r ∈ storePins s := by
   have hmem : (q, t) ∈ s.txs.val := by
     generalize s.txs.val = rows at hf
@@ -592,14 +592,14 @@ private theorem find_tx_pins_in_store {s : Spike.engine.Store} {q : U64}
 
 /-- Replace a modeled attempt at its native index, preserving every other binding and the key set. -/
 theorem replace_attempts {encode : List U8 → String} {sid : Nat}
-    {n n' : Spike.engine.Store} {w w' : State}
+    {n n' : CcfKv.engine.Store} {w w' : State}
     {natArchive natArchive' archive archive' : List Frame}
     (uniqueBefore : (n.txs.val.map Prod.fst).Nodup)
     (attemptsBefore
       : ∀ id : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val id) (find w.txs id.val))
-    (id : U64) (i : Nat) (old next : Spike.engine.Tx) (tx : Tx)
+    (id : U64) (i : Nat) (old next : CcfKv.engine.Tx) (tx : Tx)
     (hidx : n.txs.val[i]? = some (id, old))
     (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx)
@@ -652,14 +652,14 @@ theorem reachable_execute {w w' : State} {action : Action} {output : Output}
 
 /-- A successful attempt update preserves the relation whenever the updated row does. -/
 theorem replace_attempt {encode : List U8 → String} {sid : Nat}
-    {n n' : Spike.engine.Store} {w w' : State} {s' : Store}
+    {n n' : CcfKv.engine.Store} {w w' : State} {s' : Store}
     {natArchive natArchive' archive archive' : List Frame}
     (uniqueBefore : (n.txs.val.map Prod.fst).Nodup)
     (attemptsBefore
       : ∀ id : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val id) (find w.txs id.val))
-    (id : U64) (i : Nat) (old next : Spike.engine.Tx) (tx : Tx)
+    (id : U64) (i : Nat) (old next : CcfKv.engine.Tx) (tx : Tx)
     (hidx : n.txs.val[i]? = some (id, old))
     (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx) (hs' : find w'.stores sid = some s')
@@ -683,7 +683,7 @@ theorem replace_attempt {encode : List U8 → String} {sid : Nat}
   ⟩
 
 /-- Frame-order-equivalent reference history forces the native array's versions to equal its indices. -/
-theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
+theorem history_related {encode : List U8 → String} {n : CcfKv.engine.History}
     {w : State} {sid : Nat} {s : Store} {natArchive archive : List Frame}
     (reach : transitionSystem.Reachable w) (hs : find w.stores sid = some s)
     (frames : List.Forall₂ FrameOrderEq (natModelFrames n.log natArchive) s.history)
@@ -714,7 +714,7 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
     | @cons x y xs ys head _ ih => simp [head.version, ih]
   have hnatVersions : (natModelFrames n.log natArchive).reverse.map Frame.version =
       n.activeFrames.map (fun f => f.version.val) := by
-    unfold natModelFrames Spike.engine.History.activeFrames branchValues
+    unfold natModelFrames CcfKv.engine.History.activeFrames branchValues
     rw [List.filterMap_reverse, List.reverse_reverse]
     have hbd : ∀ id ∈ n.log.branch.val, id.val < n.log.frames.val.length := valid.2
     have hmeta := aligned.versionEq
@@ -773,7 +773,7 @@ theorem history_related {encode : List U8 → String} {n : Spike.engine.History}
 
 /-- The modeled store changes without changing the table of attempts. -/
 theorem replace_history {encode : List U8 → String} {sid : Nat}
-    {n n' : Spike.engine.Store} {w w' : State} {s' : Store}
+    {n n' : CcfKv.engine.Store} {w w' : State} {s' : Store}
     {natArchive natArchive' archive archive' : List Frame}
     (uniqueBefore : (n.txs.val.map Prod.fst).Nodup)
     (attemptsBefore
@@ -812,10 +812,10 @@ theorem replace_history {encode : List U8 → String} {sid : Nat}
 /-- A bounded Rust step either agrees with the reference action modulo relaxed order
 or rejects without mutation. -/
 def StepMatches (encode : List U8 → String) (sid : Nat) (action : Action)
-    (before : Spike.engine.Store)
+    (before : CcfKv.engine.Store)
     (expected : Option (State × Output))
     (actual
-      : core.result.Result Spike.engine.Output Spike.engine.Error × Spike.engine.Store)
+      : core.result.Result CcfKv.engine.Output CcfKv.engine.Error × CcfKv.engine.Store)
     : Prop :=
   match expected with
   | none => actual = (.Err .Disabled, before)

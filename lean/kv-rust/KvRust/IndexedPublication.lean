@@ -11,10 +11,10 @@ namespace KvRust
 
 open Aeneas.Std
 
-local instance : DecidableEq Spike.engine.Address :=
+local instance : DecidableEq CcfKv.engine.Address :=
   fun a b => decidable_of_iff (byteAddr a = byteAddr b) ⟨byteAddr_inj, congrArg byteAddr⟩
 
-abbrev IndexWrite := Spike.engine.Address × Spike.engine.Write
+abbrev IndexWrite := CcfKv.engine.Address × CcfKv.engine.Write
 
 def applyIndexedWrite (version : U64) (row : IndexWrite) (data : CellRows) : CellRows :=
   match row.2 with
@@ -44,7 +44,7 @@ theorem indexed_fold_projects (rows : CellRows) (writes : List IndexWrite) (vers
           rw [← ih]
           exact (erase_projected _ a byteAddr byteCell (fun _ _ h => byteAddr_inj h)).symm
 
-abbrev CellIndex := Spike.kv_index.AddressIndex Spike.engine.Cell
+abbrev CellIndex := CcfKv.kv_index.AddressIndex CcfKv.engine.Cell
 
 def IndexKeyRoom (row : IndexWrite) : Prop :=
   2 * (8 + row.1.map.val.length + row.1.key.val.length) + 1 ≤ Usize.max
@@ -65,7 +65,7 @@ private theorem indexed_fold_suffix (rows : CellRows) (writes : List IndexWrite)
           Kv.Model.set, Kv.Model.erase, List.filter_append, List.cons_append]
 
 private theorem untouched_cells_spec (writes : List IndexWrite) (rows : CellRows)
-    (entry : Spike.engine.Address × Spike.engine.Cell)
+    (entry : CcfKv.engine.Address × CcfKv.engine.Cell)
     (member : entry ∈ untouchedCells writes rows)
     : entry ∈ rows ∧ entry.1 ∉ writes.map Prod.fst := by
   induction writes with
@@ -132,7 +132,7 @@ private theorem indexed_fold_perm (version : U64) (writes : List IndexWrite)
 private def Covers (rows : CellRows) (pending : List IndexWrite) : Prop :=
   ∀ entry ∈ rows, entry.1 ∈ pending.map Prod.fst
 
-private theorem publication_compare (index : CellIndex) (root : Spike.radix.RadixRoot)
+private theorem publication_compare (index : CellIndex) (root : CcfKv.radix.RadixRoot)
     (rows : CellRows) (pending : alloc.vec.Vec IndexWrite)
     (count : Usize) (links : alloc.vec.Vec U32)
     (rowsSize : rows.length = count.val) (pendingSize : pending.val.length = count.val)
@@ -142,18 +142,18 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
           links.val[i]? = some link
           → ∃ entry,
               rows[i]? = some entry
-              ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry))
-    : WP.spec (Spike.engine.publication_base_loop index root pending count links 0#usize)
+              ∧ WP.spec (CcfKv.kv_index.AddressIndex.scan_row index link) (· = entry))
+    : WP.spec (CcfKv.engine.publication_base_loop index root pending count links 0#usize)
         (fun base =>
           base = root
           ∨ (base = 0#u32 ∧ IndexView index base [] ∧ Covers rows pending.val)) := by
-  unfold Spike.engine.publication_base_loop
+  unfold CcfKv.engine.publication_base_loop
   apply loop.spec_decr_nat (fun (i : Usize) => count.val - i.val)
     (fun i => ∀ j, j < i.val →
       rows[j]?.map Prod.fst = pending.val[count.val - 1 - j]?.map Prod.fst)
     _ _ _
   · intro i same
-    unfold Spike.engine.publication_base_loop.body
+    unfold CcfKv.engine.publication_base_loop.body
     by_cases run : i < count
     · have h : i.val < count.val := run
       have inside : i.val < links.val.length := by omega
@@ -170,7 +170,7 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
         let i1 ← count - 1#usize
         let i2 ← i1 - i
         let row ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice IndexWrite) pending i2
-        let agrees ← Spike.engine.Address.Insts.Ccf_kv_spikeEngineKey.same address row.1
+        let agrees ← CcfKv.engine.Address.Insts.Ccf_kvEngineKey.same address row.1
         if agrees then
           let j ← i + 1#usize
           Result.ok (ControlFlow.cont j)
@@ -217,21 +217,21 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
   · simp
 
 /-- The fast path starts from empty only after matching every original address. -/
-theorem publication_base_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
+theorem publication_base_refines (index : CellIndex) (root : CcfKv.radix.RadixRoot)
     (rows : CellRows)
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
     (pinsCount : Nat)
     (view : IndexView index root rows) (valid : IndexValid index)
     (space
       : IndexBatchRoom index pinsCount (rows.length + pending.val.length)
           pending.val.length)
-    : WP.spec (Spike.engine.publication_base index root pending)
+    : WP.spec (CcfKv.engine.publication_base index root pending)
         (fun base =>
           base = root
           ∨ (base = 0#u32
               ∧ IndexView index base []
               ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst)) := by
-  unfold Spike.engine.publication_base
+  unfold CcfKv.engine.publication_base
   let count := alloc.vec.Vec.len pending
   have size : count.val = pending.val.length := alloc.vec.Vec.len_val _
   have threshold : (256#usize : Usize).val = 256 := rfl
@@ -262,7 +262,7 @@ theorem publication_base_refines (index : CellIndex) (root : Spike.radix.RadixRo
       apply WP.spec_bind (index_scan_up_to_refines index root limit rows view valid enough)
       intro links ⟨scanSize, load⟩
       change WP.spec (if alloc.vec.Vec.len links != count then Result.ok root
-        else Spike.engine.publication_base_loop index root pending count links 0#usize) _
+        else CcfKv.engine.publication_base_loop index root pending count links 0#usize) _
       have actual : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val _
       by_cases sameSize : alloc.vec.Vec.len links = count
       · have checked : links.val.length = count.val := by rw [← actual, sameSize]
@@ -275,7 +275,7 @@ theorem publication_base_refines (index : CellIndex) (root : Spike.radix.RadixRo
         rw [diff, ite_eq_left (show true = true from rfl), WP.spec_ok]
         exact Or.inl rfl
 
-private theorem indexed_row_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
+private theorem indexed_row_refines (index : CellIndex) (root : CcfKv.radix.RadixRoot)
     (rows : CellRows) (write : IndexWrite) (version : U64) (pins : List U32)
     (view : IndexView index root rows) (live : IndexLiveness index pins)
     (rootRef
@@ -284,7 +284,7 @@ private theorem indexed_row_refines (index : CellIndex) (root : Spike.radix.Radi
           ∧ radixReferences index.values.dirs.val pins root > 0)
     (keyRoom : IndexKeyRoom write)
     (space : IndexBatchRoom index pins.length rows.length 1)
-    : WP.spec (Spike.engine.publish_indexed_row index root write version)
+    : WP.spec (CcfKv.engine.publish_indexed_row index root write version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out ∧ out.Perm (applyIndexedWrite version write rows))
@@ -300,12 +300,12 @@ private theorem indexed_row_refines (index : CellIndex) (root : Spike.radix.Radi
   simp only [Nat.one_mul] at lookup refs
   cases action with
   | Put value =>
-      simp only [Spike.engine.publish_indexed_row, clone_address, clone_bytes, bind_ok,
+      simp only [CcfKv.engine.publish_indexed_row, clone_address, clone_bytes, bind_ok,
         applyIndexedWrite]
       exact index_put_refines index root rows pins view address {value, version} live
         rootRef (by omega) (by omega) key (by omega)
   | Remove =>
-      simp only [Spike.engine.publish_indexed_row, applyIndexedWrite]
+      simp only [CcfKv.engine.publish_indexed_row, applyIndexedWrite]
       apply WP.spec_mono
         (index_remove_refines index root rows pins view address live rootRef
           (by omega) (by omega) (by omega))
@@ -324,7 +324,7 @@ private theorem indexed_write_length (version : U64) (row : IndexWrite) (data : 
   have erased : (Kv.Model.erase data a).length ≤ data.length := List.length_filter_le _ _
   cases w <;> simp only [applyIndexedWrite, Kv.Model.set, List.length_cons] <;> omega
 
-private theorem pin_root_ref {V : Type} {index : Spike.kv_index.AddressIndex V}
+private theorem pin_root_ref {V : Type} {index : CcfKv.kv_index.AddressIndex V}
     {pins : List U32} {root : U32} (live : IndexLiveness index pins)
     (hpin : root = 0#u32 ∨ root ∈ pins)
     : root ≠ 0#u32
@@ -339,9 +339,9 @@ private theorem pin_root_ref {V : Type} {index : Spike.kv_index.AddressIndex V}
 
 /-- Extracted publication implements the fold up to permutation, balances every
 intermediate root pin, and retains every prior root. -/
-theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
+theorem indexed_publication_refines (index : CellIndex) (root : CcfKv.radix.RadixRoot)
     (rows : CellRows)
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write) (version : U64)
     (pins : List U32)
     (view : IndexView index root rows) (live : IndexLiveness index pins)
     (hrootPin : root = 0#u32 ∨ root ∈ pins)
@@ -349,7 +349,7 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Radi
       : IndexBatchRoom index pins.length (rows.length + pending.val.length)
           pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
-    : WP.spec (Spike.engine.publish_indexed index root pending version)
+    : WP.spec (CcfKv.engine.publish_indexed index root pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out
@@ -363,24 +363,24 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Radi
   let peak := rows.length + total
   let lookupCost := peak + 1
   let expected := pending.val.foldr (applyIndexedWrite version) rows
-  let optPin (owned : Bool) (cut : Spike.radix.RadixRoot) : List U32 :=
+  let optPin (owned : Bool) (cut : CcfKv.radix.RadixRoot) : List U32 :=
     if owned then (if cut = 0#u32 then pins else cut :: pins) else pins
   change WP.spec _ (fun (next, after) =>
     (∃ out, IndexView after next out ∧ out.Perm expected)
     ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
     ∧ IndexKeeps index after
     ∧ IndexGrowth index after (total * lookupCost) total)
-  unfold Spike.engine.publish_indexed
+  unfold CcfKv.engine.publish_indexed
   have hloop :
       WP.spec
-        (Spike.engine.publish_indexed_loop index pending version root false (alloc.vec.Vec.len pending))
+        (CcfKv.engine.publish_indexed_loop index pending version root false (alloc.vec.Vec.len pending))
         (fun (after, cut, owned) =>
           (∃ out, IndexView after cut out ∧ out.Perm expected)
           ∧ IndexLiveness after (optPin owned cut)
           ∧ (cut = 0#u32 ∨ cut ∈ optPin owned cut)
           ∧ IndexKeeps index after
           ∧ IndexGrowth index after (total * lookupCost) total) := by
-    unfold Spike.engine.publish_indexed_loop
+    unfold CcfKv.engine.publish_indexed_loop
     apply loop.spec_decr_nat (fun (_, _, _, i) => (i : Usize).val)
       (fun (arena, cut, owned, i) =>
         i.val ≤ total
@@ -396,7 +396,7 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Radi
       _ _ _
     · rintro ⟨arena, cut, owned, i⟩ ⟨hi, lCur, hcutPin, kept, growth, current, related, size, remaining⟩
       dsimp only at hi lCur hcutPin kept growth related size remaining ⊢
-      unfold Spike.engine.publish_indexed_loop.body
+      unfold CcfKv.engine.publish_indexed_loop.body
       have one : (1#usize : Usize).val = 1 := rfl
       by_cases run : (0#usize : Usize) < i
       · have positive : 0 < i.val := run
@@ -555,9 +555,9 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Radi
         hg2
       ⟩
 
-theorem indexed_publish_selected (index : CellIndex) (root base : Spike.radix.RadixRoot)
+theorem indexed_publish_selected (index : CellIndex) (root base : CcfKv.radix.RadixRoot)
     (rows : CellRows)
-    (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write) (version : U64)
     (pins : List U32)
     (view : IndexView index root rows) (live : IndexLiveness index pins)
     (hrootPin : root = 0#u32 ∨ root ∈ pins)
@@ -570,7 +570,7 @@ theorem indexed_publish_selected (index : CellIndex) (root base : Spike.radix.Ra
         ∨ (base = 0#u32
             ∧ IndexView index base []
             ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
-    : WP.spec (Spike.engine.publish_indexed index base pending version)
+    : WP.spec (CcfKv.engine.publish_indexed index base pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out

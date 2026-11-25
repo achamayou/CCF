@@ -17,10 +17,10 @@ private def AbsentBefore {K V : Type} (rows : List (K × V)) (key : K) (start st
     : Prop :=
   ∀ j (h : j < rows.length), start ≤ j → j < stop → rows[j].1 ≠ key
 
-private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
-    (rows : Spike.engine.Assoc K V) (key : K) (start : Usize)
+private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
+    (rows : CcfKv.engine.Assoc K V) (key : K) (start : Usize)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
-    : WP.spec (Spike.engine.Assoc.index_from eq rows key start)
+    : WP.spec (CcfKv.engine.Assoc.index_from eq rows key start)
         (fun
           | none => find (rows.val.drop start.val) key = none
           | some i =>
@@ -28,9 +28,9 @@ private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : Spike.engine
                 rows.val[i.val]? = some (key, v)
                 ∧ find (rows.val.drop start.val) key = some v
                 ∧ AbsentBefore rows.val key start.val i.val) := by
-  unfold Spike.engine.Assoc.index_from Spike.engine.Assoc.index_from_loop
+  unfold CcfKv.engine.Assoc.index_from CcfKv.engine.Assoc.index_from_loop
   apply loop.spec_decr_nat
-    (fun (p : Spike.engine.Assoc K V × Usize) => rows.val.length - p.2.val)
+    (fun (p : CcfKv.engine.Assoc K V × Usize) => rows.val.length - p.2.val)
     (fun p =>
       p.1 = rows
       ∧ find (rows.val.drop p.2.val) key = find (rows.val.drop start.val) key
@@ -41,7 +41,7 @@ private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : Spike.engine
     subst xs
     have hlen := alloc.vec.Vec.len_ineq rows
     have hone : (1#usize : Usize).val = 1 := rfl
-    unfold Spike.engine.Assoc.index_from_loop.body
+    unfold CcfKv.engine.Assoc.index_from_loop.body
     have hlenval : (alloc.vec.Vec.len rows).val = rows.val.length :=
       alloc.vec.Vec.len_val rows
     by_cases h : i.val < rows.val.length
@@ -94,15 +94,15 @@ private theorem assoc_index_from {K V : Type} [DecidableEq K] (eq : Spike.engine
   · exact ⟨rfl, rfl, fun _ _ hlo hhi => False.elim (Nat.not_lt_of_ge hlo hhi)⟩
 
 /-- The extracted index search locates the same first binding as model lookup. -/
-theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
-    (rows : Spike.engine.Assoc K V) (key : K)
+theorem assoc_index {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
+    (rows : CcfKv.engine.Assoc K V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
-    : WP.spec (Spike.engine.Assoc.index eq rows key)
+    : WP.spec (CcfKv.engine.Assoc.index eq rows key)
         (fun
           | none => find rows.val key = none
           | some i =>
               ∃ v, rows.val[i.val]? = some (key, v) ∧ find rows.val key = some v) := by
-  unfold Spike.engine.Assoc.index
+  unfold CcfKv.engine.Assoc.index
   apply WP.spec_mono (assoc_index_from eq rows key 0#usize heq)
   intro found h
   cases found with
@@ -112,12 +112,12 @@ theorem assoc_index {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
       exact ⟨v, hrow, by simpa using hfind⟩
 
 /-- Borrowed lookup returns the first model binding without cloning it. -/
-theorem assoc_get_ref {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
-    (rows : Spike.engine.Assoc K V) (key : K)
+theorem assoc_get_ref {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
+    (rows : CcfKv.engine.Assoc K V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
-    : WP.spec (Spike.engine.Assoc.get_ref eq rows key)
+    : WP.spec (CcfKv.engine.Assoc.get_ref eq rows key)
         (fun r => r = find rows.val key) := by
-  unfold Spike.engine.Assoc.get_ref
+  unfold CcfKv.engine.Assoc.get_ref
   apply WP.spec_bind (assoc_index eq rows key heq)
   rintro (_ | i) h
   · simpa using h.symm
@@ -125,30 +125,30 @@ theorem assoc_get_ref {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
     simp [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize, hget, hfind]
 
 /-- An extracted lookup returns the first model binding for any finite association list. -/
-theorem assoc_get {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+theorem assoc_get {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (key : K)
+    (rows : CcfKv.engine.Assoc K V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hclone : ∀ v, cv.clone v = .ok v)
-    : WP.spec (Spike.engine.Assoc.get eq ck cv rows key)
+    : WP.spec (CcfKv.engine.Assoc.get eq ck cv rows key)
         (fun r => r = find rows.val key) := by
-  unfold Spike.engine.Assoc.get
+  unfold CcfKv.engine.Assoc.get
   apply WP.spec_bind (assoc_index eq rows key heq)
   rintro (_ | i) h
   · simpa using h.symm
   · obtain ⟨v, hget, hfind⟩ := h
     simp [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize, hget, hfind, hclone]
 
-private theorem copy_row {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+private theorem copy_row {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
     (out : alloc.vec.Vec (K × V)) (row : K × V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
     (hcap : out.val.length < Usize.max)
-    : WP.spec (Spike.engine.copy_if_different eq ck cv out row key)
+    : WP.spec (CcfKv.engine.copy_if_different eq ck cv out row key)
         (fun r => r.val = out.val ++ erase [row] key) := by
   obtain ⟨k, v⟩ := row
-  unfold Spike.engine.copy_if_different
+  unfold CcfKv.engine.copy_if_different
   change WP.spec (do
     let same ← eq.same k key
     if same then Result.ok out
@@ -160,17 +160,17 @@ private theorem copy_row {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
   · simp [heq, hk, erase]
   · simpa [heq, hk, hck, hcv, erase] using alloc.vec.Vec.push_spec out (k, v) hcap
 
-private theorem copy_other {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+private theorem copy_other {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (key : K) (initial : alloc.vec.Vec (K × V))
+    (rows : CcfKv.engine.Assoc K V) (key : K) (initial : alloc.vec.Vec (K × V))
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
     (hcap : initial.val.length + rows.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Assoc.copy_other_rows eq ck cv rows key initial)
+    : WP.spec (CcfKv.engine.Assoc.copy_other_rows eq ck cv rows key initial)
         (fun r => r.val = initial.val ++ erase rows.val key) := by
-  unfold Spike.engine.Assoc.copy_other_rows Spike.engine.Assoc.copy_other_rows_loop
+  unfold CcfKv.engine.Assoc.copy_other_rows CcfKv.engine.Assoc.copy_other_rows_loop
   apply loop.spec_decr_nat
-    (fun (p : Spike.engine.Assoc K V × alloc.vec.Vec (K × V) × Usize) =>
+    (fun (p : CcfKv.engine.Assoc K V × alloc.vec.Vec (K × V) × Usize) =>
       rows.val.length - p.2.2.val)
     (fun p =>
       p.1 = rows
@@ -182,7 +182,7 @@ private theorem copy_other {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K
   · rintro ⟨xs, out, i⟩ ⟨hrows, hi, hacc, hsize⟩
     dsimp only at hrows hi hacc hsize ⊢
     subst xs
-    unfold Spike.engine.Assoc.copy_other_rows_loop.body
+    unfold CcfKv.engine.Assoc.copy_other_rows_loop.body
     have hlen := alloc.vec.Vec.len_val rows
     have hbound := alloc.vec.Vec.len_ineq rows
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -218,28 +218,28 @@ private theorem copy_other {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K
   · simpa using hcap
 
 /-- Extracted erasure removes all matches and preserves the order of the remaining rows. -/
-theorem assoc_erase {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+theorem assoc_erase {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (key : K)
+    (rows : CcfKv.engine.Assoc K V) (key : K)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
-    : WP.spec (Spike.engine.Assoc.erase eq ck cv rows key)
+    : WP.spec (CcfKv.engine.Assoc.erase eq ck cv rows key)
         (fun r => r.val = erase rows.val key) := by
-  unfold Spike.engine.Assoc.erase
+  unfold CcfKv.engine.Assoc.erase
   apply WP.spec_bind
     (copy_other eq ck cv rows key (alloc.vec.Vec.new _) heq hck hcv (by simp))
   intro out hout
   simpa using hout
 
-private theorem assoc_replace {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+private theorem assoc_replace {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (key : K) (value : V)
+    (rows : CcfKv.engine.Assoc K V) (key : K) (value : V)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
     (hcap : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.Assoc.replace_and_prepend eq ck cv rows key value)
+    : WP.spec (CcfKv.engine.Assoc.replace_and_prepend eq ck cv rows key value)
         (fun r => r.val = set rows.val key value) := by
-  unfold Spike.engine.Assoc.replace_and_prepend
+  unfold CcfKv.engine.Assoc.replace_and_prepend
   simp only [hck, bind_ok]
   have hstart : (alloc.vec.Vec.new (K × V)).val.length < Usize.max := by
     simpa using Nat.zero_lt_of_lt hcap
@@ -276,16 +276,16 @@ private theorem erase_take {K V : Type} [DecidableEq K] (rows : List (K × V))
   have hne := absent j hbound (Nat.zero_le _) (by omega)
   simp [hne]
 
-private theorem rotate_replacement {K V : Type} (eq : Spike.engine.Key K)
+private theorem rotate_replacement {K V : Type} (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (row : K × V) (stop : Usize)
+    (rows : CcfKv.engine.Assoc K V) (row : K × V) (stop : Usize)
     (hstop : stop.val ≤ rows.val.length)
-    : WP.spec (Spike.engine.Assoc.rotate_replacement eq ck cv rows row stop)
+    : WP.spec (CcfKv.engine.Assoc.rotate_replacement eq ck cv rows row stop)
         (fun r => r.val = (row :: rows.val).take stop.val ++ rows.val.drop stop.val) := by
-  unfold Spike.engine.Assoc.rotate_replacement Spike.engine.Assoc.rotate_replacement_loop
+  unfold CcfKv.engine.Assoc.rotate_replacement CcfKv.engine.Assoc.rotate_replacement_loop
   let seq := row :: rows.val
   apply loop.spec_decr_nat
-    (fun (p : Spike.engine.Assoc K V × (K × V) × Usize) => stop.val - p.2.2.val)
+    (fun (p : CcfKv.engine.Assoc K V × (K × V) × Usize) => stop.val - p.2.2.val)
     (fun (cur, carried, i) =>
       i.val ≤ stop.val
       ∧ cur.val = seq.take i.val ++ rows.val.drop i.val
@@ -293,7 +293,7 @@ private theorem rotate_replacement {K V : Type} (eq : Spike.engine.Key K)
     _ _ _
   · rintro ⟨cur, carried, i⟩ ⟨hi, hcur, hcarry⟩
     dsimp only at hi hcur hcarry ⊢
-    unfold Spike.engine.Assoc.rotate_replacement_loop.body
+    unfold CcfKv.engine.Assoc.rotate_replacement_loop.body
     by_cases go : i < stop
     · have go' : i.val < stop.val := go
       have hb : i.val < rows.val.length := by omega
@@ -345,15 +345,15 @@ private theorem rotate_replacement {K V : Type} (eq : Spike.engine.Key K)
 
 /-- Set prepends the new binding and removes all older bindings for that key.
 A fresh key can be inserted without copying the existing values. -/
-theorem assoc_set {K V : Type} [DecidableEq K] (eq : Spike.engine.Key K)
+theorem assoc_set {K V : Type} [DecidableEq K] (eq : CcfKv.engine.Key K)
     (ck : core.clone.Clone K) (cv : core.clone.Clone V)
-    (rows : Spike.engine.Assoc K V) (key : K) (value : V)
+    (rows : CcfKv.engine.Assoc K V) (key : K) (value : V)
     (heq : ∀ k, eq.same k key = .ok (decide (k = key)))
     (hck : ∀ k, ck.clone k = .ok k) (hcv : ∀ v, cv.clone v = .ok v)
     (hcap : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.Assoc.set eq ck cv rows key value)
+    : WP.spec (CcfKv.engine.Assoc.set eq ck cv rows key value)
         (fun r => r.val = Kv.Model.set rows.val key value) := by
-  unfold Spike.engine.Assoc.set Spike.engine.Assoc.index
+  unfold CcfKv.engine.Assoc.set CcfKv.engine.Assoc.index
   apply WP.spec_bind (assoc_index_from eq rows key 0#usize heq)
   intro found hf
   cases found with

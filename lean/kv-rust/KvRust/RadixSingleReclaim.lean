@@ -89,26 +89,26 @@ theorem loop_lockstep {α₁ α₂ β₁ β₂ : Type}
   exact hd x₂ hrel
 
 /-- Every non-zero link referenced by a pin or directory child points to a live slot. -/
-def SingleLinkLive {V : Type} (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V))) (link : U32)
+def SingleLinkLive {V : Type} (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V))) (link : U32)
     : Prop :=
   if link < 2147483648#u32 then
     0 < link.val ∧ ∃ d, dirs[link.val - 1]? = some (some d)
   else
     2147483648 < link.val ∧ ∃ r, rows[link.val - 2147483649]? = some (some r)
 
-def arenaEdges (dirs : List (Option Spike.radix.RadixDir)) : List U32 :=
+def arenaEdges (dirs : List (Option CcfKv.radix.RadixDir)) : List U32 :=
   (dirs.filterMap id).flatMap (·.children.val)
 
-theorem radixReferences_eq (dirs : List (Option Spike.radix.RadixDir))
+theorem radixReferences_eq (dirs : List (Option CcfKv.radix.RadixDir))
     (pins : List U32) (target : U32)
     : radixReferences dirs pins target = (pins ++ arenaEdges dirs).count target :=
   rfl
 
 /-- Exact reference-count invariant against an arbitrary owner multiset `owners`. -/
 structure RefCountsExact {V : Type}
-    (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32)
     (owners : List U32)
     : Prop where
@@ -133,8 +133,8 @@ structure RefCountsExact {V : Type}
             | _ => owners.count link
 
 theorem RefCountsExact.perm {V : Type}
-    {dirs : List (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))}
+    {dirs : List (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))}
     {dirRefs rowRefs : alloc.vec.Vec U32}
     {a b : List U32}
     (h : RefCountsExact dirs rows dirRefs rowRefs a) (hp : a.Perm b)
@@ -160,7 +160,7 @@ theorem RefCountsExact.perm {V : Type}
 
 /-- Full memory-safety and liveness invariant of a refcounted `SingleRadix` arena
 relative to its active root pins `pins`. -/
-structure SingleLiveness {V : Type} (arena : Spike.radix.SingleRadix V) (pins : List U32)
+structure SingleLiveness {V : Type} (arena : CcfKv.radix.SingleRadix V) (pins : List U32)
     : Prop where
   valid : ArenaValid arena.values
   dirsBound : arena.values.dirs.val.length ≤ 2147483647
@@ -183,7 +183,7 @@ structure SingleLiveness {V : Type} (arena : Spike.radix.SingleRadix V) (pins : 
             SingleLinkLive arena.values.dirs.val arena.values.rows.val link
             ∧ radixReferences arena.values.dirs.val pins link = 0
 
-theorem SingleLiveness.perm {V : Type} {arena : Spike.radix.SingleRadix V}
+theorem SingleLiveness.perm {V : Type} {arena : CcfKv.radix.SingleRadix V}
     {a b : List U32} (h : SingleLiveness arena a) (hp : a.Perm b)
     : SingleLiveness arena b := by
   obtain ⟨entries, qv, qnd, qzero⟩ := h.queue
@@ -197,7 +197,7 @@ theorem SingleLiveness.perm {V : Type} {arena : Spike.radix.SingleRadix V}
   exact hz
 
 /-- All pinned roots retain their exact views and bindings across reclamation or mutation. -/
-def SinglePreservesPins {V : Type} (before after : Spike.radix.SingleRadix V)
+def SinglePreservesPins {V : Type} (before after : CcfKv.radix.SingleRadix V)
     (pins : List U32)
     : Prop :=
   ∀ r ∈ pins,
@@ -206,12 +206,12 @@ def SinglePreservesPins {V : Type} (before after : Spike.radix.SingleRadix V)
       → SingleView after r bindings
         ∧ singleBindings after bindings = singleBindings before bindings
 
-theorem SinglePreservesPins.refl {V : Type} (arena : Spike.radix.SingleRadix V)
+theorem SinglePreservesPins.refl {V : Type} (arena : CcfKv.radix.SingleRadix V)
     (pins : List U32)
     : SinglePreservesPins arena arena pins :=
   fun _ _ _ v => ⟨v, rfl⟩
 
-theorem SinglePreservesPins.trans {V : Type} {a b c : Spike.radix.SingleRadix V}
+theorem SinglePreservesPins.trans {V : Type} {a b c : CcfKv.radix.SingleRadix V}
     {pins : List U32} (ab : SinglePreservesPins a b pins)
     (bc : SinglePreservesPins b c pins)
     : SinglePreservesPins a c pins := by
@@ -220,13 +220,13 @@ theorem SinglePreservesPins.trans {V : Type} {a b c : Spike.radix.SingleRadix V}
   obtain ⟨vc, sc⟩ := bc r hr bs vb
   exact ⟨vc, sc.trans sb⟩
 
-theorem SinglePreservesPins.mono {V : Type} {a b : Spike.radix.SingleRadix V}
+theorem SinglePreservesPins.mono {V : Type} {a b : CcfKv.radix.SingleRadix V}
     {small large : List U32} (h : SinglePreservesPins a b large)
     (sub : ∀ r ∈ small, r ∈ large)
     : SinglePreservesPins a b small :=
   fun r hr => h r (sub r hr)
 
-theorem SinglePreservesPins.of_keeps {V : Type} {a b : Spike.radix.SingleRadix V}
+theorem SinglePreservesPins.of_keeps {V : Type} {a b : CcfKv.radix.SingleRadix V}
     (kept : ArenaKeeps a.values b.values) (pins : List U32)
     : SinglePreservesPins a b pins :=
   fun r _ bs v => single_retains_views a b kept r bs v
@@ -259,8 +259,8 @@ private theorem free_len_le_slots {T : Type} {slots : alloc.vec.Vec (Option T)}
   simpa using hle
 
 private theorem live_entries_bound {V : Type}
-    {dirs : List (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))}
+    {dirs : List (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))}
     {entries : List U32} (hnd : entries.Nodup)
     (hlive : ∀ link ∈ entries, SingleLinkLive dirs rows link)
     : entries.length ≤ dirs.length + rows.length := by
@@ -319,28 +319,28 @@ def OwnersBounded (owners : List U32) (headroom : Nat) : Prop :=
   ∀ target, owners.count target + headroom ≤ U32.max
 
 theorem retain_link_refines {V : Type}
-    (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (owners : List U32) (link : U32)
     (counts : RefCountsExact dirs rows dirRefs rowRefs owners)
     (live : link ≠ 0#u32 → SingleLinkLive dirs rows link)
     (room : link ≠ 0#u32 → owners.count link < U32.max)
-    : WP.spec (Spike.radix.retain_link dirRefs rowRefs link)
+    : WP.spec (CcfKv.radix.retain_link dirRefs rowRefs link)
         (fun (dr, rr) =>
           RefCountsExact dirs rows dr rr
             (if link = 0#u32 then owners else link :: owners)) := by
-  unfold Spike.radix.retain_link
+  unfold CcfKv.radix.retain_link
   by_cases hzero : link = 0#u32
   · simp [hzero, counts]
   · rw [ite_eq_right hzero]
     have hlive := live hzero
     have hroom := room hzero
-    have htagVal : (Spike.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
-      simp [Spike.radix.RADIX_LEAF_TAG]
+    have htagVal : (CcfKv.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
+      simp [CcfKv.radix.RADIX_LEAF_TAG]
     have hone : (1#u32 : U32).val = 1 := rfl
-    by_cases hdir : link < Spike.radix.RADIX_LEAF_TAG
+    by_cases hdir : link < CcfKv.radix.RADIX_LEAF_TAG
     · rw [ite_eq_left hdir]
-      have hltTag : link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+      have hltTag : link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
       simp only [SingleLinkLive, hltTag, ite_true] at hlive
       obtain ⟨hpos, d, hd⟩ := hlive
       have hbound : link.val - 1 < dirs.length := (List.getElem?_eq_some_iff.mp hd).1
@@ -384,11 +384,11 @@ theorem retain_link_refines {V : Type}
         · simp [hv, hzero, Ne.symm hne]
         · rename_i o; cases o <;> simp [hv, hzero, Ne.symm hne]
     · rw [ite_eq_right hdir]
-      have hgeTag : ¬ link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+      have hgeTag : ¬ link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
       simp only [SingleLinkLive, hgeTag, ite_false] at hlive
       obtain ⟨htag, r, hr⟩ := hlive
       have hbound : link.val - 2147483649 < rows.length := (List.getElem?_eq_some_iff.mp hr).1
-      apply WP.spec_bind (U32.sub_spec (x := link) (y := Spike.radix.RADIX_LEAF_TAG) (by omega))
+      apply WP.spec_bind (U32.sub_spec (x := link) (y := CcfKv.radix.RADIX_LEAF_TAG) (by omega))
       intro sub1 hsub1
       apply WP.spec_bind (U32.sub_spec (x := sub1) (y := 1#u32) (by omega))
       intro sub2 hsub2
@@ -432,8 +432,8 @@ theorem retain_link_refines {V : Type}
           · rename_i o; cases o <;> simp [hv, hzero, Ne.symm heq]
 
 theorem release_link_refines {V : Type}
-    (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (queue : NativeRetireQueue)
     (entries owners : List U32) (link : U32)
     (counts
@@ -446,7 +446,7 @@ theorem release_link_refines {V : Type}
         → owners.count link = 0
         → queue.len.val = queue.slots.val.length
         → 2 * queue.slots.val.length + 1 ≤ Usize.max)
-    : WP.spec (Spike.radix.release_link dirRefs rowRefs queue link)
+    : WP.spec (CcfKv.radix.release_link dirRefs rowRefs queue link)
         (fun (dr, rr, rq) =>
           RefCountsExact dirs rows dr rr owners
           ∧ RetirementQueueView rq
@@ -454,19 +454,19 @@ theorem release_link_refines {V : Type}
                   entries ++ [link]
                 else
                   entries)) := by
-  unfold Spike.radix.release_link
+  unfold CcfKv.radix.release_link
   by_cases hzero : link = 0#u32
   · subst hzero
     simpa [WP.spec_ok] using ⟨counts, qv⟩
   · rw [ite_eq_right hzero]
     simp only [hzero, ite_false] at counts
     have hlive := live hzero
-    have htagVal : (Spike.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
-      simp [Spike.radix.RADIX_LEAF_TAG]
+    have htagVal : (CcfKv.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
+      simp [CcfKv.radix.RADIX_LEAF_TAG]
     have hone : (1#u32 : U32).val = 1 := rfl
-    by_cases hdir : link < Spike.radix.RADIX_LEAF_TAG
+    by_cases hdir : link < CcfKv.radix.RADIX_LEAF_TAG
     · rw [ite_eq_left hdir]
-      have hltTag : link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+      have hltTag : link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
       simp only [SingleLinkLive, hltTag, ite_true] at hlive
       obtain ⟨hpos, d, hd⟩ := hlive
       have hbound : link.val - 1 < dirs.length := (List.getElem?_eq_some_iff.mp hd).1
@@ -511,11 +511,11 @@ theorem release_link_refines {V : Type}
         · rename_i o; cases o <;> simpa [List.count_cons, Ne.symm hne] using hv
       · by_cases hz : owners.count link = 0 <;> simp [hzero, hz] at hqv ⊢ <;> exact hqv
     · rw [ite_eq_right hdir]
-      have hgeTag : ¬ link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+      have hgeTag : ¬ link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
       simp only [SingleLinkLive, hgeTag, ite_false] at hlive
       obtain ⟨htag, r, hr⟩ := hlive
       have hbound : link.val - 2147483649 < rows.length := (List.getElem?_eq_some_iff.mp hr).1
-      apply WP.spec_bind (U32.sub_spec (x := link) (y := Spike.radix.RADIX_LEAF_TAG) (by omega))
+      apply WP.spec_bind (U32.sub_spec (x := link) (y := CcfKv.radix.RADIX_LEAF_TAG) (by omega))
       intro sub1 hsub1
       apply WP.spec_bind (U32.sub_spec (x := sub1) (y := 1#u32) (by omega))
       intro sub2 hsub2
@@ -560,12 +560,12 @@ theorem release_link_refines {V : Type}
       · by_cases hz : owners.count link = 0 <;> simp [hzero, hz] at hqv ⊢ <;> exact hqv
 
 theorem single_new_refines (V : Type)
-    : WP.spec (Spike.radix.SingleRadix.new V)
+    : WP.spec (CcfKv.radix.SingleRadix.new V)
         (fun arena =>
           SingleLiveness arena []
-          ∧ WP.spec (Spike.radix.SingleRadix.empty_root arena)
+          ∧ WP.spec (CcfKv.radix.SingleRadix.empty_root arena)
               (fun root => SingleView arena root [])) := by
-  unfold Spike.radix.SingleRadix.new Spike.radix.Arena.new Spike.radix.SingleRadix.empty_root
+  unfold CcfKv.radix.SingleRadix.new CcfKv.radix.Arena.new CcfKv.radix.SingleRadix.empty_root
   simp only [bind_ok]
   apply WP.spec_bind retirement_queue_new
   intro rq hrq
@@ -592,18 +592,18 @@ theorem single_new_refines (V : Type)
   rw [WP.spec_ok]
   exact ⟨⟨0, .empty 0⟩, (fun _ h => by cases h), List.Pairwise.nil⟩
 
-theorem single_retain_root_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (pins : List U32) (root : Spike.radix.RadixRoot)
+theorem single_retain_root_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (pins : List U32) (root : CcfKv.radix.RadixRoot)
     (live : SingleLiveness arena pins)
     (rootLive
       : root ≠ 0#u32 → SingleLinkLive arena.values.dirs.val arena.values.rows.val root)
     (notQueued : root ≠ 0#u32 → radixReferences arena.values.dirs.val pins root > 0)
     (room : root ≠ 0#u32 → radixReferences arena.values.dirs.val pins root < U32.max)
-    : WP.spec (Spike.radix.SingleRadix.retain_root arena root)
+    : WP.spec (CcfKv.radix.SingleRadix.retain_root arena root)
         (fun after =>
           after.values = arena.values
           ∧ SingleLiveness after (if root = 0#u32 then pins else root :: pins)) := by
-  unfold Spike.radix.SingleRadix.retain_root
+  unfold CcfKv.radix.SingleRadix.retain_root
   apply WP.spec_bind
     (retain_link_refines arena.values.dirs.val arena.values.rows.val
       arena.dir_refs arena.row_refs (pins ++ arenaEdges arena.values.dirs.val) root
@@ -634,15 +634,15 @@ theorem single_retain_root_refines {V : Type} (arena : Spike.radix.SingleRadix V
         omega
       simpa [radixReferences_eq, List.cons_append, List.count_cons, Ne.symm hne] using hcnt
 
-theorem single_release_root_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (rest : List U32) (root : Spike.radix.RadixRoot)
+theorem single_release_root_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (rest : List U32) (root : CcfKv.radix.RadixRoot)
     (live : SingleLiveness arena (if root = 0#u32 then rest else root :: rest))
     (qroom
       : 2 * (arena.values.dirs.val.length + arena.values.rows.val.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.release_root arena root)
+    : WP.spec (CcfKv.radix.SingleRadix.release_root arena root)
         (fun after =>
           after.values = arena.values ∧ SingleLiveness after rest) := by
-  unfold Spike.radix.SingleRadix.release_root
+  unfold CcfKv.radix.SingleRadix.release_root
   obtain ⟨entries, qv, qnd, qzero⟩ := live.queue
   have hqBound : entries.length ≤ arena.values.dirs.val.length + arena.values.rows.val.length :=
     live_entries_bound qnd (fun l hl => (qzero l hl).1)
@@ -725,10 +725,10 @@ theorem single_release_root_refines {V : Type} (arena : Spike.radix.SingleRadix 
         simpa [radixReferences_eq, hz, List.cons_append, List.count_cons, Ne.symm hne] using hz0
 
 private theorem single_retire_one_loop_refines {V : Type}
-    (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (queue : NativeRetireQueue)
-    (dir : Spike.radix.RadixDir) (baseOwners entries : List U32)
+    (dir : CcfKv.radix.RadixDir) (baseOwners entries : List U32)
     (counts : RefCountsExact dirs rows dirRefs rowRefs (dir.children.val ++ baseOwners))
     (childrenLive : ∀ c ∈ dir.children.val, c ≠ 0#u32 → SingleLinkLive dirs rows c)
     (qv : RetirementQueueView queue entries)
@@ -737,15 +737,15 @@ private theorem single_retire_one_loop_refines {V : Type}
       : ∀ l ∈ entries,
           SingleLinkLive dirs rows l ∧ (dir.children.val ++ baseOwners).count l = 0)
     (qroom : 2 * (dirs.length + rows.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.retire_one_loop dirRefs rowRefs queue dir 0#usize)
+    : WP.spec (CcfKv.radix.SingleRadix.retire_one_loop dirRefs rowRefs queue dir 0#usize)
         (fun (dr, rr, rq) =>
           RefCountsExact dirs rows dr rr baseOwners
           ∧ ∃ entries',
               RetirementQueueView rq entries'
               ∧ entries'.Nodup
               ∧ ∀ l ∈ entries', SingleLinkLive dirs rows l ∧ baseOwners.count l = 0) := by
-  unfold Spike.radix.SingleRadix.retire_one_loop
-  have hfan : (Spike.radix.RADIX_FANOUT : Usize).val = 17 := by simp [Spike.radix.RADIX_FANOUT]
+  unfold CcfKv.radix.SingleRadix.retire_one_loop
+  have hfan : (CcfKv.radix.RADIX_FANOUT : Usize).val = 17 := by simp [CcfKv.radix.RADIX_FANOUT]
   have hclen : dir.children.val.length = 17 := by simp
   apply loop.spec_decr_nat (fun (_, _, _, slot) => 17 - (slot : Usize).val)
     (fun (dr, rr, rq, slot) =>
@@ -760,11 +760,11 @@ private theorem single_retire_one_loop_refines {V : Type}
     _ _ _
   · rintro ⟨dr, rr, rq, slot⟩ ⟨hslot, hcnt, es, hqv, hnd, hzero⟩
     dsimp only at hslot hcnt hqv hnd hzero ⊢
-    unfold Spike.radix.SingleRadix.retire_one_loop.body
+    unfold CcfKv.radix.SingleRadix.retire_one_loop.body
     have hone : (1#usize : Usize).val = 1 := rfl
-    by_cases run : slot < Spike.radix.RADIX_FANOUT
+    by_cases run : slot < CcfKv.radix.RADIX_FANOUT
     · have hslt : slot.val < 17 := by
-        have : slot.val < (Spike.radix.RADIX_FANOUT : Usize).val := run
+        have : slot.val < (CcfKv.radix.RADIX_FANOUT : Usize).val := run
         omega
       rw [ite_eq_left run]
       apply WP.spec_bind (Array.index_usize_spec dir.children slot (by simpa using hslt))
@@ -795,7 +795,7 @@ private theorem single_retire_one_loop_refines {V : Type}
         · simpa [hz, nextOwners] using hcnt
       have hstepSpec :
           WP.spec
-            (if child != 0#u32 then Spike.radix.release_link dr rr rq child
+            (if child != 0#u32 then CcfKv.radix.release_link dr rr rq child
              else Result.ok (dr, rr, rq))
             (fun (dr', rr', rq') =>
               RefCountsExact dirs rows dr' rr' nextOwners
@@ -864,7 +864,7 @@ private theorem single_retire_one_loop_refines {V : Type}
       refine ⟨⟨by omega, by simpa [hseq, nextOwners] using hcnt', es', hqv', hnd',
         by simpa [hseq, nextOwners] using hzero'⟩, by omega⟩
     · have hdone : slot.val = 17 := by
-        have : ¬ slot.val < (Spike.radix.RADIX_FANOUT : Usize).val := run
+        have : ¬ slot.val < (CcfKv.radix.RADIX_FANOUT : Usize).val := run
         omega
       rw [ite_eq_right run, WP.spec_ok]
       have hnil : dir.children.val.drop slot.val = [] := List.drop_eq_nil_of_le (by omega)
@@ -880,17 +880,17 @@ theorem wp_spec_and {α : Type} {m : Result α} {P Q : α → Prop}
   rw [hm, WP.spec_ok] at hq ⊢
   exact ⟨hpx, hq⟩
 
-theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
+theorem single_retire_one_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
     (pins : List U32) (live : SingleLiveness arena pins)
     (qroom
       : 2 * (arena.values.dirs.val.length + arena.values.rows.val.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.retire_one arena)
+    : WP.spec (CcfKv.radix.SingleRadix.retire_one arena)
         (fun (_, after) =>
           SingleLiveness after pins
           ∧ SinglePreservesPins arena after pins
           ∧ after.values.dirs.val.length = arena.values.dirs.val.length
           ∧ after.values.rows.val.length = arena.values.rows.val.length) := by
-  unfold Spike.radix.SingleRadix.retire_one
+  unfold CcfKv.radix.SingleRadix.retire_one
   obtain ⟨entries, qv, qnd, qzero⟩ := live.queue
   apply WP.spec_bind (retirement_queue_pop arena.retired entries qv)
   rintro ⟨item, rq⟩ ⟨hitem, hqv⟩
@@ -905,15 +905,15 @@ theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
       intro r _ bs v
       exact ⟨⟨v.lookup, v.values, v.sorted⟩, rfl⟩
   | cons link tail =>
-      change WP.spec (if link < Spike.radix.RADIX_LEAF_TAG then _ else _) _
+      change WP.spec (if link < CcfKv.radix.RADIX_LEAF_TAG then _ else _) _
       obtain ⟨hnotInTail, htailNd⟩ := List.nodup_cons.mp qnd
       obtain ⟨hlinkLive, hlinkZero⟩ := qzero link List.mem_cons_self
-      have htagVal : (Spike.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
-        simp [Spike.radix.RADIX_LEAF_TAG]
+      have htagVal : (CcfKv.radix.RADIX_LEAF_TAG : U32).val = 2147483648 := by
+        simp [CcfKv.radix.RADIX_LEAF_TAG]
       have hone : (1#u32 : U32).val = 1 := rfl
-      by_cases hdir : link < Spike.radix.RADIX_LEAF_TAG
+      by_cases hdir : link < CcfKv.radix.RADIX_LEAF_TAG
       · rw [ite_eq_left hdir]
-        have hltTag : link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+        have hltTag : link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
         simp only [SingleLinkLive, hltTag, ite_true] at hlinkLive
         obtain ⟨hpos, dir, hdirSaved⟩ := hlinkLive
         have hidxBound : link.val - 1 < arena.values.dirs.val.length :=
@@ -1024,7 +1024,7 @@ theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
         rintro ⟨dr', rr', rq'⟩ ⟨hcnt', es', hqv', hnd', hzero'⟩
         change WP.spec (Result.ok (true,
           ({ values := { arena.values with dirs := dirs', free_dirs := freeDirs' },
-             dir_refs := dr', row_refs := rr', retired := rq' } : Spike.radix.SingleRadix V))) _
+             dir_refs := dr', row_refs := rr', retired := rq' } : CcfKv.radix.SingleRadix V))) _
         rw [WP.spec_ok]
         refine ⟨
           ⟨
@@ -1080,12 +1080,12 @@ theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
           obtain ⟨h, tree⟩ := v.lookup
           exact ⟨⟨⟨h, htreesKept h r bs hr tree⟩, v.values, v.sorted⟩, rfl⟩
       · rw [ite_eq_right hdir]
-        have hgeTag : ¬ link < 2147483648#u32 := by simpa [Spike.radix.RADIX_LEAF_TAG] using hdir
+        have hgeTag : ¬ link < 2147483648#u32 := by simpa [CcfKv.radix.RADIX_LEAF_TAG] using hdir
         simp only [SingleLinkLive, hgeTag, ite_false] at hlinkLive
         obtain ⟨htag, row, hrowSaved⟩ := hlinkLive
         have hidxBound : link.val - 2147483649 < arena.values.rows.val.length :=
           (List.getElem?_eq_some_iff.mp hrowSaved).1
-        apply WP.spec_bind (U32.sub_spec (x := link) (y := Spike.radix.RADIX_LEAF_TAG) (by omega))
+        apply WP.spec_bind (U32.sub_spec (x := link) (y := CcfKv.radix.RADIX_LEAF_TAG) (by omega))
         intro sub1 hsub1
         apply WP.spec_bind (U32.sub_spec (x := sub1) (y := 1#u32) (by omega))
         intro sub2 hsub2
@@ -1130,7 +1130,7 @@ theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
             obtain ⟨hlp, rl, hrl⟩ := hl
             have hneIdx : l.val - 2147483649 ≠ idx.val := fun h => hne (UScalar.eq_of_val_eq (by omega))
             exact ⟨hlp, rl, (hkeepRows _ hneIdx).trans hrl⟩
-        let nextArena : Spike.radix.SingleRadix V :=
+        let nextArena : CcfKv.radix.SingleRadix V :=
           { arena with
             values := { arena.values with rows := rows', free_rows := freeRows' }
             retired := rq }
@@ -1176,17 +1176,17 @@ theorem single_retire_one_refines {V : Type} (arena : Spike.radix.SingleRadix V)
           obtain ⟨hr', hb'⟩ := hrowsKept h r bs hr tree v.values
           exact ⟨⟨⟨h, tree⟩, hr', v.sorted⟩, hb'⟩
 
-theorem single_retire_budget_refines {V : Type} (arena : Spike.radix.SingleRadix V)
+theorem single_retire_budget_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
     (budget : Usize) (pins : List U32) (live : SingleLiveness arena pins)
     (qroom
       : 2 * (arena.values.dirs.val.length + arena.values.rows.val.length) + 1 ≤ Usize.max)
-    : WP.spec (Spike.radix.SingleRadix.retire_budget arena budget)
+    : WP.spec (CcfKv.radix.SingleRadix.retire_budget arena budget)
         (fun (_, after) =>
           SingleLiveness after pins
           ∧ SinglePreservesPins arena after pins
           ∧ after.values.dirs.val.length = arena.values.dirs.val.length
           ∧ after.values.rows.val.length = arena.values.rows.val.length) := by
-  unfold Spike.radix.SingleRadix.retire_budget Spike.radix.SingleRadix.retire_budget_loop
+  unfold CcfKv.radix.SingleRadix.retire_budget CcfKv.radix.SingleRadix.retire_budget_loop
   apply loop.spec_decr_nat (fun (_, completed) => budget.val - (completed : Usize).val)
     (fun (cur, completed) =>
       completed.val ≤ budget.val
@@ -1197,7 +1197,7 @@ theorem single_retire_budget_refines {V : Type} (arena : Spike.radix.SingleRadix
     _ _ _
   · rintro ⟨cur, completed⟩ ⟨hcomp, hlive, hpres, hdl, hrl⟩
     dsimp only at hcomp hlive hpres hdl hrl ⊢
-    unfold Spike.radix.SingleRadix.retire_budget_loop.body
+    unfold CcfKv.radix.SingleRadix.retire_budget_loop.body
     have hone : (1#usize : Usize).val = 1 := rfl
     by_cases run : completed < budget
     · have hlt : completed.val < budget.val := run
@@ -1231,7 +1231,7 @@ theorem single_retire_budget_refines {V : Type} (arena : Spike.radix.SingleRadix
 
 /-! ### Lockstep counted allocation and path-copying mutations -/
 
-theorem arenaEdges_length_le (dirs : List (Option Spike.radix.RadixDir))
+theorem arenaEdges_length_le (dirs : List (Option CcfKv.radix.RadixDir))
     : (arenaEdges dirs).length ≤ 17 * dirs.length := by
   unfold arenaEdges
   induction dirs with
@@ -1248,7 +1248,7 @@ theorem arenaEdges_length_le (dirs : List (Option Spike.radix.RadixDir))
           have hd : d.children.val.length = 17 := by simp
           omega
 
-theorem owners_count_le_bound (dirs : List (Option Spike.radix.RadixDir))
+theorem owners_count_le_bound (dirs : List (Option CcfKv.radix.RadixDir))
     (pins : List U32) (target : U32)
     : (pins ++ arenaEdges dirs).count target ≤ pins.length + 17 * dirs.length := by
   have h1 : (pins ++ arenaEdges dirs).count target ≤ (pins ++ arenaEdges dirs).length :=
@@ -1258,18 +1258,18 @@ theorem owners_count_le_bound (dirs : List (Option Spike.radix.RadixDir))
   omega
 
 private theorem retain_children_refines {V : Type}
-    (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
-    (dirRefs rowRefs : alloc.vec.Vec U32) (dir : Spike.radix.RadixDir)
+    (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
+    (dirRefs rowRefs : alloc.vec.Vec U32) (dir : CcfKv.radix.RadixDir)
     (owners : List U32)
     (counts : RefCountsExact dirs rows dirRefs rowRefs owners)
     (childrenLive : ∀ c ∈ dir.children.val, c ≠ 0#u32 → SingleLinkLive dirs rows c)
     (room : ∀ target, owners.count target + 17 ≤ U32.max)
-    : WP.spec (Spike.radix.retain_children dirRefs rowRefs dir)
+    : WP.spec (CcfKv.radix.retain_children dirRefs rowRefs dir)
         (fun (dr, rr) =>
           RefCountsExact dirs rows dr rr (dir.children.val ++ owners)) := by
-  unfold Spike.radix.retain_children Spike.radix.retain_children_loop
-  have hfan : (Spike.radix.RADIX_FANOUT : Usize).val = 17 := by simp [Spike.radix.RADIX_FANOUT]
+  unfold CcfKv.radix.retain_children CcfKv.radix.retain_children_loop
+  have hfan : (CcfKv.radix.RADIX_FANOUT : Usize).val = 17 := by simp [CcfKv.radix.RADIX_FANOUT]
   have hclen : dir.children.val.length = 17 := by simp
   apply loop.spec_decr_nat (fun (_, _, slot) => 17 - (slot : Usize).val)
     (fun (dr, rr, slot) =>
@@ -1278,11 +1278,11 @@ private theorem retain_children_refines {V : Type}
     _ _ _
   · rintro ⟨dr, rr, slot⟩ ⟨hslot, hcnt⟩
     dsimp only at hslot hcnt ⊢
-    unfold Spike.radix.retain_children_loop.body
+    unfold CcfKv.radix.retain_children_loop.body
     have hone : (1#usize : Usize).val = 1 := rfl
-    by_cases run : slot < Spike.radix.RADIX_FANOUT
+    by_cases run : slot < CcfKv.radix.RADIX_FANOUT
     · have hslt : slot.val < 17 := by
-        have : slot.val < (Spike.radix.RADIX_FANOUT : Usize).val := run
+        have : slot.val < (CcfKv.radix.RADIX_FANOUT : Usize).val := run
         omega
       rw [ite_eq_left run]
       apply WP.spec_bind (Array.index_usize_spec dir.children slot (by simpa using hslt))
@@ -1298,7 +1298,7 @@ private theorem retain_children_refines {V : Type}
         exact (List.perm_middle (l₁ := dir.children.val.take slot.val) (a := child)).symm
       have hstepSpec :
           WP.spec
-            (if child != 0#u32 then Spike.radix.retain_link dr rr child else Result.ok (dr, rr))
+            (if child != 0#u32 then CcfKv.radix.retain_link dr rr child else Result.ok (dr, rr))
             (fun (dr', rr') =>
               RefCountsExact dirs rows dr' rr' (dir.children.val.take (slot.val + 1) ++ owners)) := by
         by_cases hnz : child != 0#u32
@@ -1341,7 +1341,7 @@ private theorem retain_children_refines {V : Type}
       have hseq : slot1.val = slot.val + 1 := by omega
       exact ⟨⟨by omega, by rwa [hseq]⟩, by omega⟩
     · have hdone : slot.val = 17 := by
-        have : ¬ slot.val < (Spike.radix.RADIX_FANOUT : Usize).val := run
+        have : ¬ slot.val < (CcfKv.radix.RADIX_FANOUT : Usize).val := run
         omega
       rw [ite_eq_right run, WP.spec_ok]
       have hfull : dir.children.val.take slot.val = dir.children.val := List.take_of_length_le (by omega)
@@ -1353,14 +1353,14 @@ private theorem alloc_counted_lockstep {T : Type}
     (slots : alloc.vec.Vec (Option T)) (refs : alloc.vec.Vec U32)
     (free : alloc.vec.Vec Usize) (val : T)
     (idx : Usize) (slots' : alloc.vec.Vec (Option T)) (free' : alloc.vec.Vec Usize)
-    (halloc : Spike.radix.allocate slots free val = Result.ok (idx, slots', free'))
+    (halloc : CcfKv.radix.allocate slots free val = Result.ok (idx, slots', free'))
     (vacant : RadixFree slots free) (freeNd : free.val.Nodup)
     (hlen : refs.val.length = slots.val.length)
     (hvacZero
       : ∀ (i : Nat) (c : U32),
           slots.val[i]? = some none → refs.val[i]? = some c → c.val = 0)
     (hpushRoom : free.val = [] → slots.val.length < Usize.max)
-    : WP.spec (Spike.radix.alloc_counted slots refs free val)
+    : WP.spec (CcfKv.radix.alloc_counted slots refs free val)
         (fun (idx2, slots2, refs2, free2) =>
           idx2 = idx
           ∧ slots2 = slots'
@@ -1378,7 +1378,7 @@ private theorem alloc_counted_lockstep {T : Type}
   have hspec := radix_allocate_matches slots free val vacant hpushRoom
   rw [halloc, WP.spec_ok] at hspec
   obtain ⟨hnew, hkept, hfresh, hbound, hlenLe, hfree', _⟩ := hspec
-  unfold Spike.radix.alloc_counted
+  unfold CcfKv.radix.alloc_counted
   rw [halloc, bind_ok]
   change WP.spec
     (if idx = alloc.vec.Vec.len refs then do
@@ -1390,7 +1390,7 @@ private theorem alloc_counted_lockstep {T : Type}
         Result.ok (idx, slots', refs, free')) _
   have hfreeLen : free.val.length = (alloc.vec.Vec.len free).val := (alloc.vec.Vec.len_val free).symm
   have hrefsLen : (alloc.vec.Vec.len refs).val = refs.val.length := alloc.vec.Vec.len_val refs
-  unfold Spike.radix.allocate at halloc
+  unfold CcfKv.radix.allocate at halloc
   by_cases hempty : alloc.vec.Vec.len free = 0#usize
   · have hfreeNil : free.val = [] := List.eq_nil_of_length_eq_zero (by rw [hfreeLen, hempty]; rfl)
     rw [ite_eq_left hempty] at halloc
@@ -1463,16 +1463,16 @@ private theorem alloc_counted_lockstep {T : Type}
       fun _ => ⟨hnoneJ, hsetEq, trivial, hcZero ▸ hcGet⟩⟩
 
 /-- Every element of `owners` is either `0#u32` or points to a live slot. -/
-private def OwnersLive {V : Type} (dirs : List (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V))) (owners : List U32)
+private def OwnersLive {V : Type} (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V))) (owners : List U32)
     : Prop :=
   ∀ l ∈ owners, l ≠ 0#u32 → SingleLinkLive dirs rows l
 
 private theorem alloc_row_counts {V : Type}
-    {dirs : List (Option Spike.radix.RadixDir)}
-    {rows rows' : alloc.vec.Vec (Option (Spike.radix.RadixRow V))}
+    {dirs : List (Option CcfKv.radix.RadixDir)}
+    {rows rows' : alloc.vec.Vec (Option (CcfKv.radix.RadixRow V))}
     {dirRefs rowRefs rowRefs' : alloc.vec.Vec U32}
-    {owners : List U32} {idx : Usize} {row : Spike.radix.RadixRow V}
+    {owners : List U32} {idx : Usize} {row : CcfKv.radix.RadixRow V}
     (counts : RefCountsExact dirs rows.val dirRefs rowRefs owners)
     (ownersLive : OwnersLive dirs rows.val owners)
     (hlen' : rowRefs'.val.length = rows'.val.length)
@@ -1585,10 +1585,10 @@ private theorem filterMap_set_none_perm {α : Type} (xs : List (Option α)) (i :
               exact (hrest.cons y).trans (List.Perm.swap x y _)
 
 private theorem alloc_dir_counts {V : Type}
-    {dirs dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))}
+    {dirs dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))}
     {dirRefs dirRefs' rowRefs : alloc.vec.Vec U32}
-    {pins : List U32} {idx : Usize} {dir : Spike.radix.RadixDir}
+    {pins : List U32} {idx : Usize} {dir : CcfKv.radix.RadixDir}
     (counts
       : RefCountsExact dirs.val rows dirRefs rowRefs
           (dir.children.val ++ (pins ++ arenaEdges dirs.val)))
@@ -1719,8 +1719,8 @@ private theorem alloc_dir_counts {V : Type}
 
 /-- Lockstep invariant carried through counted directory allocation and path copying. -/
 private structure DirCountState {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32)
     (freeDirs : alloc.vec.Vec Usize)
     (pins : List U32)
@@ -1735,8 +1735,8 @@ private structure DirCountState {V : Type}
   counts : RefCountsExact dirs.val rows dirRefs rowRefs (pins ++ arenaEdges dirs.val)
 
 private theorem DirCountState.ownersLive {V : Type}
-    {dirs : alloc.vec.Vec (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))} {dirRefs rowRefs : alloc.vec.Vec U32}
+    {dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))} {dirRefs rowRefs : alloc.vec.Vec U32}
     {freeDirs : alloc.vec.Vec Usize} {pins : List U32}
     (st : DirCountState dirs rows dirRefs rowRefs freeDirs pins)
     : OwnersLive dirs.val rows (pins ++ arenaEdges dirs.val) := by
@@ -1786,22 +1786,22 @@ private theorem loop_invariant_of_ok {α β : Type}
   exact h1
 
 private theorem link_at_ok_lt (idx : Usize) (isLeaf : Bool) (out : U32)
-    (h : Spike.radix.link_at idx isLeaf = Result.ok out)
+    (h : CcfKv.radix.link_at idx isLeaf = Result.ok out)
     : idx.val < 2147483647 := by
   by_contra hge
-  have hs : WP.spec (Spike.radix.link_at idx isLeaf) (· = out) := by rw [h, WP.spec_ok]
-  unfold Spike.radix.link_at at hs
+  have hs : WP.spec (CcfKv.radix.link_at idx isLeaf) (· = out) := by rw [h, WP.spec_ok]
+  unfold CcfKv.radix.link_at at hs
   have hnot : ¬ (idx < 2147483647#usize) := fun hlt => hge hlt
   simp [massert, hnot] at hs
 
 private theorem allocate_len_le {T : Type} (slots : alloc.vec.Vec (Option T))
     (free : alloc.vec.Vec Usize) (item : T) (idx : Usize)
     (slots' : alloc.vec.Vec (Option T)) (free' : alloc.vec.Vec Usize)
-    (h : Spike.radix.allocate slots free item = Result.ok (idx, slots', free'))
+    (h : CcfKv.radix.allocate slots free item = Result.ok (idx, slots', free'))
     : slots.val.length ≤ slots'.val.length := by
-  have hs : WP.spec (Spike.radix.allocate slots free item) (· = (idx, slots', free')) := by
+  have hs : WP.spec (CcfKv.radix.allocate slots free item) (· = (idx, slots', free')) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.allocate at hs
+  unfold CcfKv.radix.allocate at hs
   dsimp only at hs
   by_cases h0 : alloc.vec.Vec.len free = 0#usize
   · rw [ite_eq_left h0] at hs
@@ -1884,24 +1884,24 @@ private theorem allocate_len_le {T : Type} (slots : alloc.vec.Vec (Option T))
                             rw [← hseq, hims.2]
                             simp [alloc.vec.Vec.set]
 
-private theorem add_directory_len_le (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (free : alloc.vec.Vec Usize) (dir : Spike.radix.RadixDir) (n : U32)
-    (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free' : alloc.vec.Vec Usize)
-    (h : Spike.radix.add_directory dirs free dir = Result.ok (n, dirs', free'))
+private theorem add_directory_len_le (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (free : alloc.vec.Vec Usize) (dir : CcfKv.radix.RadixDir) (n : U32)
+    (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free' : alloc.vec.Vec Usize)
+    (h : CcfKv.radix.add_directory dirs free dir = Result.ok (n, dirs', free'))
     : dirs.val.length ≤ dirs'.val.length := by
-  have hs : WP.spec (Spike.radix.add_directory dirs free dir) (· = (n, dirs', free')) := by
+  have hs : WP.spec (CcfKv.radix.add_directory dirs free dir) (· = (n, dirs', free')) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.add_directory at hs
+  unfold CcfKv.radix.add_directory at hs
   obtain ⟨first, hfRun, _⟩ := wp_spec_exists (radix_first_child_matches dir)
   rw [hfRun, bind_ok] at hs
   by_cases hfnz : first != 0#u32
   · simp only [massert, hfnz, ite_true, bind_ok] at hs
     cases hpre
-          : (if first >= Spike.radix.RADIX_LEAF_TAG then
+          : (if first >= CcfKv.radix.RADIX_LEAF_TAG then
                 Result.ok first
               else do
                 let s := alloc.vec.Vec.deref dirs
-                let rd ← Spike.radix.directory s first
+                let rd ← CcfKv.radix.directory s first
                 Result.ok rd.first)
       using Result.cases with
     | div => rw [hpre] at hs; simp at hs
@@ -1909,23 +1909,23 @@ private theorem add_directory_len_le (dirs : alloc.vec.Vec (Option Spike.radix.R
     | ret first1 =>
         change _ = Result.ok first1 at hpre
         rw [hpre, bind_ok] at hs
-        cases hal : Spike.radix.allocate dirs free { dir with first := first1 }
+        cases hal : CcfKv.radix.allocate dirs free { dir with first := first1 }
           using Result.cases with
         | div => rw [hal] at hs; simp at hs
         | vis _ _ => rw [hal] at hs; simp at hs
         | ret ar =>
             obtain ⟨idx, d1, f1⟩ := ar
-            change Spike.radix.allocate dirs free { dir with first := first1 } =
+            change CcfKv.radix.allocate dirs free { dir with first := first1 } =
               Result.ok (idx, d1, f1) at hal
             rw [hal, bind_ok] at hs
             change WP.spec (do
-              let i1 ← Spike.radix.link_at idx false
+              let i1 ← CcfKv.radix.link_at idx false
               Result.ok (i1, d1, f1)) (· = (n, dirs', free')) at hs
-            cases hlk : Spike.radix.link_at idx false using Result.cases with
+            cases hlk : CcfKv.radix.link_at idx false using Result.cases with
             | div => rw [hlk] at hs; simp at hs
             | vis _ _ => rw [hlk] at hs; simp at hs
             | ret n1 =>
-                change Spike.radix.link_at idx false = Result.ok n1 at hlk
+                change CcfKv.radix.link_at idx false = Result.ok n1 at hlk
                 rw [hlk, bind_ok, WP.spec_ok] at hs
                 obtain ⟨_, hs2⟩ := Prod.mk.inj hs
                 obtain ⟨hdEq, _⟩ := Prod.mk.inj hs2
@@ -1933,28 +1933,28 @@ private theorem add_directory_len_le (dirs : alloc.vec.Vec (Option Spike.radix.R
                 exact allocate_len_le dirs free { dir with first := first1 } idx d1 f1 hal
   · simp [massert, hfnz] at hs
 
-private theorem copy_parent_len_le (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
+private theorem copy_parent_len_le (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
     (free : alloc.vec.Vec Usize) (parent : U32) (slot : Usize) (child : U32) (c : U32)
-    (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free' : alloc.vec.Vec Usize)
+    (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free' : alloc.vec.Vec Usize)
     (h
-      : Spike.radix.copy_parent dirs free parent slot child = Result.ok (c, dirs', free'))
+      : CcfKv.radix.copy_parent dirs free parent slot child = Result.ok (c, dirs', free'))
     : dirs.val.length ≤ dirs'.val.length := by
-  have hs : WP.spec (Spike.radix.copy_parent dirs free parent slot child) (· = (c, dirs', free')) := by
+  have hs : WP.spec (CcfKv.radix.copy_parent dirs free parent slot child) (· = (c, dirs', free')) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.copy_parent at hs
+  unfold CcfKv.radix.copy_parent at hs
   dsimp only at hs
-  cases hd : Spike.radix.directory (alloc.vec.Vec.deref dirs) parent
+  cases hd : CcfKv.radix.directory (alloc.vec.Vec.deref dirs) parent
     using Result.cases with
   | div => rw [hd] at hs; simp at hs
   | vis _ _ => rw [hd] at hs; simp at hs
   | ret dir =>
-      change Spike.radix.directory (alloc.vec.Vec.deref dirs) parent = Result.ok dir at hd
+      change CcfKv.radix.directory (alloc.vec.Vec.deref dirs) parent = Result.ok dir at hd
       rw [hd, bind_ok] at hs
-      cases hset : Spike.radix.RadixDir.set_child dir slot child using Result.cases with
+      cases hset : CcfKv.radix.RadixDir.set_child dir slot child using Result.cases with
       | div => rw [hset] at hs; simp at hs
       | vis _ _ => rw [hset] at hs; simp at hs
       | ret dir1 =>
-          change Spike.radix.RadixDir.set_child dir slot child = Result.ok dir1 at hset
+          change CcfKv.radix.RadixDir.set_child dir slot child = Result.ok dir1 at hset
           rw [hset, bind_ok] at hs
           cases hpow : core.num.U32.is_power_of_two dir1.mask using Result.cases with
           | div => rw [hpow] at hs; simp at hs
@@ -1971,13 +1971,13 @@ private theorem copy_parent_len_le (dirs : alloc.vec.Vec (Option Spike.radix.Rad
                   exact Nat.le_refl _
               | false =>
                   simp only [Bool.false_eq_true, ite_false] at hs
-                  cases hadd : Spike.radix.add_directory dirs free dir1
+                  cases hadd : CcfKv.radix.add_directory dirs free dir1
                     using Result.cases with
                   | div => rw [hadd] at hs; simp at hs
                   | vis _ _ => rw [hadd] at hs; simp at hs
                   | ret ar =>
                       obtain ⟨c1, d1, f1⟩ := ar
-                      change Spike.radix.add_directory dirs free dir1 = Result.ok (c1, d1, f1) at hadd
+                      change CcfKv.radix.add_directory dirs free dir1 = Result.ok (c1, d1, f1) at hadd
                       rw [hadd, WP.spec_ok] at hs
                       obtain ⟨_, hs2⟩ := Prod.mk.inj hs
                       obtain ⟨hdEq, _⟩ := Prod.mk.inj hs2
@@ -1985,20 +1985,20 @@ private theorem copy_parent_len_le (dirs : alloc.vec.Vec (Option Spike.radix.Rad
                       exact add_directory_len_le dirs free dir1 c1 d1 f1 hadd
 
 private theorem rebuild_path_loop_len_mono (path : Slice (U32 × Usize))
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free : alloc.vec.Vec Usize)
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free : alloc.vec.Vec Usize)
     (child : U32) (e : Usize)
-    (res : U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize)
-    (h : Spike.radix.rebuild_path_loop dirs free path child e = Result.ok res)
+    (res : U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize)
+    (h : CcfKv.radix.rebuild_path_loop dirs free path child e = Result.ok res)
     : dirs.val.length ≤ res.2.1.val.length := by
-  unfold Spike.radix.rebuild_path_loop at h
+  unfold CcfKv.radix.rebuild_path_loop at h
   refine loop_invariant_of_ok
-    (fun (d, f, c, e) => Spike.radix.rebuild_path_loop.body path d f c e)
+    (fun (d, f, c, e) => CcfKv.radix.rebuild_path_loop.body path d f c e)
     (fun a z => a.1.val.length ≤ z.2.1.val.length) ?_ h
   rintro ⟨d1, f1, c1, e1⟩ r hb
   dsimp only at hb
-  have hs : WP.spec (Spike.radix.rebuild_path_loop.body path d1 f1 c1 e1) (· = r) := by
+  have hs : WP.spec (CcfKv.radix.rebuild_path_loop.body path d1 f1 c1 e1) (· = r) := by
     rw [hb, WP.spec_ok]
-  unfold Spike.radix.rebuild_path_loop.body at hb hs
+  unfold CcfKv.radix.rebuild_path_loop.body at hb hs
   by_cases hpos : e1 > 0#usize
   · rw [ite_eq_left hpos] at hb hs
     cases hsub : e1 - 1#usize using Result.cases with
@@ -2015,18 +2015,18 @@ private theorem rebuild_path_loop_len_mono (path : Slice (U32 × Usize))
             change Slice.index_usize path end1 = Result.ok (parent, slot) at hp
             rw [hp, bind_ok] at hb hs
             change (do
-              let (c2, d2, f2) ← Spike.radix.copy_parent d1 f1 parent slot c1
+              let (c2, d2, f2) ← CcfKv.radix.copy_parent d1 f1 parent slot c1
               Result.ok (ControlFlow.cont (d2, f2, c2, end1))) = Result.ok r at hb
             change WP.spec (do
-              let (c2, d2, f2) ← Spike.radix.copy_parent d1 f1 parent slot c1
+              let (c2, d2, f2) ← CcfKv.radix.copy_parent d1 f1 parent slot c1
               Result.ok (ControlFlow.cont (d2, f2, c2, end1))) (· = r) at hs
-            cases hcp : Spike.radix.copy_parent d1 f1 parent slot c1
+            cases hcp : CcfKv.radix.copy_parent d1 f1 parent slot c1
               using Result.cases with
             | div => rw [hcp] at hs; simp at hs
             | vis _ _ => rw [hcp] at hs; simp at hs
             | ret cpRes =>
                 obtain ⟨c2, d2, f2⟩ := cpRes
-                change Spike.radix.copy_parent d1 f1 parent slot c1 = Result.ok (c2, d2, f2) at hcp
+                change CcfKv.radix.copy_parent d1 f1 parent slot c1 = Result.ok (c2, d2, f2) at hcp
                 rw [hcp, bind_ok] at hb
                 change Result.ok (ControlFlow.cont (d2, f2, c2, end1)) = Result.ok r at hb
                 rw [Result.ok.injEq] at hb
@@ -2038,18 +2038,18 @@ private theorem rebuild_path_loop_len_mono (path : Slice (U32 × Usize))
     exact Nat.le_refl _
 
 private theorem add_directory_counted_lockstep {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (freeDirs : alloc.vec.Vec Usize)
-    (dir : Spike.radix.RadixDir) (pins : List U32)
-    (node : U32) (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (dir : CcfKv.radix.RadixDir) (pins : List U32)
+    (node : U32) (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
     (freeDirs' : alloc.vec.Vec Usize)
     (hadd
-      : Spike.radix.add_directory dirs freeDirs dir = Result.ok (node, dirs', freeDirs'))
+      : CcfKv.radix.add_directory dirs freeDirs dir = Result.ok (node, dirs', freeDirs'))
     (st : DirCountState dirs rows dirRefs rowRefs freeDirs pins)
     (hchildren : ∀ c ∈ dir.children.val, c ≠ 0#u32 → SingleLinkLive dirs.val rows c)
     (hrefRoom : pins.length + 17 * (dirs.val.length + 1) ≤ U32.max)
-    : WP.spec (Spike.radix.add_directory_counted dirs dirRefs rowRefs freeDirs dir)
+    : WP.spec (CcfKv.radix.add_directory_counted dirs dirRefs rowRefs freeDirs dir)
         (fun (node2, dirs2, dr2, rr2, free2) =>
           node2 = node
           ∧ dirs2 = dirs'
@@ -2065,20 +2065,20 @@ private theorem add_directory_counted_lockstep {V : Type}
               → dir.children.val.count target = 0
               → radixReferences dirs'.val pins target = 0) := by
   have hptrRoom : 2147483647 < Usize.max := by scalar_tac
-  have haddSpec : WP.spec (Spike.radix.add_directory dirs freeDirs dir) (· = (node, dirs', freeDirs')) := by
+  have haddSpec : WP.spec (CcfKv.radix.add_directory dirs freeDirs dir) (· = (node, dirs', freeDirs')) := by
     rw [hadd, WP.spec_ok]
-  unfold Spike.radix.add_directory at hadd haddSpec
-  unfold Spike.radix.add_directory_counted
+  unfold CcfKv.radix.add_directory at hadd haddSpec
+  unfold CcfKv.radix.add_directory_counted
   obtain ⟨first, hfRun, _⟩ := wp_spec_exists (radix_first_child_matches dir)
   rw [hfRun, bind_ok] at hadd haddSpec ⊢
   by_cases hfnz : first != 0#u32
   · simp only [massert, hfnz, ite_true, bind_ok] at hadd haddSpec ⊢
     cases hpre
-          : (if first >= Spike.radix.RADIX_LEAF_TAG then
+          : (if first >= CcfKv.radix.RADIX_LEAF_TAG then
                 Result.ok first
               else do
                 let s := alloc.vec.Vec.deref dirs
-                let rd ← Spike.radix.directory s first
+                let rd ← CcfKv.radix.directory s first
                 Result.ok rd.first)
       using Result.cases with
     | div =>
@@ -2088,25 +2088,25 @@ private theorem add_directory_counted_lockstep {V : Type}
     | ret first1 =>
         change _ = Result.ok first1 at hpre
         simp only [hpre, bind_ok] at hadd ⊢
-        let dir1 : Spike.radix.RadixDir := { dir with first := first1 }
+        let dir1 : CcfKv.radix.RadixDir := { dir with first := first1 }
         obtain ⟨⟨idx, d1, f1⟩, hallocRun, hallocSpec⟩ := wp_spec_exists
           (radix_allocate_matches dirs freeDirs dir1 st.vacant (fun _ => by have := st.dirsBound; omega))
         obtain ⟨_, _, _, hidxBound, hlenLe, hvac', _⟩ := hallocSpec
         rw [hallocRun, bind_ok] at hadd
-        have hadd1 : (Spike.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1)) =
+        have hadd1 : (CcfKv.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1)) =
             Result.ok (node, dirs', freeDirs') := hadd
         have hidxLtMax : idx.val < 2147483647 := by
-          cases hlk : Spike.radix.link_at idx false using Result.cases with
+          cases hlk : CcfKv.radix.link_at idx false using Result.cases with
           | div =>
-              have hs : WP.spec (Spike.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1))
+              have hs : WP.spec (CcfKv.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1))
                   (· = (node, dirs', freeDirs')) := by rw [hadd1, WP.spec_ok]
               rw [hlk] at hs; simp at hs
           | vis _ _ =>
-              have hs : WP.spec (Spike.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1))
+              have hs : WP.spec (CcfKv.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, f1))
                   (· = (node, dirs', freeDirs')) := by rw [hadd1, WP.spec_ok]
               rw [hlk] at hs; simp at hs
           | ret n0 =>
-              change Spike.radix.link_at idx false = Result.ok n0 at hlk
+              change CcfKv.radix.link_at idx false = Result.ok n0 at hlk
               exact link_at_ok_lt idx false n0 hlk
         obtain ⟨n1, hlinkRun, hlinkVal⟩ := wp_spec_exists (radix_link_matches idx false hidxLtMax)
         rw [hlinkRun, bind_tc_ok, Result.ok.injEq, Prod.mk.injEq, Prod.mk.injEq] at hadd1
@@ -2132,7 +2132,7 @@ private theorem add_directory_counted_lockstep {V : Type}
             st.freeNd hcnt1.dirLen hvacZero (fun _ => by have := st.dirsBound; omega))
         rintro ⟨idx2, d2, dr2, f2⟩ ⟨hidxEq, hdEq, hfEq, hfreeNd', hdrLen', hnew, happ, hreu⟩
         subst idx2 d2 f2
-        change WP.spec (Spike.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, dr2, rr1, f1)) _
+        change WP.spec (CcfKv.radix.link_at idx false >>= fun i1 => Result.ok (i1, d1, dr2, rr1, f1)) _
         rw [hlinkRun, bind_tc_ok, WP.spec_ok]
         have howners1 : OwnersLive dirs.val rows (dir1.children.val ++ (pins ++ arenaEdges dirs.val)) := by
           intro l hl hnz
@@ -2188,14 +2188,14 @@ private theorem add_directory_counted_lockstep {V : Type}
   · simp [massert, hfnz] at haddSpec
 
 private theorem copy_parent_counted_lockstep {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (freeDirs : alloc.vec.Vec Usize)
     (parent : U32) (slot : Usize) (child : U32) (pins entries : List U32)
-    (resChild : U32) (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (resChild : U32) (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
     (freeDirs' : alloc.vec.Vec Usize)
     (hcopy
-      : Spike.radix.copy_parent dirs freeDirs parent slot child
+      : CcfKv.radix.copy_parent dirs freeDirs parent slot child
         = Result.ok (resChild, dirs', freeDirs'))
     (st : DirCountState dirs rows dirRefs rowRefs freeDirs pins)
     (hchildLive : child ≠ 0#u32 → SingleLinkLive dirs.val rows child)
@@ -2205,7 +2205,7 @@ private theorem copy_parent_counted_lockstep {V : Type}
           SingleLinkLive dirs.val rows l ∧ radixReferences dirs.val pins l = 0)
     (hrefRoom : pins.length + 17 * (dirs.val.length + 1) ≤ U32.max)
     : WP.spec
-        (Spike.radix.copy_parent_counted dirs dirRefs rowRefs freeDirs parent slot child)
+        (CcfKv.radix.copy_parent_counted dirs dirRefs rowRefs freeDirs parent slot child)
         (fun (c2, d2, dr2, rr2, f2) =>
           c2 = resChild
           ∧ d2 = dirs'
@@ -2217,22 +2217,22 @@ private theorem copy_parent_counted_lockstep {V : Type}
               SingleLinkLive dirs'.val rows l ∧ radixReferences dirs'.val pins l = 0)
           ∧ dirs'.val.length ≤ dirs.val.length + 1
           ∧ (∀ l, SingleLinkLive dirs.val rows l → SingleLinkLive dirs'.val rows l)) := by
-  have hspec : WP.spec (Spike.radix.copy_parent dirs freeDirs parent slot child)
+  have hspec : WP.spec (CcfKv.radix.copy_parent dirs freeDirs parent slot child)
       (· = (resChild, dirs', freeDirs')) := by rw [hcopy, WP.spec_ok]
-  unfold Spike.radix.copy_parent at hcopy hspec
-  unfold Spike.radix.copy_parent_counted
+  unfold CcfKv.radix.copy_parent at hcopy hspec
+  unfold CcfKv.radix.copy_parent_counted
   dsimp only at hcopy hspec ⊢
-  cases hdirRun : Spike.radix.directory (alloc.vec.Vec.deref dirs) parent
+  cases hdirRun : CcfKv.radix.directory (alloc.vec.Vec.deref dirs) parent
     using Result.cases with
   | div => rw [hdirRun] at hspec; simp at hspec
   | vis _ _ => rw [hdirRun] at hspec; simp at hspec
   | ret dir =>
-      change Spike.radix.directory (alloc.vec.Vec.deref dirs) parent = Result.ok dir at hdirRun
+      change CcfKv.radix.directory (alloc.vec.Vec.deref dirs) parent = Result.ok dir at hdirRun
       simp only [hdirRun, bind_ok] at hcopy hspec ⊢
       have hdirMem : dir ∈ dirs.val.filterMap id := by
-        have hds : WP.spec (Spike.radix.directory (alloc.vec.Vec.deref dirs) parent) (· = dir) := by
+        have hds : WP.spec (CcfKv.radix.directory (alloc.vec.Vec.deref dirs) parent) (· = dir) := by
           rw [hdirRun, WP.spec_ok]
-        unfold Spike.radix.directory at hds
+        unfold CcfKv.radix.directory at hds
         cases hsub : parent - 1#u32 using Result.cases with
         | div => rw [hsub] at hds; simp at hds
         | vis _ _ => rw [hsub] at hds; simp at hds
@@ -2263,17 +2263,17 @@ private theorem copy_parent_counted_lockstep {V : Type}
                           rw [hidx]
                     exact List.mem_filterMap.mpr
                       ⟨some dir, List.mem_iff_getElem?.mpr ⟨_, hget⟩, rfl⟩
-      cases hset : Spike.radix.RadixDir.set_child dir slot child using Result.cases with
+      cases hset : CcfKv.radix.RadixDir.set_child dir slot child using Result.cases with
       | div => rw [hset] at hspec; simp at hspec
       | vis _ _ => rw [hset] at hspec; simp at hspec
       | ret dir1 =>
-          change Spike.radix.RadixDir.set_child dir slot child = Result.ok dir1 at hset
+          change CcfKv.radix.RadixDir.set_child dir slot child = Result.ok dir1 at hset
           simp only [hset, bind_ok] at hcopy hspec ⊢
           have hslotLt : slot.val < 17 := by
             by_contra hge
-            have hs : WP.spec (Spike.radix.RadixDir.set_child dir slot child) (· = dir1) := by
+            have hs : WP.spec (CcfKv.radix.RadixDir.set_child dir slot child) (· = dir1) := by
               rw [hset, WP.spec_ok]
-            unfold Spike.radix.RadixDir.set_child at hs
+            unfold CcfKv.radix.RadixDir.set_child at hs
             have hnone : dir.children.val[slot.val]? = none :=
               List.getElem?_eq_none (by simp; omega)
             simp [Array.index_mut_usize, Array.index_usize, Array.getElem?_Usize_eq, hnone] at hs
@@ -2349,14 +2349,14 @@ private theorem copy_parent_counted_lockstep {V : Type}
                     exact ⟨hkeepLive l hliv, hzeroPres l hz (hdir1NotQ l hl)⟩
 
 private theorem rebuild_path_counted_lockstep {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : List (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : List (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (freeDirs : alloc.vec.Vec Usize)
     (path : Slice (U32 × Usize)) (child : U32) (pins entries : List U32)
-    (resRoot : U32) (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (resRoot : U32) (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
     (freeDirs' : alloc.vec.Vec Usize)
     (hreb
-      : Spike.radix.rebuild_path dirs freeDirs path child
+      : CcfKv.radix.rebuild_path dirs freeDirs path child
         = Result.ok (resRoot, dirs', freeDirs'))
     (st : DirCountState dirs rows dirRefs rowRefs freeDirs pins)
     (hchildLive : child ≠ 0#u32 → SingleLinkLive dirs.val rows child)
@@ -2365,7 +2365,7 @@ private theorem rebuild_path_counted_lockstep {V : Type}
       : ∀ l ∈ entries,
           SingleLinkLive dirs.val rows l ∧ radixReferences dirs.val pins l = 0)
     (hrefRoom : pins.length + 17 * (dirs'.val.length + 1) ≤ U32.max)
-    : WP.spec (Spike.radix.rebuild_path_counted dirs dirRefs rowRefs freeDirs path child)
+    : WP.spec (CcfKv.radix.rebuild_path_counted dirs dirRefs rowRefs freeDirs path child)
         (fun (r2, d2, dr2, rr2, f2) =>
           r2 = resRoot
           ∧ d2 = dirs'
@@ -2376,13 +2376,13 @@ private theorem rebuild_path_counted_lockstep {V : Type}
           ∧ (∀ l ∈ entries,
               SingleLinkLive dirs'.val rows l ∧ radixReferences dirs'.val pins l = 0)
           ∧ (∀ l, SingleLinkLive dirs.val rows l → SingleLinkLive dirs'.val rows l)) := by
-  unfold Spike.radix.rebuild_path at hreb
+  unfold CcfKv.radix.rebuild_path at hreb
   have hrebLoop := hreb
-  unfold Spike.radix.rebuild_path_loop at hreb
-  unfold Spike.radix.rebuild_path_counted Spike.radix.rebuild_path_counted_loop
+  unfold CcfKv.radix.rebuild_path_loop at hreb
+  unfold CcfKv.radix.rebuild_path_counted CcfKv.radix.rebuild_path_counted_loop
   let rel :
-      (alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize × U32 × Usize) →
-      (alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec U32 × alloc.vec.Vec U32 ×
+      (alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize × U32 × Usize) →
+      (alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec U32 × alloc.vec.Vec U32 ×
         alloc.vec.Vec Usize × U32 × Usize) → Prop :=
     fun (d1, f1, c1, e1) (d2, dr2, rr2, f2, c2, e2) =>
       d2 = d1 ∧ f2 = f1 ∧ c2 = c1 ∧ e2 = e1
@@ -2390,11 +2390,11 @@ private theorem rebuild_path_counted_lockstep {V : Type}
       ∧ (c1 ≠ 0#u32 → SingleLinkLive d1.val rows c1)
       ∧ (∀ l ∈ entries, l ≠ c1)
       ∧ (∀ l ∈ entries, SingleLinkLive d1.val rows l ∧ radixReferences d1.val pins l = 0)
-      ∧ Spike.radix.rebuild_path_loop d1 f1 path c1 e1 = Result.ok (resRoot, dirs', freeDirs')
+      ∧ CcfKv.radix.rebuild_path_loop d1 f1 path c1 e1 = Result.ok (resRoot, dirs', freeDirs')
       ∧ (∀ l, SingleLinkLive dirs.val rows l → SingleLinkLive d1.val rows l)
   let post :
-      (U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize) →
-      (U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec U32 ×
+      (U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize) →
+      (U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec U32 ×
         alloc.vec.Vec U32 × alloc.vec.Vec Usize) → Prop :=
     fun (r1, d1, f1) (r2, d2, dr2, rr2, f2) =>
       r2 = r1 ∧ d2 = d1 ∧ f2 = f1
@@ -2404,28 +2404,28 @@ private theorem rebuild_path_counted_lockstep {V : Type}
       ∧ (∀ l ∈ entries, SingleLinkLive d1.val rows l ∧ radixReferences d1.val pins l = 0)
       ∧ (∀ l, SingleLinkLive dirs.val rows l → SingleLinkLive d1.val rows l)
   apply loop_lockstep
-    (fun (d1, f1, c1, e1) => Spike.radix.rebuild_path_loop.body path d1 f1 c1 e1)
+    (fun (d1, f1, c1, e1) => CcfKv.radix.rebuild_path_loop.body path d1 f1 c1 e1)
     (fun (d2, dr2, rr2, f2, c2, e2) =>
-      Spike.radix.rebuild_path_counted_loop.body path d2 dr2 rr2 f2 c2 e2)
+      CcfKv.radix.rebuild_path_counted_loop.body path d2 dr2 rr2 f2 c2 e2)
     rel post ?_ ?_ hreb
   · rintro ⟨d1, f1, c1, e1⟩ ⟨d2, dr2, rr2, f2, c2, e2⟩
       ⟨rfl, rfl, rfl, rfl, st1, hc1Live, hc1NotQ, hq1, hrem1, hkeep1⟩ r1 hb1
     dsimp only at hb1 ⊢
     have hlenCur : d2.val.length ≤ dirs'.val.length :=
       rebuild_path_loop_len_mono path d2 f2 c2 e2 (resRoot, dirs', freeDirs') hrem1
-    have hspec1 : WP.spec (Spike.radix.rebuild_path_loop.body path d2 f2 c2 e2) (· = r1) := by
+    have hspec1 : WP.spec (CcfKv.radix.rebuild_path_loop.body path d2 f2 c2 e2) (· = r1) := by
       rw [hb1, WP.spec_ok]
     have hremStep : (match r1 with
       | .done z => Result.ok z
-      | .cont next => Spike.radix.rebuild_path_loop next.1 next.2.1 path next.2.2.1 next.2.2.2) =
+      | .cont next => CcfKv.radix.rebuild_path_loop next.1 next.2.1 path next.2.2.1 next.2.2.2) =
         Result.ok (resRoot, dirs', freeDirs') := by
-      unfold Spike.radix.rebuild_path_loop at hrem1 ⊢
+      unfold CcfKv.radix.rebuild_path_loop at hrem1 ⊢
       rw [loop.eq_1] at hrem1
       dsimp only at hrem1
       rw [hb1, bind_ok] at hrem1
       cases r1 <;> exact hrem1
-    unfold Spike.radix.rebuild_path_loop.body at hb1 hspec1
-    unfold Spike.radix.rebuild_path_counted_loop.body
+    unfold CcfKv.radix.rebuild_path_loop.body at hb1 hspec1
+    unfold CcfKv.radix.rebuild_path_counted_loop.body
     by_cases hpos : e2 > 0#usize
     · rw [ite_eq_left hpos] at hb1 hspec1 ⊢
       have hposVal : 0 < e2.val := hpos
@@ -2441,22 +2441,22 @@ private theorem rebuild_path_counted_lockstep {V : Type}
           rw [hpRun] at hb1 hspec1
           simp only [bind_ok] at hb1 hspec1 ⊢
           change (do
-            let (child1, dirs1, free1) ← Spike.radix.copy_parent d2 f2 parent slot c2
+            let (child1, dirs1, free1) ← CcfKv.radix.copy_parent d2 f2 parent slot c2
             Result.ok (ControlFlow.cont (dirs1, free1, child1, end1))) = Result.ok r1 at hb1
           change WP.spec (do
-            let (child1, dirs1, free1) ← Spike.radix.copy_parent d2 f2 parent slot c2
+            let (child1, dirs1, free1) ← CcfKv.radix.copy_parent d2 f2 parent slot c2
             Result.ok (ControlFlow.cont (dirs1, free1, child1, end1))) (· = r1) at hspec1
           change WP.spec (do
             let (child1, dirs1, dir_refs1, row_refs1, free1) ←
-              Spike.radix.copy_parent_counted d2 dr2 rr2 f2 parent slot c2
+              CcfKv.radix.copy_parent_counted d2 dr2 rr2 f2 parent slot c2
             Result.ok (ControlFlow.cont (dirs1, dir_refs1, row_refs1, free1, child1, end1))) _
-          cases hcpRun : Spike.radix.copy_parent d2 f2 parent slot c2
+          cases hcpRun : CcfKv.radix.copy_parent d2 f2 parent slot c2
             using Result.cases with
           | div => rw [hcpRun] at hspec1; simp at hspec1
           | vis _ _ => rw [hcpRun] at hspec1; simp at hspec1
           | ret cpRes =>
               obtain ⟨cNext, dNext, fNext⟩ := cpRes
-              change Spike.radix.copy_parent d2 f2 parent slot c2 = Result.ok (cNext, dNext, fNext) at hcpRun
+              change CcfKv.radix.copy_parent d2 f2 parent slot c2 = Result.ok (cNext, dNext, fNext) at hcpRun
               rw [hcpRun, bind_ok] at hb1
               change Result.ok (ControlFlow.cont (dNext, fNext, cNext, end1)) = Result.ok r1 at hb1
               rw [Result.ok.injEq] at hb1
@@ -2478,12 +2478,12 @@ private theorem rebuild_path_counted_lockstep {V : Type}
       exact ⟨rfl, rfl, rfl, st1, hc1Live, hc1NotQ, hq1, hkeep1⟩
   · exact ⟨rfl, rfl, rfl, rfl, st, hchildLive, hchildNotQ, hqZero, hrebLoop, fun _ h => h⟩
 
-private theorem directory_ok_mem (dirs : Slice (Option Spike.radix.RadixDir)) (node : U32)
-    (dir : Spike.radix.RadixDir)
-    (h : Spike.radix.directory dirs node = Result.ok dir)
+private theorem directory_ok_mem (dirs : Slice (Option CcfKv.radix.RadixDir)) (node : U32)
+    (dir : CcfKv.radix.RadixDir)
+    (h : CcfKv.radix.directory dirs node = Result.ok dir)
     : dir ∈ dirs.val.filterMap id := by
-  have hds : WP.spec (Spike.radix.directory dirs node) (· = dir) := by rw [h, WP.spec_ok]
-  unfold Spike.radix.directory at hds
+  have hds : WP.spec (CcfKv.radix.directory dirs node) (· = dir) := by rw [h, WP.spec_ok]
+  unfold CcfKv.radix.directory at hds
   cases hsub : node - 1#u32 using Result.cases with
   | div => rw [hsub] at hds; simp at hds
   | vis _ _ => rw [hsub] at hds; simp at hds
@@ -2522,15 +2522,15 @@ private theorem array_index_usize_mem {α : Type} {n : Usize} (a : Array α n) (
       subst h
       exact List.mem_iff_getElem?.mpr ⟨i.val, hge⟩
 
-private theorem record_path_tip_mem (dirs : Slice (Option Spike.radix.RadixDir))
+private theorem record_path_tip_mem (dirs : Slice (Option CcfKv.radix.RadixDir))
     (path : alloc.vec.Vec (U32 × Usize)) (root : U32) (key : Slice U8)
     (stop : Option Usize) (tip : U32) (path' : alloc.vec.Vec (U32 × Usize))
-    (h : Spike.radix.record_path dirs path root key stop = Result.ok (tip, path'))
+    (h : CcfKv.radix.record_path dirs path root key stop = Result.ok (tip, path'))
     : tip = 0#u32 ∨ tip = root ∨ tip ∈ arenaEdges dirs.val := by
-  unfold Spike.radix.record_path at h
+  unfold CcfKv.radix.record_path at h
   have hs0 : WP.spec (do
       let path1 ← alloc.vec.Vec.resize (BuiltinClone (U32 × Usize)) path 0#usize (0#u32, 0#usize)
-      Spike.radix.record_path_loop dirs path1 key stop root) (· = (tip, path')) := by
+      CcfKv.radix.record_path_loop dirs path1 key stop root) (· = (tip, path')) := by
     rw [h, WP.spec_ok]
   cases hres
         : alloc.vec.Vec.resize (BuiltinClone (U32 × Usize)) path 0#usize (0#u32, 0#usize)
@@ -2540,35 +2540,35 @@ private theorem record_path_tip_mem (dirs : Slice (Option Spike.radix.RadixDir))
   | ret p0 =>
       change alloc.vec.Vec.resize _ path 0#usize (0#u32, 0#usize) = Result.ok p0 at hres
       rw [hres, bind_ok] at h
-      unfold Spike.radix.record_path_loop at h
+      unfold CcfKv.radix.record_path_loop at h
       refine loop_invariant_of_ok
-        (fun (p1, s1, n1) => Spike.radix.record_path_loop.body dirs key p1 s1 n1)
+        (fun (p1, s1, n1) => CcfKv.radix.record_path_loop.body dirs key p1 s1 n1)
         (fun a z => z.1 = 0#u32 ∨ z.1 = a.2.2 ∨ z.1 ∈ arenaEdges dirs.val)
         ?_ h
       rintro ⟨p1, s1, n1⟩ r hb
       dsimp only at hb
-      have hs : WP.spec (Spike.radix.record_path_loop.body dirs key p1 s1 n1) (· = r) := by
+      have hs : WP.spec (CcfKv.radix.record_path_loop.body dirs key p1 s1 n1) (· = r) := by
         rw [hb, WP.spec_ok]
-      unfold Spike.radix.record_path_loop.body at hb hs
+      unfold CcfKv.radix.record_path_loop.body at hb hs
       by_cases hnz : n1 != 0#u32
       · rw [ite_eq_left hnz] at hb hs
-        by_cases hlt : n1 < Spike.radix.RADIX_LEAF_TAG
+        by_cases hlt : n1 < CcfKv.radix.RADIX_LEAF_TAG
         · rw [ite_eq_left hlt] at hb hs
-          cases hd : Spike.radix.directory dirs n1 using Result.cases with
+          cases hd : CcfKv.radix.directory dirs n1 using Result.cases with
           | div => rw [hd] at hs; simp at hs
           | vis _ _ => rw [hd] at hs; simp at hs
           | ret dir =>
-              change Spike.radix.directory dirs n1 = Result.ok dir at hd
+              change CcfKv.radix.directory dirs n1 = Result.ok dir at hd
               have hdirMem := directory_ok_mem dirs n1 dir hd
               rw [hd, bind_ok] at hb hs
               cases s1 with
               | none =>
                   simp only at hb hs
-                  cases hsym : Spike.radix.symbol key dir.digit using Result.cases with
+                  cases hsym : CcfKv.radix.symbol key dir.digit using Result.cases with
                   | div => rw [hsym] at hs; simp at hs
                   | vis _ _ => rw [hsym] at hs; simp at hs
                   | ret slot =>
-                      change Spike.radix.symbol key dir.digit = Result.ok slot at hsym
+                      change CcfKv.radix.symbol key dir.digit = Result.ok slot at hsym
                       rw [hsym, bind_ok] at hb hs
                       cases hp : alloc.vec.Vec.push p1 (n1, slot) using Result.cases with
                       | div => rw [hp] at hs; simp at hs
@@ -2597,11 +2597,11 @@ private theorem record_path_tip_mem (dirs : Slice (Option Spike.radix.RadixDir))
                     subst hb
                     exact Or.inr (Or.inl rfl)
                   · rw [ite_eq_right hge] at hb hs
-                    cases hsym : Spike.radix.symbol key dir.digit using Result.cases with
+                    cases hsym : CcfKv.radix.symbol key dir.digit using Result.cases with
                     | div => rw [hsym] at hs; simp at hs
                     | vis _ _ => rw [hsym] at hs; simp at hs
                     | ret slot =>
-                        change Spike.radix.symbol key dir.digit = Result.ok slot at hsym
+                        change CcfKv.radix.symbol key dir.digit = Result.ok slot at hsym
                         rw [hsym, bind_ok] at hb hs
                         cases hp : alloc.vec.Vec.push p1 (n1, slot)
                           using Result.cases with
@@ -2632,44 +2632,44 @@ private theorem record_path_tip_mem (dirs : Slice (Option Spike.radix.RadixDir))
         exact Or.inr (Or.inl rfl)
 
 private theorem prepare_insert_stem_mem {V : Type}
-    (dirs : Slice (Option Spike.radix.RadixDir))
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (path : alloc.vec.Vec (U32 × Usize))
-    (root : U32) (key : Slice U8) (stem : U32) (split : Option Spike.radix.InsertionSplit)
+    (dirs : Slice (Option CcfKv.radix.RadixDir))
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (path : alloc.vec.Vec (U32 × Usize))
+    (root : U32) (key : Slice U8) (stem : U32) (split : Option CcfKv.radix.InsertionSplit)
     (path' : alloc.vec.Vec (U32 × Usize))
     (h
-      : Spike.radix.prepare_insert dirs rows path root key
+      : CcfKv.radix.prepare_insert dirs rows path root key
         = Result.ok ((stem, split), path'))
     : stem = 0#u32 ∨ stem = root ∨ stem ∈ arenaEdges dirs.val := by
-  have hs : WP.spec (Spike.radix.prepare_insert dirs rows path root key) (· = ((stem, split), path')) := by
+  have hs : WP.spec (CcfKv.radix.prepare_insert dirs rows path root key) (· = ((stem, split), path')) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.prepare_insert at hs
-  cases hrep : Spike.radix.representative dirs root key using Result.cases with
+  unfold CcfKv.radix.prepare_insert at hs
+  cases hrep : CcfKv.radix.representative dirs root key using Result.cases with
   | div => rw [hrep] at hs; simp at hs
   | vis _ _ => rw [hrep] at hs; simp at hs
   | ret rep =>
-      change Spike.radix.representative dirs root key = Result.ok rep at hrep
+      change CcfKv.radix.representative dirs root key = Result.ok rep at hrep
       rw [hrep, bind_ok] at hs
-      cases hrow : Spike.radix.row_at rows rep using Result.cases with
+      cases hrow : CcfKv.radix.row_at rows rep using Result.cases with
       | div => rw [hrow] at hs; simp at hs
       | vis _ _ => rw [hrow] at hs; simp at hs
       | ret prev =>
-          change Spike.radix.row_at rows rep = Result.ok prev at hrow
+          change CcfKv.radix.row_at rows rep = Result.ok prev at hrow
           rw [hrow, bind_ok] at hs
           dsimp only at hs
-          cases hdiff : Spike.radix.first_difference (alloc.vec.Vec.deref prev.key) key
+          cases hdiff : CcfKv.radix.first_difference (alloc.vec.Vec.deref prev.key) key
             using Result.cases with
           | div => rw [hdiff] at hs; simp at hs
           | vis _ _ => rw [hdiff] at hs; simp at hs
           | ret diff =>
-              change Spike.radix.first_difference _ key = Result.ok diff at hdiff
+              change CcfKv.radix.first_difference _ key = Result.ok diff at hdiff
               rw [hdiff, bind_ok] at hs
-              cases hrec : Spike.radix.record_path dirs path root key diff
+              cases hrec : CcfKv.radix.record_path dirs path root key diff
                 using Result.cases with
               | div => rw [hrec] at hs; simp at hs
               | vis _ _ => rw [hrec] at hs; simp at hs
               | ret recRes =>
                   obtain ⟨s0, p0⟩ := recRes
-                  change Spike.radix.record_path dirs path root key diff = Result.ok (s0, p0) at hrec
+                  change CcfKv.radix.record_path dirs path root key diff = Result.ok (s0, p0) at hrec
                   have hmem := record_path_tip_mem dirs path root key diff s0 p0 hrec
                   rw [hrec, bind_ok] at hs
                   cases diff with
@@ -2681,36 +2681,36 @@ private theorem prepare_insert_stem_mem {V : Type}
                       rwa [← hseq]
                   | some digit =>
                       change WP.spec (do
-                        let i1 ← Spike.radix.symbol (alloc.vec.Vec.deref prev.key) digit
-                        let i2 ← Spike.radix.symbol key digit
-                        Result.ok ((s0, some ({ digit, old_slot := i1, new_slot := i2 } : Spike.radix.InsertionSplit)), p0))
+                        let i1 ← CcfKv.radix.symbol (alloc.vec.Vec.deref prev.key) digit
+                        let i2 ← CcfKv.radix.symbol key digit
+                        Result.ok ((s0, some ({ digit, old_slot := i1, new_slot := i2 } : CcfKv.radix.InsertionSplit)), p0))
                         (· = ((stem, split), path')) at hs
-                      cases h1 : Spike.radix.symbol (alloc.vec.Vec.deref prev.key) digit
+                      cases h1 : CcfKv.radix.symbol (alloc.vec.Vec.deref prev.key) digit
                         using Result.cases with
                       | div => rw [h1] at hs; simp at hs
                       | vis _ _ => rw [h1] at hs; simp at hs
                       | ret i1 =>
-                          change Spike.radix.symbol _ digit = Result.ok i1 at h1
+                          change CcfKv.radix.symbol _ digit = Result.ok i1 at h1
                           rw [h1, bind_ok] at hs
-                          cases h2 : Spike.radix.symbol key digit using Result.cases with
+                          cases h2 : CcfKv.radix.symbol key digit using Result.cases with
                           | div => rw [h2] at hs; simp at hs
                           | vis _ _ => rw [h2] at hs; simp at hs
                           | ret i2 =>
-                              change Spike.radix.symbol _ digit = Result.ok i2 at h2
+                              change CcfKv.radix.symbol _ digit = Result.ok i2 at h2
                               rw [h2, bind_ok, WP.spec_ok] at hs
                               obtain ⟨hs1, _⟩ := Prod.mk.inj hs
                               obtain ⟨hseq, _⟩ := Prod.mk.inj hs1
                               rwa [← hseq]
 
-private theorem set_child_children_mem (dir : Spike.radix.RadixDir) (slot : Usize)
-    (child : U32) (dir1 : Spike.radix.RadixDir)
-    (h : Spike.radix.RadixDir.set_child dir slot child = Result.ok dir1)
+private theorem set_child_children_mem (dir : CcfKv.radix.RadixDir) (slot : Usize)
+    (child : U32) (dir1 : CcfKv.radix.RadixDir)
+    (h : CcfKv.radix.RadixDir.set_child dir slot child = Result.ok dir1)
     : ∀ c ∈ dir1.children.val, c = child ∨ c ∈ dir.children.val := by
   have hslotLt : slot.val < 17 := by
     by_contra hge
-    have hs : WP.spec (Spike.radix.RadixDir.set_child dir slot child) (· = dir1) := by
+    have hs : WP.spec (CcfKv.radix.RadixDir.set_child dir slot child) (· = dir1) := by
       rw [h, WP.spec_ok]
-    unfold Spike.radix.RadixDir.set_child at hs
+    unfold CcfKv.radix.RadixDir.set_child at hs
     have hnone : dir.children.val[slot.val]? = none := List.getElem?_eq_none (by simp; omega)
     simp [Array.index_mut_usize, Array.index_usize, Array.getElem?_Usize_eq, hnone] at hs
   have hspec := radix_set_child_matches dir slot child hslotLt
@@ -2724,29 +2724,29 @@ private theorem set_child_children_mem (dir : Spike.radix.RadixDir) (slot : Usiz
   · rw [List.getElem?_set_ne (Ne.symm hjs)] at hj
     exact Or.inr (List.mem_iff_getElem?.mpr ⟨j, hj⟩)
 
-private theorem split_directory_children_mem (dirs : Slice (Option Spike.radix.RadixDir))
-    (stem : U32) (split : Spike.radix.InsertionSplit) (dir : Spike.radix.RadixDir)
-    (h : Spike.radix.split_directory dirs stem split = Result.ok dir)
+private theorem split_directory_children_mem (dirs : Slice (Option CcfKv.radix.RadixDir))
+    (stem : U32) (split : CcfKv.radix.InsertionSplit) (dir : CcfKv.radix.RadixDir)
+    (h : CcfKv.radix.split_directory dirs stem split = Result.ok dir)
     : ∀ c ∈ dir.children.val, c = 0#u32 ∨ c = stem ∨ c ∈ arenaEdges dirs.val := by
-  have hs : WP.spec (Spike.radix.split_directory dirs stem split) (· = dir) := by
+  have hs : WP.spec (CcfKv.radix.split_directory dirs stem split) (· = dir) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.split_directory at hs
-  have hempty : ∀ (d0 : Spike.radix.RadixDir),
-      Spike.radix.RadixDir.empty split.digit = Result.ok d0 →
+  unfold CcfKv.radix.split_directory at hs
+  have hempty : ∀ (d0 : CcfKv.radix.RadixDir),
+      CcfKv.radix.RadixDir.empty split.digit = Result.ok d0 →
       ∀ c ∈ d0.children.val, c = 0#u32 := by
     intro d0 he0 c hc
-    unfold Spike.radix.RadixDir.empty at he0
+    unfold CcfKv.radix.RadixDir.empty at he0
     rw [Result.ok.injEq] at he0
     subst he0
     simp only [Array.repeat_val, List.mem_replicate] at hc
     exact hc.2
-  by_cases hlt : stem < Spike.radix.RADIX_LEAF_TAG
+  by_cases hlt : stem < CcfKv.radix.RADIX_LEAF_TAG
   · rw [ite_eq_left hlt] at hs
-    cases hd : Spike.radix.directory dirs stem using Result.cases with
+    cases hd : CcfKv.radix.directory dirs stem using Result.cases with
     | div => rw [hd] at hs; simp at hs
     | vis _ _ => rw [hd] at hs; simp at hs
     | ret existing =>
-        change Spike.radix.directory dirs stem = Result.ok existing at hd
+        change CcfKv.radix.directory dirs stem = Result.ok existing at hd
         have hexMem := directory_ok_mem dirs stem existing hd
         rw [hd, bind_ok] at hs
         by_cases hdig : existing.digit = split.digit
@@ -2755,18 +2755,18 @@ private theorem split_directory_children_mem (dirs : Slice (Option Spike.radix.R
           intro c hc
           exact Or.inr (Or.inr (List.mem_flatMap.mpr ⟨existing, hexMem, hc⟩))
         · rw [ite_eq_right hdig] at hs
-          cases he0 : Spike.radix.RadixDir.empty split.digit using Result.cases with
+          cases he0 : CcfKv.radix.RadixDir.empty split.digit using Result.cases with
           | div => rw [he0] at hs; simp at hs
           | vis _ _ => rw [he0] at hs; simp at hs
           | ret d0 =>
-              change Spike.radix.RadixDir.empty split.digit = Result.ok d0 at he0
+              change CcfKv.radix.RadixDir.empty split.digit = Result.ok d0 at he0
               rw [he0, bind_ok] at hs
-              cases hset : Spike.radix.RadixDir.set_child d0 split.old_slot stem
+              cases hset : CcfKv.radix.RadixDir.set_child d0 split.old_slot stem
                 using Result.cases with
               | div => rw [hset] at hs; simp at hs
               | vis _ _ => rw [hset] at hs; simp at hs
               | ret d1 =>
-                  change Spike.radix.RadixDir.set_child d0 split.old_slot stem = Result.ok d1 at hset
+                  change CcfKv.radix.RadixDir.set_child d0 split.old_slot stem = Result.ok d1 at hset
                   rw [hset, WP.spec_ok] at hs
                   subst hs
                   intro c hc
@@ -2774,18 +2774,18 @@ private theorem split_directory_children_mem (dirs : Slice (Option Spike.radix.R
                   · exact Or.inr (Or.inl rfl)
                   · exact Or.inl (hempty d0 he0 c hc0)
   · rw [ite_eq_right hlt] at hs
-    cases he0 : Spike.radix.RadixDir.empty split.digit using Result.cases with
+    cases he0 : CcfKv.radix.RadixDir.empty split.digit using Result.cases with
     | div => rw [he0] at hs; simp at hs
     | vis _ _ => rw [he0] at hs; simp at hs
     | ret d0 =>
-        change Spike.radix.RadixDir.empty split.digit = Result.ok d0 at he0
+        change CcfKv.radix.RadixDir.empty split.digit = Result.ok d0 at he0
         rw [he0, bind_ok] at hs
-        cases hset : Spike.radix.RadixDir.set_child d0 split.old_slot stem
+        cases hset : CcfKv.radix.RadixDir.set_child d0 split.old_slot stem
           using Result.cases with
         | div => rw [hset] at hs; simp at hs
         | vis _ _ => rw [hset] at hs; simp at hs
         | ret d1 =>
-            change Spike.radix.RadixDir.set_child d0 split.old_slot stem = Result.ok d1 at hset
+            change CcfKv.radix.RadixDir.set_child d0 split.old_slot stem = Result.ok d1 at hset
             rw [hset, WP.spec_ok] at hs
             subst hs
             intro c hc
@@ -2794,8 +2794,8 @@ private theorem split_directory_children_mem (dirs : Slice (Option Spike.radix.R
             · exact Or.inl (hempty d0 he0 c hc0)
 
 private theorem single_link_live_ne_zero {V : Type}
-    {dirs : List (Option Spike.radix.RadixDir)}
-    {rows : List (Option (Spike.radix.RadixRow V))} {l : U32}
+    {dirs : List (Option CcfKv.radix.RadixDir)}
+    {rows : List (Option (CcfKv.radix.RadixRow V))} {l : U32}
     (h : SingleLinkLive dirs rows l)
     : l ≠ 0#u32 := by
   intro rfl
@@ -2807,18 +2807,18 @@ private theorem erase_pairwise {α β : Type} [DecidableEq α] {R : α × β →
   h.filter _
 
 theorem single_preserves_pins_of_arena_keeps {V : Type}
-    {before after : Spike.radix.SingleRadix V} {pins : List U32}
+    {before after : CcfKv.radix.SingleRadix V} {pins : List U32}
     (hkeeps : ArenaKeeps before.values after.values)
     : SinglePreservesPins before after pins :=
   fun root _ bindings hview =>
     single_retains_views before after hkeeps root bindings hview
 
 private theorem single_liveness_retain_next {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : alloc.vec.Vec (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : alloc.vec.Vec (Option (CcfKv.radix.RadixRow V)))
     (freeDirs freeRows : alloc.vec.Vec Usize)
     (path : alloc.vec.Vec (U32 × Usize))
-    (retired : Spike.retire_queue.RetireQueue)
+    (retired : CcfKv.retire_queue.RetireQueue)
     (dirRefs rowRefs : alloc.vec.Vec U32) (pins entries : List U32) (next : U32)
     (hvalid : ArenaValid ⟨dirs, rows, freeDirs, freeRows, path⟩)
     (hrowsBound : rows.val.length ≤ 2147483647)
@@ -2832,7 +2832,7 @@ private theorem single_liveness_retain_next {V : Type}
     (hnextLive : next ≠ 0#u32 → SingleLinkLive dirs.val rows.val next)
     (hnextNotQ : ∀ l ∈ entries, l ≠ next)
     (hrefRoom : pins.length + 17 * dirs.val.length + 1 ≤ U32.max)
-    : WP.spec (Spike.radix.retain_link dirRefs rowRefs next)
+    : WP.spec (CcfKv.radix.retain_link dirRefs rowRefs next)
         (fun (dr', rr') =>
           SingleLiveness
             ⟨⟨dirs, rows, freeDirs, freeRows, path⟩, dr', rr', retired⟩
@@ -2863,8 +2863,8 @@ private theorem single_liveness_retain_next {V : Type}
       have hne : next ≠ l := Ne.symm (hnextNotQ l hl)
       simpa [List.count_cons, beq_eq_false_iff_ne.mpr hne] using hz
 
-theorem single_remove_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (key : Slice U8)
+theorem single_remove_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (key : Slice U8)
     (bindings : List (List U8 × U32)) (pins : List U32)
     (view : SingleView arena root bindings)
     (live : SingleLiveness arena pins)
@@ -2876,7 +2876,7 @@ theorem single_remove_refines {V : Type} (arena : Spike.radix.SingleRadix V)
     (refRoom
       : pins.length + 17 * (arena.values.dirs.val.length + bindings.length + 1) + 1
         ≤ U32.max)
-    : WP.spec (Spike.radix.SingleRadix.remove arena root key)
+    : WP.spec (CcfKv.radix.SingleRadix.remove arena root key)
         (fun (next, after) =>
           SingleLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ ArenaKeeps arena.values after.values
@@ -2920,54 +2920,54 @@ theorem single_remove_refines {V : Type} (arena : Spike.radix.SingleRadix V)
       have := (hqZero l hl).2
       omega
   have hremSpec : WP.spec
-      (Spike.radix.remove arena.values.dirs arena.values.free_dirs
+      (CcfKv.radix.remove arena.values.dirs arena.values.free_dirs
         (alloc.vec.Vec.deref arena.values.rows) arena.values.path root key)
       (· = (next0, dirs', freeDirs', path')) := by rw [hremRun, WP.spec_ok]
-  unfold Spike.radix.remove at hremRun hremSpec
-  unfold Spike.radix.SingleRadix.remove
+  unfold CcfKv.radix.remove at hremRun hremSpec
+  unfold CcfKv.radix.SingleRadix.remove
   dsimp only at hremRun hremSpec ⊢
   cases hrec
-        : Spike.radix.record_path (alloc.vec.Vec.deref arena.values.dirs)
+        : CcfKv.radix.record_path (alloc.vec.Vec.deref arena.values.dirs)
             arena.values.path root key none
     using Result.cases with
   | div => rw [hrec] at hremSpec; simp at hremSpec
   | vis _ _ => rw [hrec] at hremSpec; simp at hremSpec
   | ret recRes =>
       obtain ⟨leaf, path1⟩ := recRes
-      change Spike.radix.record_path _ arena.values.path root key none = Result.ok (leaf, path1) at hrec
+      change CcfKv.radix.record_path _ arena.values.path root key none = Result.ok (leaf, path1) at hrec
       rw [hrec, bind_ok] at hremRun hremSpec
       simp only [bind_ok]
       change (if leaf = 0#u32 then Result.ok (root, arena.values.dirs, arena.values.free_dirs, path1)
         else do
-          let v ← Spike.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
+          let v ← CcfKv.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
           if core.option.Option.is_none v then
             Result.ok (root, arena.values.dirs, arena.values.free_dirs, path1)
           else do
-            let (n, d, f) ← Spike.radix.rebuild_path arena.values.dirs arena.values.free_dirs
+            let (n, d, f) ← CcfKv.radix.rebuild_path arena.values.dirs arena.values.free_dirs
               (alloc.vec.Vec.deref path1) 0#u32
             Result.ok (n, d, f, path1)) = Result.ok (next0, dirs', freeDirs', path') at hremRun
       change WP.spec (if leaf = 0#u32 then Result.ok (root, arena.values.dirs, arena.values.free_dirs, path1)
         else do
-          let v ← Spike.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
+          let v ← CcfKv.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
           if core.option.Option.is_none v then
             Result.ok (root, arena.values.dirs, arena.values.free_dirs, path1)
           else do
-            let (n, d, f) ← Spike.radix.rebuild_path arena.values.dirs arena.values.free_dirs
+            let (n, d, f) ← CcfKv.radix.rebuild_path arena.values.dirs arena.values.free_dirs
               (alloc.vec.Vec.deref path1) 0#u32
             Result.ok (n, d, f, path1)) (· = (next0, dirs', freeDirs', path')) at hremSpec
       let av := arena.values
       change WP.spec (if leaf = 0#u32 then do
-          let (v1, v2) ← Spike.radix.retain_link arena.dir_refs arena.row_refs root
+          let (v1, v2) ← CcfKv.radix.retain_link arena.dir_refs arena.row_refs root
           Result.ok (root, { arena with values := { av with path := path1 }, dir_refs := v1, row_refs := v2 })
         else do
-          let o ← Spike.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
+          let o ← CcfKv.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
           if core.option.Option.is_none o then do
-            let (v1, v2) ← Spike.radix.retain_link arena.dir_refs arena.row_refs root
+            let (v1, v2) ← CcfKv.radix.retain_link arena.dir_refs arena.row_refs root
             Result.ok (root, { arena with values := { av with path := path1 }, dir_refs := v1, row_refs := v2 })
           else do
-            let (next, v1, v2, v3, v4) ← Spike.radix.rebuild_path_counted arena.values.dirs
+            let (next, v1, v2, v3, v4) ← CcfKv.radix.rebuild_path_counted arena.values.dirs
               arena.dir_refs arena.row_refs arena.values.free_dirs (alloc.vec.Vec.deref path1) 0#u32
-            let (v5, v6) ← Spike.radix.retain_link v2 v3 next
+            let (v5, v6) ← CcfKv.radix.retain_link v2 v3 next
             Result.ok (next, { arena with values := { av with dirs := v1, free_dirs := v4, path := path1 }, dir_refs := v5, row_refs := v6 })) _
       by_cases hlz : leaf = 0#u32
       · rw [ite_eq_left hlz] at hremRun ⊢
@@ -2986,12 +2986,12 @@ theorem single_remove_refines {V : Type} (arena : Spike.radix.SingleRadix V)
           by simpa [singleBindings, alloc.vec.Vec.deref] using hbind'⟩
       · rw [ite_eq_right hlz] at hremRun hremSpec ⊢
         cases hchk
-              : Spike.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
+              : CcfKv.radix.check_leaf (alloc.vec.Vec.deref arena.values.rows) leaf key
           using Result.cases with
         | div => rw [hchk] at hremSpec; simp at hremSpec
         | vis _ _ => rw [hchk] at hremSpec; simp at hremSpec
         | ret opt =>
-            change Spike.radix.check_leaf _ leaf key = Result.ok opt at hchk
+            change CcfKv.radix.check_leaf _ leaf key = Result.ok opt at hchk
             rw [hchk, bind_ok] at hremRun hremSpec
             simp only [bind_ok]
             by_cases hnone : core.option.Option.is_none opt = true
@@ -3011,14 +3011,14 @@ theorem single_remove_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                 by simpa [singleBindings, alloc.vec.Vec.deref] using hbind'⟩
             · rw [ite_eq_right hnone] at hremRun hremSpec ⊢
               cases hreb
-                    : Spike.radix.rebuild_path arena.values.dirs arena.values.free_dirs
+                    : CcfKv.radix.rebuild_path arena.values.dirs arena.values.free_dirs
                         (alloc.vec.Vec.deref path1) 0#u32
                 using Result.cases with
               | div => rw [hreb] at hremSpec; simp at hremSpec
               | vis _ _ => rw [hreb] at hremSpec; simp at hremSpec
               | ret rebRes =>
                   obtain ⟨n1, d1, f1⟩ := rebRes
-                  change Spike.radix.rebuild_path _ _ _ 0#u32 = Result.ok (n1, d1, f1) at hreb
+                  change CcfKv.radix.rebuild_path _ _ _ 0#u32 = Result.ok (n1, d1, f1) at hreb
                   rw [hreb, bind_ok] at hremRun
                   change Result.ok (n1, d1, f1, path1) = Result.ok (next0, dirs', freeDirs', path') at hremRun
                   rw [Result.ok.injEq, Prod.mk.injEq, Prod.mk.injEq, Prod.mk.injEq] at hremRun
@@ -3060,7 +3060,7 @@ private theorem not_lt_leaf_tag {l : U32} (h : 2147483648 < l.val)
   have hval : (2147483648#u32 : U32).val = 2147483648 := by scalar_tac
   omega
 
-private theorem vacant_row_ref_zero {V : Type} {arena : Spike.radix.SingleRadix V}
+private theorem vacant_row_ref_zero {V : Type} {arena : CcfKv.radix.SingleRadix V}
     {pins : List U32} (live : SingleLiveness arena pins)
     : ∀ (i : Nat) (c : U32),
         arena.values.rows.val[i]? = some none
@@ -3075,8 +3075,8 @@ private theorem vacant_row_ref_zero {V : Type} {arena : Spike.radix.SingleRadix 
   have hzero := live.counts.rowVal l c hgt (by rw [hsub]; exact hc)
   simpa [hsub, hnone] using hzero
 
-theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (root : Spike.radix.RadixRoot) (row : Spike.radix.RadixRow V)
+theorem single_put_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (root : CcfKv.radix.RadixRoot) (row : CcfKv.radix.RadixRow V)
     (bindings : List (List U8 × U32)) (pins : List U32)
     (view : SingleView arena root bindings)
     (live : SingleLiveness arena pins)
@@ -3090,7 +3090,7 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
     (refRoom
       : pins.length + 17 * (arena.values.dirs.val.length + bindings.length + 2) + 1
         ≤ U32.max)
-    : WP.spec (Spike.radix.SingleRadix.put arena root row)
+    : WP.spec (CcfKv.radix.SingleRadix.put arena root row)
         (fun (next, after) =>
           SingleLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ ArenaKeeps arena.values after.values
@@ -3134,12 +3134,12 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
     exact hsortedPerm.filterMap _
   obtain ⟨entries, hqv, hqnd, hqZero⟩ := live.queue
   have hputSpec : WP.spec
-      (Spike.radix.put arena.values.dirs arena.values.free_dirs arena.values.rows
+      (CcfKv.radix.put arena.values.dirs arena.values.free_dirs arena.values.rows
         arena.values.free_rows arena.values.path root row)
       (· = ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path')) := by
     rw [hputRun, WP.spec_ok]
-  unfold Spike.radix.put at hputRun hputSpec
-  unfold Spike.radix.SingleRadix.put
+  unfold CcfKv.radix.put at hputRun hputSpec
+  unfold CcfKv.radix.SingleRadix.put
   dsimp only at hputRun hputSpec ⊢
   have hvacRowsZero := vacant_row_ref_zero live
   have howners0 : OwnersLive arena.values.dirs.val arena.values.rows.val
@@ -3151,28 +3151,28 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
       exact live.childrenLive d hd l hc hnz
   by_cases hrz : root = 0#u32
   · rw [ite_eq_left hrz] at hputRun hputSpec ⊢
-    cases hal : Spike.radix.allocate arena.values.rows arena.values.free_rows row
+    cases hal : CcfKv.radix.allocate arena.values.rows arena.values.free_rows row
       using Result.cases with
     | div => rw [hal] at hputSpec; simp at hputSpec
     | vis _ _ => rw [hal] at hputSpec; simp at hputSpec
     | ret ar =>
         obtain ⟨idx, r1, fr1⟩ := ar
-        change Spike.radix.allocate arena.values.rows arena.values.free_rows row =
+        change CcfKv.radix.allocate arena.values.rows arena.values.free_rows row =
           Result.ok (idx, r1, fr1) at hal
         rw [hal, bind_ok] at hputRun hputSpec
         change (do
-          let leaf ← Spike.radix.link_at idx true
+          let leaf ← CcfKv.radix.link_at idx true
           Result.ok ((leaf, leaf, none), arena.values.dirs, arena.values.free_dirs, r1, fr1,
             arena.values.path)) = Result.ok _ at hputRun
         change WP.spec (do
-          let leaf ← Spike.radix.link_at idx true
+          let leaf ← CcfKv.radix.link_at idx true
           Result.ok ((leaf, leaf, none), arena.values.dirs, arena.values.free_dirs, r1, fr1,
             arena.values.path)) _ at hputSpec
-        cases hlk : Spike.radix.link_at idx true using Result.cases with
+        cases hlk : CcfKv.radix.link_at idx true using Result.cases with
         | div => rw [hlk] at hputSpec; simp at hputSpec
         | vis _ _ => rw [hlk] at hputSpec; simp at hputSpec
         | ret lf =>
-            change Spike.radix.link_at idx true = Result.ok lf at hlk
+            change CcfKv.radix.link_at idx true = Result.ok lf at hlk
             have hidxLt := link_at_ok_lt idx true lf hlk
             have hlkSpec := radix_link_matches idx true hidxLt
             rw [hlk, WP.spec_ok] at hlkSpec
@@ -3218,8 +3218,8 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                 fun p hp => hkeepLive1 p (live.pinsLive p hp),
                 fun d hd c hc hnz => hkeepLive1 c (live.childrenLive d hd c hc hnz), hcnt1⟩
             change WP.spec (do
-              let leaf ← Spike.radix.link_at idx true
-              let (v3, v4) ← Spike.radix.retain_link arena.dir_refs rr2 leaf
+              let leaf ← CcfKv.radix.link_at idx true
+              let (v3, v4) ← CcfKv.radix.retain_link arena.dir_refs rr2 leaf
               Result.ok (leaf, { arena with
                 values := { (arena.values) with rows := r1, free_rows := fr1 },
                 dir_refs := v3, row_refs := v4 })) _
@@ -3239,7 +3239,7 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
               ⟨⟨h', htreeSorted⟩, hrowsSorted, hsortedOrd⟩, hbindSorted⟩
   · rw [ite_eq_right hrz] at hputRun hputSpec ⊢
     cases hprep
-          : Spike.radix.prepare_insert (alloc.vec.Vec.deref arena.values.dirs)
+          : CcfKv.radix.prepare_insert (alloc.vec.Vec.deref arena.values.dirs)
               (alloc.vec.Vec.deref arena.values.rows) arena.values.path root
               (alloc.vec.Vec.deref row.key)
       using Result.cases with
@@ -3247,87 +3247,87 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
     | vis _ _ => rw [hprep] at hputSpec; simp at hputSpec
     | ret prepRes =>
         obtain ⟨⟨stem, split⟩, path1⟩ := prepRes
-        change Spike.radix.prepare_insert _ _ _ _ _ = Result.ok ((stem, split), path1) at hprep
+        change CcfKv.radix.prepare_insert _ _ _ _ _ = Result.ok ((stem, split), path1) at hprep
         have hstemMem := prepare_insert_stem_mem _ _ _ _ _ stem split path1 hprep
         rw [hprep, bind_ok] at hputRun hputSpec
         simp only [bind_ok]
         change (do
-          let (i, r1, fr1) ← Spike.radix.allocate arena.values.rows arena.values.free_rows row
-          let leaf ← Spike.radix.link_at i true
+          let (i, r1, fr1) ← CcfKv.radix.allocate arena.values.rows arena.values.free_rows row
+          let leaf ← CcfKv.radix.link_at i true
           let (d1, fd1, child, rep) ← match split with
             | none => Result.ok (arena.values.dirs, arena.values.free_dirs, leaf, some stem)
             | some split1 => do
-                let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                let (c1, d2, fd2) ← Spike.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
+                let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                let (c1, d2, fd2) ← CcfKv.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
                 Result.ok (d2, fd2, c1, none)
-          let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+          let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
           Result.ok ((n1, leaf, rep), d3, fd3, r1, fr1, path1)) = Result.ok _ at hputRun
         change WP.spec (do
-          let (i, r1, fr1) ← Spike.radix.allocate arena.values.rows arena.values.free_rows row
-          let leaf ← Spike.radix.link_at i true
+          let (i, r1, fr1) ← CcfKv.radix.allocate arena.values.rows arena.values.free_rows row
+          let leaf ← CcfKv.radix.link_at i true
           let (d1, fd1, child, rep) ← match split with
             | none => Result.ok (arena.values.dirs, arena.values.free_dirs, leaf, some stem)
             | some split1 => do
-                let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                let (c1, d2, fd2) ← Spike.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
+                let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                let (c1, d2, fd2) ← CcfKv.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
                 Result.ok (d2, fd2, c1, none)
-          let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+          let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
           Result.ok ((n1, leaf, rep), d3, fd3, r1, fr1, path1)) _ at hputSpec
         change WP.spec (do
-          let (i, r1, rr1, fr1) ← Spike.radix.alloc_counted arena.values.rows arena.row_refs
+          let (i, r1, rr1, fr1) ← CcfKv.radix.alloc_counted arena.values.rows arena.row_refs
             arena.values.free_rows row
-          let leaf ← Spike.radix.link_at i true
+          let leaf ← CcfKv.radix.link_at i true
           let (d1, fd1, dr1, rr2, child) ← match split with
             | none => Result.ok (arena.values.dirs, arena.values.free_dirs, arena.dir_refs, rr1, leaf)
             | some split1 => do
-                let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                let (c1, d2, dr2, rr3, fd2) ← Spike.radix.add_directory_counted arena.values.dirs
+                let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                let (c1, d2, dr2, rr3, fd2) ← CcfKv.radix.add_directory_counted arena.values.dirs
                   arena.dir_refs rr1 arena.values.free_dirs dir1
                 Result.ok (d2, fd2, dr2, rr3, c1)
-          let (n1, d3, dr3, rr4, fd3) ← Spike.radix.rebuild_path_counted d1 dr1 rr2 fd1
+          let (n1, d3, dr3, rr4, fd3) ← CcfKv.radix.rebuild_path_counted d1 dr1 rr2 fd1
             (alloc.vec.Vec.deref path1) child
-          let (dr4, rr5) ← Spike.radix.retain_link dr3 rr4 n1
+          let (dr4, rr5) ← CcfKv.radix.retain_link dr3 rr4 n1
           Result.ok (n1, { arena with
             values := { dirs := d3, rows := r1, free_dirs := fd3, free_rows := fr1, path := path1 },
             dir_refs := dr4, row_refs := rr5 })) _
-        cases hal : Spike.radix.allocate arena.values.rows arena.values.free_rows row
+        cases hal : CcfKv.radix.allocate arena.values.rows arena.values.free_rows row
           using Result.cases with
         | div => rw [hal] at hputSpec; simp at hputSpec
         | vis _ _ => rw [hal] at hputSpec; simp at hputSpec
         | ret ar =>
             obtain ⟨idx, r1, fr1⟩ := ar
-            change Spike.radix.allocate _ _ _ = Result.ok (idx, r1, fr1) at hal
+            change CcfKv.radix.allocate _ _ _ = Result.ok (idx, r1, fr1) at hal
             rw [hal, bind_ok] at hputRun hputSpec
             change (do
-              let leaf ← Spike.radix.link_at idx true
+              let leaf ← CcfKv.radix.link_at idx true
               let (d1, fd1, child, rep) ← match split with
                 | none => Result.ok (arena.values.dirs, arena.values.free_dirs, leaf, some stem)
                 | some split1 => do
-                    let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                    let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                    let (c1, d2, fd2) ← Spike.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
+                    let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                    let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                    let (c1, d2, fd2) ← CcfKv.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
                     Result.ok (d2, fd2, c1, none)
-              let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+              let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
               Result.ok ((n1, leaf, rep), d3, fd3, r1, fr1, path1)) = Result.ok _ at hputRun
             change WP.spec (do
-              let leaf ← Spike.radix.link_at idx true
+              let leaf ← CcfKv.radix.link_at idx true
               let (d1, fd1, child, rep) ← match split with
                 | none => Result.ok (arena.values.dirs, arena.values.free_dirs, leaf, some stem)
                 | some split1 => do
-                    let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                    let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                    let (c1, d2, fd2) ← Spike.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
+                    let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                    let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                    let (c1, d2, fd2) ← CcfKv.radix.add_directory arena.values.dirs arena.values.free_dirs dir1
                     Result.ok (d2, fd2, c1, none)
-              let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+              let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
               Result.ok ((n1, leaf, rep), d3, fd3, r1, fr1, path1)) _ at hputSpec
-            cases hlk : Spike.radix.link_at idx true using Result.cases with
+            cases hlk : CcfKv.radix.link_at idx true using Result.cases with
             | div => rw [hlk] at hputSpec; simp at hputSpec
             | vis _ _ => rw [hlk] at hputSpec; simp at hputSpec
             | ret lf =>
-                change Spike.radix.link_at idx true = Result.ok lf at hlk
+                change CcfKv.radix.link_at idx true = Result.ok lf at hlk
                 have hidxLt := link_at_ok_lt idx true lf hlk
                 have hlkSpec := radix_link_matches idx true hidxLt
                 rw [hlk, WP.spec_ok] at hlkSpec
@@ -3378,18 +3378,18 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                     ∧ radixReferences arena.values.dirs.val pins l = 0 :=
                   fun l hl => ⟨hkeepLive1 l (hqZero l hl).1, (hqZero l hl).2⟩
                 change WP.spec (do
-                  let leaf ← Spike.radix.link_at idx true
+                  let leaf ← CcfKv.radix.link_at idx true
                   let (d1, fd1, dr1, rr2, child) ← match split with
                     | none => Result.ok (arena.values.dirs, arena.values.free_dirs, arena.dir_refs, rr1, leaf)
                     | some split1 => do
-                        let dir ← Spike.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
-                        let dir1 ← Spike.radix.RadixDir.set_child dir split1.new_slot leaf
-                        let (c1, d2, dr2, rr3, fd2) ← Spike.radix.add_directory_counted arena.values.dirs
+                        let dir ← CcfKv.radix.split_directory (alloc.vec.Vec.deref arena.values.dirs) stem split1
+                        let dir1 ← CcfKv.radix.RadixDir.set_child dir split1.new_slot leaf
+                        let (c1, d2, dr2, rr3, fd2) ← CcfKv.radix.add_directory_counted arena.values.dirs
                           arena.dir_refs rr1 arena.values.free_dirs dir1
                         Result.ok (d2, fd2, dr2, rr3, c1)
-                  let (n1, d3, dr3, rr4, fd3) ← Spike.radix.rebuild_path_counted d1 dr1 rr2 fd1
+                  let (n1, d3, dr3, rr4, fd3) ← CcfKv.radix.rebuild_path_counted d1 dr1 rr2 fd1
                     (alloc.vec.Vec.deref path1) child
-                  let (dr4, rr5) ← Spike.radix.retain_link dr3 rr4 n1
+                  let (dr4, rr5) ← CcfKv.radix.retain_link dr3 rr4 n1
                   Result.ok (n1, { arena with values := { dirs := d3, rows := r1, free_dirs := fd3, free_rows := fr1, path := path1 }, dir_refs := dr4, row_refs := rr5 })) _
                 rw [hlk, bind_ok]
                 have hstemMem' : stem = 0#u32 ∨ stem = root ∨ stem ∈ arenaEdges arena.values.dirs.val := by
@@ -3414,29 +3414,29 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                 | none =>
                     simp only [bind_ok] at hputRun hputSpec ⊢
                     change (do
-                      let (n1, d3, fd3) ← Spike.radix.rebuild_path arena.values.dirs
+                      let (n1, d3, fd3) ← CcfKv.radix.rebuild_path arena.values.dirs
                         arena.values.free_dirs (alloc.vec.Vec.deref path1) lf
                       Result.ok ((n1, lf, some stem), d3, fd3, r1, fr1, path1)) =
                         Result.ok ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path') at hputRun
                     change WP.spec (do
-                      let (n1, d3, fd3) ← Spike.radix.rebuild_path arena.values.dirs
+                      let (n1, d3, fd3) ← CcfKv.radix.rebuild_path arena.values.dirs
                         arena.values.free_dirs (alloc.vec.Vec.deref path1) lf
                       Result.ok ((n1, lf, some stem), d3, fd3, r1, fr1, path1))
                         (· = ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path')) at hputSpec
                     change WP.spec (do
-                      let (n1, d3, dr3, rr4, fd3) ← Spike.radix.rebuild_path_counted arena.values.dirs
+                      let (n1, d3, dr3, rr4, fd3) ← CcfKv.radix.rebuild_path_counted arena.values.dirs
                         arena.dir_refs rr1 arena.values.free_dirs (alloc.vec.Vec.deref path1) lf
-                      let (dr4, rr5) ← Spike.radix.retain_link dr3 rr4 n1
+                      let (dr4, rr5) ← CcfKv.radix.retain_link dr3 rr4 n1
                       Result.ok (n1, { arena with values := { dirs := d3, rows := r1, free_dirs := fd3, free_rows := fr1, path := path1 }, dir_refs := dr4, row_refs := rr5 })) _
                     cases hreb
-                          : Spike.radix.rebuild_path arena.values.dirs
+                          : CcfKv.radix.rebuild_path arena.values.dirs
                               arena.values.free_dirs (alloc.vec.Vec.deref path1) lf
                       using Result.cases with
                     | div => rw [hreb] at hputSpec; simp at hputSpec
                     | vis _ _ => rw [hreb] at hputSpec; simp at hputSpec
                     | ret rebRes =>
                         obtain ⟨n1, d3, fd3⟩ := rebRes
-                        change Spike.radix.rebuild_path _ _ _ lf = Result.ok (n1, d3, fd3) at hreb
+                        change CcfKv.radix.rebuild_path _ _ _ lf = Result.ok (n1, d3, fd3) at hreb
                         rw [hreb, bind_ok] at hputRun
                         change Result.ok ((n1, lf, some stem), d3, fd3, r1, fr1, path1) =
                           Result.ok ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path') at hputRun
@@ -3471,55 +3471,55 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                 | some split1 =>
                     dsimp only at hputRun hputSpec ⊢
                     cases hsp
-                          : Spike.radix.split_directory
+                          : CcfKv.radix.split_directory
                               (alloc.vec.Vec.deref arena.values.dirs) stem split1
                       using Result.cases with
                     | div => rw [hsp] at hputSpec; simp at hputSpec
                     | vis _ _ => rw [hsp] at hputSpec; simp at hputSpec
                     | ret dir0 =>
-                        change Spike.radix.split_directory _ stem split1 = Result.ok dir0 at hsp
+                        change CcfKv.radix.split_directory _ stem split1 = Result.ok dir0 at hsp
                         have hdir0Mem := split_directory_children_mem _ stem split1 dir0 hsp
                         rw [hsp, bind_ok] at hputRun hputSpec
                         simp only [bind_ok]
                         cases hset
-                              : Spike.radix.RadixDir.set_child dir0 split1.new_slot lf
+                              : CcfKv.radix.RadixDir.set_child dir0 split1.new_slot lf
                           using Result.cases with
                         | div => rw [hset] at hputSpec; simp at hputSpec
                         | vis _ _ => rw [hset] at hputSpec; simp at hputSpec
                         | ret dir1 =>
-                            change Spike.radix.RadixDir.set_child dir0 split1.new_slot lf = Result.ok dir1 at hset
+                            change CcfKv.radix.RadixDir.set_child dir0 split1.new_slot lf = Result.ok dir1 at hset
                             have hdir1Mem := set_child_children_mem dir0 split1.new_slot lf dir1 hset
                             rw [hset, bind_ok] at hputRun hputSpec
                             simp only [bind_ok]
                             cases hadd
-                                  : Spike.radix.add_directory arena.values.dirs
+                                  : CcfKv.radix.add_directory arena.values.dirs
                                       arena.values.free_dirs dir1
                               using Result.cases with
                             | div => rw [hadd] at hputSpec; simp at hputSpec
                             | vis _ _ => rw [hadd] at hputSpec; simp at hputSpec
                             | ret addRes =>
                                 obtain ⟨c1, d2, fd2⟩ := addRes
-                                change Spike.radix.add_directory _ _ dir1 = Result.ok (c1, d2, fd2) at hadd
+                                change CcfKv.radix.add_directory _ _ dir1 = Result.ok (c1, d2, fd2) at hadd
                                 rw [hadd, bind_ok] at hputRun hputSpec
                                 change (Result.ok (d2, fd2, c1, none) >>= fun (d1, fd1, child, rep) => do
-                                  let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+                                  let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
                                   Result.ok ((n1, lf, rep), d3, fd3, r1, fr1, path1)) =
                                     Result.ok ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path') at hputRun
                                 change WP.spec (Result.ok (d2, fd2, c1, none) >>= fun (d1, fd1, child, rep) => do
-                                  let (n1, d3, fd3) ← Spike.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
+                                  let (n1, d3, fd3) ← CcfKv.radix.rebuild_path d1 fd1 (alloc.vec.Vec.deref path1) child
                                   Result.ok ((n1, lf, rep), d3, fd3, r1, fr1, path1))
                                     (· = ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path')) at hputSpec
                                 rw [bind_tc_ok] at hputRun hputSpec
                                 dsimp only at hputRun hputSpec
                                 cases hreb
-                                      : Spike.radix.rebuild_path d2 fd2
+                                      : CcfKv.radix.rebuild_path d2 fd2
                                           (alloc.vec.Vec.deref path1) c1
                                   using Result.cases with
                                 | div => rw [hreb] at hputSpec; simp at hputSpec
                                 | vis _ _ => rw [hreb] at hputSpec; simp at hputSpec
                                 | ret rebRes =>
                                     obtain ⟨n1, d3, fd3⟩ := rebRes
-                                    change Spike.radix.rebuild_path d2 fd2 _ c1 = Result.ok (n1, d3, fd3) at hreb
+                                    change CcfKv.radix.rebuild_path d2 fd2 _ c1 = Result.ok (n1, d3, fd3) at hreb
                                     rw [hreb, bind_ok] at hputRun
                                     change Result.ok ((n1, lf, none), d3, fd3, r1, fr1, path1) =
                                       Result.ok ((next0, leaf0, replaced0), dirs', freeDirs', rows', freeRows', path') at hputRun
@@ -3559,7 +3559,7 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                                           omega
                                     have haddBind : WP.spec
                                         (do
-                                          let (c1, d2, dr2, rr3, fd2) ← Spike.radix.add_directory_counted
+                                          let (c1, d2, dr2, rr3, fd2) ← CcfKv.radix.add_directory_counted
                                             arena.values.dirs arena.dir_refs rr1 arena.values.free_dirs dir1
                                           Result.ok (d2, fd2, dr2, rr3, c1))
                                         (fun (d1, fd1, dr1, rr2, child) =>
@@ -3616,11 +3616,11 @@ theorem single_put_refines {V : Type} (arena : Spike.radix.SingleRadix V)
                                       hbindSorted
                                     ⟩
 
-theorem single_stage_batch_leaf_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (row : Spike.radix.RadixRow V) (pins : List U32)
+theorem single_stage_batch_leaf_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (row : CcfKv.radix.RadixRow V) (pins : List U32)
     (live : SingleLiveness arena pins)
     (rowRoom : arena.values.rows.val.length < 2147483647)
-    : WP.spec (Spike.radix.SingleRadix.stage_batch_leaf arena row)
+    : WP.spec (CcfKv.radix.SingleRadix.stage_batch_leaf arena row)
         (fun (leaf, after) =>
           SingleLiveness after pins
           ∧ ArenaKeeps arena.values after.values
@@ -3644,7 +3644,7 @@ theorem single_stage_batch_leaf_refines {V : Type} (arena : Spike.radix.SingleRa
     · exact live.pinsLive l hp
     · obtain ⟨d, hd, hc⟩ := List.mem_flatMap.mp he
       exact live.childrenLive d hd l hc hnz
-  unfold Spike.radix.SingleRadix.stage_batch_leaf
+  unfold CcfKv.radix.SingleRadix.stage_batch_leaf
   apply WP.spec_bind
     (alloc_counted_lockstep arena.values.rows arena.row_refs arena.values.free_rows row
       idx r1 fr1 halRun live.valid.rows live.freeRowsNodup live.counts.rowLen hvacRowsZero
@@ -3734,25 +3734,25 @@ private theorem vec_index_mem {α : Type} (v : alloc.vec.Vec α) (i : Usize) (x 
   exact List.getElem_mem hlt
 
 private theorem sorted_frame_empty_children {V : Type}
-    (rows : Slice (Option (Spike.radix.RadixRow V)))
+    (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (sorted : Slice U32) (begin «end» parentSlot : Usize)
-    (frame : Spike.radix.BuildFrame)
-    (h : Spike.radix.sorted_frame rows sorted begin «end» parentSlot = Result.ok frame)
+    (frame : CcfKv.radix.BuildFrame)
+    (h : CcfKv.radix.sorted_frame rows sorted begin «end» parentSlot = Result.ok frame)
     : ∀ c ∈ frame.dir.children.val, c = 0#u32 := by
-  have hs : WP.spec (Spike.radix.sorted_frame rows sorted begin «end» parentSlot) (· = frame) := by
+  have hs : WP.spec (CcfKv.radix.sorted_frame rows sorted begin «end» parentSlot) (· = frame) := by
     rw [h, WP.spec_ok]
-  unfold Spike.radix.sorted_frame at hs
+  unfold CcfKv.radix.sorted_frame at hs
   cases hi : Slice.index_usize sorted begin using Result.cases with
   | div => rw [hi] at hs; simp at hs
   | vis _ _ => rw [hi] at hs; simp at hs
   | ret i =>
       change Slice.index_usize sorted begin = Result.ok i at hi
       rw [hi, bind_ok] at hs
-      cases hf : Spike.radix.row_at rows i using Result.cases with
+      cases hf : CcfKv.radix.row_at rows i using Result.cases with
       | div => rw [hf] at hs; simp at hs
       | vis _ _ => rw [hf] at hs; simp at hs
       | ret first =>
-          change Spike.radix.row_at rows i = Result.ok first at hf
+          change CcfKv.radix.row_at rows i = Result.ok first at hf
           rw [hf, bind_ok] at hs
           cases hsub : «end» - 1#usize using Result.cases with
           | div => rw [hsub] at hs; simp at hs
@@ -3766,27 +3766,27 @@ private theorem sorted_frame_empty_children {V : Type}
               | ret i2 =>
                   change Slice.index_usize sorted i1 = Result.ok i2 at hi2
                   rw [hi2, bind_ok] at hs
-                  cases hl : Spike.radix.row_at rows i2 using Result.cases with
+                  cases hl : CcfKv.radix.row_at rows i2 using Result.cases with
                   | div => rw [hl] at hs; simp at hs
                   | vis _ _ => rw [hl] at hs; simp at hs
                   | ret last =>
-                      change Spike.radix.row_at rows i2 = Result.ok last at hl
+                      change CcfKv.radix.row_at rows i2 = Result.ok last at hl
                       rw [hl, bind_ok] at hs
                       dsimp only at hs
                       cases hd
-                            : Spike.radix.first_difference (alloc.vec.Vec.deref first.key)
+                            : CcfKv.radix.first_difference (alloc.vec.Vec.deref first.key)
                                 (alloc.vec.Vec.deref last.key)
                         using Result.cases with
                       | div => rw [hd] at hs; simp at hs
                       | vis _ _ => rw [hd] at hs; simp at hs
                       | ret o =>
-                          change Spike.radix.first_difference _ _ = Result.ok o at hd
+                          change CcfKv.radix.first_difference _ _ = Result.ok o at hd
                           rw [hd, bind_ok] at hs
                           cases o with
                           | none => simp at hs
                           | some digit =>
                               simp only at hs
-                              unfold Spike.radix.RadixDir.empty at hs
+                              unfold CcfKv.radix.RadixDir.empty at hs
                               rw [bind_ok, WP.spec_ok] at hs
                               subst hs
                               intro c hc
@@ -3794,30 +3794,30 @@ private theorem sorted_frame_empty_children {V : Type}
                               exact hc.2
 
 private theorem build_sorted_loop_len_mono {V : Type}
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (sorted : Slice U32)
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free : alloc.vec.Vec Usize)
-    (parents : alloc.vec.Vec Spike.radix.BuildFrame) (frame : Spike.radix.BuildFrame)
-    (res : U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize)
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (sorted : Slice U32)
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free : alloc.vec.Vec Usize)
+    (parents : alloc.vec.Vec CcfKv.radix.BuildFrame) (frame : CcfKv.radix.BuildFrame)
+    (res : U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize)
     (h
-      : Spike.radix.build_sorted_loop dirs free rows sorted parents frame = Result.ok res)
+      : CcfKv.radix.build_sorted_loop dirs free rows sorted parents frame = Result.ok res)
     : dirs.val.length ≤ res.2.1.val.length := by
-  unfold Spike.radix.build_sorted_loop at h
+  unfold CcfKv.radix.build_sorted_loop at h
   refine loop_invariant_of_ok
-    (fun (d, f, ps, fr) => Spike.radix.build_sorted_loop.body rows sorted d f ps fr)
+    (fun (d, f, ps, fr) => CcfKv.radix.build_sorted_loop.body rows sorted d f ps fr)
     (fun a z => a.1.val.length ≤ z.2.1.val.length) ?_ h
   rintro ⟨d1, f1, ps1, fr1⟩ r hb
   dsimp only at hb
-  have hs : WP.spec (Spike.radix.build_sorted_loop.body rows sorted d1 f1 ps1 fr1) (· = r) := by
+  have hs : WP.spec (CcfKv.radix.build_sorted_loop.body rows sorted d1 f1 ps1 fr1) (· = r) := by
     rw [hb, WP.spec_ok]
-  unfold Spike.radix.build_sorted_loop.body at hb hs
+  unfold CcfKv.radix.build_sorted_loop.body at hb hs
   by_cases hdone : fr1.cursor = fr1.end
   · rw [ite_eq_left hdone] at hb hs
-    cases hadd : Spike.radix.add_directory d1 f1 fr1.dir using Result.cases with
+    cases hadd : CcfKv.radix.add_directory d1 f1 fr1.dir using Result.cases with
     | div => rw [hadd] at hs; simp at hs
     | vis _ _ => rw [hadd] at hs; simp at hs
     | ret ar =>
         obtain ⟨comp, d2, f2⟩ := ar
-        change Spike.radix.add_directory d1 f1 fr1.dir = Result.ok (comp, d2, f2) at hadd
+        change CcfKv.radix.add_directory d1 f1 fr1.dir = Result.ok (comp, d2, f2) at hadd
         have hle := add_directory_len_le d1 f1 fr1.dir comp d2 f2 hadd
         rw [hadd, bind_ok] at hb hs
         change (do
@@ -3825,18 +3825,18 @@ private theorem build_sorted_loop_len_mono {V : Type}
           if b then Result.ok (ControlFlow.done (comp, d2, f2))
           else do
             let depth ← alloc.vec.Vec.len ps1 - 1#usize
-            let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps1 depth
-            let ps2 ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps1 depth fr1
-            let rd ← Spike.radix.RadixDir.set_child parent.dir fr1.parent_slot comp
+            let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps1 depth
+            let ps2 ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps1 depth fr1
+            let rd ← CcfKv.radix.RadixDir.set_child parent.dir fr1.parent_slot comp
             Result.ok (ControlFlow.cont (d2, f2, ps2, { parent with dir := rd }))) = Result.ok r at hb
         change WP.spec (do
           let b ← alloc.vec.Vec.is_empty ps1
           if b then Result.ok (ControlFlow.done (comp, d2, f2))
           else do
             let depth ← alloc.vec.Vec.len ps1 - 1#usize
-            let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps1 depth
-            let ps2 ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps1 depth fr1
-            let rd ← Spike.radix.RadixDir.set_child parent.dir fr1.parent_slot comp
+            let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps1 depth
+            let ps2 ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps1 depth fr1
+            let rd ← CcfKv.radix.RadixDir.set_child parent.dir fr1.parent_slot comp
             Result.ok (ControlFlow.cont (d2, f2, ps2, { parent with dir := rd }))) (· = r) at hs
         cases hemp : alloc.vec.Vec.is_empty ps1 using Result.cases with
         | div => rw [hemp] at hs; simp at hs
@@ -3860,7 +3860,7 @@ private theorem build_sorted_loop_len_mono {V : Type}
                     cases hpar
                           : alloc.vec.Vec.index
                               (core.slice.index.SliceIndexUsizeSlice
-                                Spike.radix.BuildFrame)
+                                CcfKv.radix.BuildFrame)
                               ps1 depth
                       using Result.cases with
                     | div => rw [hpar] at hs; simp at hs
@@ -3870,7 +3870,7 @@ private theorem build_sorted_loop_len_mono {V : Type}
                         rw [hpar, bind_ok] at hb hs
                         cases hres
                               : alloc.vec.Vec.resize
-                                  Spike.radix.BuildFrame.Insts.CoreCloneClone ps1 depth
+                                  CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps1 depth
                                   fr1
                           using Result.cases with
                         | div => rw [hres] at hs; simp at hs
@@ -3879,13 +3879,13 @@ private theorem build_sorted_loop_len_mono {V : Type}
                             change alloc.vec.Vec.resize _ ps1 depth fr1 = Result.ok ps2 at hres
                             rw [hres, bind_ok] at hb hs
                             cases hset
-                                  : Spike.radix.RadixDir.set_child parent.dir
+                                  : CcfKv.radix.RadixDir.set_child parent.dir
                                       fr1.parent_slot comp
                               using Result.cases with
                             | div => rw [hset] at hs; simp at hs
                             | vis _ _ => rw [hset] at hs; simp at hs
                             | ret rd =>
-                                change Spike.radix.RadixDir.set_child parent.dir fr1.parent_slot comp = Result.ok rd at hset
+                                change CcfKv.radix.RadixDir.set_child parent.dir fr1.parent_slot comp = Result.ok rd at hset
                                 rw [hset, bind_ok, Result.ok.injEq] at hb
                                 subst hb
                                 intro z hz
@@ -3897,28 +3897,28 @@ private theorem build_sorted_loop_len_mono {V : Type}
     | ret i =>
         change Slice.index_usize sorted fr1.cursor = Result.ok i at hi
         rw [hi, bind_ok] at hb hs
-        cases hrr : Spike.radix.row_at rows i using Result.cases with
+        cases hrr : CcfKv.radix.row_at rows i using Result.cases with
         | div => rw [hrr] at hs; simp at hs
         | vis _ _ => rw [hrr] at hs; simp at hs
         | ret rr =>
-            change Spike.radix.row_at rows i = Result.ok rr at hrr
+            change CcfKv.radix.row_at rows i = Result.ok rr at hrr
             rw [hrr, bind_ok] at hb hs
             dsimp only at hb hs
-            cases hsym : Spike.radix.symbol (alloc.vec.Vec.deref rr.key) fr1.dir.digit
+            cases hsym : CcfKv.radix.symbol (alloc.vec.Vec.deref rr.key) fr1.dir.digit
               using Result.cases with
             | div => rw [hsym] at hs; simp at hs
             | vis _ _ => rw [hsym] at hs; simp at hs
             | ret slot =>
-                change Spike.radix.symbol _ fr1.dir.digit = Result.ok slot at hsym
+                change CcfKv.radix.symbol _ fr1.dir.digit = Result.ok slot at hsym
                 rw [hsym, bind_ok] at hb hs
                 cases hend
-                      : Spike.radix.sorted_group_end rows sorted fr1.cursor fr1.end
+                      : CcfKv.radix.sorted_group_end rows sorted fr1.cursor fr1.end
                           fr1.dir.digit slot
                   using Result.cases with
                 | div => rw [hend] at hs; simp at hs
                 | vis _ _ => rw [hend] at hs; simp at hs
                 | ret e =>
-                    change Spike.radix.sorted_group_end rows sorted fr1.cursor fr1.end fr1.dir.digit slot = Result.ok e at hend
+                    change CcfKv.radix.sorted_group_end rows sorted fr1.cursor fr1.end fr1.dir.digit slot = Result.ok e at hend
                     rw [hend, bind_ok] at hb hs
                     cases hadd1 : fr1.cursor + 1#usize using Result.cases with
                     | div => rw [hadd1] at hs; simp at hs
@@ -3928,12 +3928,12 @@ private theorem build_sorted_loop_len_mono {V : Type}
                         rw [hadd1, bind_ok] at hb hs
                         by_cases hsingle : e = i1
                         · rw [ite_eq_left hsingle] at hb hs
-                          cases hset : Spike.radix.RadixDir.set_child fr1.dir slot i
+                          cases hset : CcfKv.radix.RadixDir.set_child fr1.dir slot i
                             using Result.cases with
                           | div => rw [hset] at hs; simp at hs
                           | vis _ _ => rw [hset] at hs; simp at hs
                           | ret rd =>
-                              change Spike.radix.RadixDir.set_child fr1.dir slot i = Result.ok rd at hset
+                              change CcfKv.radix.RadixDir.set_child fr1.dir slot i = Result.ok rd at hset
                               rw [hset, bind_ok, Result.ok.injEq] at hb
                               subst hb
                               intro z hz; exact hz
@@ -3946,26 +3946,26 @@ private theorem build_sorted_loop_len_mono {V : Type}
                               change alloc.vec.Vec.push ps1 _ = Result.ok ps2 at hpush
                               rw [hpush, bind_ok] at hb hs
                               cases hfr
-                                    : Spike.radix.sorted_frame rows sorted fr1.cursor e
+                                    : CcfKv.radix.sorted_frame rows sorted fr1.cursor e
                                         slot
                                 using Result.cases with
                               | div => rw [hfr] at hs; simp at hs
                               | vis _ _ => rw [hfr] at hs; simp at hs
                               | ret fr2 =>
-                                  change Spike.radix.sorted_frame rows sorted fr1.cursor e slot = Result.ok fr2 at hfr
+                                  change CcfKv.radix.sorted_frame rows sorted fr1.cursor e slot = Result.ok fr2 at hfr
                                   rw [hfr, bind_ok, Result.ok.injEq] at hb
                                   subst hb
                                   intro z hz; exact hz
 
 private theorem build_sorted_counted_lockstep {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir))
-    (rows : Slice (Option (Spike.radix.RadixRow V)))
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
+    (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (dirRefs rowRefs : alloc.vec.Vec U32) (freeDirs : alloc.vec.Vec Usize)
     (sorted : Slice U32) (pins entries : List U32)
-    (resRoot : U32) (dirs' : alloc.vec.Vec (Option Spike.radix.RadixDir))
+    (resRoot : U32) (dirs' : alloc.vec.Vec (Option CcfKv.radix.RadixDir))
     (freeDirs' : alloc.vec.Vec Usize)
     (hbuild
-      : Spike.radix.build_sorted dirs freeDirs rows sorted
+      : CcfKv.radix.build_sorted dirs freeDirs rows sorted
         = Result.ok (resRoot, dirs', freeDirs'))
     (st : DirCountState dirs rows.val dirRefs rowRefs freeDirs pins)
     (hsortedLive
@@ -3974,7 +3974,7 @@ private theorem build_sorted_counted_lockstep {V : Type}
       : ∀ l ∈ entries,
           SingleLinkLive dirs.val rows.val l ∧ radixReferences dirs.val pins l = 0)
     (hrefRoom : pins.length + 17 * (dirs'.val.length + 1) ≤ U32.max)
-    : WP.spec (Spike.radix.build_sorted_counted dirs dirRefs rowRefs freeDirs rows sorted)
+    : WP.spec (CcfKv.radix.build_sorted_counted dirs dirRefs rowRefs freeDirs rows sorted)
         (fun (r2, d2, dr2, rr2, f2) =>
           r2 = resRoot
           ∧ d2 = dirs'
@@ -3985,10 +3985,10 @@ private theorem build_sorted_counted_lockstep {V : Type}
           ∧ (∀ l ∈ entries,
               SingleLinkLive dirs'.val rows.val l
               ∧ radixReferences dirs'.val pins l = 0)) := by
-  have hbuildSpec : WP.spec (Spike.radix.build_sorted dirs freeDirs rows sorted)
+  have hbuildSpec : WP.spec (CcfKv.radix.build_sorted dirs freeDirs rows sorted)
       (· = (resRoot, dirs', freeDirs')) := by rw [hbuild, WP.spec_ok]
-  unfold Spike.radix.build_sorted at hbuild hbuildSpec
-  unfold Spike.radix.build_sorted_counted
+  unfold CcfKv.radix.build_sorted at hbuild hbuildSpec
+  unfold CcfKv.radix.build_sorted_counted
   dsimp only at hbuild hbuildSpec ⊢
   by_cases h0 : Slice.len sorted = 0#usize
   · rw [ite_eq_left h0] at hbuild ⊢
@@ -4014,36 +4014,36 @@ private theorem build_sorted_counted_lockstep {V : Type}
           exact ⟨rfl, rfl, rfl, st, fun _ => (hsortedLive comp hmem).1,
             (hsortedLive comp hmem).2, hqZero⟩
     · rw [ite_eq_right h1] at hbuild hbuildSpec ⊢
-      cases hfr0 : Spike.radix.sorted_frame rows sorted 0#usize (Slice.len sorted) 0#usize
+      cases hfr0 : CcfKv.radix.sorted_frame rows sorted 0#usize (Slice.len sorted) 0#usize
         using Result.cases with
       | div => rw [hfr0] at hbuildSpec; simp at hbuildSpec
       | vis _ _ => rw [hfr0] at hbuildSpec; simp at hbuildSpec
       | ret frame0 =>
-          change Spike.radix.sorted_frame rows sorted 0#usize (Slice.len sorted) 0#usize = Result.ok frame0 at hfr0
+          change CcfKv.radix.sorted_frame rows sorted 0#usize (Slice.len sorted) 0#usize = Result.ok frame0 at hfr0
           have hfr0Empty := sorted_frame_empty_children rows sorted 0#usize (Slice.len sorted) 0#usize frame0 hfr0
           rw [hfr0, bind_ok] at hbuild
           simp only [bind_ok]
           have hloopRun := hbuild
-          unfold Spike.radix.build_sorted_loop at hbuild
-          unfold Spike.radix.build_sorted_counted_loop
-          let FrameOk (d : List (Option Spike.radix.RadixDir)) (fr : Spike.radix.BuildFrame) : Prop :=
+          unfold CcfKv.radix.build_sorted_loop at hbuild
+          unfold CcfKv.radix.build_sorted_counted_loop
+          let FrameOk (d : List (Option CcfKv.radix.RadixDir)) (fr : CcfKv.radix.BuildFrame) : Prop :=
             ∀ c ∈ fr.dir.children.val, (c ≠ 0#u32 → SingleLinkLive d rows.val c) ∧ ∀ l ∈ entries, l ≠ c
           let rel :
-              (alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize ×
-                alloc.vec.Vec Spike.radix.BuildFrame × Spike.radix.BuildFrame) →
-              (alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec U32 × alloc.vec.Vec U32 ×
-                alloc.vec.Vec Usize × alloc.vec.Vec Spike.radix.BuildFrame × Spike.radix.BuildFrame) → Prop :=
+              (alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize ×
+                alloc.vec.Vec CcfKv.radix.BuildFrame × CcfKv.radix.BuildFrame) →
+              (alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec U32 × alloc.vec.Vec U32 ×
+                alloc.vec.Vec Usize × alloc.vec.Vec CcfKv.radix.BuildFrame × CcfKv.radix.BuildFrame) → Prop :=
             fun (d1, f1, ps1, fr1) (d2, dr2, rr2, f2, ps2, fr2) =>
               d2 = d1 ∧ f2 = f1 ∧ ps2 = ps1 ∧ fr2 = fr1
               ∧ DirCountState d1 rows.val dr2 rr2 f1 pins
               ∧ (∀ p ∈ ps1.val, FrameOk d1.val p)
               ∧ FrameOk d1.val fr1
               ∧ (∀ l ∈ entries, SingleLinkLive d1.val rows.val l ∧ radixReferences d1.val pins l = 0)
-              ∧ Spike.radix.build_sorted_loop d1 f1 rows sorted ps1 fr1 = Result.ok (resRoot, dirs', freeDirs')
+              ∧ CcfKv.radix.build_sorted_loop d1 f1 rows sorted ps1 fr1 = Result.ok (resRoot, dirs', freeDirs')
               ∧ (∀ l, SingleLinkLive dirs.val rows.val l → SingleLinkLive d1.val rows.val l)
           let post :
-              (U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec Usize) →
-              (U32 × alloc.vec.Vec (Option Spike.radix.RadixDir) × alloc.vec.Vec U32 ×
+              (U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec Usize) →
+              (U32 × alloc.vec.Vec (Option CcfKv.radix.RadixDir) × alloc.vec.Vec U32 ×
                 alloc.vec.Vec U32 × alloc.vec.Vec Usize) → Prop :=
             fun (r1, d1, f1) (r2, d2, dr2, rr2, f2) =>
               r2 = r1 ∧ d2 = d1 ∧ f2 = f1
@@ -4053,9 +4053,9 @@ private theorem build_sorted_counted_lockstep {V : Type}
               ∧ (∀ l ∈ entries, SingleLinkLive d1.val rows.val l ∧ radixReferences d1.val pins l = 0)
           apply loop_lockstep
             (fun (d1, f1, ps1, fr1) =>
-              Spike.radix.build_sorted_loop.body rows sorted d1 f1 ps1 fr1)
+              CcfKv.radix.build_sorted_loop.body rows sorted d1 f1 ps1 fr1)
             (fun (d2, dr2, rr2, f2, ps2, fr2) =>
-              Spike.radix.build_sorted_counted_loop.body rows sorted d2 dr2 rr2 f2 ps2
+              CcfKv.radix.build_sorted_counted_loop.body rows sorted d2 dr2 rr2 f2 ps2
                 fr2)
             rel post ?_ ?_ hbuild
           · rintro ⟨d1, f1, ps1, fr1⟩ ⟨d2, dr2, rr2, f2, ps2, fr2⟩
@@ -4063,27 +4063,27 @@ private theorem build_sorted_counted_lockstep {V : Type}
             dsimp only at hb1 ⊢
             have hlenCur : d2.val.length ≤ dirs'.val.length :=
               build_sorted_loop_len_mono rows sorted d2 f2 ps2 fr2 (resRoot, dirs', freeDirs') hrem1
-            have hspec1 : WP.spec (Spike.radix.build_sorted_loop.body rows sorted d2 f2 ps2 fr2) (· = r1) := by
+            have hspec1 : WP.spec (CcfKv.radix.build_sorted_loop.body rows sorted d2 f2 ps2 fr2) (· = r1) := by
               rw [hb1, WP.spec_ok]
             have hremStep : (match r1 with
               | .done z => Result.ok z
-              | .cont next => Spike.radix.build_sorted_loop next.1 next.2.1 rows sorted next.2.2.1 next.2.2.2) =
+              | .cont next => CcfKv.radix.build_sorted_loop next.1 next.2.1 rows sorted next.2.2.1 next.2.2.2) =
                 Result.ok (resRoot, dirs', freeDirs') := by
-              unfold Spike.radix.build_sorted_loop at hrem1 ⊢
+              unfold CcfKv.radix.build_sorted_loop at hrem1 ⊢
               rw [loop.eq_1] at hrem1
               dsimp only at hrem1
               rw [hb1, bind_ok] at hrem1
               cases r1 <;> exact hrem1
-            unfold Spike.radix.build_sorted_loop.body at hb1 hspec1
-            unfold Spike.radix.build_sorted_counted_loop.body
+            unfold CcfKv.radix.build_sorted_loop.body at hb1 hspec1
+            unfold CcfKv.radix.build_sorted_counted_loop.body
             by_cases hdone : fr2.cursor = fr2.end
             · rw [ite_eq_left hdone] at hb1 hspec1 ⊢
-              cases hadd : Spike.radix.add_directory d2 f2 fr2.dir using Result.cases with
+              cases hadd : CcfKv.radix.add_directory d2 f2 fr2.dir using Result.cases with
               | div => rw [hadd] at hspec1; simp at hspec1
               | vis _ _ => rw [hadd] at hspec1; simp at hspec1
               | ret ar =>
                   obtain ⟨comp, dNext, fNext⟩ := ar
-                  change Spike.radix.add_directory d2 f2 fr2.dir = Result.ok (comp, dNext, fNext) at hadd
+                  change CcfKv.radix.add_directory d2 f2 fr2.dir = Result.ok (comp, dNext, fNext) at hadd
                   rw [hadd, bind_ok] at hb1 hspec1
                   have hfrNotQ : ∀ l ∈ entries, fr2.dir.children.val.count l = 0 := by
                     intro l hl
@@ -4106,27 +4106,27 @@ private theorem build_sorted_counted_lockstep {V : Type}
                     if b then Result.ok (ControlFlow.done (comp, dNext, fNext))
                     else do
                       let depth ← alloc.vec.Vec.len ps2 - 1#usize
-                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps2 depth
-                      let ps3 ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
-                      let rd ← Spike.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
+                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps2 depth
+                      let ps3 ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
+                      let rd ← CcfKv.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
                       Result.ok (ControlFlow.cont (dNext, fNext, ps3, { parent with dir := rd }))) = Result.ok r1 at hb1
                   change WP.spec (do
                     let b ← alloc.vec.Vec.is_empty ps2
                     if b then Result.ok (ControlFlow.done (comp, dNext, fNext))
                     else do
                       let depth ← alloc.vec.Vec.len ps2 - 1#usize
-                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps2 depth
-                      let ps3 ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
-                      let rd ← Spike.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
+                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps2 depth
+                      let ps3 ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
+                      let rd ← CcfKv.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
                       Result.ok (ControlFlow.cont (dNext, fNext, ps3, { parent with dir := rd }))) (· = r1) at hspec1
                   change WP.spec (do
                     let b ← alloc.vec.Vec.is_empty ps2
                     if b then Result.ok (ControlFlow.done (comp, dNext, drNext, rrNext, fNext))
                     else do
                       let depth ← alloc.vec.Vec.len ps2 - 1#usize
-                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps2 depth
-                      let ps3 ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
-                      let rd ← Spike.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
+                      let parent ← alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps2 depth
+                      let ps3 ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps2 depth fr2
+                      let rd ← CcfKv.radix.RadixDir.set_child parent.dir fr2.parent_slot comp
                       Result.ok (ControlFlow.cont (dNext, drNext, rrNext, fNext, ps3, { parent with dir := rd }))) _
                   cases hemp : alloc.vec.Vec.is_empty ps2 using Result.cases with
                   | div => rw [hemp] at hspec1; simp at hspec1
@@ -4154,7 +4154,7 @@ private theorem build_sorted_counted_lockstep {V : Type}
                               cases hpar
                                     : alloc.vec.Vec.index
                                         (core.slice.index.SliceIndexUsizeSlice
-                                          Spike.radix.BuildFrame)
+                                          CcfKv.radix.BuildFrame)
                                         ps2 depth
                                 using Result.cases with
                               | div => rw [hpar] at hspec1; simp at hspec1
@@ -4174,17 +4174,17 @@ private theorem build_sorted_counted_lockstep {V : Type}
                                       simp [hnone] at hpar
                                     omega
                                   obtain ⟨ps3, hres, hresVal⟩ := wp_spec_exists
-                                    (alloc.vec.Vec.resize_spec Spike.radix.BuildFrame.Insts.CoreCloneClone
+                                    (alloc.vec.Vec.resize_spec CcfKv.radix.BuildFrame.Insts.CoreCloneClone
                                       ps2 depth fr2 rfl)
                                   rw [hres, bind_ok] at hb1 hspec1 ⊢
                                   cases hset
-                                        : Spike.radix.RadixDir.set_child parent.dir
+                                        : CcfKv.radix.RadixDir.set_child parent.dir
                                             fr2.parent_slot comp
                                     using Result.cases with
                                   | div => rw [hset] at hspec1; simp at hspec1
                                   | vis _ _ => rw [hset] at hspec1; simp at hspec1
                                   | ret rd =>
-                                      change Spike.radix.RadixDir.set_child parent.dir fr2.parent_slot comp = Result.ok rd at hset
+                                      change CcfKv.radix.RadixDir.set_child parent.dir fr2.parent_slot comp = Result.ok rd at hset
                                       have hrdMem := set_child_children_mem parent.dir fr2.parent_slot comp rd hset
                                       rw [hset, bind_ok, Result.ok.injEq] at hb1
                                       subst hb1
@@ -4223,32 +4223,32 @@ private theorem build_sorted_counted_lockstep {V : Type}
                   have hiMem := slice_index_usize_mem sorted fr2.cursor i hi
                   rw [hi, bind_ok] at hb1 hspec1
                   simp only [bind_ok]
-                  cases hrr : Spike.radix.row_at rows i using Result.cases with
+                  cases hrr : CcfKv.radix.row_at rows i using Result.cases with
                   | div => rw [hrr] at hspec1; simp at hspec1
                   | vis _ _ => rw [hrr] at hspec1; simp at hspec1
                   | ret rr =>
-                      change Spike.radix.row_at rows i = Result.ok rr at hrr
+                      change CcfKv.radix.row_at rows i = Result.ok rr at hrr
                       rw [hrr, bind_ok] at hb1 hspec1
                       simp only [bind_ok]
                       dsimp only at hb1 hspec1 ⊢
                       cases hsym
-                            : Spike.radix.symbol (alloc.vec.Vec.deref rr.key)
+                            : CcfKv.radix.symbol (alloc.vec.Vec.deref rr.key)
                                 fr2.dir.digit
                         using Result.cases with
                       | div => rw [hsym] at hspec1; simp at hspec1
                       | vis _ _ => rw [hsym] at hspec1; simp at hspec1
                       | ret slot =>
-                          change Spike.radix.symbol _ fr2.dir.digit = Result.ok slot at hsym
+                          change CcfKv.radix.symbol _ fr2.dir.digit = Result.ok slot at hsym
                           rw [hsym, bind_ok] at hb1 hspec1
                           simp only [bind_ok]
                           cases hend
-                                : Spike.radix.sorted_group_end rows sorted fr2.cursor
+                                : CcfKv.radix.sorted_group_end rows sorted fr2.cursor
                                     fr2.end fr2.dir.digit slot
                             using Result.cases with
                           | div => rw [hend] at hspec1; simp at hspec1
                           | vis _ _ => rw [hend] at hspec1; simp at hspec1
                           | ret e =>
-                              change Spike.radix.sorted_group_end rows sorted fr2.cursor fr2.end fr2.dir.digit slot = Result.ok e at hend
+                              change CcfKv.radix.sorted_group_end rows sorted fr2.cursor fr2.end fr2.dir.digit slot = Result.ok e at hend
                               rw [hend, bind_ok] at hb1 hspec1
                               simp only [bind_ok]
                               cases hadd1 : fr2.cursor + 1#usize using Result.cases with
@@ -4261,12 +4261,12 @@ private theorem build_sorted_counted_lockstep {V : Type}
                                   by_cases hsingle : e = i1
                                   · rw [ite_eq_left hsingle] at hb1 hspec1 ⊢
                                     cases hset
-                                          : Spike.radix.RadixDir.set_child fr2.dir slot i
+                                          : CcfKv.radix.RadixDir.set_child fr2.dir slot i
                                       using Result.cases with
                                     | div => rw [hset] at hspec1; simp at hspec1
                                     | vis _ _ => rw [hset] at hspec1; simp at hspec1
                                     | ret rd =>
-                                        change Spike.radix.RadixDir.set_child fr2.dir slot i = Result.ok rd at hset
+                                        change CcfKv.radix.RadixDir.set_child fr2.dir slot i = Result.ok rd at hset
                                         have hrdMem := set_child_children_mem fr2.dir slot i rd hset
                                         rw [hset, bind_ok, Result.ok.injEq] at hb1
                                         subst hb1
@@ -4297,13 +4297,13 @@ private theorem build_sorted_counted_lockstep {V : Type}
                                         rw [hpush, bind_ok] at hb1 hspec1
                                         simp only [bind_ok]
                                         cases hfr
-                                              : Spike.radix.sorted_frame rows sorted
+                                              : CcfKv.radix.sorted_frame rows sorted
                                                   fr2.cursor e slot
                                           using Result.cases with
                                         | div => rw [hfr] at hspec1; simp at hspec1
                                         | vis _ _ => rw [hfr] at hspec1; simp at hspec1
                                         | ret fr3 =>
-                                            change Spike.radix.sorted_frame rows sorted fr2.cursor e slot = Result.ok fr3 at hfr
+                                            change CcfKv.radix.sorted_frame rows sorted fr2.cursor e slot = Result.ok fr3 at hfr
                                             have hfr3Empty := sorted_frame_empty_children rows sorted fr2.cursor e slot fr3 hfr
                                             rw [hfr, bind_ok, Result.ok.injEq] at hb1
                                             subst hb1
@@ -4327,7 +4327,7 @@ private theorem build_sorted_counted_lockstep {V : Type}
             exact ⟨fun h => (h rfl).elim,
               fun l hl h0 => single_link_live_ne_zero (hqZero l hl).1 h0⟩
 
-theorem single_publish_batch_leaves_refines {V : Type} (arena : Spike.radix.SingleRadix V)
+theorem single_publish_batch_leaves_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
     (lookup : Slice U32) (bindings : List (List U8 × U32)) (pins : List U32)
     (live : SingleLiveness arena pins)
     (lookupRows : BatchLeaves (alloc.vec.Vec.deref arena.values.rows) lookup bindings)
@@ -4347,7 +4347,7 @@ theorem single_publish_batch_leaves_refines {V : Type} (arena : Spike.radix.Sing
             * (arena.values.dirs.val.length + 2 * (bindings.length * (ceiling + 1)) + 2)
           + 1
         ≤ U32.max)
-    : WP.spec (Spike.radix.SingleRadix.publish_batch_leaves arena lookup)
+    : WP.spec (CcfKv.radix.SingleRadix.publish_batch_leaves arena lookup)
         (fun (root, after) =>
           SingleView after root bindings
           ∧ singleBindings after bindings = singleBindings arena bindings
@@ -4367,7 +4367,7 @@ theorem single_publish_batch_leaves_refines {V : Type} (arena : Spike.radix.Sing
   have st0 : DirCountState arena.values.dirs arena.values.rows.val arena.dir_refs arena.row_refs
       arena.values.free_dirs pins :=
     ⟨live.valid.dirs, live.freeDirsNodup, live.dirsBound, live.pinsLive, live.childrenLive, live.counts⟩
-  unfold Spike.radix.SingleRadix.publish_batch_leaves
+  unfold CcfKv.radix.SingleRadix.publish_batch_leaves
   dsimp only
   apply WP.spec_bind
     (build_sorted_counted_lockstep arena.values.dirs
@@ -4400,9 +4400,9 @@ theorem single_publish_batch_leaves_refines {V : Type} (arena : Spike.radix.Sing
   ⟩
   simpa [alloc.vec.Vec.deref] using lookupRows.2
 
-theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.SingleRadix V)
-    (input : alloc.vec.Vec (Option (Spike.radix.RadixRow V)))
-    (rows : List (Spike.radix.RadixRow V)) (pins : List U32)
+theorem single_build_sorted_batch_refines {V : Type} (arena : CcfKv.radix.SingleRadix V)
+    (input : alloc.vec.Vec (Option (CcfKv.radix.RadixRow V)))
+    (rows : List (CcfKv.radix.RadixRow V)) (pins : List U32)
     (live : SingleLiveness arena pins)
     (owned : input.val = rows.map some)
     (sorted : rows.Pairwise fun a b => a.key.val < b.key.val)
@@ -4417,7 +4417,7 @@ theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.Single
           + 17 * (arena.values.dirs.val.length + 2 * (rows.length * (ceiling + 1)) + 2)
           + 1
         ≤ U32.max)
-    : WP.spec (Spike.radix.SingleRadix.build_sorted_batch arena input)
+    : WP.spec (CcfKv.radix.SingleRadix.build_sorted_batch arena input)
         (fun (root, after) =>
           SingleLiveness after (if root = 0#u32 then pins else root :: pins)
           ∧ ArenaKeeps arena.values after.values
@@ -4427,7 +4427,7 @@ theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.Single
               SingleView after root bindings
               ∧ singleBindings after bindings
                 = rows.map fun r => (r.key.val, r.value)) := by
-  unfold Spike.radix.SingleRadix.build_sorted_batch
+  unfold CcfKv.radix.SingleRadix.build_sorted_batch
   have nVal : (alloc.vec.Vec.len input).val = rows.length := by
     change input.val.length = rows.length
     rw [owned, List.length_map]
@@ -4438,7 +4438,7 @@ theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.Single
   let cap := alloc.vec.Vec.with_capacity U32 (alloc.vec.Vec.len input)
   have hStage :
       WP.spec
-        (Spike.radix.SingleRadix.build_sorted_batch_loop arena input (alloc.vec.Vec.len input)
+        (CcfKv.radix.SingleRadix.build_sorted_batch_loop arena input (alloc.vec.Vec.len input)
           cap 0#usize)
         (fun (mid, lookup) =>
           SingleLiveness mid pins
@@ -4453,7 +4453,7 @@ theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.Single
               BatchLeaves (alloc.vec.Vec.deref mid.values.rows) (alloc.vec.Vec.deref lookup) bindings
               ∧ bindings.map Prod.fst = rows.map (fun r => r.key.val)
               ∧ singleBindings mid bindings = rows.map (fun r => (r.key.val, r.value))) := by
-    unfold Spike.radix.SingleRadix.build_sorted_batch_loop
+    unfold CcfKv.radix.SingleRadix.build_sorted_batch_loop
     apply loop.spec_decr_nat
       (fun (_, _, _, i) => rows.length - i.val)
       (fun (cur, rem, lookup, i) =>
@@ -4479,7 +4479,7 @@ theorem single_build_sorted_batch_refines {V : Type} (arena : Spike.radix.Single
     · rintro ⟨cur, rem, lookup, i⟩
         ⟨hi, lCur, kCur, gCur, hDirs, hRet, hFresh, hRemLen, hRem, bindings, hLeaves, hKeys, hBind⟩
       dsimp only at hi lCur kCur gCur hDirs hRet hFresh hRemLen hRem hLeaves hKeys hBind ⊢
-      unfold Spike.radix.SingleRadix.build_sorted_batch_loop.body
+      unfold CcfKv.radix.SingleRadix.build_sorted_batch_loop.body
       by_cases run : i < alloc.vec.Vec.len input
       · have hilt : i.val < rows.length := by rwa [← nVal]
         have one : (1#usize : Usize).val = 1 := rfl

@@ -13,18 +13,18 @@ open Aeneas.Std
 open Kv.Model
 
 /-- Capacity required for a live attempt to publish a new frame. -/
-def FitsApply (n : Spike.engine.Store) (id : U64) : Prop :=
+def FitsApply (n : CcfKv.engine.Store) (id : U64) : Prop :=
   ∀ t,
     find n.txs.val id = some t
     → ∀ prior head,
         n.history.activeFrames = prior ++ [head]
         → ApplyCapacity n.history head t (storePins n).length
 
-private def nativeCommitting : Spike.engine.Phase → Bool
+private def nativeCommitting : CcfKv.engine.Phase → Bool
   | .Committing => true
   | _ => false
 
-private theorem apply_empty {encode : List U8 → String} {sid : Nat} {t : Spike.engine.Tx}
+private theorem apply_empty {encode : List U8 → String} {sid : Nat} {t : CcfKv.engine.Tx}
     {index : CellIndex} {natArchive archive : List Frame} {tx : Tx}
     (h : AttemptMatches encode sid index natArchive archive t tx)
     : tx.normal.writes.isEmpty = t.pending.val.isEmpty := by
@@ -72,7 +72,7 @@ private theorem opt_stamp_beq_eq {a b : Option Stamp} (h : (a == b) = true) : a 
   · exact congrArg some (stamp_beq_eq h)
 
 private theorem nat_active_in_archive
-    (log : Spike.branch_log.BranchLog Spike.engine.Frame) (natArchive : List Frame)
+    (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame) (natArchive : List Frame)
     {f : Frame} (hf : f ∈ natModelFrames log natArchive)
     : f ∈ natArchive := by
   unfold natModelFrames at hf
@@ -80,9 +80,9 @@ private theorem nat_active_in_archive
   exact List.mem_iff_getElem?.mpr ⟨id.val, hsaved⟩
 
 private theorem nat_head_in_frames {encode : List U8 → String}
-    {n : Spike.engine.History} {s : Store} {natArchive archive : List Frame}
+    {n : CcfKv.engine.History} {s : Store} {natArchive archive : List Frame}
     (hs : HistoryMatches encode n s natArchive archive)
-    {prior : List Spike.engine.Frame} {head : Spike.engine.Frame}
+    {prior : List CcfKv.engine.Frame} {head : CcfKv.engine.Frame}
     (hf : n.activeFrames = prior ++ [head])
     : (natModelFrames n.log natArchive).head?
       = some (modelFrame encode n.index head) := by
@@ -105,7 +105,7 @@ private theorem nat_head_in_frames {encode : List U8 → String}
   have hgfSaved : natArchive[headId.val]? = some gfHead := List.getElem?_eq_getElem hheadIdLtG
   have hactSplit : n.activeFrames =
       (priorIds.filterMap fun id => n.log.frames.val[id.val]?) ++ [nfHead] := by
-    unfold Spike.engine.History.activeFrames branchValues
+    unfold CcfKv.engine.History.activeFrames branchValues
     rw [hbr', List.filterMap_append, List.filterMap_cons, List.filterMap_nil, hheadSaved]
   have hheadEq : nfHead = head := by
     have hsame := hactSplit.symm.trans hf
@@ -136,19 +136,19 @@ private theorem nat_head_in_frames {encode : List U8 → String}
   rfl
 
 private theorem eligibility (encode : List U8 → String) (inj : Function.Injective encode)
-    {sid : Nat} {w : State} {s : Store} {store : Spike.engine.Store}
-    {natArchive archive : List Frame} {tx : Tx} {t : Spike.engine.Tx} {id : U64}
+    {sid : Nat} {w : State} {s : Store} {store : CcfKv.engine.Store}
+    {natArchive archive : List Frame} {tx : Tx} {t : CcfKv.engine.Tx} {id : U64}
     {pinsCount : Nat}
     (reach : transitionSystem.Reachable w) (hsFound : find w.stores sid = some s)
     (hs : HistoryMatches encode store.history s natArchive archive)
     (hMeta : StoreMetaLive encode store natArchive)
     (hTxMem : (id, t) ∈ store.txs.val)
     (ht : AttemptMatches encode sid store.history.index natArchive archive t tx)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hf : store.history.activeFrames = prior ++ [head])
     (hhead : FrameOrderEq (modelFrame encode store.history.index head) s.head)
     (space : ApplyCapacity store.history head t pinsCount)
-    : WP.spec (Spike.engine.Tx.can_apply t store.history)
+    : WP.spec (CcfKv.engine.Tx.can_apply t store.history)
         (fun r => r = canApply s tx) := by
   let n := store.history
   let nativeHead := modelFrame encode n.index head
@@ -169,7 +169,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     simp only [stampsOnBranch, viewStamps, nativeStore, List.any_eq_true, Bool.and_eq_true]
     constructor
     · rintro ⟨nf, hnfMem, hfm⟩
-      unfold Spike.engine.History.activeFrames branchValues at hnfMem
+      unfold CcfKv.engine.History.activeFrames branchValues at hnfMem
       obtain ⟨fid, hfidBr, hnfAt⟩ := List.mem_filterMap.mp hnfMem
       have hfidLt : fid.val < n.log.frames.val.length := hs.valid.2 fid hfidBr
       have hgfLt : fid.val < natArchive.length := hs.aligned.len.symm ▸ hfidLt
@@ -221,7 +221,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
   have hModUnique : Kv.Properties.Unique s.head.data :=
     hs.modelArchive.unique s.head (hs.modelSub s.head hHeadMemModel)
   have hCheckDeps (hLin : tx.globalViews.all (fun (m, view) => mapLineage s view.current m) = true) :
-      WP.spec (Spike.engine.Tx.valid_dependencies t n) (fun r => r = validates s.head.data tx.normal.deps) := by
+      WP.spec (CcfKv.engine.Tx.valid_dependencies t n) (fun r => r = validates s.head.data tx.normal.deps) := by
     have hNatCanon : ∀ d ∈ pointDeps encode n.index t,
         d.holds nativeHead.data = holdsByContents nativeHead.data d := by
       intro d hd
@@ -336,8 +336,8 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
         List.map_map, Function.comp_def]
     rw [hRev, hNatEq, ← hModelEq]
   have hcheck : WP.spec (do
-      let b ← Spike.engine.Tx.valid_lineage t n
-      if b then Spike.engine.Tx.valid_dependencies t n else Result.ok false)
+      let b ← CcfKv.engine.Tx.valid_lineage t n
+      if b then CcfKv.engine.Tx.valid_dependencies t n else Result.ok false)
       (fun r => r = (tx.globalViews.all (fun (m, view) => mapLineage s view.current m)
         && validates s.head.data tx.normal.deps)) := by
     apply WP.spec_bind hl
@@ -352,7 +352,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     simpa only [snapshotCut, modelSnapshot, List.map_map, Option.map_map,
       Function.comp_def]
       using congrArg (Option.map Prod.snd) ht.snapshot
-  unfold Spike.engine.Tx.can_apply
+  unfold CcfKv.engine.Tx.can_apply
   by_cases hu : t.unavailable = true
   · simp [hu, canApply, ht.unavailable]
   · simp only [hu]
@@ -385,9 +385,9 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
 /-- Local publication both takes the model's enabled transition and preserves the state relation.
 Disabled publication leaves the store unchanged. -/
 theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
-    (sid : Nat) (n : Spike.engine.Store) (w : State) (id : U64)
+    (sid : Nat) (n : CcfKv.engine.Store) (w : State) (id : U64)
     (h : StateMatches encode sid n w) (room : FitsApply n id)
-    : WP.spec (Spike.engine.Store.execute n (.Apply id))
+    : WP.spec (CcfKv.engine.Store.execute n (.Apply id))
         (StepMatches encode sid (.apply sid id.val) n
           (execute w (.apply sid id.val))) := by
   obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
@@ -445,9 +445,9 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
             }
             let nativeWrites := encodeWrites encode (byteWrites t.pending.val)
             have hOk
-                : WP.spec (Spike.engine.Tx.can_apply t n.history) (fun r => r = true) :=
+                : WP.spec (CcfKv.engine.Tx.can_apply t n.history) (fun r => r = true) :=
               ha ▸ heligible
-            change WP.spec (Spike.engine.Store.apply n id true) _
+            change WP.spec (CcfKv.engine.Store.apply n id true) _
             apply WP.spec_mono
               (apply_accepted_matches_model encode inj n id true t nativeStore prior head
                 natArchive hn hPhase hWrites hOk hframes rfl rfl hhist.term hhist.global
@@ -590,7 +590,7 @@ theorem apply_step_matches (encode : List U8 → String) (inj : Function.Injecti
                     · obtain ⟨hidEq, htEq⟩ := Prod.mk.inj heq
                       exact Or.inr ⟨hidEq, by rw [htEq]⟩
                   obtain ⟨off', fid'', nf'', hbr'', hnf'', hfm''⟩ :
-                      ∃ (off' : Nat) (fid'' : Usize) (nf'' : Spike.engine.Frame),
+                      ∃ (off' : Nat) (fid'' : Usize) (nf'' : CcfKv.engine.Frame),
                         n.history.log.branch.val[off']? = some fid''
                         ∧ n.history.log.frames.val[fid''.val]? = some nf''
                         ∧ frameMatches (encode ∘ alloc.vec.Vec.val) nf'' bm bv.birth bv.revision = true := by

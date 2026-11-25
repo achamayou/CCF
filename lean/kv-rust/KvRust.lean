@@ -10,7 +10,6 @@ public import KvRust.Apply
 public import KvRust.ApplyRefinement
 public import KvRust.Assoc
 public import KvRust.BranchLog
-public import KvRust.Correspondence
 public import KvRust.Environment
 public import KvRust.History
 public import KvRust.IndexedHistory
@@ -30,8 +29,6 @@ public import KvRust.Publication
 public import KvRust.Radix
 public import KvRust.RadixAddress
 public import KvRust.RadixBatch
-public import KvRust.RadixDual
-public import KvRust.RadixDualBatch
 public import KvRust.RadixLiveness
 public import KvRust.RadixSingle
 public import KvRust.RadixSingleReclaim

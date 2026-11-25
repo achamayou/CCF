@@ -15,7 +15,7 @@ namespace KvRust
 open Aeneas.Std
 
 /-- Every input link reads the indicated byte key and a live value row. -/
-structure BatchLeaves {V : Type} (rows : Slice (Option (Spike.radix.RadixRow V)))
+structure BatchLeaves {V : Type} (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (sorted : Slice U32) (bindings : List (List U8 × U32))
     : Prop where
   links : sorted.val = bindings.map Prod.snd
@@ -24,7 +24,7 @@ structure BatchLeaves {V : Type} (rows : Slice (Option (Spike.radix.RadixRow V))
 def batchKey (bindings : List (List U8 × U32)) (i : Nat) : List U8 :=
   (bindings[i]?.map Prod.fst).getD []
 
-private theorem batch_link_at {V : Type} (rows : Slice (Option (Spike.radix.RadixRow V)))
+private theorem batch_link_at {V : Type} (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (sorted : Slice U32) (bindings : List (List U8 × U32))
     (valid : BatchLeaves rows sorted bindings) (i : Usize)
     (inside : i.val < bindings.length)
@@ -53,7 +53,7 @@ private theorem batch_link_at {V : Type} (rows : Slice (Option (Spike.radix.Radi
 
 /-- The native builder selects the earliest routing difference of a group's
 first and last keys and initializes a directory with no children. -/
-theorem sorted_frame_refines {V : Type} (rows : Slice (Option (Spike.radix.RadixRow V)))
+theorem sorted_frame_refines {V : Type} (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (sorted : Slice U32) (bindings : List (List U8 × U32))
     (valid : BatchLeaves rows sorted bindings) (begin past parent : Usize)
     (span : begin.val + 2 ≤ past.val) (inside : past.val ≤ bindings.length)
@@ -64,7 +64,7 @@ theorem sorted_frame_refines {V : Type} (rows : Slice (Option (Spike.radix.Radix
                 (batchKey bindings (past.val - 1)).length
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.radix.sorted_frame rows sorted begin past parent)
+    : WP.spec (CcfKv.radix.sorted_frame rows sorted begin past parent)
         (fun frame =>
           frame.cursor = begin
           ∧ frame.end = past
@@ -73,7 +73,7 @@ theorem sorted_frame_refines {V : Type} (rows : Slice (Option (Spike.radix.Radix
               (batchKey bindings (past.val - 1)) (some frame.dir.digit.val)
           ∧ frame.dir.children.val = List.replicate 17 0#u32
           ∧ RadixMask frame.dir) := by
-  unfold Spike.radix.sorted_frame
+  unfold CcfKv.radix.sorted_frame
   apply WP.spec_bind (batch_link_at rows sorted bindings valid begin (by omega))
   intro firstLink ⟨_, firstRow, firstTag, firstLive, firstKey⟩
   apply WP.spec_bind (radix_row_at_matches rows firstLink firstRow firstTag firstLive)
@@ -108,12 +108,12 @@ theorem sorted_frame_refines {V : Type} (rows : Slice (Option (Spike.radix.Radix
 /-- The extracted group scanner consumes exactly a maximal run sharing the
 requested routing digit, without consulting rows beyond the group's parent. -/
 theorem sorted_group_end_refines {V : Type}
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (sorted : Slice U32)
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (sorted : Slice U32)
     (bindings : List (List U8 × U32)) (valid : BatchLeaves rows sorted bindings)
     (begin past digit slot : Usize) (span : begin.val < past.val)
     (inside : past.val ≤ bindings.length) (space : past.val ≤ Usize.max)
     (first : radixSymbol (batchKey bindings begin.val) digit.val = slot.val)
-    : WP.spec (Spike.radix.sorted_group_end rows sorted begin past digit slot)
+    : WP.spec (CcfKv.radix.sorted_group_end rows sorted begin past digit slot)
         (fun next =>
           begin.val < next.val
           ∧ next.val ≤ past.val
@@ -123,7 +123,7 @@ theorem sorted_group_end_refines {V : Type}
               → radixSymbol (batchKey bindings i) digit.val = slot.val)
           ∧ (next.val < past.val
               → radixSymbol (batchKey bindings next.val) digit.val ≠ slot.val)) := by
-  unfold Spike.radix.sorted_group_end Spike.radix.sorted_group_end_loop
+  unfold CcfKv.radix.sorted_group_end CcfKv.radix.sorted_group_end_loop
   have one : (1#usize : Usize).val = 1 := rfl
   apply WP.spec_bind (Usize.add_spec (x := begin) (y := 1#usize) (by omega))
   intro start startStep
@@ -137,7 +137,7 @@ theorem sorted_group_end_refines {V : Type}
           → radixSymbol (batchKey bindings j) digit.val = slot.val)
     _ _ _
   · intro i ⟨afterBegin, untilEnd, consumed⟩
-    unfold Spike.radix.sorted_group_end_loop.body
+    unfold CcfKv.radix.sorted_group_end_loop.body
     by_cases run : i < past
     · have h : i.val < past.val := run
       rw [ite_eq_left run]
@@ -334,8 +334,8 @@ theorem batch_group_partition (bindings : List (List U8 × U32))
 
 /-- A stack frame contains precisely the already completed group partitions.
 The ghost cursor may lag the native cursor while a child frame is in flight. -/
-structure BatchFrameView (dirs : List (Option Spike.radix.RadixDir))
-    (bindings : List (List U8 × U32)) (frame : Spike.radix.BuildFrame)
+structure BatchFrameView (dirs : List (Option CcfKv.radix.RadixDir))
+    (bindings : List (List U8 × U32)) (frame : CcfKv.radix.BuildFrame)
     (begin doneAt : Nat)
     : Prop where
   span : begin + 2 ≤ frame.end.val
@@ -358,8 +358,8 @@ structure BatchFrameView (dirs : List (Option Spike.radix.RadixDir))
           < radixSymbol (batchKey bindings doneAt) frame.dir.digit.val
 
 theorem BatchFrameView.preserve
-    {before after : alloc.vec.Vec (Option Spike.radix.RadixDir)}
-    {bindings : List (List U8 × U32)} {frame : Spike.radix.BuildFrame}
+    {before after : alloc.vec.Vec (Option CcfKv.radix.RadixDir)}
+    {bindings : List (List U8 × U32)} {frame : CcfKv.radix.BuildFrame}
     {begin doneAt : Nat} (view : BatchFrameView before.val bindings frame begin doneAt)
     (kept : preservesSlots before after)
     : BatchFrameView after.val bindings frame begin doneAt := by
@@ -368,8 +368,8 @@ theorem BatchFrameView.preserve
   obtain ⟨child, read, tree⟩ := view.children slot bound
   exact ⟨child, read, radix_tree_preserved before.val after.val kept tree⟩
 
-theorem batch_fresh_frame {V : Type} (dirs : List (Option Spike.radix.RadixDir))
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (sorted : Slice U32)
+theorem batch_fresh_frame {V : Type} (dirs : List (Option CcfKv.radix.RadixDir))
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (sorted : Slice U32)
     (bindings : List (List U8 × U32)) (valid : BatchLeaves rows sorted bindings)
     (begin past parent : Usize) (span : begin.val + 2 ≤ past.val)
     (inside : past.val ≤ bindings.length)
@@ -380,7 +380,7 @@ theorem batch_fresh_frame {V : Type} (dirs : List (Option Spike.radix.RadixDir))
                 (batchKey bindings (past.val - 1)).length
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.radix.sorted_frame rows sorted begin past parent)
+    : WP.spec (CcfKv.radix.sorted_frame rows sorted begin past parent)
         (fun frame =>
           frame.cursor = begin
           ∧ frame.end = past
@@ -408,8 +408,8 @@ theorem batch_fresh_frame {V : Type} (dirs : List (Option Spike.radix.RadixDir))
     exact .empty _
 
 /-- Attach one completed group to the prepared parent without losing sibling trees. -/
-theorem batch_attach_child (dirs : List (Option Spike.radix.RadixDir))
-    (bindings : List (List U8 × U32)) (frame : Spike.radix.BuildFrame)
+theorem batch_attach_child (dirs : List (Option CcfKv.radix.RadixDir))
+    (bindings : List (List U8 × U32)) (frame : CcfKv.radix.BuildFrame)
     (begin cursor next : Nat) (slot : Usize)
     (view : BatchFrameView dirs bindings frame begin cursor)
     (sorted : bindings.Pairwise radixKeyLt) (nonempty : cursor < next)
@@ -424,7 +424,7 @@ theorem batch_attach_child (dirs : List (Option Spike.radix.RadixDir))
         → radixSymbol (batchKey bindings next) frame.dir.digit.val ≠ slot.val)
     (child : U32)
     (tree : RadixTree dirs bindings.length child (batchInterval bindings cursor next))
-    : WP.spec (Spike.radix.RadixDir.set_child frame.dir slot child)
+    : WP.spec (CcfKv.radix.RadixDir.set_child frame.dir slot child)
         (fun dir =>
           dir.digit = frame.dir.digit
           ∧ BatchFrameView dirs bindings {frame with dir} begin next) := by
@@ -501,15 +501,15 @@ private theorem batch_interval_subset {α : Type} (entries : List α) (begin pas
 /-- Once all groups in the interval are attached, publishing the directory
 is a single allocation and preserves the existing arena. -/
 theorem batch_publish_frame {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free : alloc.vec.Vec Usize)
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (bindings : List (List U8 × U32))
-    (frame : Spike.radix.BuildFrame) (begin : Nat)
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free : alloc.vec.Vec Usize)
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (bindings : List (List U8 × U32))
+    (frame : CcfKv.radix.BuildFrame) (begin : Nat)
     (view : BatchFrameView dirs.val bindings frame begin frame.end.val)
     (sorted : bindings.Pairwise radixKeyLt) (live : RadixRows rows.val bindings)
     (directories : RadixDirectoryInvariant dirs)
     (known : RadixKnowledge dirs (radixKeyOf rows.val)) (available : RadixFree dirs free)
     (room : dirs.val.length < 2147483647)
-    : WP.spec (Spike.radix.add_directory dirs free frame.dir)
+    : WP.spec (CcfKv.radix.add_directory dirs free frame.dir)
         (fun (root, after, left) =>
           preservesSlots dirs after
           ∧ RadixFree after left
@@ -568,11 +568,11 @@ theorem batch_publish_frame {V : Type}
 
 /-- The native parent stack is read in reverse. Each suspended parent records
 the interval and routing slot of the one child it is waiting to attach. -/
-inductive BatchSuspension (dirs : List (Option Spike.radix.RadixDir))
+inductive BatchSuspension (dirs : List (Option CcfKv.radix.RadixDir))
     (bindings : List (List U8 × U32))
-    : List Spike.radix.BuildFrame → Nat → Nat → Nat → Prop where
+    : List CcfKv.radix.BuildFrame → Nat → Nat → Nat → Prop where
   | top {slot : Nat} : BatchSuspension dirs bindings [] 0 bindings.length slot
-  | pending (parent : Spike.radix.BuildFrame) (rest : List Spike.radix.BuildFrame)
+  | pending (parent : CcfKv.radix.BuildFrame) (rest : List CcfKv.radix.BuildFrame)
     (begin childBegin childSlot : Nat)
     (outer
       : BatchSuspension dirs bindings rest begin parent.end.val parent.parent_slot.val)
@@ -592,8 +592,8 @@ inductive BatchSuspension (dirs : List (Option Spike.radix.RadixDir))
         childSlot
 
 theorem BatchSuspension.preserve
-    {before after : alloc.vec.Vec (Option Spike.radix.RadixDir)}
-    {bindings : List (List U8 × U32)} {stack : List Spike.radix.BuildFrame}
+    {before after : alloc.vec.Vec (Option CcfKv.radix.RadixDir)}
+    {bindings : List (List U8 × U32)} {stack : List CcfKv.radix.BuildFrame}
     {begin past slot : Nat}
     (suspended : BatchSuspension before.val bindings stack begin past slot)
     (kept : preservesSlots before after)
@@ -605,16 +605,16 @@ theorem BatchSuspension.preserve
       exact .pending parent rest begin childBegin childSlot ih (view.preserve kept)
         span within grouped boundary
 
-private theorem batch_top {dirs : List (Option Spike.radix.RadixDir)}
+private theorem batch_top {dirs : List (Option CcfKv.radix.RadixDir)}
     {bindings : List (List U8 × U32)} {begin past slot : Nat}
     (suspended : BatchSuspension dirs bindings [] begin past slot)
     : begin = 0 ∧ past = bindings.length := by
   cases suspended
   exact ⟨rfl, rfl⟩
 
-private theorem batch_parent {dirs : List (Option Spike.radix.RadixDir)}
-    {bindings : List (List U8 × U32)} {parent : Spike.radix.BuildFrame}
-    {rest : List Spike.radix.BuildFrame} {begin past slot : Nat}
+private theorem batch_parent {dirs : List (Option CcfKv.radix.RadixDir)}
+    {bindings : List (List U8 × U32)} {parent : CcfKv.radix.BuildFrame}
+    {rest : List CcfKv.radix.BuildFrame} {begin past slot : Nat}
     (suspended : BatchSuspension dirs bindings (parent :: rest) begin past slot)
     : ∃ start,
         BatchSuspension dirs bindings rest start parent.end.val parent.parent_slot.val
@@ -701,24 +701,24 @@ private theorem batch_nested_split (bindings : List (List U8 × U32))
   · have atSplit : split = digit := by omega
     rw [atSplit, a, b]
 
-private def frameWork (ceiling : Nat) (frame : Spike.radix.BuildFrame) : Nat :=
+private def frameWork (ceiling : Nat) (frame : CcfKv.radix.BuildFrame) : Nat :=
   (frame.end.val - frame.cursor.val) * (ceiling - frame.dir.digit.val + 1)
 
-private def batchWork (ceiling : Nat) (parents : List Spike.radix.BuildFrame)
-    (frame : Spike.radix.BuildFrame)
+private def batchWork (ceiling : Nat) (parents : List CcfKv.radix.BuildFrame)
+    (frame : CcfKv.radix.BuildFrame)
     : Nat :=
   2 * ((parents.map (frameWork ceiling)).sum + frameWork ceiling frame) + parents.length
 
-private theorem batch_work_pop (ceiling : Nat) (rest : List Spike.radix.BuildFrame)
-    (parent frame : Spike.radix.BuildFrame) (dir : Spike.radix.RadixDir)
+private theorem batch_work_pop (ceiling : Nat) (rest : List CcfKv.radix.BuildFrame)
+    (parent frame : CcfKv.radix.BuildFrame) (dir : CcfKv.radix.RadixDir)
     (finished : frame.cursor = frame.end) (same : dir.digit = parent.dir.digit)
     : batchWork ceiling (rest ++ [parent]) frame
       = batchWork ceiling rest {parent with dir} + 1 := by
   simp [batchWork, frameWork, finished, same]
   omega
 
-private theorem batch_work_child (ceiling : Nat) (parents : List Spike.radix.BuildFrame)
-    (frame child : Spike.radix.BuildFrame) (next : Usize)
+private theorem batch_work_child (ceiling : Nat) (parents : List CcfKv.radix.BuildFrame)
+    (frame child : CcfKv.radix.BuildFrame) (next : Usize)
     (bounds : frame.cursor.val < next.val ∧ next.val ≤ frame.end.val)
     (starts : child.cursor = frame.cursor) (ends : child.end = next)
     (nested : frame.dir.digit.val < child.dir.digit.val)
@@ -743,8 +743,8 @@ private theorem batch_work_child (ceiling : Nat) (parents : List Spike.radix.Bui
       + (next.val - frame.cursor.val) * work)) + parents.length
   omega
 
-private theorem batch_work_leaf (ceiling : Nat) (parents : List Spike.radix.BuildFrame)
-    (frame : Spike.radix.BuildFrame) (next : Usize) (dir : Spike.radix.RadixDir)
+private theorem batch_work_leaf (ceiling : Nat) (parents : List CcfKv.radix.BuildFrame)
+    (frame : CcfKv.radix.BuildFrame) (next : Usize) (dir : CcfKv.radix.RadixDir)
     (bounds : frame.cursor.val < next.val ∧ next.val ≤ frame.end.val)
     (same : dir.digit = frame.dir.digit)
     : batchWork ceiling parents {frame with cursor := next, dir}
@@ -764,8 +764,8 @@ private theorem batch_work_leaf (ceiling : Nat) (parents : List Spike.radix.Buil
       parents.length
   omega
 
-private theorem BatchFrameView.withCursor {dirs : List (Option Spike.radix.RadixDir)}
-    {bindings : List (List U8 × U32)} {frame : Spike.radix.BuildFrame}
+private theorem BatchFrameView.withCursor {dirs : List (Option CcfKv.radix.RadixDir)}
+    {bindings : List (List U8 × U32)} {frame : CcfKv.radix.BuildFrame}
     {begin doneAt : Nat} (view : BatchFrameView dirs bindings frame begin doneAt)
     (cursor : Usize)
     : BatchFrameView dirs bindings {frame with cursor} begin doneAt :=
@@ -791,15 +791,15 @@ private theorem batch_key_room (bindings : List (List U8 × U32)) (i j : Nat)
   have minimum := Nat.min_le_left (batchKey bindings i).length (batchKey bindings j).length
   omega
 
-private abbrev BuildDirs := alloc.vec.Vec (Option Spike.radix.RadixDir)
+private abbrev BuildDirs := alloc.vec.Vec (Option CcfKv.radix.RadixDir)
 
 private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
-    (free : alloc.vec.Vec Usize) (rows : Slice (Option (Spike.radix.RadixRow V)))
+    (free : alloc.vec.Vec Usize) (rows : Slice (Option (CcfKv.radix.RadixRow V)))
     (sorted : Slice U32) (bindings : List (List U8 × U32))
     (input : BatchLeaves rows sorted bindings) (ordered : bindings.Pairwise radixKeyLt)
     (ceiling : Nat) (bounded : ∀ entry ∈ bindings, 2 * entry.1.length ≤ ceiling)
     (keyRoom : ∀ entry ∈ bindings, 2 * entry.1.length + 1 ≤ Usize.max)
-    (parents : alloc.vec.Vec Spike.radix.BuildFrame) (frame : Spike.radix.BuildFrame)
+    (parents : alloc.vec.Vec CcfKv.radix.BuildFrame) (frame : CcfKv.radix.BuildFrame)
     (ready
       : ∃ begin,
           BatchFrameView dirs.val bindings frame begin frame.cursor.val
@@ -809,7 +809,7 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
     (kept : preservesSlots original dirs) (available : RadixFree dirs free)
     (valid : RadixDirectoryInvariant dirs)
     (known : RadixKnowledge dirs (radixKeyOf rows.val))
-    : WP.spec (Spike.radix.build_sorted_loop dirs free rows sorted parents frame)
+    : WP.spec (CcfKv.radix.build_sorted_loop dirs free rows sorted parents frame)
         (fun (root, after, left) =>
           preservesSlots original after
           ∧ RadixFree after left
@@ -818,7 +818,7 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
           ∧ RadixTree after.val bindings.length root bindings
           ∧ after.val.length
             ≤ dirs.val.length + batchWork ceiling parents.val frame + 1) := by
-  unfold Spike.radix.build_sorted_loop
+  unfold CcfKv.radix.build_sorted_loop
   apply loop.spec_decr_nat
     (fun (_, _, ps, current) => batchWork ceiling ps.val current)
     (fun (arena, vacant, ps, current) =>
@@ -836,7 +836,7 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
   · rintro ⟨arena, vacant, ps, current⟩ ⟨retained, freeSlots, invariant, knowledge, capacity,
       begin, view, stack⟩
     dsimp only at retained freeSlots invariant knowledge capacity view stack ⊢
-    unfold Spike.radix.build_sorted_loop.body
+    unfold CcfKv.radix.build_sorted_loop.body
     have one : (1#usize : Usize).val = 1 := rfl
     by_cases finished : current.cursor = current.end
     · rw [ite_eq_left finished]
@@ -856,9 +856,9 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
         else do
           let i ← alloc.vec.Vec.len ps - 1#usize
           let parent ← alloc.vec.Vec.index
-            (core.slice.index.SliceIndexUsizeSlice Spike.radix.BuildFrame) ps i
-          let tail ← alloc.vec.Vec.resize Spike.radix.BuildFrame.Insts.CoreCloneClone ps i current
-          let dir ← Spike.radix.RadixDir.set_child parent.dir current.parent_slot root
+            (core.slice.index.SliceIndexUsizeSlice CcfKv.radix.BuildFrame) ps i
+          let tail ← alloc.vec.Vec.resize CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps i current
+          let dir ← CcfKv.radix.RadixDir.set_child parent.dir current.parent_slot root
           Result.ok (ControlFlow.cont (after, left, tail, {parent with dir}))) _
       by_cases empty : ps.val = []
       · rw [ite_eq_left empty, WP.spec_ok]
@@ -903,7 +903,7 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
           exact last
         rw [same]
         apply WP.spec_bind
-          (alloc.vec.Vec.resize_spec Spike.radix.BuildFrame.Insts.CoreCloneClone ps i
+          (alloc.vec.Vec.resize_spec CcfKv.radix.BuildFrame.Insts.CoreCloneClone ps i
             current rfl)
         intro tail resized
         have tailEq : tail.val = rest := by
@@ -1012,8 +1012,8 @@ bindings without changing the directories reachable from prior roots.
 The numerical bound reserves room for the explicit-stack schedule and its
 directory allocations. -/
 theorem build_sorted_refines {V : Type}
-    (dirs : alloc.vec.Vec (Option Spike.radix.RadixDir)) (free : alloc.vec.Vec Usize)
-    (rows : Slice (Option (Spike.radix.RadixRow V))) (sorted : Slice U32)
+    (dirs : alloc.vec.Vec (Option CcfKv.radix.RadixDir)) (free : alloc.vec.Vec Usize)
+    (rows : Slice (Option (CcfKv.radix.RadixRow V))) (sorted : Slice U32)
     (bindings : List (List U8 × U32)) (input : BatchLeaves rows sorted bindings)
     (ordered : bindings.Pairwise radixKeyLt) (ceiling : Nat)
     (bounded : ∀ entry ∈ bindings, 2 * entry.1.length ≤ ceiling)
@@ -1021,7 +1021,7 @@ theorem build_sorted_refines {V : Type}
     (room : dirs.val.length + 2 * (bindings.length * (ceiling + 1)) < 2147483647)
     (available : RadixFree dirs free) (valid : RadixDirectoryInvariant dirs)
     (known : RadixKnowledge dirs (radixKeyOf rows.val))
-    : WP.spec (Spike.radix.build_sorted dirs free rows sorted)
+    : WP.spec (CcfKv.radix.build_sorted dirs free rows sorted)
         (fun (root, after, left) =>
           preservesSlots dirs after
           ∧ RadixFree after left
@@ -1030,7 +1030,7 @@ theorem build_sorted_refines {V : Type}
           ∧ RadixTree after.val bindings.length root bindings
           ∧ after.val.length
             ≤ dirs.val.length + 2 * (bindings.length * (ceiling + 1)) + 1) := by
-  unfold Spike.radix.build_sorted
+  unfold CcfKv.radix.build_sorted
   let past := Slice.len sorted
   have size : past.val = bindings.length := by
     change (Slice.len sorted).val = bindings.length
@@ -1068,7 +1068,7 @@ theorem build_sorted_refines {V : Type}
       apply WP.spec_bind (batch_fresh_frame dirs.val rows sorted bindings input 0#usize past 0#usize
         (by omega) (by omega) different (batch_key_room bindings _ _ (by omega) keyRoom))
       intro frame ⟨start, last, _, current⟩
-      let stack := alloc.vec.Vec.new Spike.radix.BuildFrame
+      let stack := alloc.vec.Vec.new CcfKv.radix.BuildFrame
       have ready : ∃ begin, BatchFrameView dirs.val bindings frame begin frame.cursor.val
           ∧ BatchSuspension dirs.val bindings stack.val.reverse begin frame.end.val frame.parent_slot.val := by
         refine ⟨0, ?_, ?_⟩

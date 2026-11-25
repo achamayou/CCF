@@ -27,7 +27,7 @@ structure PinnedView where
 
 /-- Project a Rust handle without depending on the rest of either historical frame. -/
 noncomputable def rustPinnedView (encode : List U8 → String)
-    (index : CellIndex) (map : Spike.engine.Bytes) (view : Spike.engine.View)
+    (index : CellIndex) (map : CcfKv.engine.Bytes) (view : CcfKv.engine.View)
     : PinnedView :=
   {
     birth := view.birth.map modelStamp
@@ -123,7 +123,7 @@ theorem ViewsOrderEq.set {a b : Assoc String PinnedView} (h : ViewsOrderEq a b)
 /-- Every acquired Rust view originates either from an unborn map or from an
 archived ghost frame whose revision and ordered image match the pinned handle. -/
 def ViewOrigin (encode : List U8 → String) (index : CellIndex) (natArchive : List Frame)
-    (map : Spike.engine.Bytes) (view : Spike.engine.View)
+    (map : CcfKv.engine.Bytes) (view : CcfKv.engine.View)
     : Prop :=
   let m := encode (alloc.vec.Vec.val map)
   let img := encodeImage encode (pinImage index map view.local)
@@ -133,38 +133,38 @@ def ViewOrigin (encode : List U8 → String) (index : CellIndex) (natArchive : L
       ∃ f ∈ natArchive, revision f m = modelStamp view.revision ∧ img = image f.data m
 
 def ViewsOrigin (encode : List U8 → String) (index : CellIndex) (natArchive : List Frame)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     : Prop :=
   ∀ row ∈ rows.val, ViewOrigin encode index natArchive row.1 row.2
 
 /-- Relate the association lists of acquired views, including their order. -/
 noncomputable def rustPinnedViews (encode : List U8 → String)
     (index : CellIndex)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     : Assoc String PinnedView :=
   rows.val.map
     fun (m, v) => (encode (alloc.vec.Vec.val m), rustPinnedView encode index m v)
 
-def ViewLive (index : CellIndex) (view : Spike.engine.View) : Prop :=
+def ViewLive (index : CellIndex) (view : CcfKv.engine.View) : Prop :=
   PinLive index view.local ∧ PinLive index (view.global.getD view.local)
 
 def ViewsLive (index : CellIndex)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     : Prop :=
   ∀ row ∈ rows.val, ViewLive index row.2
 
-def ViewScanRoom (index : CellIndex) (view : Spike.engine.View) : Prop :=
+def ViewScanRoom (index : CellIndex) (view : CcfKv.engine.View) : Prop :=
   PinScanRoom index view.local ∧ PinScanRoom index (view.global.getD view.local)
 
 def ViewsScanRoom (index : CellIndex)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     : Prop :=
   ∀ row ∈ rows.val, ViewScanRoom index row.2
 
 theorem pinned_views_preserved_of_pins (encode : List U8 → String)
     {before after : CellIndex} {pins : List U32}
     (preserved : IndexPreservesPins before after pins)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     (inPins : ∀ row ∈ rows.val, ∀ r ∈ viewPins row.2, r ∈ pins)
     (live : ViewsLive before rows)
     : ViewsLive after rows
@@ -196,7 +196,7 @@ theorem pinned_views_preserved_of_pins (encode : List U8 → String)
 
 theorem pinned_views_preserved (encode : List U8 → String)
     {before after : CellIndex} (preserved : IndexKeeps before after)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     (live : ViewsLive before rows)
     : ViewsLive after rows
       ∧ rustPinnedViews encode after rows = rustPinnedViews encode before rows := by
@@ -218,7 +218,7 @@ def modelPinnedViews (rows : Assoc String GlobalView) : Assoc String PinnedView 
 
 theorem ViewsOrderEq.stamps {encode : List U8 → String} {index : CellIndex}
     {modelViews : Assoc String GlobalView}
-    {nativeViews : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View}
+    {nativeViews : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View}
     (h
       : ViewsOrderEq (modelPinnedViews modelViews)
           (rustPinnedViews encode index nativeViews))
@@ -250,7 +250,7 @@ theorem views_origin_preserved_of_pins (encode : List U8 → String)
     {before after : CellIndex} {pins : List U32} {archBefore archAfter : List Frame}
     (preserved : IndexPreservesPins before after pins)
     (sub : ∀ f ∈ archBefore, f ∈ archAfter)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     (inPins : ∀ row ∈ rows.val, ∀ r ∈ viewPins row.2, r ∈ pins)
     (live : ViewsLive before rows) (orig : ViewsOrigin encode before archBefore rows)
     : ViewsOrigin encode after archAfter rows := by
@@ -273,7 +273,7 @@ theorem views_origin_preserved (encode : List U8 → String)
     {before after : CellIndex} {archBefore archAfter : List Frame}
     (preserved : IndexKeeps before after)
     (sub : ∀ f ∈ archBefore, f ∈ archAfter)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
     (live : ViewsLive before rows) (orig : ViewsOrigin encode before archBefore rows)
     : ViewsOrigin encode after archAfter rows := by
   intro ⟨m, v⟩ present
@@ -341,7 +341,7 @@ theorem pinned_data_image (db captured : Data) (m other : String)
     image_filter_maps captured other (fun k => k == m)]
   by_cases h : other = m <;> simp [h]
 
-local instance : DecidableEq Spike.engine.Bytes :=
+local instance : DecidableEq CcfKv.engine.Bytes :=
   fun a b =>
     decidable_of_iff (alloc.vec.Vec.val a = alloc.vec.Vec.val b)
       ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
@@ -352,22 +352,22 @@ private theorem map_encoding_injective (encode : List U8 → String)
   inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
 
 /-- Cloning a view preserves its pinned data and stamps. -/
-theorem clone_view (v : Spike.engine.View)
-    : Spike.engine.View.Insts.CoreCloneClone.clone v = .ok v := by
+theorem clone_view (v : CcfKv.engine.View)
+    : CcfKv.engine.View.Insts.CoreCloneClone.clone v = .ok v := by
   obtain ⟨birth, rev, localRows, globalRows⟩ := v
-  cases globalRows <;> simp [Spike.engine.View.Insts.CoreCloneClone.clone, clone_pin]
+  cases globalRows <;> simp [CcfKv.engine.View.Insts.CoreCloneClone.clone, clone_pin]
 
 private theorem install_view (encode : List U8 → String) (inj : Function.Injective encode)
     (index : CellIndex) (natArchive : List Frame)
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
-    (m : Spike.engine.Bytes) (v : Spike.engine.View) (room : rows.val.length < Usize.max)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.View)
+    (m : CcfKv.engine.Bytes) (v : CcfKv.engine.View) (room : rows.val.length < Usize.max)
     (absent : find rows.val m = none)
     (oldLive : ViewsLive index rows) (newLive : ViewLive index v)
     (oldOrig : ViewsOrigin encode index natArchive rows)
     (newOrig : ViewOrigin encode index natArchive m v)
     : WP.spec
-        (Spike.engine.Assoc.set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.View.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.View.Insts.CoreCloneClone
           rows m v)
         (fun next =>
           next.val = (m, v) :: rows.val
@@ -377,8 +377,8 @@ private theorem install_view (encode : List U8 → String) (inj : Function.Injec
           ∧ ViewsLive index next
           ∧ ViewsOrigin encode index natArchive next) := by
   apply WP.spec_mono
-    (assoc_set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-      Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.View.Insts.CoreCloneClone rows
+    (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+      CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.View.Insts.CoreCloneClone rows
       m v (fun a => key_same a m) clone_bytes clone_view room)
   intro next he
   have hcons : next.val = (m, v) :: rows.val := by
@@ -422,8 +422,8 @@ private theorem install_view (encode : List U8 → String) (inj : Function.Injec
 
 private theorem revision_frame (encode : List U8 → String)
     (inj : Function.Injective encode) (index : CellIndex)
-    (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
-    : WP.spec (Spike.engine.Frame.revision f m)
+    (f : CcfKv.engine.Frame) (m : CcfKv.engine.Bytes)
+    : WP.spec (CcfKv.engine.Frame.revision f m)
         (fun r =>
           modelStamp r
           = revision (modelFrame encode index f) (encode (alloc.vec.Vec.val m))) :=
@@ -431,19 +431,19 @@ private theorem revision_frame (encode : List U8 → String)
     f m
 
 private theorem revision_meta_eq {encode : List U8 → String} {index : CellIndex}
-    {nf : Spike.engine.Frame} {gf : Frame} (hm : FrameMetaEq encode nf gf) (k : String)
+    {nf : CcfKv.engine.Frame} {gf : Frame} (hm : FrameMetaEq encode nf gf) (k : String)
     : revision (modelFrame encode index nf) k = revision gf k := by
   unfold revision modelFrame
   rw [hm.2.1]
 
 private theorem births_meta_eq {encode : List U8 → String} {index : CellIndex}
-    {nf : Spike.engine.Frame} {gf : Frame} (hm : FrameMetaEq encode nf gf) (k : String)
+    {nf : CcfKv.engine.Frame} {gf : Frame} (hm : FrameMetaEq encode nf gf) (k : String)
     : find (modelFrame encode index nf).births k = find gf.births k := by
   unfold modelFrame
   rw [hm.2.2]
 
-private theorem frame_root_ref {s : Spike.engine.History} {extraPins : List U32}
-    {id : Spike.branch_log.FrameId} {f : Spike.engine.Frame}
+private theorem frame_root_ref {s : CcfKv.engine.History} {extraPins : List U32}
+    {id : CcfKv.branch_log.FrameId} {f : CcfKv.engine.Frame}
     (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
     (saved : s.log.frames.val[id.val]? = some f)
     : f.data ≠ 0#u32
@@ -460,10 +460,10 @@ private theorem frame_root_ref {s : Spike.engine.History} {extraPins : List U32}
   exact List.count_pos_iff.mpr (List.mem_append_left _ hmem)
 
 private theorem pin_maps_spec (encode : List U8 → String)
-    (inj : Function.Injective encode) (history : Spike.engine.History)
-    (current global : Spike.engine.Frame) (gfLocal gfGlobal : Frame)
-    (m : Spike.engine.Bytes) (extraPins : List U32)
-    (currentId globalId : Spike.branch_log.FrameId)
+    (inj : Function.Injective encode) (history : CcfKv.engine.History)
+    (current global : CcfKv.engine.Frame) (gfLocal gfGlobal : Frame)
+    (m : CcfKv.engine.Bytes) (extraPins : List U32)
+    (currentId globalId : CcfKv.branch_log.FrameId)
     (currentSaved : history.log.frames.val[currentId.val]? = some current)
     (globalSaved : history.log.frames.val[globalId.val]? = some global) (cut : U64)
     (idxValid : HistoryIndexValid history)
@@ -480,7 +480,7 @@ private theorem pin_maps_spec (encode : List U8 → String)
           + 17 * history.index.values.dirs.val.length
           + 2
         ≤ U32.max)
-    : WP.spec (Spike.engine.pin_maps history currentId globalId cut)
+    : WP.spec (CcfKv.engine.pin_maps history currentId globalId cut)
         (fun ((localPin, globalPin), after) =>
           after.log = history.log
           ∧ after.global = history.global
@@ -525,14 +525,14 @@ private theorem pin_maps_spec (encode : List U8 → String)
     exact Nat.lt_of_le_of_lt h1 (by omega)
   have hfallback : ¬ (history.reuse_compacted_images = true ∧ cut < history.global) →
       WP.spec (do
-        let f ← Spike.branch_log.BranchLog.read history.log currentId
-        let ai ← Spike.kv_index.AddressIndex.retain_root history.index f.data
+        let f ← CcfKv.branch_log.BranchLog.read history.log currentId
+        let ai ← CcfKv.kv_index.AddressIndex.retain_root history.index f.data
         if cut = history.global then
-          Result.ok ((Spike.engine.PinnedImage.Root f.data, none), { history with index := ai })
+          Result.ok ((CcfKv.engine.PinnedImage.Root f.data, none), { history with index := ai })
         else do
-          let f1 ← Spike.branch_log.BranchLog.read history.log globalId
-          let ai1 ← Spike.kv_index.AddressIndex.retain_root ai f1.data
-          Result.ok ((Spike.engine.PinnedImage.Root f.data, some (Spike.engine.PinnedImage.Root f1.data)),
+          let f1 ← CcfKv.branch_log.BranchLog.read history.log globalId
+          let ai1 ← CcfKv.kv_index.AddressIndex.retain_root ai f1.data
+          Result.ok ((CcfKv.engine.PinnedImage.Root f.data, some (CcfKv.engine.PinnedImage.Root f1.data)),
             { history with index := ai1 }))
         (fun ((localPin, globalPin), after) =>
           after.log = history.log
@@ -618,7 +618,7 @@ private theorem pin_maps_spec (encode : List U8 → String)
       refine ⟨rfl, rfl, rfl, rfl, rfl, hvals2.trans hvals1, hlive2', ?_, ?_, hlocalPres2.1, hglobalPres2.1⟩
       · rw [hlocalPres2.2]; exact hlocalRows
       · simp only [Option.getD_some]; rw [hglobalPres2.2]; exact hglobalRows
-  unfold Spike.engine.pin_maps
+  unfold CcfKv.engine.pin_maps
   by_cases reusable : history.reuse_compacted_images = true
   · rw [ite_eq_left reusable]
     by_cases older : cut < history.global
@@ -644,13 +644,13 @@ private theorem pin_maps_spec (encode : List U8 → String)
   · rw [ite_eq_right reusable]
     exact hfallback (fun h => reusable h.1)
 
-private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U64)
+private theorem history_pin_cut_matches_nat (s : CcfKv.engine.History) (cut : U64)
     (model : Store) (encode : List U8 → String) (natArchive : List Frame)
     (hmodel : model.history = natModelFrames s.log natArchive)
-    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
+    (hzero : CcfKv.engine.History.relative_cut s cut = .ok cut)
     (hversions : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
     (valid : BranchValid s.log) (aligned : ArchiveAligned encode s natArchive)
-    : WP.spec (Spike.engine.History.pin_cut s cut)
+    : WP.spec (CcfKv.engine.History.pin_cut s cut)
         (fun id =>
           ∃ nf gf,
             s.log.frames.val[id.val]? = some nf
@@ -659,7 +659,7 @@ private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U6
             ∧ nf.version.val = min cut.val (s.log.branch.val.length - 1)
             ∧ gf = atCut model cut.val
             ∧ gf ∈ model.history) := by
-  unfold Spike.engine.History.pin_cut
+  unfold CcfKv.engine.History.pin_cut
   simp only [hzero, bind_ok]
   have hlenBr : s.log.branch.val.length = s.activeFrames.length :=
     (branch_values_length s.log valid).symm
@@ -669,7 +669,7 @@ private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U6
   -- Reuse `branch_cut_refines`
   have hbrRef := branch_cut_refines s.log valid cut
   -- Also know `at_cut` reads `s.log.branch.val[off]` directly:
-  unfold Spike.branch_log.BranchLog.at_cut
+  unfold CcfKv.branch_log.BranchLog.at_cut
   have hlen : (alloc.vec.Vec.len s.log.branch).val = s.log.branch.val.length := alloc.vec.Vec.len_val _
   have hcap := alloc.vec.Vec.len_ineq s.log.branch
   have hone : (1#usize : Usize).val = 1 := rfl
@@ -711,7 +711,7 @@ private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U6
   refine ⟨s.log.frames.val[id.val], natArchive[id.val],
     List.getElem?_eq_getElem hidLt, List.getElem?_eq_getElem hidLtG, hidAt, ?_, ?_, ?_⟩
   · have hact : s.activeFrames[off]? = some s.log.frames.val[id.val] := by
-      unfold Spike.engine.History.activeFrames branchValues
+      unfold CcfKv.engine.History.activeFrames branchValues
       have hfm : ∀ (ids : List Usize) (k : Nat),
           (∀ j ∈ ids, j.val < s.log.frames.val.length) →
           (ids.filterMap fun j => s.log.frames.val[j.val]?)[k]? =
@@ -781,7 +781,7 @@ private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U6
         have hactK : s.activeFrames[k] = s.log.frames.val[s.log.branch.val[k].val] := by
           apply Option.some.inj
           rw [← List.getElem?_eq_getElem hkAct]
-          unfold Spike.engine.History.activeFrames branchValues
+          unfold CcfKv.engine.History.activeFrames branchValues
           have hfm : ∀ (ids : List Usize) (j : Nat),
               (∀ x ∈ ids, x.val < s.log.frames.val.length) →
               (ids.filterMap fun x => s.log.frames.val[x.val]?)[j]? =
@@ -849,10 +849,10 @@ private theorem lineage_of_mem (s : Store) (f : Frame) (m : String) (hf : f ∈ 
 
 /-- An enabled lazy acquisition pins the model's local and global views or flags unavailability. -/
 theorem acquire_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (model : Store)
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (model : Store)
     (natArchive : List Frame) (extraPins : List U32)
-    (t : Spike.engine.Tx) (snap : Snapshot) (rustSnap : Spike.engine.Snapshot)
-    (m : Spike.engine.Bytes) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (t : CcfKv.engine.Tx) (snap : Snapshot) (rustSnap : CcfKv.engine.Snapshot)
+    (m : CcfKv.engine.Bytes) (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.activeFrames = prior ++ [head])
     (hmodel : model.history = natModelFrames s.log natArchive)
     (hversions : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
@@ -883,7 +883,7 @@ theorem acquire_matches_model (encode : List U8 → String)
     (oldOrig : ViewsOrigin encode s.index natArchive t.views)
     : let k := encode (alloc.vec.Vec.val m)
       let v := captureGlobal model snap k
-      WP.spec (Spike.engine.Tx.acquire t s m)
+      WP.spec (CcfKv.engine.Tx.acquire t s m)
         (fun (output, afterTx, afterHist) =>
           afterHist.log = s.log
           ∧ afterHist.global = s.global
@@ -912,7 +912,7 @@ theorem acquire_matches_model (encode : List U8 → String)
   let enc := encode ∘ alloc.vec.Vec.val (α := U8)
   let k := enc m
   let v := captureGlobal model snap k
-  have hzero (cut : U64) : Spike.engine.History.relative_cut s cut = .ok cut :=
+  have hzero (cut : U64) : CcfKv.engine.History.relative_cut s cut = .ok cut :=
     history_relative_cut_zero s cut (by simp [hframes]) hversions valid
   have hi := map_encoding_injective encode inj
   change find (rustPinnedViews encode s.index t.views) k = none at hAbsent
@@ -926,8 +926,8 @@ theorem acquire_matches_model (encode : List U8 → String)
     | some view =>
         rw [e, Option.map_some] at hm
         cases hm
-  simp only [Spike.engine.Tx.acquire, hSnapshot, hPhase, bind_ok]
-  apply WP.spec_bind (assoc_index Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey t.views m
+  simp only [CcfKv.engine.Tx.acquire, hSnapshot, hPhase, bind_ok]
+  apply WP.spec_bind (assoc_index CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey t.views m
     (fun a => key_same a m))
   intro index hindex
   cases index with
@@ -955,13 +955,13 @@ theorem acquire_matches_model (encode : List U8 → String)
             simp [available, captureLocal, hb, mapAvailable, image, find]
           have hView : v = {frame := {}} := by
             simp [v, captureGlobal, captureLocal, hb, find]
-          let empty : Spike.engine.View :=
+          let empty : CcfKv.engine.View :=
             { birth := none, revision := {version := 0#u64, identity := 0#u64}
               «local» := .Empty, global := none }
           have he : rustPinnedView encode s.index m empty = modelPinnedView k v := by
             simp [hView, empty, rustPinnedView, modelPinnedView, encodeImage, pinImage, modelStamp,
               revision, image, find]
-          simp only [core.option.Option.is_none, Spike.engine.Stamp.zero, bind_ok]
+          simp only [core.option.Option.is_none, CcfKv.engine.Stamp.zero, bind_ok]
           apply WP.spec_bind
             (install_view encode inj s.index natArchive t.views m empty hRoom hn
               oldLive ⟨trivial, trivial⟩
@@ -1076,7 +1076,7 @@ theorem acquire_matches_model (encode : List U8 → String)
               unfold IndexKeeps; rw [hvalsEq]; exact .refl _
             have hPresOld := pinned_views_preserved encode hkAfter t.views oldLive
             have hOrigOld := views_origin_preserved encode hkAfter (fun _ h => h) t.views oldLive oldOrig
-            let newView : Spike.engine.View :=
+            let newView : CcfKv.engine.View :=
               { birth := some birth, revision := localRev, «local» := localPin, global := globalPin }
             have newOrig : ViewOrigin encode afterHist.index natArchive m newView := by
               refine ⟨gfLocal, List.mem_iff_getElem?.mpr ⟨currentId.val, gfLocalAt⟩, ?_, ?_⟩
@@ -1113,7 +1113,7 @@ theorem acquire_matches_model (encode : List U8 → String)
             · exact hliveAfter
 
 /-- Compare the observable result of a completed acquisition, including both reported revisions. -/
-def modelAcquisition (out : core.result.Result Spike.engine.Output Spike.engine.Error)
+def modelAcquisition (out : core.result.Result CcfKv.engine.Output CcfKv.engine.Error)
     : Option Output :=
   match out with
   | .Ok (.Acquired localVer globalVer) => some (.acquired localVer.val globalVer.val)
@@ -1125,32 +1125,32 @@ private theorem option_bind_some {α β : Type} (x : α) (f : α → Option β)
   rfl
 
 private theorem acquire_disabled (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : Spike.engine.Tx) (s : Spike.engine.History)
-    (m : Spike.engine.Bytes)
+    (inj : Function.Injective encode) (t : CcfKv.engine.Tx) (s : CcfKv.engine.History)
+    (m : CcfKv.engine.Bytes)
     (disabled
       : t.snapshot = none
         ∨ t.phase ≠ .Active
         ∨ (find (rustPinnedViews encode s.index t.views)
             (encode (alloc.vec.Vec.val m))).isSome)
-    : WP.spec (Spike.engine.Tx.acquire t s m) (fun r => r = (.Err .Disabled, t, s)) := by
+    : WP.spec (CcfKv.engine.Tx.acquire t s m) (fun r => r = (.Err .Disabled, t, s)) := by
   cases hs : t.snapshot with
-  | none => simp [Spike.engine.Tx.acquire, hs]
+  | none => simp [CcfKv.engine.Tx.acquire, hs]
   | some snap =>
-      have restore (phase : Spike.engine.Phase) (hp : t.phase = phase) :
+      have restore (phase : CcfKv.engine.Phase) (hp : t.phase = phase) :
           {t with snapshot := some snap, phase := phase} = t := by
         rw [← hs, ← hp]
       cases hp : t.phase with
-      | Committing => simp [Spike.engine.Tx.acquire, hs, hp, restore _ hp]
-      | Finished => simp [Spike.engine.Tx.acquire, hs, hp, restore _ hp]
-      | Applied version => simp [Spike.engine.Tx.acquire, hs, hp, restore _ hp]
+      | Committing => simp [CcfKv.engine.Tx.acquire, hs, hp, restore _ hp]
+      | Finished => simp [CcfKv.engine.Tx.acquire, hs, hp, restore _ hp]
+      | Applied version => simp [CcfKv.engine.Tx.acquire, hs, hp, restore _ hp]
       | Active =>
           have hPresent
               : (find (rustPinnedViews encode s.index t.views)
                   (encode (alloc.vec.Vec.val m))).isSome :=
             disabled.resolve_left (by simp [hs]) |>.resolve_left (by simp [hp])
-          simp only [Spike.engine.Tx.acquire, hs, hp, bind_ok]
+          simp only [CcfKv.engine.Tx.acquire, hs, hp, bind_ok]
           apply WP.spec_bind
-            (assoc_index Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey t.views m
+            (assoc_index CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey t.views m
               (fun a => key_same a m))
           intro i hi
           cases i with
@@ -1166,8 +1166,8 @@ private theorem acquire_disabled (encode : List U8 → String)
 
 /-- Acquiring without a live, active, uncaptured view leaves the store and all attempts unchanged. -/
 theorem execute_acquire_disabled (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.Store) (id : U64)
-    (m : Spike.engine.Bytes)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (id : U64)
+    (m : CcfKv.engine.Bytes)
     (disabled
       : ∀ t,
           find s.txs.val id = some t
@@ -1175,9 +1175,9 @@ theorem execute_acquire_disabled (encode : List U8 → String)
             ∨ t.phase ≠ .Active
             ∨ (find (rustPinnedViews encode s.history.index t.views)
                 (encode (alloc.vec.Vec.val m))).isSome)
-    : WP.spec (Spike.engine.Store.execute s (.Acquire id m))
+    : WP.spec (CcfKv.engine.Store.execute s (.Acquire id m))
         (fun r => r = (.Err .Disabled, s)) := by
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro outcome hi
   cases outcome with
@@ -1194,7 +1194,7 @@ theorem execute_acquire_disabled (encode : List U8 → String)
       have he : row = (id, t) := hback.1.trans hget
       subst row
       change WP.spec (do
-        let (out, next, hist) ← Spike.engine.Tx.acquire t s.history m
+        let (out, next, hist) ← CcfKv.engine.Tx.acquire t s.history m
         Result.ok (out, {s with history := hist, txs := back (id, next)})) _
       apply WP.spec_bind (acquire_disabled encode inj t s.history m (disabled t hfound))
       intro result hr
@@ -1204,17 +1204,17 @@ theorem execute_acquire_disabled (encode : List U8 → String)
         apply alloc.vec.Vec.ext
         rw [alloc.vec.Vec.set_val_eq, ← hget]
         exact List.set_getElem_self idx
-      change WP.spec (Result.ok (core.result.Result.Err Spike.engine.Error.Disabled,
-        ({s with history := s.history, txs := back (id, t)} : Spike.engine.Store))) _
+      change WP.spec (Result.ok (core.result.Result.Err CcfKv.engine.Error.Disabled,
+        ({s with history := s.history, txs := back (id, t)} : CcfKv.engine.Store))) _
       simp [hunchanged]
 
 /-- The extracted dispatcher and `Kv.Model.execute` agree on an enabled acquisition and the updated attempt. -/
 theorem execute_acquire_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (s : Spike.engine.Store) (id : U64) (w : State)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (id : U64) (w : State)
     (sid : Nat) (model : Store) (natArchive : List Frame)
-    (tx : Tx) (t : Spike.engine.Tx) (snap : Snapshot)
-    (rustSnap : Spike.engine.Snapshot) (m : Spike.engine.Bytes)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (tx : Tx) (t : CcfKv.engine.Tx) (snap : Snapshot)
+    (rustSnap : CcfKv.engine.Snapshot) (m : CcfKv.engine.Bytes)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.history.activeFrames = prior ++ [head])
     (hmodel
       : List.Forall₂ FrameOrderEq (natModelFrames s.history.log natArchive) model.history)
@@ -1250,7 +1250,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       : (storePins s).length + 17 * s.history.index.values.dirs.val.length + 2 ≤ U32.max)
     (oldLive : ViewsLive s.history.index t.views)
     (oldOrig : ViewsOrigin encode s.history.index natArchive t.views)
-    : WP.spec (Spike.engine.Store.execute s (.Acquire id m))
+    : WP.spec (CcfKv.engine.Store.execute s (.Acquire id m))
         (fun (output, after) =>
           ∃ modelAfter txAfter tAfter obs index,
             execute w (.acquire sid id.val (encode (alloc.vec.Vec.val m)))
@@ -1351,7 +1351,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     simp only [execute, hLookup, option_bind_some, hModelSnap, hModelPhase, hp, hFresh,
       Option.isSome_none, Bool.false_or, hLog, Bool.not_true, Bool.false_eq_true, ite_false]
     rfl
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro outcome hi
   cases outcome with
@@ -1367,7 +1367,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       have he : row = (id, t) := hback.1.trans hget
       subst row
       change WP.spec (do
-        let (out, next, hist) ← Spike.engine.Tx.acquire t s.history m
+        let (out, next, hist) ← CcfKv.engine.Tx.acquire t s.history m
         Result.ok (out, {s with history := hist, txs := back (id, next)})) _
       apply WP.spec_bind
         (acquire_matches_model encode inj s.history nativeModel natArchive
@@ -1379,7 +1379,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
       have hupdate : (back (id, next)).val = s.txs.val.set i.val (id, next) := by
         rw [hback.2]
         exact alloc.vec.Vec.set_val_eq _ _ _
-      change WP.spec (Result.ok (out, ({s with history := hist, txs := back (id, next)} : Spike.engine.Store))) _
+      change WP.spec (Result.ok (out, ({s with history := hist, txs := back (id, next)} : CcfKv.engine.Store))) _
       rw [WP.spec_ok]
       by_cases ha : available model snap k
       · rw [ite_eq_left ha] at hn

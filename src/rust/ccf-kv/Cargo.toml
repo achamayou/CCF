@@ -1,15 +1,11 @@
 [package]
-name = "ccf-kv-spike"
+name = "ccf-kv"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [[bench]]
 name = "engine"
-harness = false
-
-[[bench]]
-name = "storage"
 harness = false
 
 [lints.rust]

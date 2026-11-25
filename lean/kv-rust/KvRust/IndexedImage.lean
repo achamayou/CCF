@@ -11,20 +11,20 @@ namespace KvRust
 
 open Aeneas.Std
 
-abbrev CellRows := List (Spike.engine.Address × Spike.engine.Cell)
+abbrev CellRows := List (CcfKv.engine.Address × CcfKv.engine.Cell)
 
-abbrev MapRows := alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Cell)
+abbrev MapRows := alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Cell)
 
-def indexedImageRows (rows : CellRows) (map : Spike.engine.Bytes)
-    : List (Spike.engine.Bytes × Spike.engine.Cell) :=
+def indexedImageRows (rows : CellRows) (map : CcfKv.engine.Bytes)
+    : List (CcfKv.engine.Bytes × CcfKv.engine.Cell) :=
   rows.filterMap fun (a, c) => if a.map.val = map.val then some (a.key, c) else none
 
-theorem indexed_image_append (rows more : CellRows) (map : Spike.engine.Bytes)
+theorem indexed_image_append (rows more : CellRows) (map : CcfKv.engine.Bytes)
     : indexedImageRows (rows ++ more) map
       = indexedImageRows rows map ++ indexedImageRows more map := by
   simp [indexedImageRows, List.filterMap_append]
 
-theorem indexed_image_projects (rows : CellRows) (map : Spike.engine.Bytes)
+theorem indexed_image_projects (rows : CellRows) (map : CcfKv.engine.Bytes)
     : (indexedImageRows rows map).map (fun (k, c) => (k.val, byteCell c))
       = Kv.Model.image (rows.map fun (a, c) => (byteAddr a, byteCell c)) map.val := by
   induction rows with
@@ -35,14 +35,14 @@ theorem indexed_image_projects (rows : CellRows) (map : Spike.engine.Bytes)
         simp [indexedImageRows, Kv.Model.image, byteAddr, same] at ih ⊢ <;> rw [ih]
 
 private theorem append_image_row_refines (out : MapRows)
-    (row : Spike.engine.Address × Spike.engine.Cell) (map : Spike.engine.Bytes)
+    (row : CcfKv.engine.Address × CcfKv.engine.Cell) (map : CcfKv.engine.Bytes)
     (room : out.val.length < Usize.max)
-    : WP.spec (Spike.engine.append_image_row out row.1 row.2 map)
+    : WP.spec (CcfKv.engine.append_image_row out row.1 row.2 map)
         (fun next =>
           next.val = out.val ++ indexedImageRows [row] map
           ∧ next.val.length ≤ out.val.length + 1) := by
   obtain ⟨a, c⟩ := row
-  unfold Spike.engine.append_image_row
+  unfold CcfKv.engine.append_image_row
   by_cases same : a.map.val = map.val
   · simp only [bytes_same, same, decide_true, bind_ok, ite_true, clone_bytes, clone_cell]
     apply WP.spec_mono (alloc.vec.Vec.push_spec out (a.key, c) room)
@@ -51,12 +51,12 @@ private theorem append_image_row_refines (out : MapRows)
   · simp [bytes_same, same, indexedImageRows]
 
 /-- The extracted map materialization preserves the ordered, versioned rows. -/
-theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.Cell)
-    (root : Spike.radix.RadixRoot) (rows : CellRows) (map : Spike.engine.Bytes)
+theorem indexed_image_refines (index : CcfKv.kv_index.AddressIndex CcfKv.engine.Cell)
+    (root : CcfKv.radix.RadixRoot) (rows : CellRows) (map : CcfKv.engine.Bytes)
     (view : IndexView index root rows) (valid : IndexValid index)
     (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
     (room : 18 * rows.length ≤ Usize.max)
-    : WP.spec (Spike.engine.indexed_image index root map)
+    : WP.spec (CcfKv.engine.indexed_image index root map)
         (fun out => out.val = indexedImageRows rows map) := by
   let selected := rows.filter fun r => decide (r.1.map.val = map.val)
   have hSelImg : indexedImageRows selected map = indexedImageRows rows map := by
@@ -66,15 +66,15 @@ theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.
     | nil => rfl
     | cons r rest ih =>
         by_cases hm : r.1.map.val = map.val <;> simp [hm, ih]
-  unfold Spike.engine.indexed_image
+  unfold CcfKv.engine.indexed_image
   apply WP.spec_bind (index_scan_map_refines index root rows map view valid mapRoom room)
   intro links ⟨length, load⟩
   change links.val.length = selected.length at length
   change ∀ (i : Nat) link, links.val[i]? = some link →
-    ∃ entry, selected[i]? = some entry ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry) at load
+    ∃ entry, selected[i]? = some entry ∧ WP.spec (CcfKv.kv_index.AddressIndex.scan_row index link) (· = entry) at load
   apply WP.spec_bind
     (Pₘ := fun out => out.val = indexedImageRows selected map)
-  · unfold Spike.engine.indexed_image_loop
+  · unfold CcfKv.engine.indexed_image_loop
     apply loop.spec_decr_nat (fun (_, i) => selected.length - (i : Usize).val)
       (fun (out, i) =>
         i.val ≤ selected.length
@@ -84,7 +84,7 @@ theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.
       _ _ _
     · rintro ⟨out, i⟩ ⟨hi, space, ordered⟩
       dsimp only at hi space ordered ⊢
-      unfold Spike.engine.indexed_image_loop.body
+      unfold CcfKv.engine.indexed_image_loop.body
       have size := alloc.vec.Vec.len_ineq links
       have len : (alloc.vec.Vec.len links).val = links.val.length :=
         alloc.vec.Vec.len_val links
@@ -126,7 +126,7 @@ theorem indexed_image_refines (index : Spike.kv_index.AddressIndex Spike.engine.
     · have hcap := alloc.vec.Vec.len_ineq links
       have h0 : (0#usize : Usize).val = 0 := rfl
       simp only [h0, Nat.zero_le, Nat.sub_zero, List.drop_zero, true_and]
-      have hwc : (alloc.vec.Vec.with_capacity (Spike.engine.Bytes × Spike.engine.Cell) (alloc.vec.Vec.len links)).val = [] := by
+      have hwc : (alloc.vec.Vec.with_capacity (CcfKv.engine.Bytes × CcfKv.engine.Cell) (alloc.vec.Vec.len links)).val = [] := by
         simp [alloc.vec.Vec.with_capacity]
       simp [hwc, ← length, hcap]
   · intro out eq

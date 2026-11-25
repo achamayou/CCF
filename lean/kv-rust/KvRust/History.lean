@@ -16,16 +16,16 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-abbrev _root_.Spike.engine.History.activeFrames (history : Spike.engine.History)
-    : List Spike.engine.Frame :=
+abbrev _root_.CcfKv.engine.History.activeFrames (history : CcfKv.engine.History)
+    : List CcfKv.engine.Frame :=
   branchValues history.log
 
 /-- Every previously issued frame slot retains its value across this history update. -/
-def FrameSlotsPreserved (before after : Spike.engine.History) : Prop :=
+def FrameSlotsPreserved (before after : CcfKv.engine.History) : Prop :=
   ∀ (i : Nat) frame,
     before.log.frames.val[i]? = some frame → after.log.frames.val[i]? = some frame
 
-theorem FrameSlotsPreserved.of_same (before after : Spike.engine.History)
+theorem FrameSlotsPreserved.of_same (before after : CcfKv.engine.History)
     (same : after.log.frames = before.log.frames)
     : FrameSlotsPreserved before after := by
   intro i frame saved
@@ -39,7 +39,7 @@ private theorem returning {α : Type} {r : Result α} {p : α → Prop} (h : WP.
   | div => simp at h
 
 /-- The history vector is the model's history in reverse chronological order. -/
-def modelFrames (s : Spike.engine.History) (project : Spike.engine.Frame → Frame)
+def modelFrames (s : CcfKv.engine.History) (project : CcfKv.engine.Frame → Frame)
     : List Frame :=
   s.activeFrames.reverse.map project
 
@@ -71,10 +71,10 @@ private theorem filter_is_take {α : Type} (xs : List α) (p : α → Bool) (n :
 theorem compact_cut_model (global head requested : U64) (s : Store)
     (hg : s.global = global.val) (hh : s.head.version = head.val)
     : (do
-        let result ← Spike.engine.compact_cut global head requested
+        let result ← CcfKv.engine.compact_cut global head requested
         Result.ok result.val)
       = .ok (compactStore s requested.val).global := by
-  simp only [Spike.engine.compact_cut, compactStore, hg, hh]
+  simp only [CcfKv.engine.compact_cut, compactStore, hg, hh]
   by_cases hhead : requested.val ≤ head.val
   · by_cases hglobal : global.val < requested.val
     · simp [hhead, hglobal, Nat.max_eq_right (Nat.le_of_lt hglobal)]
@@ -85,10 +85,10 @@ theorem compact_cut_model (global head requested : U64) (s : Store)
 theorem rollback_cut_model (global head requested : U64) (s : Store)
     (hg : s.global = global.val) (hh : s.head.version = head.val)
     : (do
-        let result ← Spike.engine.rollback_cut global head requested
+        let result ← CcfKv.engine.rollback_cut global head requested
         Result.ok result.val)
       = .ok (rollbackCut s requested.val) := by
-  simp only [Spike.engine.rollback_cut, rollbackCut, hg, hh]
+  simp only [CcfKv.engine.rollback_cut, rollbackCut, hg, hh]
   by_cases hhead : requested.val < head.val
   · by_cases hglobal : global.val < requested.val
     · simp [hhead, hglobal, Nat.min_eq_right (Nat.le_of_lt hhead),
@@ -102,12 +102,12 @@ theorem rollback_cut_model (global head requested : U64) (s : Store)
         Nat.max_eq_left (Nat.le_of_not_gt hglobal)]
 
 /-- The extracted head lookup returns the last frame of the oldest-first vector. -/
-theorem history_head (history : Spike.engine.History) (prior : List Spike.engine.Frame)
-    (head : Spike.engine.Frame) (h : history.activeFrames = prior ++ [head])
+theorem history_head (history : CcfKv.engine.History) (prior : List CcfKv.engine.Frame)
+    (head : CcfKv.engine.Frame) (h : history.activeFrames = prior ++ [head])
     (valid : BranchValid history.log)
-    : Spike.engine.History.head history = .ok head := by
-  have hit : WP.spec (Spike.engine.History.head history) (· = head) := by
-    unfold Spike.engine.History.head
+    : CcfKv.engine.History.head history = .ok head := by
+  have hit : WP.spec (CcfKv.engine.History.head history) (· = head) := by
+    unfold CcfKv.engine.History.head
     apply WP.spec_bind (branch_active_len history.log valid)
     intro count hcount
     have hc : count.val = prior.length + 1 := by
@@ -126,32 +126,32 @@ theorem history_head (history : Spike.engine.History) (prior : List Spike.engine
   rw [result, eq]
 
 /-- For histories generated from the model's initial state, cut offsets are absolute. -/
-theorem history_relative_cut_zero (s : Spike.engine.History) (cut : U64)
+theorem history_relative_cut_zero (s : CcfKv.engine.History) (cut : U64)
     (hNonempty : s.activeFrames ≠ [])
     (hIndexed : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
     (valid : BranchValid s.log)
-    : Spike.engine.History.relative_cut s cut = .ok cut := by
+    : CcfKv.engine.History.relative_cut s cut = .ok cut := by
   have hb : 0 < s.activeFrames.length := List.length_pos_iff.mpr hNonempty
   have hBase := hIndexed 0 hb
   have hRead : s.activeFrames[0]? = some s.activeFrames[0] := List.getElem?_eq_getElem hb
   have hZero : s.activeFrames[0].version = 0#u64 := UScalar.eq_of_val_eq hBase
   obtain ⟨first, selected, hfirst⟩ := returning
     (branch_active_at s.log valid 0#usize s.activeFrames[0] hRead)
-  simp [Spike.engine.History.relative_cut, selected, hfirst, hZero]
+  simp [CcfKv.engine.History.relative_cut, selected, hfirst, hZero]
   obtain ⟨offset, hr, hv⟩ := returning
     (U64.sub_spec (x := cut) (y := 0#u64) (by scalar_tac))
   have he : offset = cut := UScalar.eq_of_val_eq (by simpa using hv)
   simpa [he] using hr
 
 /-- With a zero base, the extracted cut lookup clamps to the last retained vector index. -/
-theorem history_at_cut_index (s : Spike.engine.History) (cut : U64)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+theorem history_at_cut_index (s : CcfKv.engine.History) (cut : U64)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.activeFrames = prior ++ [head])
-    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
+    (hzero : CcfKv.engine.History.relative_cut s cut = .ok cut)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.at_cut s cut)
+    : WP.spec (CcfKv.engine.History.at_cut s cut)
         (fun f => s.activeFrames[min cut.val prior.length]? = some f) := by
-  unfold Spike.engine.History.at_cut Spike.engine.History.pin_cut
+  unfold CcfKv.engine.History.at_cut CcfKv.engine.History.pin_cut
   simp only [hzero, bind_ok]
   apply WP.spec_bind (branch_cut_refines s.log valid cut)
   rintro id ⟨frame, saved, selected⟩
@@ -190,16 +190,16 @@ private theorem find_reverse_indexed {α : Type} (xs : List α) (project : α �
         simpa only [Nat.min_eq_left hmin] using ih hprior
 
 /-- Indexed Rust lookup and the model's search of the current branch select the same frame. -/
-theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
-    (model : Store) (project : Spike.engine.Frame → Frame)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+theorem history_at_cut_matches_model (s : CcfKv.engine.History) (cut : U64)
+    (model : Store) (project : CcfKv.engine.Frame → Frame)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.activeFrames = prior ++ [head])
     (hmodel : model.history = modelFrames s project)
-    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
+    (hzero : CcfKv.engine.History.relative_cut s cut = .ok cut)
     (hversions
       : ∀ i (hi : i < s.activeFrames.length), (project s.activeFrames[i]).version = i)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.at_cut s cut)
+    : WP.spec (CcfKv.engine.History.at_cut s cut)
         (fun f => project f = atCut model cut.val ∧ project f ∈ model.history) := by
   apply WP.spec_mono (history_at_cut_index s cut prior head hframes hzero valid)
   intro f hf
@@ -210,20 +210,20 @@ theorem history_at_cut_matches_model (s : Spike.engine.History) (cut : U64)
   exact ⟨by simp [atCut, he], List.mem_of_find?_eq_some he⟩
 
 /-- Pinning a cut returns a stable frame slot with the model's selected value. -/
-theorem history_pin_cut_matches_model (s : Spike.engine.History) (cut : U64)
-    (model : Store) (project : Spike.engine.Frame → Frame)
+theorem history_pin_cut_matches_model (s : CcfKv.engine.History) (cut : U64)
+    (model : Store) (project : CcfKv.engine.Frame → Frame)
     (hmodel : model.history = modelFrames s project)
-    (hzero : Spike.engine.History.relative_cut s cut = .ok cut)
+    (hzero : CcfKv.engine.History.relative_cut s cut = .ok cut)
     (hversions
       : ∀ i (hi : i < s.activeFrames.length), (project s.activeFrames[i]).version = i)
     (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.pin_cut s cut)
+    : WP.spec (CcfKv.engine.History.pin_cut s cut)
         (fun id =>
           ∃ frame,
             s.log.frames.val[id.val]? = some frame
             ∧ project frame = atCut model cut.val
             ∧ project frame ∈ model.history) := by
-  unfold Spike.engine.History.pin_cut
+  unfold CcfKv.engine.History.pin_cut
   simp only [hzero, bind_ok]
   apply WP.spec_mono (branch_cut_refines s.log valid cut)
   rintro id ⟨frame, saved, selected⟩
@@ -238,8 +238,8 @@ theorem history_pin_cut_matches_model (s : Spike.engine.History) (cut : U64)
   exact ⟨frame, saved, by simp [atCut, found], List.mem_of_find?_eq_some found⟩
 
 /-- The version of the selected reference frame is the cut clamped to the surviving branch. -/
-theorem model_cut_version (s : Spike.engine.History) (model : Store)
-    (project : Spike.engine.Frame → Frame)
+theorem model_cut_version (s : CcfKv.engine.History) (model : Store)
+    (project : CcfKv.engine.Frame → Frame)
     (nonempty : s.activeFrames ≠ [])
     (hmodel : model.history = modelFrames s project)
     (indexed
@@ -253,10 +253,10 @@ theorem model_cut_version (s : Spike.engine.History) (model : Store)
   exact indexed _ hi
 
 /-- All non-empty radix roots currently retained by archived frames. -/
-def framePins (frames : List Spike.engine.Frame) : List U32 :=
+def framePins (frames : List CcfKv.engine.Frame) : List U32 :=
   frames.filterMap fun f => if f.data = 0#u32 then none else some f.data
 
-theorem framePins_append (frames : List Spike.engine.Frame) (f : Spike.engine.Frame)
+theorem framePins_append (frames : List CcfKv.engine.Frame) (f : CcfKv.engine.Frame)
     : (framePins (frames ++ [f])).Perm
         (if f.data = 0#u32 then framePins frames else f.data :: framePins frames) := by
   unfold framePins
@@ -266,8 +266,8 @@ theorem framePins_append (frames : List Spike.engine.Frame) (f : Spike.engine.Fr
   · simp only [hz, ite_false]
     exact List.perm_append_singleton f.data _
 
-theorem framePins_set_clear (frames : List Spike.engine.Frame) (i : Nat)
-    (f : Spike.engine.Frame) (hget : frames[i]? = some f)
+theorem framePins_set_clear (frames : List CcfKv.engine.Frame) (i : Nat)
+    (f : CcfKv.engine.Frame) (hget : frames[i]? = some f)
     : (framePins frames).Perm
         (if f.data = 0#u32 then
             framePins (frames.set i { f with data := 0#u32 })
@@ -298,8 +298,8 @@ theorem framePins_set_clear (frames : List Spike.engine.Frame) (i : Nat)
             · simp only [hf, ite_false] at hsub ⊢
               exact (hsub.cons hd.data).trans (List.Perm.swap f.data hd.data _)
 
-private theorem framePins_set_same_data (xs : List Spike.engine.Frame) (j : Nat)
-    (x y : Spike.engine.Frame) (hget : xs[j]? = some x) (hdata : x.data = y.data)
+private theorem framePins_set_same_data (xs : List CcfKv.engine.Frame) (j : Nat)
+    (x y : CcfKv.engine.Frame) (hget : xs[j]? = some x) (hdata : x.data = y.data)
     : framePins (xs.set j y) = framePins xs := by
   induction xs generalizing j with
   | nil => simp at hget
@@ -318,7 +318,7 @@ private theorem framePins_set_same_data (xs : List Spike.engine.Frame) (j : Nat)
 /-- Releasing active frames in `[start, end)` clears their `data` roots and
 elides their metadata (`meta_live := false`), keeping branch IDs intact and
 preserving liveness against the updated `framePins ++ extraPins`. -/
-theorem history_release_active_range_refines (s : Spike.engine.History)
+theorem history_release_active_range_refines (s : CcfKv.engine.History)
     (start «end» : Usize) (extraPins : List U32)
     (valid : BranchValid s.log) (unique : BranchUnique s.log)
     (hle : start.val ≤ «end».val) (hbound : «end».val ≤ s.log.branch.val.length)
@@ -326,7 +326,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
     (queueRoom
       : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.History.release_active_range s start «end»)
+    : WP.spec (CcfKv.engine.History.release_active_range s start «end»)
         (fun after =>
           after.log.branch = s.log.branch
           ∧ after.global = s.global
@@ -338,7 +338,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
           ∧ BranchUnique after.log
           ∧ IndexLiveness after.index (framePins after.log.frames.val ++ extraPins)
           ∧ after.log.frames.val.length = s.log.frames.val.length
-          ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+          ∧ (∀ (k : Nat) (f : CcfKv.engine.Frame),
               s.log.frames.val[k]? = some f
               → ∃ f',
                   after.log.frames.val[k]? = some f'
@@ -354,7 +354,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
                         → s.log.branch.val[off]? = some id
                         → id.val ≠ k)
                       → f' = f))) := by
-  unfold Spike.engine.History.release_active_range Spike.engine.History.release_active_range_loop
+  unfold CcfKv.engine.History.release_active_range CcfKv.engine.History.release_active_range_loop
   let endVal := «end».val
   apply loop.spec_decr_nat
     (fun (_, i) => endVal - i.val)
@@ -371,7 +371,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
       ∧ BranchUnique cur.log
       ∧ IndexLiveness cur.index (framePins cur.log.frames.val ++ extraPins)
       ∧ cur.log.frames.val.length = s.log.frames.val.length
-      ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+      ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
           s.log.frames.val[k]? = some f
           → ∃ f',
               cur.log.frames.val[k]? = some f'
@@ -390,7 +390,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
     _ _ _
   · rintro ⟨cur, i⟩ ⟨hsi, hie, hbr, hgl, htm, hid, hreuse, hvals, hval, huniq, hlive, hflen, hslots⟩
     dsimp only at hsi hie hbr hgl htm hid hreuse hvals hval huniq hlive hflen hslots ⊢
-    unfold Spike.engine.History.release_active_range_loop.body
+    unfold CcfKv.engine.History.release_active_range_loop.body
     by_cases hlt : i < «end»
     · have hilt : i.val < «end».val := hlt
       have hcap : «end».val ≤ Usize.max := by scalar_tac
@@ -411,15 +411,15 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
       apply WP.spec_bind (branch_read_refines cur.log id fCur hfCur)
       intro fRead hfRead
       subst fRead
-      unfold Spike.radix.RadixRoot.is_empty
+      unfold CcfKv.radix.RadixRoot.is_empty
       simp only [bind_ok]
       have hstep1 :
           WP.spec
             (if decide (fCur.data = 0#u32) then Result.ok (cur.log, cur.index)
               else do
-                let rr ← Spike.kv_index.AddressIndex.empty_root cur.index
-                let (f1, read_mut_back) ← Spike.branch_log.BranchLog.read_mut cur.log id
-                let ai1 ← Spike.kv_index.AddressIndex.release_root cur.index fCur.data
+                let rr ← CcfKv.kv_index.AddressIndex.empty_root cur.index
+                let (f1, read_mut_back) ← CcfKv.branch_log.BranchLog.read_mut cur.log id
+                let ai1 ← CcfKv.kv_index.AddressIndex.release_root cur.index fCur.data
                 let bl1 := read_mut_back { f1 with data := rr }
                 Result.ok (bl1, ai1))
             (fun (bl1, ai1) =>
@@ -430,7 +430,7 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
               ∧ IndexLiveness ai1 (framePins bl1.frames.val ++ extraPins)
               ∧ bl1.frames.val.length = s.log.frames.val.length
               ∧ bl1.frames.val[id.val]? = some { fCur with data := 0#u32 }
-              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+              ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                   s.log.frames.val[k]? = some f →
                   ∃ f', bl1.frames.val[k]? = some f'
                     ∧ f'.version = f.version
@@ -502,8 +502,8 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
       rintro ⟨bl1, ai1⟩ ⟨hbr1, hvals1, hval1, huniq1, hlive1, hflen1, hfAt1, hslots1⟩
       change WP.spec (do
         let (bl, ai) ← (do
-          let (slot, read_mut_back) ← Spike.branch_log.BranchLog.read_mut bl1 id
-          let a ← Spike.engine.Assoc.new Spike.engine.Bytes Spike.engine.Stamp
+          let (slot, read_mut_back) ← CcfKv.branch_log.BranchLog.read_mut bl1 id
+          let a ← CcfKv.engine.Assoc.new CcfKv.engine.Bytes CcfKv.engine.Stamp
           Result.ok (read_mut_back { slot with revisions := a, births := a, meta_live := false }, ai1))
         let i1 ← i + 1#usize
         Result.ok (ControlFlow.cont ({ cur with log := bl, index := ai }, i1))) _
@@ -511,8 +511,8 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
       apply WP.spec_bind (branch_read_mut_refines bl1 id { fCur with data := 0#u32 } hfAt1)
       rintro ⟨slot, back2⟩ ⟨hslotEq, hback2⟩
       subst slot
-      simp only [Spike.engine.Assoc.new, bind_ok]
-      let elidedFrame : Spike.engine.Frame := {
+      simp only [CcfKv.engine.Assoc.new, bind_ok]
+      let elidedFrame : CcfKv.engine.Frame := {
         fCur with
           data := 0#u32
           revisions := alloc.vec.Vec.new _
@@ -566,34 +566,34 @@ theorem history_release_active_range_refines (s : Spike.engine.History)
   · exact ⟨Nat.le_refl _, hle, rfl, rfl, rfl, rfl, rfl, rfl, valid, unique, live, rfl,
       fun k f hf => ⟨f, hf, rfl, fun h => ⟨h, rfl, rfl⟩, Or.inl rfl, fun _ => rfl⟩⟩
 
-private theorem stamp_same_terminates (a b : Spike.engine.Stamp)
-    : WP.spec (Spike.engine.Stamp.same a b) (fun _ => True) := by
-  unfold Spike.engine.Stamp.same
+private theorem stamp_same_terminates (a b : CcfKv.engine.Stamp)
+    : WP.spec (CcfKv.engine.Stamp.same a b) (fun _ => True) := by
+  unfold CcfKv.engine.Stamp.same
   by_cases h : a.version = b.version <;> simp [h]
 
 private theorem assoc_get_stamp_terminates
-    (rows : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.Stamp)
-    (m : Spike.engine.Bytes)
+    (rows : CcfKv.engine.Assoc CcfKv.engine.Bytes CcfKv.engine.Stamp)
+    (m : CcfKv.engine.Bytes)
     : WP.spec
-        (Spike.engine.Assoc.get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
           rows m)
         (fun _ => True) := by
-  have hkey : ∀ a : Spike.engine.Bytes,
-      Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey.same a m = .ok (decide (a = m)) := by
+  have hkey : ∀ a : CcfKv.engine.Bytes,
+      CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same a m = .ok (decide (a = m)) := by
     intro a
     have h := bytes_same a m
     have hiff : a.val = m.val ↔ a = m := ⟨alloc.vec.Vec.ext a m, congrArg alloc.vec.Vec.val⟩
     simpa [decide_eq_decide.mpr hiff] using h
-  apply WP.spec_mono (assoc_get Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-    Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Stamp.Insts.CoreCloneClone rows m
-    hkey (fun s => by simp [Spike.engine.Stamp.Insts.CoreCloneClone.clone]))
+  apply WP.spec_mono (assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+    CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone rows m
+    hkey (fun s => by simp [CcfKv.engine.Stamp.Insts.CoreCloneClone.clone]))
   intro _ _; trivial
 
-private theorem frame_matches_lineage_terminates (f : Spike.engine.Frame)
-    (m : Spike.engine.Bytes) (b : Option Spike.engine.Stamp) (r : Spike.engine.Stamp)
-    : WP.spec (Spike.engine.Frame.matches_lineage f m b r) (fun _ => True) := by
-  unfold Spike.engine.Frame.matches_lineage
+private theorem frame_matches_lineage_terminates (f : CcfKv.engine.Frame)
+    (m : CcfKv.engine.Bytes) (b : Option CcfKv.engine.Stamp) (r : CcfKv.engine.Stamp)
+    : WP.spec (CcfKv.engine.Frame.matches_lineage f m b r) (fun _ => True) := by
+  unfold CcfKv.engine.Frame.matches_lineage
   cases f.meta_live with
   | false => simp
   | true =>
@@ -606,7 +606,7 @@ private theorem frame_matches_lineage_terminates (f : Spike.engine.Frame)
             | some _ => Result.ok false
           | some a => match b with
             | none => Result.ok false
-            | some b' => Spike.engine.Stamp.same a b') (fun _ => True) := by
+            | some b' => CcfKv.engine.Stamp.same a b') (fun _ => True) := by
         cases o <;> cases b <;> simp [stamp_same_terminates]
       apply WP.spec_bind hsb
       intro sb _
@@ -614,19 +614,19 @@ private theorem frame_matches_lineage_terminates (f : Spike.engine.Frame)
       | false => simp
       | true =>
           simp only [ite_true]
-          have hrev : WP.spec (Spike.engine.Frame.revision f m) (fun _ => True) := by
-            unfold Spike.engine.Frame.revision
+          have hrev : WP.spec (CcfKv.engine.Frame.revision f m) (fun _ => True) := by
+            unfold CcfKv.engine.Frame.revision
             apply WP.spec_bind (assoc_get_stamp_terminates f.revisions m)
             intro ro _
-            cases ro <;> simp [Spike.engine.Stamp.zero]
+            cases ro <;> simp [CcfKv.engine.Stamp.zero]
           apply WP.spec_bind hrev
           intro s _
           exact stamp_same_terminates s r
 
-private theorem view_needs_frame_terminates (row : Spike.engine.Bytes × Spike.engine.View)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.view_needs_frame row frame globalFrame) (fun _ => True) := by
-  unfold Spike.engine.view_needs_frame
+private theorem view_needs_frame_terminates (row : CcfKv.engine.Bytes × CcfKv.engine.View)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.view_needs_frame row frame globalFrame) (fun _ => True) := by
+  unfold CcfKv.engine.view_needs_frame
   apply WP.spec_bind
     (frame_matches_lineage_terminates frame row.1 row.2.birth row.2.revision)
   intro b _
@@ -637,18 +637,18 @@ private theorem view_needs_frame_terminates (row : Spike.engine.Bytes × Spike.e
       apply WP.spec_bind (frame_matches_lineage_terminates globalFrame row.1 row.2.birth row.2.revision)
       intro _ _; simp
 
-private theorem tx_needs_frame_terminates (tx : Spike.engine.Tx)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.tx_needs_frame tx frame globalFrame) (fun _ => True) := by
-  have hloop0 : WP.spec (Spike.engine.tx_needs_frame_loop0 tx.views frame globalFrame 0#usize)
+private theorem tx_needs_frame_terminates (tx : CcfKv.engine.Tx)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.tx_needs_frame tx frame globalFrame) (fun _ => True) := by
+  have hloop0 : WP.spec (CcfKv.engine.tx_needs_frame_loop0 tx.views frame globalFrame 0#usize)
       (fun _ => True) := by
-    unfold Spike.engine.tx_needs_frame_loop0
+    unfold CcfKv.engine.tx_needs_frame_loop0
     apply loop.spec_decr_nat (fun (_, i) => tx.views.val.length - (i : Usize).val)
       (fun (cur, _) => cur = tx.views) _ _ _
     · rintro ⟨cur, i⟩ hcur
       dsimp only at hcur ⊢
       subst hcur
-      unfold Spike.engine.tx_needs_frame_loop0.body
+      unfold CcfKv.engine.tx_needs_frame_loop0.body
       have hlen : (alloc.vec.Vec.len tx.views).val = tx.views.val.length := alloc.vec.Vec.len_val _
       have hcap := alloc.vec.Vec.len_ineq tx.views
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -671,16 +671,16 @@ private theorem tx_needs_frame_terminates (tx : Spike.engine.Tx)
       · rw [ite_eq_right hlt, WP.spec_ok]; trivial
     · rfl
   have hloop1 : WP.spec
-      (Spike.engine.tx_needs_frame_loop1 tx.views frame.version frame.data
+      (CcfKv.engine.tx_needs_frame_loop1 tx.views frame.version frame.data
         frame.revisions frame.births frame.meta_live globalFrame 0#usize)
       (fun _ => True) := by
-    unfold Spike.engine.tx_needs_frame_loop1
+    unfold CcfKv.engine.tx_needs_frame_loop1
     apply loop.spec_decr_nat (fun (_, i) => tx.views.val.length - (i : Usize).val)
       (fun (cur, _) => cur = tx.views) _ _ _
     · rintro ⟨cur, i⟩ hcur
       dsimp only at hcur ⊢
       subst hcur
-      unfold Spike.engine.tx_needs_frame_loop1.body
+      unfold CcfKv.engine.tx_needs_frame_loop1.body
       have hlen : (alloc.vec.Vec.len tx.views).val = tx.views.val.length := alloc.vec.Vec.len_val _
       have hcap := alloc.vec.Vec.len_ineq tx.views
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -702,7 +702,7 @@ private theorem tx_needs_frame_terminates (tx : Spike.engine.Tx)
             exact ⟨rfl, by omega⟩
       · rw [ite_eq_right hlt, WP.spec_ok]; trivial
     · rfl
-  unfold Spike.engine.tx_needs_frame
+  unfold CcfKv.engine.tx_needs_frame
   cases tx.snapshot with
   | none => exact hloop0
   | some snap =>
@@ -710,18 +710,18 @@ private theorem tx_needs_frame_terminates (tx : Spike.engine.Tx)
       · simp [heq]
       · simp [heq, hloop1]
 
-theorem txs_need_frame_terminates (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
-    (frame globalFrame : Spike.engine.Frame)
-    : WP.spec (Spike.engine.txs_need_frame txs frame globalFrame)
-        (fun b => Spike.engine.txs_need_frame txs frame globalFrame = .ok b) := by
-  have hterm : WP.spec (Spike.engine.txs_need_frame txs frame globalFrame) (fun _ => True) := by
-    unfold Spike.engine.txs_need_frame Spike.engine.txs_need_frame_loop
+theorem txs_need_frame_terminates (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
+    (frame globalFrame : CcfKv.engine.Frame)
+    : WP.spec (CcfKv.engine.txs_need_frame txs frame globalFrame)
+        (fun b => CcfKv.engine.txs_need_frame txs frame globalFrame = .ok b) := by
+  have hterm : WP.spec (CcfKv.engine.txs_need_frame txs frame globalFrame) (fun _ => True) := by
+    unfold CcfKv.engine.txs_need_frame CcfKv.engine.txs_need_frame_loop
     apply loop.spec_decr_nat (fun (_, i) => txs.val.length - (i : Usize).val)
       (fun (cur, _) => cur = txs) _ _ _
     · rintro ⟨cur, i⟩ hcur
       dsimp only at hcur ⊢
       subst cur
-      unfold Spike.engine.txs_need_frame_loop.body
+      unfold CcfKv.engine.txs_need_frame_loop.body
       have hlen : (alloc.vec.Vec.len txs).val = txs.val.length := alloc.vec.Vec.len_val _
       have hcap := alloc.vec.Vec.len_ineq txs
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -743,7 +743,7 @@ theorem txs_need_frame_terminates (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
             exact ⟨rfl, by omega⟩
       · rw [ite_eq_right hlt, WP.spec_ok]; trivial
     · rfl
-  cases h : Spike.engine.txs_need_frame txs frame globalFrame using Result.cases with
+  cases h : CcfKv.engine.txs_need_frame txs frame globalFrame using Result.cases with
   | ret b => simp [WP.spec_ok]
   | vis _ _ => simp [h] at hterm
   | div => simp [h] at hterm
@@ -751,9 +751,9 @@ theorem txs_need_frame_terminates (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
 /-- Releasing compacted frames in `[start, end)` clears their `data` roots and
 elides metadata (`meta_live := false`) only when `txs_need_frame` returns `false`
 against `globalFrame`. -/
-theorem history_release_compacted_range_refines (s : Spike.engine.History)
-    (start «end» globalId : Usize) (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
-    (globalFrame : Spike.engine.Frame) (extraPins : List U32)
+theorem history_release_compacted_range_refines (s : CcfKv.engine.History)
+    (start «end» globalId : Usize) (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
+    (globalFrame : CcfKv.engine.Frame) (extraPins : List U32)
     (valid : BranchValid s.log) (unique : BranchUnique s.log)
     (hle : start.val ≤ «end».val) (hbound : «end».val ≤ s.log.branch.val.length)
     (hGlobalAt : s.log.frames.val[globalId.val]? = some globalFrame)
@@ -767,7 +767,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
     (queueRoom
       : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.History.release_compacted_range s start «end» globalId txs)
+    : WP.spec (CcfKv.engine.History.release_compacted_range s start «end» globalId txs)
         (fun after =>
           after.log.branch = s.log.branch
           ∧ after.global = s.global
@@ -779,7 +779,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
           ∧ BranchUnique after.log
           ∧ IndexLiveness after.index (framePins after.log.frames.val ++ extraPins)
           ∧ after.log.frames.val.length = s.log.frames.val.length
-          ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+          ∧ (∀ (k : Nat) (f : CcfKv.engine.Frame),
               s.log.frames.val[k]? = some f
               → ∃ f',
                   after.log.frames.val[k]? = some f'
@@ -789,7 +789,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
                         ∧ f'.revisions = f.revisions
                         ∧ f'.births = f.births)
                       ∨ (f'.meta_live = false
-                          ∧ Spike.engine.txs_need_frame txs { f with data := 0#u32 }
+                          ∧ CcfKv.engine.txs_need_frame txs { f with data := 0#u32 }
                               globalFrame
                             = .ok false))
                   ∧ ((∀ off (id : Usize),
@@ -798,7 +798,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
                         → s.log.branch.val[off]? = some id
                         → id.val ≠ k)
                       → f' = f))) := by
-  unfold Spike.engine.History.release_compacted_range Spike.engine.History.release_compacted_range_loop
+  unfold CcfKv.engine.History.release_compacted_range CcfKv.engine.History.release_compacted_range_loop
   let endVal := «end».val
   apply loop.spec_decr_nat
     (fun (_, i) => endVal - i.val)
@@ -816,7 +816,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
       ∧ IndexLiveness cur.index (framePins cur.log.frames.val ++ extraPins)
       ∧ cur.log.frames.val.length = s.log.frames.val.length
       ∧ cur.log.frames.val[globalId.val]? = some globalFrame
-      ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+      ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
           s.log.frames.val[k]? = some f
           → ∃ f',
               cur.log.frames.val[k]? = some f'
@@ -826,7 +826,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
                     ∧ f'.revisions = f.revisions
                     ∧ f'.births = f.births)
                   ∨ (f'.meta_live = false
-                      ∧ Spike.engine.txs_need_frame txs { f with data := 0#u32 }
+                      ∧ CcfKv.engine.txs_need_frame txs { f with data := 0#u32 }
                           globalFrame
                         = .ok false))
               ∧ ((∀ off (id : Usize),
@@ -838,7 +838,7 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
     _ _ _
   · rintro ⟨cur, i⟩ ⟨hsi, hie, hbr, hgl, htm, hid, hreuse, hvals, hval, huniq, hlive, hflen, hglCur, hslots⟩
     dsimp only at hsi hie hbr hgl htm hid hreuse hvals hval huniq hlive hflen hglCur hslots ⊢
-    unfold Spike.engine.History.release_compacted_range_loop.body
+    unfold CcfKv.engine.History.release_compacted_range_loop.body
     by_cases hlt : i < «end»
     · have hilt : i.val < «end».val := hlt
       have hcap : «end».val ≤ Usize.max := by scalar_tac
@@ -877,15 +877,15 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
       apply WP.spec_bind (branch_read_refines cur.log id fOrig hfCur)
       intro fRead hfRead
       subst fRead
-      unfold Spike.radix.RadixRoot.is_empty
+      unfold CcfKv.radix.RadixRoot.is_empty
       simp only [bind_ok]
       have hstep1 :
           WP.spec
             (if decide (fOrig.data = 0#u32) then Result.ok (cur.log, cur.index)
               else do
-                let rr ← Spike.kv_index.AddressIndex.empty_root cur.index
-                let (f1, read_mut_back) ← Spike.branch_log.BranchLog.read_mut cur.log id
-                let ai1 ← Spike.kv_index.AddressIndex.release_root cur.index fOrig.data
+                let rr ← CcfKv.kv_index.AddressIndex.empty_root cur.index
+                let (f1, read_mut_back) ← CcfKv.branch_log.BranchLog.read_mut cur.log id
+                let ai1 ← CcfKv.kv_index.AddressIndex.release_root cur.index fOrig.data
                 let bl1 := read_mut_back { f1 with data := rr }
                 Result.ok (bl1, ai1))
             (fun (bl1, ai1) =>
@@ -897,14 +897,14 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
               ∧ bl1.frames.val.length = s.log.frames.val.length
               ∧ bl1.frames.val[id.val]? = some { fOrig with data := 0#u32 }
               ∧ bl1.frames.val[globalId.val]? = some globalFrame
-              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+              ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                   s.log.frames.val[k]? = some f →
                   ∃ f', bl1.frames.val[k]? = some f'
                     ∧ f'.version = f.version
                     ∧ (f'.data = f.data ∨ f'.data = 0#u32)
                     ∧ ((f'.meta_live = f.meta_live ∧ f'.revisions = f.revisions ∧ f'.births = f.births)
                         ∨ (f'.meta_live = false
-                            ∧ Spike.engine.txs_need_frame txs { f with data := 0#u32 } globalFrame
+                            ∧ CcfKv.engine.txs_need_frame txs { f with data := 0#u32 } globalFrame
                               = .ok false))
                     ∧ ((∀ off (id0 : Usize), start.val ≤ off → off < i.val + 1 →
                           s.log.branch.val[off]? = some id0 → id0.val ≠ k)
@@ -975,13 +975,13 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
       rintro ⟨bl1, ai1⟩ ⟨hbr1, hvals1, hval1, huniq1, hlive1, hflen1, hfAt1, hgl1At, hslots1⟩
       change WP.spec (do
         let (bl, ai) ← (do
-          let f1 ← Spike.branch_log.BranchLog.read bl1 id
-          let f2 ← Spike.branch_log.BranchLog.read bl1 globalId
-          let b1 ← Spike.engine.txs_need_frame txs f1 f2
+          let f1 ← CcfKv.branch_log.BranchLog.read bl1 id
+          let f2 ← CcfKv.branch_log.BranchLog.read bl1 globalId
+          let b1 ← CcfKv.engine.txs_need_frame txs f1 f2
           let bl2 ←
             if ¬ b1 then do
-              let (slot, read_mut_back) ← Spike.branch_log.BranchLog.read_mut bl1 id
-              let a ← Spike.engine.Assoc.new Spike.engine.Bytes Spike.engine.Stamp
+              let (slot, read_mut_back) ← CcfKv.branch_log.BranchLog.read_mut bl1 id
+              let a ← CcfKv.engine.Assoc.new CcfKv.engine.Bytes CcfKv.engine.Stamp
               Result.ok (read_mut_back { slot with revisions := a, births := a, meta_live := false })
             else Result.ok bl1
           Result.ok (bl2, ai1))
@@ -1000,8 +1000,8 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
       have hstep2 :
           WP.spec
             (if ¬ needed then do
-              let (slot, read_mut_back) ← Spike.branch_log.BranchLog.read_mut bl1 id
-              let a ← Spike.engine.Assoc.new Spike.engine.Bytes Spike.engine.Stamp
+              let (slot, read_mut_back) ← CcfKv.branch_log.BranchLog.read_mut bl1 id
+              let a ← CcfKv.engine.Assoc.new CcfKv.engine.Bytes CcfKv.engine.Stamp
               Result.ok (read_mut_back { slot with revisions := a, births := a, meta_live := false })
             else Result.ok bl1)
             (fun bl2 =>
@@ -1011,14 +1011,14 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
               ∧ IndexLiveness ai1 (framePins bl2.frames.val ++ extraPins)
               ∧ bl2.frames.val.length = s.log.frames.val.length
               ∧ bl2.frames.val[globalId.val]? = some globalFrame
-              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+              ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                   s.log.frames.val[k]? = some f →
                   ∃ f', bl2.frames.val[k]? = some f'
                     ∧ f'.version = f.version
                     ∧ (f'.data = f.data ∨ f'.data = 0#u32)
                     ∧ ((f'.meta_live = f.meta_live ∧ f'.revisions = f.revisions ∧ f'.births = f.births)
                         ∨ (f'.meta_live = false
-                            ∧ Spike.engine.txs_need_frame txs { f with data := 0#u32 } globalFrame
+                            ∧ CcfKv.engine.txs_need_frame txs { f with data := 0#u32 } globalFrame
                               = .ok false))
                     ∧ ((∀ off (id0 : Usize), start.val ≤ off → off < i.val + 1 →
                           s.log.branch.val[off]? = some id0 → id0.val ≠ k)
@@ -1033,8 +1033,8 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
               (branch_read_mut_refines bl1 id { fOrig with data := 0#u32 } hfAt1)
             rintro ⟨slot, back2⟩ ⟨hslotEq, hback2⟩
             subst slot
-            simp only [Spike.engine.Assoc.new, bind_ok]
-            let elidedFrame : Spike.engine.Frame := {
+            simp only [CcfKv.engine.Assoc.new, bind_ok]
+            let elidedFrame : CcfKv.engine.Frame := {
               fOrig with
                 data := 0#u32
                 revisions := alloc.vec.Vec.new _
@@ -1133,13 +1133,13 @@ theorem history_release_compacted_range_refines (s : Spike.engine.History)
 /-- Trying to elide a single compacted frame's metadata after a transaction ends
 preserves `data`, `index`, `branch`, and `liveness`, and only sets `meta_live := false`
 on a slot strictly below `s.global` when `txs_need_frame` returns `false`. -/
-theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
-    (version : U64) (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
+theorem history_try_elide_compacted_version_refines (s : CcfKv.engine.History)
+    (version : U64) (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
     (hnonempty : s.activeFrames ≠ [])
     (hIndexed : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
     (hGlobalBound : s.global.val < s.activeFrames.length)
     (valid : BranchValid s.log) (unique : BranchUnique s.log)
-    : WP.spec (Spike.engine.History.try_elide_compacted_version s version txs)
+    : WP.spec (CcfKv.engine.History.try_elide_compacted_version s version txs)
         (fun after =>
           after.log.branch = s.log.branch
           ∧ after.index = s.index
@@ -1154,7 +1154,7 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
           ∧ (∃ globalId globalFrame,
               s.log.branch.val[s.global.val]? = some globalId
               ∧ s.log.frames.val[globalId.val]? = some globalFrame
-              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+              ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                   s.log.frames.val[k]? = some f
                   → ∃ f',
                       after.log.frames.val[k]? = some f'
@@ -1164,7 +1164,7 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
                           ∨ (f'.meta_live = false
                               ∧ f.version.val < s.global.val
                               ∧ s.reuse_compacted_images = true
-                              ∧ Spike.engine.txs_need_frame txs f globalFrame
+                              ∧ CcfKv.engine.txs_need_frame txs f globalFrame
                                 = .ok false)))) := by
   have hbrLen : s.log.branch.val.length = s.activeFrames.length :=
     (branch_values_length s.log valid).symm
@@ -1190,15 +1190,15 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
       ∧ ∃ gId gFr,
           s.log.branch.val[s.global.val]? = some gId
           ∧ s.log.frames.val[gId.val]? = some gFr
-          ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+          ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
               s.log.frames.val[k]? = some f
               → ∃ f', s.log.frames.val[k]? = some f' ∧ f'.version = f.version ∧ f'.data = f.data
                   ∧ (f' = f ∨ (f'.meta_live = false ∧ f.version.val < s.global.val
                       ∧ s.reuse_compacted_images = true
-                      ∧ Spike.engine.txs_need_frame txs f gFr = .ok false)) :=
+                      ∧ CcfKv.engine.txs_need_frame txs f gFr = .ok false)) :=
     ⟨rfl, rfl, rfl, rfl, rfl, rfl, valid, unique, rfl, rfl, globalId, globalFrame, hglBrAt, hglFrAt,
       fun _ f hf => ⟨f, hf, rfl, rfl, Or.inl rfl⟩⟩
-  unfold Spike.engine.History.try_elide_compacted_version
+  unfold CcfKv.engine.History.try_elide_compacted_version
   by_cases hreuse : s.reuse_compacted_images = true
   · rw [ite_eq_left hreuse]
     by_cases hge : version ≥ s.global
@@ -1215,8 +1215,8 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
         rw [← UScalar.max_USize_eq, UScalar.max] at hbd
         have := Nat.two_pow_pos UScalarTy.Usize.numBits
         omega
-      have hpinGl : WP.spec (Spike.engine.History.pin_cut s s.global) (· = globalId) := by
-        unfold Spike.engine.History.pin_cut
+      have hpinGl : WP.spec (CcfKv.engine.History.pin_cut s s.global) (· = globalId) := by
+        unfold CcfKv.engine.History.pin_cut
         rw [hzeroG, bind_ok]
         apply WP.spec_mono (branch_cut_id_refines s.log valid s.global)
         intro r hr
@@ -1263,7 +1263,7 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
                     exact ih j' (fun y hy => hbd' y (List.mem_cons_of_mem _ hy)) hget
           have := hfm s.log.branch.val version.val targetId hbd hvBrAt
           rw [hvFrAt] at this
-          simpa [Spike.engine.History.activeFrames, branchValues] using this
+          simpa [CcfKv.engine.History.activeFrames, branchValues] using this
         have hactLt : version.val < s.activeFrames.length := by omega
         have heq : s.activeFrames[version.val]'hactLt = targetFrame :=
           Option.some.inj ((List.getElem?_eq_getElem hactLt).symm.trans hactAt)
@@ -1286,8 +1286,8 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
           apply WP.spec_bind (branch_read_mut_refines s.log targetId targetFrame hvFrAt)
           rintro ⟨slot, back⟩ ⟨hslotEq, hback⟩
           subst slot
-          simp only [Spike.engine.Assoc.new, bind_ok]
-          let elidedFrame : Spike.engine.Frame := {
+          simp only [CcfKv.engine.Assoc.new, bind_ok]
+          let elidedFrame : CcfKv.engine.Frame := {
             targetFrame with
               revisions := alloc.vec.Vec.new _
               births := alloc.vec.Vec.new _
@@ -1296,7 +1296,7 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
           let bl := back elidedFrame
           obtain ⟨hblBr, hblFr⟩ := hback elidedFrame
           have hpinsSame : framePins bl.frames.val = framePins s.log.frames.val := by
-            have hsetEq : ∀ (xs : List Spike.engine.Frame) (j : Nat) (x y : Spike.engine.Frame),
+            have hsetEq : ∀ (xs : List CcfKv.engine.Frame) (j : Nat) (x y : CcfKv.engine.Frame),
                 xs[j]? = some x → x.data = y.data → framePins (xs.set j y) = framePins xs := by
               intro xs j x y hget hdata
               induction xs generalizing j with
@@ -1322,7 +1322,7 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
             exact valid.2 j (hblBr ▸ hj)
           have hblUniq : BranchUnique bl := by
             unfold BranchUnique; rw [hblBr]; exact unique
-          change WP.spec (Result.ok ({ s with log := bl } : Spike.engine.History)) _
+          change WP.spec (Result.ok ({ s with log := bl } : CcfKv.engine.History)) _
           rw [WP.spec_ok]
           refine ⟨hblBr, rfl, rfl, rfl, rfl, rfl, hblValid, hblUniq, hpinsSame, hblLen,
             globalId, globalFrame, hglBrAt, hglFrAt, ?_⟩
@@ -1342,9 +1342,9 @@ theorem history_try_elide_compacted_version_refines (s : Spike.engine.History)
 /-- Compaction advances the frontier, releases compacted roots `< next` and elides
 unneeded compacted metadata when `reuse_compacted_images` is enabled, runs bounded
 retirement, and preserves all remaining pins. -/
-theorem history_compact (s : Spike.engine.History) (requested : U64)
-    (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
-    (model : Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+theorem history_compact (s : CcfKv.engine.History) (requested : U64)
+    (txs : CcfKv.engine.Assoc U64 CcfKv.engine.Tx)
+    (model : Store) (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (extraPins : List U32)
     (hframes : s.activeFrames = prior ++ [head]) (hg : model.global = s.global.val)
     (hglobalBound : s.global.val < s.activeFrames.length)
@@ -1355,7 +1355,7 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
     (queueRoom
       : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.History.compact s requested txs)
+    : WP.spec (CcfKv.engine.History.compact s requested txs)
         (fun (cut, after) =>
           cut.val = (compactStore model requested.val).global
           ∧ after.global = cut
@@ -1374,7 +1374,7 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
           ∧ (∃ globalId globalFrame,
               s.log.branch.val[cut.val]? = some globalId
               ∧ s.log.frames.val[globalId.val]? = some globalFrame
-              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+              ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                   s.log.frames.val[k]? = some f
                   → ∃ f',
                       after.log.frames.val[k]? = some f'
@@ -1384,7 +1384,7 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
                             ∧ f'.revisions = f.revisions
                             ∧ f'.births = f.births)
                           ∨ (f'.meta_live = false
-                              ∧ Spike.engine.txs_need_frame txs { f with data := 0#u32 }
+                              ∧ CcfKv.engine.txs_need_frame txs { f with data := 0#u32 }
                                   globalFrame
                                 = .ok false))
                       ∧ ((s.reuse_compacted_images = false
@@ -1408,18 +1408,18 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
   have hbrLen : s.log.branch.val.length = prior.length + 1 := by
     rw [← branch_values_length s.log valid]
     exact hactLen
-  unfold Spike.engine.History.compact
+  unfold CcfKv.engine.History.compact
   rw [history_head s prior head hframes valid, bind_ok]
-  cases hcutRun : Spike.engine.compact_cut s.global head.version requested
+  cases hcutRun : CcfKv.engine.compact_cut s.global head.version requested
     using Result.cases with
   | div => rw [hcutRun] at hcutModel; simp at hcutModel
   | vis _ _ => rw [hcutRun] at hcutModel; simp at hcutModel
   | ret next =>
-      change Spike.engine.compact_cut s.global head.version requested = Result.ok next at hcutRun
+      change CcfKv.engine.compact_cut s.global head.version requested = Result.ok next at hcutRun
       have hnextVal : next.val = (compactStore model requested.val).global := by
         simpa [hcutRun] using hcutModel
       have hnextLe : next.val ≤ prior.length := by
-        unfold Spike.engine.compact_cut at hcutRun
+        unfold CcfKv.engine.compact_cut at hcutRun
         split at hcutRun
         · split at hcutRun
           · rw [Result.ok.injEq] at hcutRun; subst hcutRun
@@ -1458,8 +1458,8 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
             rw [← UScalar.max_USize_eq, UScalar.max] at hcap
             have := Nat.two_pow_pos UScalarTy.Usize.numBits
             omega
-          have hpinNext : WP.spec (Spike.engine.History.pin_cut { s with global := next } next) (· = globalId) := by
-            unfold Spike.engine.History.pin_cut
+          have hpinNext : WP.spec (CcfKv.engine.History.pin_cut { s with global := next } next) (· = globalId) := by
+            unfold CcfKv.engine.History.pin_cut
             rw [hzero2, bind_ok]
             apply WP.spec_mono (branch_cut_id_refines s.log valid next)
             intro r hr
@@ -1491,7 +1491,7 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
             rw [hvals1]; exact queueRoom
           apply WP.spec_bind
             (index_retire_budget_refines s1.index (framePins s1.log.frames.val ++ extraPins)
-              Spike.engine.RETIRE_BUDGET hlive1 hq1)
+              CcfKv.engine.RETIRE_BUDGET hlive1 hq1)
           rintro ⟨_, ai⟩ ⟨hlive2, hpres2, hdLen2, hrLen2⟩
           change WP.spec (Result.ok (s1.global, { s1 with index := ai })) _
           rw [WP.spec_ok]
@@ -1520,34 +1520,34 @@ theorem history_compact (s : Spike.engine.History) (requested : U64)
           fun k f hf => ⟨f, hf, rfl, Or.inl rfl, Or.inl ⟨rfl, rfl, rfl⟩, fun _ => rfl⟩⟩
 
 /-- A request below the irrevocable cut reports rejection and leaves the entire Rust store unchanged. -/
-theorem rollback_rejected (s : Spike.engine.Store) (requested term : U64)
+theorem rollback_rejected (s : CcfKv.engine.Store) (requested term : U64)
     (h : requested.val < s.history.global.val)
-    : Spike.engine.Store.execute s (.Rollback requested term)
+    : CcfKv.engine.Store.execute s (.Rollback requested term)
       = .ok (.Ok .RollbackRejected, s) := by
-  simp [Spike.engine.Store.execute, Spike.engine.History.rollback, h]
+  simp [CcfKv.engine.Store.execute, CcfKv.engine.History.rollback, h]
 
 /-- A request at or above the cut with a stale term is disabled without changing the store. -/
-theorem rollback_stale_term (s : Spike.engine.Store) (requested term : U64)
+theorem rollback_stale_term (s : CcfKv.engine.Store) (requested term : U64)
     (hcut : s.history.global.val ≤ requested.val) (hterm : term.val < s.history.term.val)
-    : Spike.engine.Store.execute s (.Rollback requested term)
+    : CcfKv.engine.Store.execute s (.Rollback requested term)
       = .ok (.Err .Disabled, s) := by
-  simp [Spike.engine.Store.execute, Spike.engine.History.rollback, Nat.not_lt.mpr hcut, hterm]
+  simp [CcfKv.engine.Store.execute, CcfKv.engine.History.rollback, Nat.not_lt.mpr hcut, hterm]
 
 /-- A legal rollback releases discarded frames `> cut`, rewinds the active branch
 to the prefix through `cut`, runs bounded retirement, and preserves all surviving pins. -/
-theorem history_rollback (s : Spike.engine.History) (requested term : U64)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+theorem history_rollback (s : CcfKv.engine.History) (requested term : U64)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (extraPins : List U32)
     (hframes : s.activeFrames = prior ++ [head])
     (hindex : head.version.val = prior.length)
-    (hzero : ∀ cut, Spike.engine.History.relative_cut s cut = .ok cut)
+    (hzero : ∀ cut, CcfKv.engine.History.relative_cut s cut = .ok cut)
     (hcut : s.global.val ≤ requested.val) (hterm : s.term.val ≤ term.val)
     (valid : BranchValid s.log) (unique : BranchUnique s.log)
     (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
     (queueRoom
       : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.History.rollback s requested term)
+    : WP.spec (CcfKv.engine.History.rollback s requested term)
         (fun (out, after) =>
           ∃ cut,
             out = .Ok (.RolledBack cut)
@@ -1565,7 +1565,7 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
             ∧ after.index.values.dirs.val.length = s.index.values.dirs.val.length
             ∧ after.index.values.rows.val.length = s.index.values.rows.val.length
             ∧ after.log.frames.val.length = s.log.frames.val.length
-            ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+            ∧ (∀ (k : Nat) (f : CcfKv.engine.Frame),
                 s.log.frames.val[k]? = some f
                 → ∃ f',
                     after.log.frames.val[k]? = some f'
@@ -1583,9 +1583,9 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
                         → f' = f))) := by
   let model : Store := { global := s.global.val, head := {version := head.version.val} }
   have hspec := rollback_cut_model s.global head.version requested model rfl rfl
-  have hsuccess : ∃ cut, Spike.engine.rollback_cut s.global head.version requested = .ok cut
+  have hsuccess : ∃ cut, CcfKv.engine.rollback_cut s.global head.version requested = .ok cut
       ∧ cut.val = max s.global.val (min head.version.val requested.val) := by
-    cases h : Spike.engine.rollback_cut s.global head.version requested
+    cases h : CcfKv.engine.rollback_cut s.global head.version requested
       using Result.cases with
     | ret cut => exact ⟨cut, rfl, by simpa [h, model, rollbackCut] using hspec⟩
     | vis _ _ => simp [h] at hspec
@@ -1595,7 +1595,7 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
   have hbrLen : s.log.branch.val.length = prior.length + 1 := by
     rw [← branch_values_length s.log valid]
     exact hlen
-  unfold Spike.engine.History.rollback
+  unfold CcfKv.engine.History.rollback
   have hnotLow : ¬ (requested < s.global) := by change ¬ (requested.val < s.global.val); omega
   have hnotTerm : ¬ (term < s.term) := by change ¬ (term.val < s.term.val); omega
   rw [ite_eq_right hnotLow, ite_eq_right hnotTerm,
@@ -1635,17 +1635,17 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     obtain ⟨_, hbrBl⟩ := hrew
     change WP.spec (do
       massert true
-      let (_, ai) ← Spike.kv_index.AddressIndex.retire_budget s1.index Spike.engine.RETIRE_BUDGET
-      Result.ok (core.result.Result.Ok (Spike.engine.Output.RolledBack cut),
+      let (_, ai) ← CcfKv.kv_index.AddressIndex.retire_budget s1.index CcfKv.engine.RETIRE_BUDGET
+      Result.ok (core.result.Result.Ok (CcfKv.engine.Output.RolledBack cut),
         { s1 with log := bl, index := ai, term })) _
     simp only [massert, ite_true, bind_ok]
     have hq1 : 2 * (s1.index.values.dirs.val.length + s1.index.values.rows.val.length) + 1 ≤ Usize.max := by
       rw [hvals1]; exact queueRoom
     apply WP.spec_bind
       (index_retire_budget_refines s1.index (framePins s1.log.frames.val ++ extraPins)
-        Spike.engine.RETIRE_BUDGET hlive1 hq1)
+        CcfKv.engine.RETIRE_BUDGET hlive1 hq1)
     rintro ⟨_, ai⟩ ⟨hlive2, hpres2, hdLen2, hrLen2⟩
-    change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.RolledBack cut),
+    change WP.spec (Result.ok (core.result.Result.Ok (CcfKv.engine.Output.RolledBack cut),
       { s1 with log := bl, index := ai, term })) _
     rw [WP.spec_ok]
     have hpres1 : IndexPreservesPins s.index s1.index (framePins s1.log.frames.val ++ extraPins) :=

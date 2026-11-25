@@ -14,11 +14,11 @@ open Aeneas.Std
 open Kv.Model
 
 private abbrev NativeResult :=
-  core.result.Result Spike.engine.Output Spike.engine.Error
+  core.result.Result CcfKv.engine.Output CcfKv.engine.Error
 
-private abbrev NativeStep := NativeResult × Spike.engine.Store
+private abbrev NativeStep := NativeResult × CcfKv.engine.Store
 
-private def emptyFrame (root : Spike.radix.RadixRoot) : Spike.engine.Frame :=
+private def emptyFrame (root : CcfKv.radix.RadixRoot) : CcfKv.engine.Frame :=
   {
     version := 0#u64
     data := root
@@ -29,7 +29,7 @@ private def emptyFrame (root : Spike.radix.RadixRoot) : Spike.engine.Frame :=
 
 /-- The extracted constructor creates the model's empty version-zero history. -/
 theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
-    : WP.spec (Spike.engine.Store.new term)
+    : WP.spec (CcfKv.engine.Store.new term)
         (fun s =>
           ∃ head,
             s.history.activeFrames = [head]
@@ -47,9 +47,9 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
             ∧ HistoryIndexValid s.history
             ∧ ArchiveAligned encode s.history [({term := term.val} : Store).head]
             ∧ IndexLiveness s.history.index (storePins s)) := by
-  simp only [Spike.engine.Store.new, Spike.engine.History.new, Spike.engine.Frame.empty,
-    Spike.engine.Assoc.new, Aeneas.Std.bind_assoc, bind_ok]
-  apply WP.spec_bind (index_new_refines Spike.engine.Cell)
+  simp only [CcfKv.engine.Store.new, CcfKv.engine.History.new, CcfKv.engine.Frame.empty,
+    CcfKv.engine.Assoc.new, Aeneas.Std.bind_assoc, bind_ok]
+  apply WP.spec_bind (index_new_refines CcfKv.engine.Cell)
   intro index ⟨indexLive, empty⟩
   apply WP.spec_bind empty
   intro root ⟨hrootZero, view⟩
@@ -146,7 +146,7 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
     exact indexLive
 
 /-- The exact native transaction installed by a fresh `Begin`. -/
-def lifecycleNewTx : Spike.engine.Tx :=
+def lifecycleNewTx : CcfKv.engine.Tx :=
   {
     snapshot := none
     views := alloc.vec.Vec.new _
@@ -157,22 +157,22 @@ def lifecycleNewTx : Spike.engine.Tx :=
   }
 
 /-- The extracted transaction constructor initializes every attempt field. -/
-theorem tx_new_lifecycle : Spike.engine.Tx.new = .ok lifecycleNewTx := by
-  simp [Spike.engine.Tx.new, Spike.engine.Assoc.new, lifecycleNewTx]
+theorem tx_new_lifecycle : CcfKv.engine.Tx.new = .ok lifecycleNewTx := by
+  simp [CcfKv.engine.Tx.new, CcfKv.engine.Assoc.new, lifecycleNewTx]
 
-private theorem clone_dependencies (rows : alloc.vec.Vec Spike.engine.Dependency)
-    : alloc.vec.CloneVec.clone Spike.engine.Dependency.Insts.CoreCloneClone rows
+private theorem clone_dependencies (rows : alloc.vec.Vec CcfKv.engine.Dependency)
+    : alloc.vec.CloneVec.clone CcfKv.engine.Dependency.Insts.CoreCloneClone rows
       = .ok rows := by
-  have hsingle (d : Spike.engine.Dependency)
-      : Spike.engine.Dependency.Insts.CoreCloneClone.clone d = .ok d := by
+  have hsingle (d : CcfKv.engine.Dependency)
+      : CcfKv.engine.Dependency.Insts.CoreCloneClone.clone d = .ok d := by
     cases d with
     | Key addr cell =>
-        cases cell <;> simp [Spike.engine.Dependency.Insts.CoreCloneClone.clone,
-          Spike.engine.copy_cell, clone_address, clone_cell]
+        cases cell <;> simp [CcfKv.engine.Dependency.Insts.CoreCloneClone.clone,
+          CcfKv.engine.copy_cell, clone_address, clone_cell]
     | Map map image =>
-        simp [Spike.engine.Dependency.Insts.CoreCloneClone.clone, clone_bytes, clone_pin]
+        simp [CcfKv.engine.Dependency.Insts.CoreCloneClone.clone, clone_bytes, clone_pin]
   generalize hr :
-    alloc.vec.CloneVec.clone Spike.engine.Dependency.Insts.CoreCloneClone rows = result
+    alloc.vec.CloneVec.clone CcfKv.engine.Dependency.Insts.CoreCloneClone rows = result
   suffices h : WP.spec result (fun next => next = rows) by
     cases result using Result.cases with
     | ret next => simpa using h
@@ -185,14 +185,14 @@ private theorem clone_dependencies (rows : alloc.vec.Vec Spike.engine.Dependency
   cases rows
   simp
 
-private theorem clone_tx (t : Spike.engine.Tx)
-    : Spike.engine.Tx.Insts.CoreCloneClone.clone t = .ok t := by
-  simp [Spike.engine.Tx.Insts.CoreCloneClone.clone, clone_assoc, clone_dependencies]
+private theorem clone_tx (t : CcfKv.engine.Tx)
+    : CcfKv.engine.Tx.Insts.CoreCloneClone.clone t = .ok t := by
+  simp [CcfKv.engine.Tx.Insts.CoreCloneClone.clone, clone_assoc, clone_dependencies]
 
 /-- Enabled `Begin` prepends the fresh attempt; duplicate IDs leave the store unchanged. -/
-theorem execute_begin_lifecycle (s : Spike.engine.Store) (id : U64)
+theorem execute_begin_lifecycle (s : CcfKv.engine.Store) (id : U64)
     (room : find s.txs.val id = none → s.txs.val.length < Usize.max)
-    : WP.spec (Spike.engine.Store.execute s (.Begin id))
+    : WP.spec (CcfKv.engine.Store.execute s (.Begin id))
         (fun (out, after) =>
           match find s.txs.val id with
           | none =>
@@ -200,8 +200,8 @@ theorem execute_begin_lifecycle (s : Spike.engine.Store) (id : U64)
               ∧ after.history = s.history
               ∧ after.txs.val = Kv.Model.set s.txs.val id lifecycleNewTx
           | some _ => (out, after) = (.Err .Disabled, s)) := by
-  unfold Spike.engine.Store.execute
-  apply WP.spec_bind (assoc_index Spike.U64.Insts.Ccf_kv_spikeEngineKey s.txs id
+  unfold CcfKv.engine.Store.execute
+  apply WP.spec_bind (assoc_index CcfKv.U64.Insts.Ccf_kvEngineKey s.txs id
     (fun _ => rfl))
   intro index hi
   cases index with
@@ -209,8 +209,8 @@ theorem execute_begin_lifecycle (s : Spike.engine.Store) (id : U64)
       change find s.txs.val id = none at hi
       simp only [hi, core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true,
         ite_false, tx_new_lifecycle, bind_ok]
-      apply WP.spec_bind (assoc_set Spike.U64.Insts.Ccf_kv_spikeEngineKey
-        core.clone.CloneU64 Spike.engine.Tx.Insts.CoreCloneClone s.txs id lifecycleNewTx
+      apply WP.spec_bind (assoc_set CcfKv.U64.Insts.Ccf_kvEngineKey
+        core.clone.CloneU64 CcfKv.engine.Tx.Insts.CoreCloneClone s.txs id lifecycleNewTx
         (fun _ => rfl) (fun _ => rfl) clone_tx (room hi))
       intro next hn
       simp [hn]
@@ -218,7 +218,7 @@ theorem execute_begin_lifecycle (s : Spike.engine.Store) (id : U64)
       obtain ⟨t, _, ht⟩ := hi
       simp [core.option.Option.is_some, ht]
 
-private abbrev AttemptRows := alloc.vec.Vec (U64 × Spike.engine.Tx)
+private abbrev AttemptRows := alloc.vec.Vec (U64 × CcfKv.engine.Tx)
 
 private theorem drop_after_set {α : Type} (rows : List α) (i : Nat) (x : α)
     : (rows.set i x).drop (i + 1) = rows.drop (i + 1) := by
@@ -230,15 +230,15 @@ private theorem drop_after_set {α : Type} (rows : List α) (i : Nat) (x : α)
       | succ i => exact ih i
 
 private theorem move_other_attempt_matches (kept : AttemptRows)
-    (row : U64 × Spike.engine.Tx) (id : U64) (room : kept.val.length < Usize.max)
-    : WP.spec (Spike.engine.move_other_attempt kept row id)
+    (row : U64 × CcfKv.engine.Tx) (id : U64) (room : kept.val.length < Usize.max)
+    : WP.spec (CcfKv.engine.move_other_attempt kept row id)
         (fun (next, _) =>
           next.val = kept.val ++ erase [row] id
           ∧ next.val.length ≤ kept.val.length + 1) := by
   obtain ⟨key, tx⟩ := row
-  unfold Spike.engine.move_other_attempt
+  unfold CcfKv.engine.move_other_attempt
   change WP.spec (if key != id then do
-      let tmp ← Spike.engine.Tx.new
+      let tmp ← CcfKv.engine.Tx.new
       let (moved, empty) := core.mem.swap tmp tx
       let out ← alloc.vec.Vec.push kept (key, moved)
       Result.ok (out, (key, empty))
@@ -254,11 +254,11 @@ private theorem move_other_attempt_matches (kept : AttemptRows)
 
 /-- Ending an attempt moves untouched rows without copying their observations or values. -/
 private theorem erase_attempt_matches (rows : AttemptRows) (id : U64)
-    : WP.spec (Spike.engine.erase_attempt rows id)
+    : WP.spec (CcfKv.engine.erase_attempt rows id)
         (fun next => next.val = erase rows.val id) := by
-  unfold Spike.engine.erase_attempt
+  unfold CcfKv.engine.erase_attempt
   apply WP.spec_bind (Pₘ := fun out => out.val = erase rows.val id)
-  · unfold Spike.engine.erase_attempt_loop
+  · unfold CcfKv.engine.erase_attempt_loop
     apply loop.spec_decr_nat (fun (_, _, i) => rows.val.length - (i : Usize).val)
       (fun (working, kept, i) =>
         working.val.length = rows.val.length
@@ -267,7 +267,7 @@ private theorem erase_attempt_matches (rows : AttemptRows) (id : U64)
       _ _ _
     · rintro ⟨working, kept, i⟩ ⟨size, keptBound, suffix⟩
       dsimp only at size keptBound suffix ⊢
-      unfold Spike.engine.erase_attempt_loop.body
+      unfold CcfKv.engine.erase_attempt_loop.body
       have len : (alloc.vec.Vec.len working).val = working.val.length :=
         alloc.vec.Vec.len_val working
       have space := alloc.vec.Vec.len_ineq working
@@ -338,7 +338,7 @@ private theorem erase_eq_eraseIdx {K V : Type} [DecidableEq K] (rows : Assoc K V
 /-- Enabled `End` releases the attempt's pins, erases its row, opportunistically elides
 compacted snapshot metadata when no remaining attempt needs it, and retires freed nodes;
 missing IDs leave the store unchanged. -/
-theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
+theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
     (unique : (s.txs.val.map Prod.fst).Nodup)
     (hnonempty : s.history.activeFrames ≠ [])
     (hIndexed
@@ -353,7 +353,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
                 + s.history.index.values.rows.val.length)
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.Store.execute s (.End id))
+    : WP.spec (CcfKv.engine.Store.execute s (.End id))
         (fun (out, after) =>
           match find s.txs.val id with
           | none => (out, after) = (.Err .Disabled, s)
@@ -374,7 +374,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
                   s.history.log.branch.val[s.history.global.val]? = some globalId
                   ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
                   ∧ after.history.log.frames.val[globalId.val]? = some globalFrame
-                  ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                  ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                       s.history.log.frames.val[k]? = some f
                       → ∃ f',
                           after.history.log.frames.val[k]? = some f'
@@ -384,9 +384,9 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
                               ∨ (f'.meta_live = false
                                   ∧ f.version.val < s.history.global.val
                                   ∧ s.history.reuse_compacted_images = true
-                                  ∧ Spike.engine.txs_need_frame after.txs f globalFrame
+                                  ∧ CcfKv.engine.txs_need_frame after.txs f globalFrame
                                     = .ok false))) := by
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro index hi
   cases index with
@@ -396,7 +396,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
         core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
   | Ok i =>
       obtain ⟨t, hrow, ht⟩ := hi
-      have hidx : alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice (U64 × Spike.engine.Tx))
+      have hidx : alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice (U64 × CcfKv.engine.Tx))
           s.txs i = .ok (id, t) := by
         simp [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize,
           alloc.vec.Vec.getElem?_Nat_eq, hrow]
@@ -441,7 +441,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
           (match t.snapshot with
             | none => Result.ok {s.history with index := ai}
             | some snap =>
-              Spike.engine.History.try_elide_compacted_version
+              CcfKv.engine.History.try_elide_compacted_version
                 {s.history with index := ai} snap.version next)
           (fun h =>
             h.log.branch = s.history.log.branch
@@ -458,7 +458,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
                 s.history.log.branch.val[s.history.global.val]? = some globalId
                 ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
                 ∧ h.log.frames.val[globalId.val]? = some globalFrame
-                ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                     s.history.log.frames.val[k]? = some f
                     → ∃ f',
                         h.log.frames.val[k]? = some f'
@@ -468,7 +468,7 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
                             ∨ (f'.meta_live = false
                                 ∧ f.version.val < s.history.global.val
                                 ∧ s.history.reuse_compacted_images = true
-                                ∧ Spike.engine.txs_need_frame next f globalFrame = .ok false))) := by
+                                ∧ CcfKv.engine.txs_need_frame next f globalFrame = .ok false))) := by
         cases hsnap : t.snapshot with
         | none =>
             rw [WP.spec_ok]
@@ -505,11 +505,11 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
         rw [haiVals]; exact queueRoom
       rw [hidxEq]
       apply WP.spec_bind
-        (index_retire_budget_refines ai restPins Spike.engine.RETIRE_BUDGET haiLive
+        (index_retire_budget_refines ai restPins CcfKv.engine.RETIRE_BUDGET haiLive
           haiQueue)
       rintro ⟨_, ai1⟩ ⟨hai1Live, hai1Pres, _, _⟩
-      change WP.spec (Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
-        ({s with history := {h with index := ai1}, txs := next} : Spike.engine.Store))) _
+      change WP.spec (Result.ok (core.result.Result.Ok CcfKv.engine.Output.Unit,
+        ({s with history := {h with index := ai1}, txs := next} : CcfKv.engine.Store))) _
       rw [WP.spec_ok]
       have hpinsAfter : storePins {s with history := {h with index := ai1}, txs := next} = restPins := by
         simp [storePins, restPins, hfp, hn]
@@ -525,8 +525,8 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
         exact hkeptAi.trans hai1Pres
 
 /-- `SetTerm` changes only the term, including on equality, and rejects a decrease. -/
-theorem execute_set_term_lifecycle (s : Spike.engine.Store) (term : U64)
-    : WP.spec (Spike.engine.Store.execute s (.SetTerm term))
+theorem execute_set_term_lifecycle (s : CcfKv.engine.Store) (term : U64)
+    : WP.spec (CcfKv.engine.Store.execute s (.SetTerm term))
         (fun r =>
           r
           = if term.val < s.history.term.val then
@@ -540,8 +540,8 @@ theorem execute_set_term_lifecycle (s : Spike.engine.Store) (term : U64)
   split <;> simp [*]
 
 /-- An in-place attempt update preserves history and changes exactly the selected row. -/
-def LifecycleRowUpdate (s after : Spike.engine.Store) (id : U64)
-    (t next : Spike.engine.Tx)
+def LifecycleRowUpdate (s after : CcfKv.engine.Store) (id : U64)
+    (t next : CcfKv.engine.Tx)
     : Prop :=
   after.history = s.history
   ∧ next.views = t.views
@@ -549,9 +549,9 @@ def LifecycleRowUpdate (s after : Spike.engine.Store) (id : U64)
       s.txs.val[index]? = some (id, t) ∧ after.txs.val = s.txs.val.set index (id, next)
 
 /-- A guarded attempt update either takes its designated step or leaves the store untouched. -/
-def LifecycleTxPost (s : Spike.engine.Store) (id : U64)
-    (step : Spike.engine.Tx → Option (Spike.engine.Output × Spike.engine.Tx))
-    (r : core.result.Result Spike.engine.Output Spike.engine.Error × Spike.engine.Store)
+def LifecycleTxPost (s : CcfKv.engine.Store) (id : U64)
+    (step : CcfKv.engine.Tx → Option (CcfKv.engine.Output × CcfKv.engine.Tx))
+    (r : core.result.Result CcfKv.engine.Output CcfKv.engine.Error × CcfKv.engine.Store)
     : Prop :=
   match (find s.txs.val id).bind step with
   | none => r = (.Err .Disabled, s)
@@ -563,20 +563,20 @@ private theorem vec_index {α : Type} (rows : alloc.vec.Vec α) (i : Usize) (a :
     : alloc.vec.Vec.index_usize rows i = .ok a := by
   simp [alloc.vec.Vec.index_usize, alloc.vec.Vec.getElem?_Nat_eq, h]
 
-private theorem index_mut_row (s : Spike.engine.Store) (i : Usize) (id : U64)
-    (t : Spike.engine.Tx) (h : s.txs.val[i.val]? = some (id, t))
+private theorem index_mut_row (s : CcfKv.engine.Store) (i : Usize) (id : U64)
+    (t : CcfKv.engine.Tx) (h : s.txs.val[i.val]? = some (id, t))
     : alloc.vec.Vec.index_mut
-        (core.slice.index.SliceIndexUsizeSlice (U64 × Spike.engine.Tx)) s.txs i
+        (core.slice.index.SliceIndexUsizeSlice (U64 × CcfKv.engine.Tx)) s.txs i
       = .ok ((id, t), alloc.vec.Vec.set s.txs i) := by
   simp [alloc.vec.Vec.index_mut_slice_index, alloc.vec.Vec.index_mut_usize, vec_index _ _ _ h]
 
-private theorem row_update (s : Spike.engine.Store) (id : U64) (t next : Spike.engine.Tx)
+private theorem row_update (s : CcfKv.engine.Store) (id : U64) (t next : CcfKv.engine.Tx)
     (i : Usize) (h : s.txs.val[i.val]? = some (id, t)) (hv : next.views = t.views)
     : LifecycleRowUpdate s {s with txs := alloc.vec.Vec.set s.txs i (id, next)} id t
         next :=
   ⟨rfl, hv, i.val, h, alloc.vec.Vec.set_val_eq ..⟩
 
-private theorem restore_row (s : Spike.engine.Store) (id : U64) (t : Spike.engine.Tx)
+private theorem restore_row (s : CcfKv.engine.Store) (id : U64) (t : CcfKv.engine.Tx)
     (i : Usize) (h : s.txs.val[i.val]? = some (id, t))
     : alloc.vec.Vec.set s.txs i (id, t) = s.txs := by
   obtain ⟨hi, hget⟩ := List.getElem?_eq_some_iff.mp h
@@ -585,11 +585,11 @@ private theorem restore_row (s : Spike.engine.Store) (id : U64) (t : Spike.engin
   exact List.set_getElem_self hi
 
 /-- `Snapshot` freezes the actual head version and term, only on a fresh active attempt. -/
-theorem execute_snapshot_lifecycle (s : Spike.engine.Store) (id : U64)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+theorem execute_snapshot_lifecycle (s : CcfKv.engine.Store) (id : U64)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.history.activeFrames = prior ++ [head])
     (valid : BranchValid s.history.log)
-    : WP.spec (Spike.engine.Store.execute s (.Snapshot id))
+    : WP.spec (CcfKv.engine.Store.execute s (.Snapshot id))
         (LifecycleTxPost s id
           fun t =>
             match t.phase, t.snapshot with
@@ -603,7 +603,7 @@ theorem execute_snapshot_lifecycle (s : Spike.engine.Store) (id : U64)
                     }
                   )
             | _, _ => none) := by
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro index hi
   cases index with
@@ -629,14 +629,14 @@ theorem execute_snapshot_lifecycle (s : Spike.engine.Store) (id : U64)
       | Finished => simp [LifecycleTxPost, ht, hp]
 
 /-- `CommitBegin` moves a live active attempt to committing, with no other mutations. -/
-theorem execute_commit_begin_lifecycle (s : Spike.engine.Store) (id : U64)
-    : WP.spec (Spike.engine.Store.execute s (.CommitBegin id))
+theorem execute_commit_begin_lifecycle (s : CcfKv.engine.Store) (id : U64)
+    : WP.spec (CcfKv.engine.Store.execute s (.CommitBegin id))
         (LifecycleTxPost s id
           fun t =>
             match t.phase with
             | .Active => some (.Unit, {t with phase := .Committing})
             | _ => none) := by
-  unfold Spike.engine.Store.execute
+  unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro index hi
   cases index with
@@ -646,7 +646,7 @@ theorem execute_commit_begin_lifecycle (s : Spike.engine.Store) (id : U64)
         core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
   | Ok i =>
       obtain ⟨t, hrow, ht⟩ := hi
-      have hrestore (phase : Spike.engine.Phase) (hp : t.phase = phase)
+      have hrestore (phase : CcfKv.engine.Phase) (hp : t.phase = phase)
           : {t with phase} = t := by rw [← hp]
       simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok, index_mut_row s i id t hrow]
       cases hp : t.phase with
@@ -661,7 +661,7 @@ theorem execute_commit_begin_lifecycle (s : Spike.engine.Store) (id : U64)
           simp [LifecycleTxPost, ht, hp, hrestore _ hp, restore_row s id t i hrow]
 
 /-- Assigned commit version, or `none` when the supplied outcome is disabled. -/
-def lifecycleCommitVersion (t : Spike.engine.Tx) (outcome : Spike.engine.Outcome)
+def lifecycleCommitVersion (t : CcfKv.engine.Tx) (outcome : CcfKv.engine.Outcome)
     : Option U64 :=
   match t.phase, outcome with
   | .Applied _, .Conflict => none
@@ -672,15 +672,15 @@ def lifecycleCommitVersion (t : Spike.engine.Tx) (outcome : Spike.engine.Outcome
   | _, _ => none
 
 /-- Every phase/outcome combination returns its prescribed version or rejects without mutation. -/
-theorem execute_commit_result_lifecycle (s : Spike.engine.Store) (id : U64)
-    (outcome : Spike.engine.Outcome)
-    : WP.spec (Spike.engine.Store.execute s (.CommitResult id outcome))
+theorem execute_commit_result_lifecycle (s : CcfKv.engine.Store) (id : U64)
+    (outcome : CcfKv.engine.Outcome)
+    : WP.spec (CcfKv.engine.Store.execute s (.CommitResult id outcome))
         (LifecycleTxPost s id
           fun t =>
             (lifecycleCommitVersion t outcome).map
               fun v =>
                 (.Committed outcome v, {t with phase := .Finished})) := by
-  unfold Spike.engine.Store.execute Spike.engine.Store.finish
+  unfold CcfKv.engine.Store.execute CcfKv.engine.Store.finish
   apply WP.spec_bind (tx_index s id)
   intro index hi
   cases index with
@@ -752,25 +752,25 @@ theorem lifecycle_find_set_in_place {K V : Type} [DecidableEq K] (rows : Assoc K
           · by_cases hd : k = other <;> simp [find, hd, he, ho]
 
 /-- The phase projection retains the version of an applied attempt. -/
-def lifecyclePhase : Spike.engine.Phase → Phase
+def lifecyclePhase : CcfKv.engine.Phase → Phase
   | .Active => .active
   | .Committing => .committing
   | .Applied v => .applied v.val
   | .Finished => .finished
 
 /-- Frozen metadata represented natively, independent of the captured model frame's data. -/
-def lifecycleSnapshot (snap : Option Spike.engine.Snapshot) : Option (Nat × Nat) :=
+def lifecycleSnapshot (snap : Option CcfKv.engine.Snapshot) : Option (Nat × Nat) :=
   snap.map fun s => (s.version.val, s.term.val)
 
 /-- The outcome projection preserves all three replication outcomes. -/
-def lifecycleOutcome : Spike.engine.Outcome → Outcome
+def lifecycleOutcome : CcfKv.engine.Outcome → Outcome
   | .Success => .success
   | .Conflict => .conflict
   | .NoReplicate => .noReplicate
 
 /-- The parts of attempt correspondence needed by lifecycle guards. -/
 structure LifecycleAttempt (encode : List U8 → String) (index : CellIndex)
-    (natArchive archive : List Frame) (native : Spike.engine.Tx) (tx : Tx)
+    (natArchive archive : List Frame) (native : CcfKv.engine.Tx) (tx : Tx)
     : Prop where
   phase : lifecyclePhase native.phase = tx.phase
   snapshot
@@ -783,7 +783,7 @@ structure LifecycleAttempt (encode : List U8 → String) (index : CellIndex)
 
 /-- Full attempt correspondence supplies the lifecycle guard projections. -/
 theorem LifecycleAttempt.ofMatched {encode : List U8 → String} {sid : Nat}
-    {index : CellIndex} {natArchive archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    {index : CellIndex} {natArchive archive : List Frame} {n : CcfKv.engine.Tx} {t : Tx}
     (h : AttemptMatches encode sid index natArchive archive n t)
     : LifecycleAttempt encode index natArchive archive n t :=
   ⟨h.phase.symm, h.snapshot.symm, h.writes, h.unavailable.symm, h.store ▸ h⟩
@@ -807,7 +807,7 @@ theorem lifecycle_new_attempt (encode : List U8 → String) (sid : Nat)
 
 /-- `CommitResult` uses exactly the model's phase, outcome, and pending-write guard. -/
 theorem lifecycle_commit_version_matches_model (encode : List U8 → String)
-    (t : Spike.engine.Tx) (tx : Tx) (outcome : Spike.engine.Outcome)
+    (t : CcfKv.engine.Tx) (tx : Tx) (outcome : CcfKv.engine.Outcome)
     {index : CellIndex} {natArchive archive : List Frame}
     (h : LifecycleAttempt encode index natArchive archive t tx)
     : (lifecycleCommitVersion t outcome).map (fun v => v.val)
@@ -841,28 +841,28 @@ theorem lifecycle_commit_version_matches_model (encode : List U8 → String)
 
 /-- Project just the outputs of lifecycle actions. -/
 def lifecycleOutput
-    : core.result.Result Spike.engine.Output Spike.engine.Error → Option Output
+    : core.result.Result CcfKv.engine.Output CcfKv.engine.Error → Option Output
   | .Ok .Unit => some .unit
   | .Ok (.Snapshot v g term) => some (.snapshot v.val g.val term.val)
   | .Ok (.Committed outcome v) => some (.committed (lifecycleOutcome outcome) v.val)
   | _ => none
 
 /-- Model rejection means an exact native no-op; success agrees on output and state updates. -/
-def LifecycleModelPost (s : Spike.engine.Store) (step : Option (State × Output))
-    (post : State → Spike.engine.Store → Prop)
-    (r : core.result.Result Spike.engine.Output Spike.engine.Error × Spike.engine.Store)
+def LifecycleModelPost (s : CcfKv.engine.Store) (step : Option (State × Output))
+    (post : State → CcfKv.engine.Store → Prop)
+    (r : core.result.Result CcfKv.engine.Output CcfKv.engine.Error × CcfKv.engine.Store)
     : Prop :=
   match step with
   | none => r = (.Err .Disabled, s)
   | some (after, out) => lifecycleOutput r.1 = some out ∧ post after r.2
 
 /-- For a live store, the duplicate-attempt guard and fresh attempt agree with `execute`. -/
-theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.engine.Store)
+theorem execute_begin_matches_model (encode : List U8 → String) (s : CcfKv.engine.Store)
     (w : State) (sid : Nat) (id : U64) (model : Store) (natArchive archive : List Frame)
     (hStore : find w.stores sid = some model)
     (hExists : (find w.txs id.val).isSome = (find s.txs.val id).isSome)
     (room : find s.txs.val id = none → s.txs.val.length < Usize.max)
-    : WP.spec (Spike.engine.Store.execute s (.Begin id))
+    : WP.spec (CcfKv.engine.Store.execute s (.Begin id))
         (LifecycleModelPost s (execute w (.txCreate sid id.val))
           fun w' s' =>
             w' = {w with txs := Kv.Model.set w.txs id.val {store := sid}}
@@ -882,7 +882,7 @@ theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.eng
       simpa [execute, hStore, hExists, ht, LifecycleModelPost] using h
 
 /-- The owned-attempt lookup and native lookup give the same `End` guard, pin release, and exact erasure. -/
-theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Nat)
+theorem execute_end_matches_model (s : CcfKv.engine.Store) (w : State) (sid : Nat)
     (id : U64) (hExists : (lookupTx w sid id.val).isSome = (find s.txs.val id).isSome)
     (unique : (s.txs.val.map Prod.fst).Nodup)
     (hnonempty : s.history.activeFrames ≠ [])
@@ -898,7 +898,7 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
                 + s.history.index.values.rows.val.length)
           + 1
         ≤ Usize.max)
-    : WP.spec (Spike.engine.Store.execute s (.End id))
+    : WP.spec (CcfKv.engine.Store.execute s (.End id))
         (LifecycleModelPost s (execute w (.txEnd sid id.val))
           fun w' s' =>
             w' = {w with txs := erase w.txs id.val}
@@ -917,7 +917,7 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
                 s.history.log.branch.val[s.history.global.val]? = some globalId
                 ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
                 ∧ s'.history.log.frames.val[globalId.val]? = some globalFrame
-                ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
                     s.history.log.frames.val[k]? = some f
                     → ∃ f',
                         s'.history.log.frames.val[k]? = some f'
@@ -927,7 +927,7 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
                             ∨ (f'.meta_live = false
                                 ∧ f.version.val < s.history.global.val
                                 ∧ s.history.reuse_compacted_images = true
-                                ∧ Spike.engine.txs_need_frame s'.txs f globalFrame
+                                ∧ CcfKv.engine.txs_need_frame s'.txs f globalFrame
                                   = .ok false))) := by
   apply WP.spec_mono
     (execute_end_lifecycle s id unique hnonempty hIndexed hGlobalBound valid branchUnique
@@ -944,10 +944,10 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
     exact ⟨rfl, rfl, hrest⟩
 
 /-- `SetTerm` compares the same natural-number terms as the model, preserving other fields. -/
-theorem execute_set_term_matches_model (s : Spike.engine.Store) (w : State) (sid : Nat)
+theorem execute_set_term_matches_model (s : CcfKv.engine.Store) (w : State) (sid : Nat)
     (term : U64) (model : Store) (hStore : find w.stores sid = some model)
     (hTerm : model.term = s.history.term.val)
-    : WP.spec (Spike.engine.Store.execute s (.SetTerm term))
+    : WP.spec (CcfKv.engine.Store.execute s (.SetTerm term))
         (LifecycleModelPost s (execute w (.setTerm sid term.val))
           fun w' s' =>
             w'
@@ -962,9 +962,9 @@ theorem execute_set_term_matches_model (s : Spike.engine.Store) (w : State) (sid
     simp [execute, hStore, hTerm, hlt, LifecycleModelPost, lifecycleOutput]
 
 /-- The exact model row replacement and native in-place update for a matched attempt. -/
-def LifecycleModelRow (encode : List U8 → String) (s : Spike.engine.Store) (w : State)
+def LifecycleModelRow (encode : List U8 → String) (s : CcfKv.engine.Store) (w : State)
     (sid : Nat) (id : U64) (natArchive archive : List Frame) (w' : State)
-    (s' : Spike.engine.Store)
+    (s' : CcfKv.engine.Store)
     : Prop :=
   ∃ old next nextModel,
     find s.txs.val id = some old
@@ -973,12 +973,12 @@ def LifecycleModelRow (encode : List U8 → String) (s : Spike.engine.Store) (w 
     ∧ AttemptMatches encode sid s.history.index natArchive archive next nextModel
 
 private theorem match_attempt_step (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : CcfKv.engine.Store) (w : State) (sid : Nat) (id : U64)
     (natArchive archive : List Frame)
-    (action : Spike.engine.Action) (modelAction : Action)
-    (nativeStep : Spike.engine.Tx → Option (Spike.engine.Output × Spike.engine.Tx))
+    (action : CcfKv.engine.Action) (modelAction : Action)
+    (nativeStep : CcfKv.engine.Tx → Option (CcfKv.engine.Output × CcfKv.engine.Tx))
     (modelStep : Store → Tx → Option (Output × Tx))
-    (related : Spike.engine.Tx → Store → Tx → Prop)
+    (related : CcfKv.engine.Tx → Store → Tx → Prop)
     (lookup
       : Option.Rel (fun t (store, tx) => related t store tx)
           (find s.txs.val id) (lookupTx w sid id.val))
@@ -1001,8 +1001,8 @@ private theorem match_attempt_step (encode : List U8 → String)
                 fun (out, next) =>
                   ({w with txs := Kv.Model.set w.txs id.val next}, out))
     (hNative
-      : WP.spec (Spike.engine.Store.execute s action) (LifecycleTxPost s id nativeStep))
-    : WP.spec (Spike.engine.Store.execute s action)
+      : WP.spec (CcfKv.engine.Store.execute s action) (LifecycleTxPost s id nativeStep))
+    : WP.spec (CcfKv.engine.Store.execute s action)
         (LifecycleModelPost s (execute w modelAction)
           (LifecycleModelRow encode s w sid id natArchive archive)) := by
   apply WP.spec_mono hNative
@@ -1048,17 +1048,17 @@ private theorem lifecycle_option_bind_some {α β : Type} (a : α) (f : α → O
 
 /-- On related lookups, `CommitBegin` agrees with the model without assuming either guard. -/
 theorem execute_commit_begin_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : CcfKv.engine.Store) (w : State) (sid : Nat) (id : U64)
     (natArchive archive : List Frame)
     (lookup
       : Option.Rel
           (fun t (_, tx) =>
             LifecycleAttempt encode s.history.index natArchive archive t tx)
           (find s.txs.val id) (lookupTx w sid id.val))
-    : WP.spec (Spike.engine.Store.execute s (.CommitBegin id))
+    : WP.spec (CcfKv.engine.Store.execute s (.CommitBegin id))
         (LifecycleModelPost s (execute w (.commitBegin sid id.val))
           (LifecycleModelRow encode s w sid id natArchive archive)) := by
-  let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
+  let nStep (t : CcfKv.engine.Tx) : Option (CcfKv.engine.Output × CcfKv.engine.Tx) :=
     match t.phase with
     | .Active => some (.Unit, {t with phase := .Committing})
     | _ => none
@@ -1085,9 +1085,9 @@ theorem execute_commit_begin_matches_model (encode : List U8 → String)
 
 /-- On related lookups, `Snapshot` agrees with the model's fresh-active guard and frozen fields. -/
 theorem execute_snapshot_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : CcfKv.engine.Store) (w : State) (sid : Nat) (id : U64)
     (natArchive archive : List Frame)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hframes : s.history.activeFrames = prior ++ [head])
     (valid : BranchValid s.history.log)
     (lookup
@@ -1098,10 +1098,10 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
             ∧ model.global = s.history.global.val
             ∧ model.term = s.history.term.val)
           (find s.txs.val id) (lookupTx w sid id.val))
-    : WP.spec (Spike.engine.Store.execute s (.Snapshot id))
+    : WP.spec (CcfKv.engine.Store.execute s (.Snapshot id))
         (LifecycleModelPost s (execute w (.snapshot sid id.val))
           (LifecycleModelRow encode s w sid id natArchive archive)) := by
-  let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
+  let nStep (t : CcfKv.engine.Tx) : Option (CcfKv.engine.Output × CcfKv.engine.Tx) :=
     match t.phase, t.snapshot with
     | .Active, none =>
         some (.Snapshot head.version s.history.global s.history.term,
@@ -1143,19 +1143,19 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
 
 /-- On related lookups, all `CommitResult` guards, versions and updates match `execute`. -/
 theorem execute_commit_result_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : CcfKv.engine.Store) (w : State) (sid : Nat) (id : U64)
     (natArchive archive : List Frame)
-    (outcome : Spike.engine.Outcome)
+    (outcome : CcfKv.engine.Outcome)
     (lookup
       : Option.Rel
           (fun t (_, tx) =>
             LifecycleAttempt encode s.history.index natArchive archive t tx)
           (find s.txs.val id) (lookupTx w sid id.val))
-    : WP.spec (Spike.engine.Store.execute s (.CommitResult id outcome))
+    : WP.spec (CcfKv.engine.Store.execute s (.CommitResult id outcome))
         (LifecycleModelPost s
           (execute w (.commitResult sid id.val (lifecycleOutcome outcome)))
           (LifecycleModelRow encode s w sid id natArchive archive)) := by
-  let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
+  let nStep (t : CcfKv.engine.Tx) : Option (CcfKv.engine.Output × CcfKv.engine.Tx) :=
     (lifecycleCommitVersion t outcome).map fun v =>
       (.Committed outcome v, {t with phase := .Finished})
   let version (tx : Tx) : Option Nat :=

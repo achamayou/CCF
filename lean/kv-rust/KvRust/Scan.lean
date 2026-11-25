@@ -14,18 +14,18 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-private abbrev Bytes := Spike.engine.Bytes
-private abbrev Entries := Spike.engine.Assoc Bytes Bytes
-private abbrev WriteRow := Spike.engine.Address × Spike.engine.Write
+private abbrev Bytes := CcfKv.engine.Bytes
+private abbrev Entries := CcfKv.engine.Assoc Bytes Bytes
+private abbrev WriteRow := CcfKv.engine.Address × CcfKv.engine.Write
 
-local instance : DecidableEq Spike.engine.Bytes :=
+local instance : DecidableEq CcfKv.engine.Bytes :=
   fun a b =>
     decidable_of_iff (alloc.vec.Vec.val a = alloc.vec.Vec.val b)
       ⟨alloc.vec.Vec.ext a b, congrArg alloc.vec.Vec.val⟩
 
 /-- Read the encoded keys and values of an extracted scan or range. -/
 def modelEntries (encode : List U8 → String)
-    (rows : alloc.vec.Vec (Spike.engine.Bytes × Spike.engine.Bytes))
+    (rows : alloc.vec.Vec (CcfKv.engine.Bytes × CcfKv.engine.Bytes))
     : Assoc String String :=
   rows.val.map fun (k, v) => (encode (alloc.vec.Vec.val k), encode (alloc.vec.Vec.val v))
 
@@ -44,7 +44,7 @@ private theorem map_writes_append (encode : List U8 → String) (m : Bytes)
   simp [mapWrites]
 
 private theorem map_writes_proj (encode : List U8 → String)
-    (inj : Function.Injective encode) (m : Bytes) (t : Spike.engine.Tx)
+    (inj : Function.Injective encode) (m : Bytes) (t : CcfKv.engine.Tx)
     : mapWrites encode m t.pending.val
       = (pointWrites encode t).filterMap
           fun (a, v) =>
@@ -60,16 +60,16 @@ private theorem map_writes_proj (encode : List U8 → String)
 private theorem scan_put (encode : List U8 → String) (inj : Function.Injective encode)
     (rows : Entries) (key value : Bytes) (room : rows.val.length < Usize.max)
     : WP.spec
-        (Spike.engine.Assoc.set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Bytes.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Bytes.Insts.CoreCloneClone
           rows key value)
         (fun out =>
           modelEntries encode out
             = Kv.Model.set (modelEntries encode rows) (encode (alloc.vec.Vec.val key))
                 (encode (alloc.vec.Vec.val value))
           ∧ out.val.length ≤ rows.val.length + 1) := by
-  apply WP.spec_mono (assoc_set Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-    Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Bytes.Insts.CoreCloneClone rows key value
+  apply WP.spec_mono (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+    CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Bytes.Insts.CoreCloneClone rows key value
     (fun a => key_same a key) clone_bytes clone_bytes room)
   intro out h
   have hi : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
@@ -84,15 +84,15 @@ private theorem scan_put (encode : List U8 → String) (inj : Function.Injective
 private theorem scan_remove (encode : List U8 → String) (inj : Function.Injective encode)
     (rows : Entries) (key : Bytes)
     : WP.spec
-        (Spike.engine.Assoc.erase Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-          Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Bytes.Insts.CoreCloneClone
+        (CcfKv.engine.Assoc.erase CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Bytes.Insts.CoreCloneClone
           rows key)
         (fun out =>
           modelEntries encode out
             = erase (modelEntries encode rows) (encode (alloc.vec.Vec.val key))
           ∧ out.val.length ≤ rows.val.length) := by
-  apply WP.spec_mono (assoc_erase Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-    Spike.engine.Bytes.Insts.CoreCloneClone Spike.engine.Bytes.Insts.CoreCloneClone rows key
+  apply WP.spec_mono (assoc_erase CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+    CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Bytes.Insts.CoreCloneClone rows key
     (fun a => key_same a key) clone_bytes clone_bytes)
   intro out h
   have hi : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
@@ -107,14 +107,14 @@ private theorem scan_remove (encode : List U8 → String) (inj : Function.Inject
 private theorem scan_overlay (encode : List U8 → String) (inj : Function.Injective encode)
     (m : Bytes) (pending : alloc.vec.Vec WriteRow) (base : Entries)
     (room : base.val.length + pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.scan_loop pending m base (alloc.vec.Vec.len pending))
+    : WP.spec (CcfKv.engine.Tx.scan_loop pending m base (alloc.vec.Vec.len pending))
         (fun r =>
           modelEntries encode r
             = writeValues (modelEntries encode base) (mapWrites encode m pending.val)
           ∧ r.val.length ≤ base.val.length + pending.val.length) := by
   let expected := writeValues (modelEntries encode base) (mapWrites encode m pending.val)
   let cap := base.val.length + pending.val.length
-  unfold Spike.engine.Tx.scan_loop
+  unfold CcfKv.engine.Tx.scan_loop
   apply loop.spec_decr_nat (fun (p : Entries × Usize) => p.2.val)
     (fun (rows, i) =>
       i.val ≤ pending.val.length
@@ -124,7 +124,7 @@ private theorem scan_overlay (encode : List U8 → String) (inj : Function.Injec
         = expected) _ _ _
   · rintro ⟨rows, i⟩ ⟨hi, hcap, hrows⟩
     dsimp only at hi hcap hrows ⊢
-    unfold Spike.engine.Tx.scan_loop.body
+    unfold CcfKv.engine.Tx.scan_loop.body
     have hzero : (0#usize : Usize).val = 0 := rfl
     have hone : (1#usize : Usize).val = 1 := rfl
     by_cases h : (0#usize : Usize) < i
@@ -179,8 +179,8 @@ private theorem scan_overlay (encode : List U8 → String) (inj : Function.Injec
 
 /-- The native scan includes this map's overlay and records the committed image as a dependency. -/
 theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injective encode)
-    (history : Spike.engine.History)
-    (t : Spike.engine.Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View) (tx : Tx)
+    (history : CcfKv.engine.History)
+    (t : CcfKv.engine.Tx) (m : CcfKv.engine.Bytes) (view : CcfKv.engine.View) (tx : Tx)
     (hLocal
       : encodeImage encode (pinImage history.index m view.local)
         = image tx.data (encode (alloc.vec.Vec.val m)))
@@ -193,7 +193,7 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
     (room : t.deps.val.length < Usize.max)
     (rowsRoom
       : (pinImage history.index m view.local).length + t.pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
+    : WP.spec (CcfKv.engine.Tx.scan history t.pending t.deps m view)
         (fun (rows, deps) =>
           let next := {t with deps}
           deps.val = t.deps.val ++ [.Map m view.local]
@@ -206,7 +206,7 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
               :: tx.normal.deps
           ∧ rows.val.length
             ≤ (pinImage history.index m view.local).length + t.pending.val.length) := by
-  simp only [Spike.engine.Tx.scan, clone_bytes, clone_pin, bind_ok]
+  simp only [CcfKv.engine.Tx.scan, clone_bytes, clone_pin, bind_ok]
   apply WP.spec_bind (deps_push encode history.index t (.Map m view.local) room)
   intro deps ⟨hdepsVal, hd⟩
   apply WP.spec_bind
@@ -242,8 +242,8 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
 /-- The extracted scan accepts a different pinned-row and staged-write order.
 The new map dependency still binds the complete pinned cells. -/
 theorem scan_by_contents_matches (encode : List U8 → String)
-    (inj : Function.Injective encode) (history : Spike.engine.History)
-    (t : Spike.engine.Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View) (tx : Tx)
+    (inj : Function.Injective encode) (history : CcfKv.engine.History)
+    (t : CcfKv.engine.Tx) (m : CcfKv.engine.Bytes) (view : CcfKv.engine.View) (tx : Tx)
     (localImage
       : (encodeImage encode (pinImage history.index m view.local)).Perm
           (image tx.data (encode m.val)))
@@ -256,7 +256,7 @@ theorem scan_by_contents_matches (encode : List U8 → String)
     (room : t.deps.val.length < Usize.max)
     (rowsRoom
       : (pinImage history.index m view.local).length + t.pending.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
+    : WP.spec (CcfKv.engine.Tx.scan history t.pending t.deps m view)
         (fun (rows, deps) =>
           deps.val = t.deps.val ++ [.Map m view.local]
           ∧ (modelEntries encode rows).Perm
@@ -299,10 +299,10 @@ private theorem clear_writes_fold (m : String)
   | cons row rest ih => exact ih (set_perm related (m, row.1) none)
 
 private theorem clear_rows (encode : List U8 → String)
-    (inj : Function.Injective encode) (t : Spike.engine.Tx) (m : Bytes)
+    (inj : Function.Injective encode) (t : CcfKv.engine.Tx) (m : Bytes)
     (entries : Entries) (sorted : PendingSorted t.pending.val)
     (room : t.pending.val.length + entries.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.operate_loop t.pending m entries 0#usize)
+    : WP.spec (CcfKv.engine.Tx.operate_loop t.pending m entries 0#usize)
         (fun next =>
           (pointWrites encode {t with pending := next}).Perm
             ((modelEntries encode entries).foldl (removeEntry (encode m.val))
@@ -311,12 +311,12 @@ private theorem clear_rows (encode : List U8 → String)
   let project := fun (p : Bytes × Bytes) =>
     (encode (alloc.vec.Vec.val p.1), encode (alloc.vec.Vec.val p.2))
   let table := encode m.val
-  let remaining := fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write)) (i : Nat) =>
+  let remaining := fun (p : alloc.vec.Vec (CcfKv.engine.Address × CcfKv.engine.Write)) (i : Nat) =>
     ((entries.val.drop i).map project).foldl (removeEntry table)
       (pointWrites encode {t with pending := p})
-  unfold Spike.engine.Tx.operate_loop
+  unfold CcfKv.engine.Tx.operate_loop
   apply loop.spec_decr_nat
-    (fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write) × Usize) =>
+    (fun (p : alloc.vec.Vec (CcfKv.engine.Address × CcfKv.engine.Write) × Usize) =>
       entries.val.length - p.2.val)
     (fun (s, i) =>
       i.val ≤ entries.val.length
@@ -326,7 +326,7 @@ private theorem clear_rows (encode : List U8 → String)
     _ _ _
   · rintro ⟨s, i⟩ ⟨hi, hsize, hs, hsOrder⟩
     dsimp only at hi hsize hs hsOrder ⊢
-    unfold Spike.engine.Tx.operate_loop.body
+    unfold CcfKv.engine.Tx.operate_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq entries
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -336,8 +336,8 @@ private theorem clear_rows (encode : List U8 → String)
       apply WP.spec_bind (alloc.vec.Vec.index_usize_spec entries i hb)
       rintro ⟨key, value⟩ hr
       change WP.spec (do
-        let key' ← Spike.engine.Bytes.Insts.CoreCloneClone.clone key
-        let pending ← Spike.engine.stage_write s {map := m, key := key'} .Remove
+        let key' ← CcfKv.engine.Bytes.Insts.CoreCloneClone.clone key
+        let pending ← CcfKv.engine.stage_write s {map := m, key := key'} .Remove
         let j ← i + 1#usize
         Result.ok (ControlFlow.cont (pending, j))) _
       simp only [clone_bytes, bind_ok]
@@ -392,18 +392,18 @@ inductive ScanOperation where
   | scan
   | size
   | clear
-  | range (lower upper : Option Spike.engine.Bytes)
+  | range (lower upper : Option CcfKv.engine.Bytes)
 
 /-- Map-level output observations of the native engine. -/
 def scanOutput (encode : List U8 → String)
-    : core.result.Result Spike.engine.Output Spike.engine.Error → Option Output
+    : core.result.Result CcfKv.engine.Output CcfKv.engine.Error → Option Output
   | .Ok (.Entries entries) => some (.entries (modelEntries encode entries))
   | .Ok (.Size size) => some (.size size.val)
   | .Ok .Unit => some .unit
   | _ => none
 
 /-- Embed a map-level operation into an extracted action. -/
-def ScanOperation.rust : ScanOperation → Spike.engine.Operation
+def ScanOperation.rust : ScanOperation → CcfKv.engine.Operation
   | .scan => .Scan
   | .size => .Size
   | .clear => .Clear
@@ -444,16 +444,16 @@ private theorem compare_lt_zero_iff {encode : List U8 → String}
   decide_eq_decide.mpr (byteOrder_lt_encoded order a.val b.val)
 
 private theorem bytes_compare_ok (a b : Bytes)
-    : Spike.engine.Bytes.compare a b = .ok (byteOrder a.val b.val) := by
+    : CcfKv.engine.Bytes.compare a b = .ok (byteOrder a.val b.val) := by
   have h := bytes_compare a b
-  cases heq : Spike.engine.Bytes.compare a b using Result.cases with
+  cases heq : CcfKv.engine.Bytes.compare a b using Result.cases with
   | ret cmp => simpa [heq] using h
   | vis _ _ => simp [heq] at h
   | div => simp [heq] at h
 
 private theorem pin_range_refines {encode : List U8 → String}
     (inj : Function.Injective encode) (order : PreservesByteOrder encode)
-    (history : Spike.engine.History) (m : Bytes) (pin : Spike.engine.PinnedImage)
+    (history : CcfKv.engine.History) (m : Bytes) (pin : CcfKv.engine.PinnedImage)
     (visible : Assoc String String) (lower upper : Option Bytes)
     (unique : Kv.Properties.Unique visible)
     (related
@@ -463,7 +463,7 @@ private theorem pin_range_refines {encode : List U8 → String}
     (live : PinLive history.index pin) (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
     (space : PinScanRoom history.index pin)
-    : WP.spec (Spike.engine.PinnedImage.range pin history m lower upper)
+    : WP.spec (CcfKv.engine.PinnedImage.range pin history m lower upper)
         (fun out =>
           modelEntries encode out
           = (visible.filter
@@ -471,7 +471,7 @@ private theorem pin_range_refines {encode : List U8 → String}
                 inRange (encodeBound encode lower) (encodeBound encode upper)
                   row.1)).mergeSort
               (fun a b => decide (a.1 ≤ b.1))) := by
-  unfold Spike.engine.PinnedImage.range
+  unfold CcfKv.engine.PinnedImage.range
   cases pin with
   | Empty =>
       have hnil : visible = [] := by
@@ -480,20 +480,20 @@ private theorem pin_range_refines {encode : List U8 → String}
         exact List.eq_nil_of_length_eq_zero this.symm
       simp [alloc.vec.Vec.new, modelEntries, hnil]
   | Recovered rows =>
-      have hrel : (encodeRangeEntries encode Spike.engine.Cell.value rows.val).Perm visible := by
-        have heq : encodeRangeEntries encode Spike.engine.Cell.value rows.val =
+      have hrel : (encodeRangeEntries encode CcfKv.engine.Cell.value rows.val).Perm visible := by
+        have heq : encodeRangeEntries encode CcfKv.engine.Cell.value rows.val =
             (encodeImage encode (pinImage history.index m (.Recovered rows))).map
               (fun (k, c) => (k, c.value)) := by
           simp [encodeRangeEntries, encodeImage, pinImage, byteImage, List.map_map,
             Function.comp_def, encodeCell, byteCell]
         rwa [heq]
       apply WP.spec_mono (ordered_range_by_contents order
-        Spike.engine.Cell.Insts.Ccf_kv_spikeEngineRangeValue Spike.engine.Cell.value
+        CcfKv.engine.Cell.Insts.Ccf_kvEngineRangeValue CcfKv.engine.Cell.value
         (fun _ => rfl) rows visible lower upper unique hrel)
       intro out hout
       simpa [modelEntries, encodeEntries] using hout
   | Root root =>
-      unfold Spike.engine.indexed_range
+      unfold CcfKv.engine.indexed_range
       apply WP.spec_bind
         (index_scan_map_refines history.index root (indexRows history.index root) m
           live valid mapRoom space)
@@ -506,8 +506,8 @@ private theorem pin_range_refines {encode : List U8 → String}
       change links.val.length = selected.length at hlen
       change ∀ (i : Nat) link, links.val[i]? = some link →
         ∃ entry, selected[i]? = some entry ∧
-          WP.spec (Spike.kv_index.AddressIndex.scan_row history.index link) (· = entry) at hload
-      unfold Spike.engine.indexed_range_loop
+          WP.spec (CcfKv.kv_index.AddressIndex.scan_row history.index link) (· = entry) at hload
+      unfold CcfKv.engine.indexed_range_loop
       have hcap := alloc.vec.Vec.len_ineq links
       have hlenV : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
       have hone : (1#usize : Usize).val = 1 := rfl
@@ -522,7 +522,7 @@ private theorem pin_range_refines {encode : List U8 → String}
           _ _ _
         · rintro ⟨out, i⟩ ⟨hi, houtLen, hinv⟩
           dsimp only at hi houtLen hinv ⊢
-          unfold Spike.engine.indexed_range_loop.body
+          unfold CcfKv.engine.indexed_range_loop.body
           by_cases run : i < alloc.vec.Vec.len links
           · have hlt : i.val < links.val.length := by rwa [← hlenV]
             have his : i.val < selected.length := by omega
@@ -539,21 +539,21 @@ private theorem pin_range_refines {encode : List U8 → String}
               have hmem : (a', c') ∈ selected := List.mem_of_getElem? hat
               exact of_decide_eq_true (List.mem_filter.mp hmem).2
             change WP.spec (do
-              let out1 ← Spike.engine.append_range_row out a' c' m lower upper
+              let out1 ← CcfKv.engine.append_range_row out a' c' m lower upper
               let i1 ← i + 1#usize
               Result.ok (ControlFlow.cont (out1, i1))) _
-            have happend : WP.spec (Spike.engine.append_range_row out a' c' m lower upper)
+            have happend : WP.spec (CcfKv.engine.append_range_row out a' c' m lower upper)
                 (fun out1 =>
                   out1.val.length ≤ out.val.length + 1
                   ∧ modelEntries encode out1 =
                       modelEntries encode out ++
                       ([(encode a'.key.val, encode c'.value.val)].filter pred)) := by
-              unfold Spike.engine.append_range_row
+              unfold CcfKv.engine.append_range_row
               simp only [bytes_same, hOnMap, decide_true, bind_ok, ite_true]
               have hlo : WP.spec (match lower with
                   | none => Result.ok true
                   | some l => do
-                      let i1 ← Spike.engine.Bytes.compare l a'.key
+                      let i1 ← CcfKv.engine.Bytes.compare l a'.key
                       Result.ok (decide (i1 ≤ 0#i8)))
                   (fun b => b = (encodeBound encode lower).all (fun l => decide (l ≤ encode a'.key.val))) := by
                 cases lower with
@@ -564,7 +564,7 @@ private theorem pin_range_refines {encode : List U8 → String}
               have hhi : WP.spec (match upper with
                   | none => Result.ok true
                   | some u => do
-                      let i1 ← Spike.engine.Bytes.compare a'.key u
+                      let i1 ← CcfKv.engine.Bytes.compare a'.key u
                       Result.ok (decide (i1 < 0#i8)))
                   (fun b => b = (encodeBound encode upper).all (fun u => decide (encode a'.key.val < u))) := by
                 cases upper with
@@ -645,7 +645,7 @@ private theorem pin_range_refines {encode : List U8 → String}
           rw [hencSelEq]
           exact related.filter pred
         have hsorted : (encSel.filter pred).Pairwise (fun a b => a.1 ≤ b.1) := by
-          let dummyFrame : Spike.engine.Frame := {
+          let dummyFrame : CcfKv.engine.Frame := {
             version := 0#u64
             data := root
             revisions := alloc.vec.Vec.new _
@@ -696,8 +696,8 @@ private theorem pin_range_refines {encode : List U8 → String}
 /-- An enabled scan, size, clear, or range agrees with the relaxed reference contract. -/
 theorem operate_scan_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (order : PreservesByteOrder encode)
-    (history : Spike.engine.History)
-    (t : Spike.engine.Tx) (tx : Tx) (m : Spike.engine.Bytes) (op : ScanOperation)
+    (history : CcfKv.engine.History)
+    (t : CcfKv.engine.Tx) (tx : Tx) (m : CcfKv.engine.Bytes) (op : ScanOperation)
     (view : GlobalView) (hPhase : t.phase = .Active)
     (hView : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some view)
     (hPinned
@@ -728,7 +728,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
     (space : ViewsScanRoom history.index t.views)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
-      WP.spec (Spike.engine.Tx.operate t history m op.rust)
+      WP.spec (CcfKv.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
           (∃ obs,
             scanOutput encode output = some obs
@@ -749,7 +749,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
   have hRelFound := hPinned.find mapName
   rw [he] at hRelFound
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
-  simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
+  simp only [CcfKv.engine.Tx.operate, hPhase, bind_ok]
   apply WP.spec_bind (view_lookup encode inj history.index t m live)
   intro found ⟨hf, alive⟩
   rw [← hf] at hRelFound
@@ -766,7 +766,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
       have hNativeFound : find (rustPinnedViews encode history.index t.views) mapName =
           some (rustPinnedView encode history.index m native) := by
         simpa [mapName] using hf.symm
-      have addNativeOrig (deps : alloc.vec.Vec Spike.engine.Dependency)
+      have addNativeOrig (deps : alloc.vec.Vec CcfKv.engine.Dependency)
           (hd : pointDeps encode history.index {t with deps} =
             .map mapName (encodeImage encode (pinImage history.index m native.local)) :: pointDeps encode history.index t) :
           NativeDepsFromViews encode history.index {t with deps} := by
@@ -775,11 +775,11 @@ theorem operate_scan_matches_model (encode : List U8 → String)
         rcases List.mem_cons.mp hm with rfl | old
         · exact ⟨rustPinnedView encode history.index m native, hNativeFound, rfl⟩
         · exact hNativeOrig d old
-      have addDepsPins (deps : alloc.vec.Vec Spike.engine.Dependency)
+      have addDepsPins (deps : alloc.vec.Vec CcfKv.engine.Dependency)
           (hval : deps.val = t.deps.val ++ [.Map m native.local]) :
           DepsPinsInViews {t with deps} := by
         intro mp pin hmem
-        change Spike.engine.Dependency.Map mp pin ∈ deps.val at hmem
+        change CcfKv.engine.Dependency.Map mp pin ∈ deps.val at hmem
         rw [hval, List.mem_append, List.mem_singleton] at hmem
         rcases hmem with hold | hnew
         · exact hDepsPins mp pin hold
@@ -821,15 +821,15 @@ theorem operate_scan_matches_model (encode : List U8 → String)
           change WP.spec (do
             let b1 ← alloc.vec.Vec.is_empty t.pending
             if b1 then
-              let count ← Spike.engine.PinnedImage.size native.local history m
-              let pi ← Spike.engine.PinnedImage.Insts.CoreCloneClone.clone native.local
+              let count ← CcfKv.engine.PinnedImage.size native.local history m
+              let pi ← CcfKv.engine.PinnedImage.Insts.CoreCloneClone.clone native.local
               let v1 ← alloc.vec.Vec.push t.deps (.Map m pi)
-              Result.ok (core.result.Result.Ok (Spike.engine.Output.Size count),
+              Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Size count),
                 {t with deps := v1, phase := .Active})
             else
-              let (v1, v2) ← Spike.engine.Tx.scan history t.pending t.deps m native
+              let (v1, v2) ← CcfKv.engine.Tx.scan history t.pending t.deps m native
               let i := alloc.vec.Vec.len v1
-              Result.ok (core.result.Result.Ok (Spike.engine.Output.Size i),
+              Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Size i),
                 {t with deps := v2, phase := .Active})) _
           simp only [emptyTest, bind_ok]
           by_cases clean : t.pending.val = []
@@ -911,12 +911,12 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             rw [hcount]
             exact clearRoom rfl
           change WP.spec (do
-            let pending ← Spike.engine.Tx.operate_loop t.pending m rows 0#usize
-            Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
+            let pending ← CcfKv.engine.Tx.operate_loop t.pending m rows 0#usize
+            Result.ok (core.result.Result.Ok CcfKv.engine.Output.Unit,
               {t with pending, deps, phase := .Active})) _
           apply WP.spec_bind (clear_rows encode inj t m rows hSorted hspace)
           intro pending ⟨ho, hpOrder⟩
-          let out : Spike.engine.Tx := {t with pending, deps, phase := .Active}
+          let out : CcfKv.engine.Tx := {t with pending, deps, phase := .Active}
           have hcontext : pointKeepsContext t out := by
             simp [out, pointKeepsContext, ← hPhase]
           have hclear := clear_reference visible
@@ -964,21 +964,21 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             ModelDepsFromViews outRef.1
           let fullScan
               : Result
-                  (core.result.Result Spike.engine.Output Spike.engine.Error
-                    × Spike.engine.Tx) := do
-            let (rows, deps) ← Spike.engine.Tx.scan history t.pending t.deps m native
-            let filtered ← Spike.engine.ordered_range
-              Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue rows lower upper
-            Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
+                  (core.result.Result CcfKv.engine.Output CcfKv.engine.Error
+                    × CcfKv.engine.Tx) := do
+            let (rows, deps) ← CcfKv.engine.Tx.scan history t.pending t.deps m native
+            let filtered ← CcfKv.engine.ordered_range
+              CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue rows lower upper
+            Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Entries filtered),
               {t with deps, phase := .Active})
           let committedRange
               : Result
-                  (core.result.Result Spike.engine.Output Spike.engine.Error
-                    × Spike.engine.Tx) := do
-            let rows ← Spike.engine.PinnedImage.range native.local history m lower upper
-            let pin ← Spike.engine.PinnedImage.Insts.CoreCloneClone.clone native.local
+                  (core.result.Result CcfKv.engine.Output CcfKv.engine.Error
+                    × CcfKv.engine.Tx) := do
+            let rows ← CcfKv.engine.PinnedImage.range native.local history m lower upper
+            let pin ← CcfKv.engine.PinnedImage.Insts.CoreCloneClone.clone native.local
             let deps ← alloc.vec.Vec.push t.deps (.Map m pin)
-            Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries rows),
+            Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Entries rows),
               {t with deps, phase := .Active})
           let nonemptyScan := do
             let empty ← alloc.vec.Vec.is_empty t.pending
@@ -996,13 +996,13 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             have hEntriesPerm : (encodeRangeEntries encode id rows.val).Perm visible := by
               simpa [encodeRangeEntries, modelEntries] using hr
             change WP.spec (do
-              let filtered ← Spike.engine.ordered_range
-                Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue rows lower upper
-              Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
+              let filtered ← CcfKv.engine.ordered_range
+                CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue rows lower upper
+              Result.ok (core.result.Result.Ok (CcfKv.engine.Output.Entries filtered),
                 {t with deps, phase := .Active})) post
             apply WP.spec_bind
               (ordered_range_by_contents order
-                Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue id (fun _ => rfl)
+                CcfKv.engine.Bytes.Insts.Ccf_kvEngineRangeValue id (fun _ => rfl)
                 rows visible lower upper hVisUnique hEntriesPerm)
             intro filtered hfiltered
             change modelEntries encode filtered = _ at hfiltered
