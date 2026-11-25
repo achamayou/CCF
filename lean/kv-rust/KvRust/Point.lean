@@ -467,8 +467,7 @@ theorem view_lookup (encode : List U8 → String) (inj : Function.Injective enco
     (index : CellIndex) (t : CcfKv.engine.Tx) (m : CcfKv.engine.Bytes)
     (live : ViewsLive index t.views)
     : WP.spec
-        (CcfKv.engine.Assoc.get_ref CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey t.views
-          m)
+        (CcfKv.engine.Assoc.get_ref CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey t.views m)
         (fun result =>
           result.map (rustPinnedView encode index m)
             = find (rustPinnedViews encode index t.views) (encode m.val)

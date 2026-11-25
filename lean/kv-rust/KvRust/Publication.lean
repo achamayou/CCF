@@ -80,8 +80,7 @@ local instance : DecidableEq CcfKv.engine.Address :=
 
 /-- The engine's address comparison implements decidable equality. -/
 theorem compare_address [DecidableEq CcfKv.engine.Address] (a b : CcfKv.engine.Address)
-    : CcfKv.engine.Address.Insts.Ccf_kvEngineKey.same a b
-      = .ok (decide (a = b)) := by
+    : CcfKv.engine.Address.Insts.Ccf_kvEngineKey.same a b = .ok (decide (a = b)) := by
   have h : a = b ↔ byteAddr a = byteAddr b :=
     ⟨congrArg byteAddr, byteAddr_inj⟩
   simp [address_same, h, byteAddr]

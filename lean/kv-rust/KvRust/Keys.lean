@@ -155,8 +155,7 @@ private theorem bytes_same_slice (a b : CcfKv.engine.Bytes)
 theorem bytes_same (a b : CcfKv.engine.Bytes)
     : CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same a b
       = .ok (decide (alloc.vec.Vec.val a = alloc.vec.Vec.val b)) := by
-  simpa only [CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same]
-    using bytes_same_slice a b
+  simpa only [CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey.same] using bytes_same_slice a b
 
 private theorem bytes_same_key (a b : CcfKv.engine.Bytes)
     : CcfKv.engine.Bytes.same_key a b = .ok (decide (a.val = b.val)) := by
