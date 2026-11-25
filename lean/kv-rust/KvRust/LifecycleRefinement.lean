@@ -20,7 +20,7 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
             execute {} (.storeCreate sid term.val) = some (w, .unit)
             ∧ StateMatches encode sid n w) := by
   apply WP.spec_mono (store_new_lifecycle encode term)
-  intro n ⟨head, _, hsaved, hzero, hf, hg, ht, hi, htx, valid, indexed⟩
+  intro n ⟨head, _, _, _, _, hnat, hg, ht, hi, htx, valid, unique, indexed, aligned, hlive⟩
   let s : Store := {term := term.val}
   let w : State := {stores := [(sid, s)]}
   have hs : find w.stores sid = some s := by simp [w, find]
@@ -28,21 +28,24 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     simp [execute, find, Kv.Model.set, erase, s, w]
   have hReach := reachable_execute (CCF.TransitionSystem.Reachable.initial rfl) he
   have hFrames : List.Forall₂ FrameOrderEq
-      (modelFrames n.history (modelFrame encode n.history.index)) s.history := by
-    rw [hf]
+      (natModelFrames n.history.log [s.head]) s.history := by
+    rw [hnat]
     exact .cons (.refl _) .nil
-  have hRev : RevisionHistory (modelFrames n.history (modelFrame encode n.history.index)) := by
-    rw [hf]
+  have hRev : RevisionHistory (natModelFrames n.history.log [s.head]) := by
+    rw [hnat]
     exact revision_history_new
-  have hNatArch : ArchiveConsistent
-      (n.history.log.frames.val.map (modelFrame encode n.history.index))
-      n.history.next_identity.val := by
-    rw [hsaved, hi]
-    simpa [hzero, s] using archive_consistent_new
-  have hr := history_related (encode := encode) (n := n.history) (archive := [{}]) hReach hs
-    hFrames hg.symm (by change term.val = n.history.term.val; rw [ht]) hi.symm valid indexed
-    hRev hNatArch (fun f hm => hm) archive_consistent_new
-  refine ⟨w, he, ⟨⟨s, [{}], hs, hr, ?_⟩, ?_, hReach⟩⟩
+  have hNatArch : ArchiveConsistent [s.head] n.history.next_identity.val := by
+    rw [hi]
+    simpa [s] using archive_consistent_new
+  have hNatSorted : ∀ f ∈ [s.head], ∀ m, (image f.data m).Pairwise (encKeyLt encode) := by
+    intro f hf m
+    rw [List.mem_singleton.mp hf]
+    exact List.Pairwise.nil
+  have hr := history_related (encode := encode) (n := n.history) (natArchive := [s.head])
+    (archive := [{}]) hReach hs hFrames hg.symm (by change term.val = n.history.term.val; rw [ht])
+    hi.symm valid unique indexed aligned hRev hNatArch hNatSorted (fun f hm => hm)
+    archive_consistent_new
+  refine ⟨w, he, ⟨⟨s, [s.head], [{}], hs, hr, ?_⟩, hlive, ?_, hReach⟩⟩
   · intro id
     simp [htx, find, w]
   · simp [htx]
@@ -79,12 +82,12 @@ private theorem refinement_of_lifecycle_post (encode : List U8 → String) (sid 
 
 private theorem related_row (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64) (action : Action)
-    {s : Store} {archive : List Frame}
+    {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
-    (hhist : HistoryMatches encode n.history s archive)
+    (hhist : HistoryMatches encode n.history s natArchive archive)
     (hattempts
       : ∀ q : U64,
-          Option.Rel (AttemptMatches encode sid n.history archive)
+          Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val q) (find w.txs q.val))
     (h : StateMatches encode sid n w)
     (op
@@ -94,31 +97,39 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
     (before
       : WP.spec op
           (LifecycleModelPost n (execute w action)
-            (LifecycleModelRow encode n w sid id archive)))
+            (LifecycleModelRow encode n w sid id natArchive archive)))
     : WP.spec op (StepMatches encode sid action n (execute w action)) := by
   apply WP.spec_mono before
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w action r h _ hr
-  intro w' _ _ ⟨old, next, modelTx, _, hw, ⟨hh, index, hi, hn⟩, ht⟩ reach
-  refine replace_attempt h.unique hattempts hhist id index old next modelTx hi hn
+  intro w' _ _ ⟨old, next, modelTx, _, hw, ⟨hh, hviews, index, hi, hn⟩, ht⟩ reach
+  have hpins : storePins r.2 = storePins n := by
+    unfold storePins
+    rw [hh, hn, txsPins_set_same_views n.txs.val index id old next hi hviews]
+  have hlive' : IndexLiveness r.2.history.index (storePins r.2) := by
+    rw [hh, hpins]
+    exact h.liveness
+  refine replace_attempt h.unique hattempts id index old next modelTx hi hn
     (congrArg State.txs hw)
     (by rw [hw]; exact hs)
     (by rw [hh]; exact hhist)
+    hlive'
     (by rw [hh]; exact ht)
     reach
-    (HistoryKeeps.of_same (congrArg (fun h => h.log.frames) hh)
-      (congrArg (fun h => h.index) hh))
+    (by rw [hh]; exact SinglePreservesPins.refl _ _)
+    (fun _ hm => hm)
     (fun _ hm => hm)
 
 private theorem lookup_for_lifecycle (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64)
-    {s : Store} {archive : List Frame}
+    {s : Store} {natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
     (hattempts
       : ∀ q : U64,
-          Option.Rel (AttemptMatches encode sid n.history archive)
+          Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val q) (find w.txs q.val))
-    : Option.Rel (fun t (_, tx) => LifecycleAttempt encode n.history archive t tx)
+    : Option.Rel
+        (fun t (_, tx) => LifecycleAttempt encode n.history.index natArchive archive t tx)
         (find n.txs.val id) (lookupTx w sid id.val) := by
   have he := lookupRelated_of_attempts hs hattempts id
   cases hn : find n.txs.val id <;> cases hm : lookupTx w sid id.val <;>
@@ -134,9 +145,9 @@ theorem commit_begin_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute n (.CommitBegin id))
         (StepMatches encode sid (.commitBegin sid id.val) n
           (execute w (.commitBegin sid id.val))) := by
-  obtain ⟨s, archive, hs, hhist, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hhist, hattempts⟩ := h.history
   exact related_row encode sid n w id _ hs hhist hattempts h _
-    (execute_commit_begin_matches_model encode n w sid id archive
+    (execute_commit_begin_matches_model encode n w sid id natArchive archive
       (lookup_for_lifecycle encode sid n w id hs hattempts))
 
 /-- Commit completion preserves the relation even when replication fails. -/
@@ -146,9 +157,9 @@ theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute n (.CommitResult id result))
         (StepMatches encode sid (.commitResult sid id.val (modelOutcome result)) n
           (execute w (.commitResult sid id.val (modelOutcome result)))) := by
-  obtain ⟨s, archive, hs, hhist, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hhist, hattempts⟩ := h.history
   cases result <;> exact related_row encode sid n w id _ hs hhist hattempts h _
-    (execute_commit_result_matches_model encode n w sid id archive _
+    (execute_commit_result_matches_model encode n w sid id natArchive archive _
       (lookup_for_lifecycle encode sid n w id hs hattempts))
 
 /-- Explicit snapshot capture agrees on both guards and frozen metadata. -/
@@ -157,10 +168,10 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute n (.Snapshot id))
         (StepMatches encode sid (.snapshot sid id.val) n
           (execute w (.snapshot sid id.val))) := by
-  obtain ⟨s, archive, hs, hh, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hh, hattempts⟩ := h.history
   obtain ⟨prior, head, hf, hhead⟩ := hh.split
   apply related_row encode sid n w id _ hs hh hattempts h
-  apply execute_snapshot_matches_model encode n w sid id archive prior head hf hh.valid
+  apply execute_snapshot_matches_model encode n w sid id natArchive archive prior head hf hh.valid
   have he := lookupRelated_of_attempts hs hattempts id
   cases hn : find n.txs.val id <;> cases hm : lookupTx w sid id.val <;>
     rw [hn, hm] at he
@@ -176,21 +187,27 @@ theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute n (.SetTerm term))
         (StepMatches encode sid (.setTerm sid term.val) n
           (execute w (.setTerm sid term.val))) := by
-  obtain ⟨s, archive, hs, hh, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hh, hattempts⟩ := h.history
   apply WP.spec_mono (execute_set_term_matches_model n w sid term s hs hh.term)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
   intro w' _ _ ⟨he, hn⟩ reach
-  have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} archive :=
-    {hh with term := rfl, indexValid := hh.indexValid.congr rfl rfl}
-  refine replace_history h.unique hattempts hh (s' := {s with term := term.val}) ?_ ?_ ?_ ?_ reach ?_
-    (fun _ hm => hm)
+  have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} natArchive archive :=
+    {hh with
+      term := rfl
+      indexValid := hh.indexValid.congr rfl rfl
+      aligned := ⟨hh.aligned.len, hh.aligned.metaEq, hh.aligned.activeLive⟩}
+  have hlive' : IndexLiveness r.2.history.index (storePins r.2) := by
+    rw [hn]
+    exact h.liveness
+  refine replace_history h.unique hattempts (s' := {s with term := term.val}) ?_ hlive' ?_
+    ?_ ?_ reach ?_ (fun _ hm => hm) (fun _ hm => hm)
   · rw [hn]; exact hh'
   · rw [he]; simp [find_set_key]
   · rw [hn]
   · rw [he]
   · rw [hn]
-    exact HistoryKeeps.of_same rfl rfl
+    exact SinglePreservesPins.refl _ _
 
 private theorem keys_erase {K V : Type} [DecidableEq K] (xs : Assoc K V) (k : K)
     (h : (xs.map Prod.fst).Nodup)
@@ -208,6 +225,35 @@ private theorem keys_set {K V : Type} [DecidableEq K] (xs : Assoc K V) (k : K) (
   have hf := (List.mem_filter.mp hm).2
   simp at hf
 
+private theorem erase_missing {K V : Type} [DecidableEq K] (rows : Assoc K V) (k : K)
+    (h : find rows k = none)
+    : erase rows k = rows := by
+  induction rows with
+  | nil => rfl
+  | cons hd tl ih =>
+      obtain ⟨rk, rv⟩ := hd
+      by_cases he : rk = k
+      · subst rk; simp [find] at h
+      · simp only [find, he, ite_false] at h
+        have hne : (rk != k) = true := bne_iff_ne.mpr he
+        simp only [erase, List.filter_cons, hne, ite_true]
+        exact congrArg ((rk, rv) :: ·) (ih h)
+
+private theorem assoc_find_mem {K V : Type} [DecidableEq K] {rows : Assoc K V} {k : K}
+    {v : V} (h : find rows k = some v)
+    : (k, v) ∈ rows := by
+  induction rows with
+  | nil => simp [find] at h
+  | cons hd tl ih =>
+      obtain ⟨rk, rv⟩ := hd
+      by_cases he : rk = k
+      · subst rk
+        simp only [find, ite_true, Option.some.injEq] at h
+        subst h
+        exact List.mem_cons_self
+      · simp only [find, he, ite_false] at h
+        exact List.mem_cons_of_mem _ (ih h)
+
 /-- Begin agrees with the model's duplicate-ID check and creates a related empty attempt. -/
 theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
@@ -215,16 +261,30 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute n (.Begin id))
         (StepMatches encode sid (.txCreate sid id.val) n
           (execute w (.txCreate sid id.val))) := by
-  obtain ⟨s, archive, hs, hhist, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hhist, hattempts⟩ := h.history
   have he : (find w.txs id.val).isSome = (find n.txs.val id).isSome := by
     have hr := hattempts id
     cases hn : find n.txs.val id <;> cases hw : find w.txs id.val <;>
       rw [hn, hw] at hr <;> cases hr <;> rfl
-  apply WP.spec_mono (execute_begin_matches_model encode n w sid id s archive hs he room)
+  apply WP.spec_mono
+    (execute_begin_matches_model encode n w sid id s natArchive archive hs he room)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
-  intro w' _ _ ⟨hw, hh, hn, ht⟩ reach
-  refine ⟨⟨s, archive, ?_, ?_, ?_⟩, ?_, reach⟩
+  intro w' _ hstep ⟨hw, hh, hn, ht⟩ reach
+  have hmiss : find n.txs.val id = none := by
+    cases hfind : find n.txs.val id with
+    | none => rfl
+    | some _ =>
+        have hsome : (find w.txs id.val).isSome = true := by rw [he, hfind]; rfl
+        simp [execute, hs, hsome] at hstep
+  have hlive' : IndexLiveness r.2.history.index (storePins r.2) := by
+    have hpins : storePins r.2 = storePins n := by
+      unfold storePins
+      rw [hh, hn, Kv.Model.set, erase_missing n.txs.val id hmiss]
+      simp [txsPins, txPins, lifecycleNewTx, alloc.vec.Vec.new]
+    rw [hh, hpins]
+    exact h.liveness
+  refine ⟨⟨s, natArchive, archive, ?_, ?_, ?_⟩, hlive', ?_, reach⟩
   · rw [hw]; exact hs
   · rw [hh]; exact hhist
   · intro q
@@ -237,31 +297,93 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
   · rw [hn]
     exact keys_set _ _ _ h.unique
 
-/-- End erases the same live attempt or rejects without mutation. -/
+/-- End releases the attempt's pins, erases its row, and retires freed nodes, or rejects without mutation. -/
 theorem end_step_matches (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (id : U64) (h : StateMatches encode sid n w)
+    (queueRoom
+      : 2
+            * (n.history.index.values.dirs.val.length
+                + n.history.index.values.rows.val.length)
+          + 1
+        ≤ Usize.max)
     : WP.spec (Spike.engine.Store.execute n (.End id))
         (StepMatches encode sid (.txEnd sid id.val) n
           (execute w (.txEnd sid id.val))) := by
-  obtain ⟨s, archive, hs, hhist, hattempts⟩ := h.history
+  obtain ⟨s, natArchive, archive, hs, hhist, hattempts⟩ := h.history
   have he : (lookupTx w sid id.val).isSome = (find n.txs.val id).isSome := by
     have hr := lookupRelated_of_attempts hs hattempts id
     cases hn : find n.txs.val id <;> cases hw : lookupTx w sid id.val <;>
       rw [hn, hw] at hr <;> cases hr <;> rfl
-  apply WP.spec_mono (execute_end_matches_model n w sid id he)
+  apply WP.spec_mono
+    (execute_end_matches_model n w sid id he h.unique h.liveness queueRoom)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
-  intro w' _ _ ⟨hw, hh, hn⟩ reach
-  refine ⟨⟨s, archive, ?_, ?_, ?_⟩, ?_, reach⟩
+  intro w' _ _ ⟨hw, hh, hn, hlive', hpres⟩ reach
+  have hlogEq : r.2.history.log = n.history.log := by rw [hh]
+  have hglobalEq : r.2.history.global = n.history.global := by rw [hh]
+  have htermEq : r.2.history.term = n.history.term := by rw [hh]
+  have hidentEq : r.2.history.next_identity = n.history.next_identity := by rw [hh]
+  have hreuseEq : r.2.history.reuse_compacted_images = n.history.reuse_compacted_images := by rw [hh]
+  have hpresFrames : IndexPreservesPins n.history.index r.2.history.index
+      (framePins r.2.history.log.frames.val ++ txsPins r.2.txs.val) := hpres
+  have hidxValid' : HistoryIndexValid r.2.history :=
+    hhist.indexValid.of_preserves_pins hlive'.valid hpresFrames (fun i f' hf' =>
+      Or.inr ⟨i, f', hlogEq ▸ hf', rfl⟩)
+  have haligned' : ArchiveAligned encode r.2.history natArchive :=
+    hhist.aligned.of_preserves_pins hhist.indexValid hpresFrames
+      (congrArg Spike.branch_log.BranchLog.branch hlogEq)
+      (congrArg Spike.branch_log.BranchLog.frames hlogEq)
+      hglobalEq hreuseEq
+  have hhist' : HistoryMatches encode r.2.history s natArchive archive :=
+    { hhist with
+      nonempty := by unfold Spike.engine.History.activeFrames; rw [hlogEq]; exact hhist.nonempty
+      frames := by rw [hlogEq]; exact hhist.frames
+      indexed := by unfold Spike.engine.History.activeFrames; rw [hlogEq]; exact hhist.indexed
+      global := by rw [hglobalEq]; exact hhist.global
+      globalBound := by
+        unfold Spike.engine.History.activeFrames
+        rw [hglobalEq, hlogEq]
+        exact hhist.globalBound
+      term := by rw [htermEq]; exact hhist.term
+      identity := by rw [hidentEq]; exact hhist.identity
+      valid := by rw [hlogEq]; exact hhist.valid
+      unique := by rw [hlogEq]; exact hhist.unique
+      indexValid := hidxValid'
+      aligned := haligned'
+      revisions := by rw [hlogEq]; exact hhist.revisions
+      nativeArchive := by rw [hidentEq]; exact hhist.nativeArchive }
+  refine ⟨⟨s, natArchive, archive, ?_, hhist', ?_⟩, hlive', ?_, reach⟩
   · rw [hw]; exact hs
-  · rw [hh]; exact hhist
   · intro q
-    rw [hh, hn, hw, find_erase_key, find_erase_key]
+    rw [hn, hw, find_erase_key, find_erase_key]
     by_cases eq : q = id
     · subst q
       simp
     · have hv : q.val ≠ id.val := fun he => eq (UScalar.eq_of_val_eq he)
-      simpa [eq, hv] using hattempts q
+      simp only [eq, hv, ite_false]
+      have hprev := hattempts q
+      cases hfq : find n.txs.val q with
+      | none =>
+          rw [hfq] at hprev
+          cases hfm : find w.txs q.val with
+          | none => exact .none
+          | some _ => rw [hfm] at hprev; cases hprev
+      | some t =>
+          rw [hfq] at hprev
+          cases hfm : find w.txs q.val with
+          | none => rw [hfm] at hprev; cases hprev
+          | some tx =>
+              rw [hfm] at hprev
+              have hmemAfter : (q, t) ∈ r.2.txs.val := by
+                have hfq' : find r.2.txs.val q = some t := by
+                  rw [hn, find_erase_key, ite_eq_right eq, hfq]
+                exact assoc_find_mem hfq'
+              have hsub : ∀ row ∈ t.views.val, ∀ r_1 ∈ viewPins row.2, r_1 ∈ storePins r.2 :=
+                fun row hrow r_1 hr1 =>
+                  List.mem_append_right _ (List.mem_flatMap.mpr
+                    ⟨(q, t), hmemAfter, List.mem_flatMap.mpr ⟨row, hrow, hr1⟩⟩)
+              exact .some ((Option.rel_some_some.mp hprev).withPreservedPins hpres hsub
+                (fun _ hm => hm) (fun _ hm => hm))
   · rw [hn]
     exact keys_erase _ _ h.unique
 

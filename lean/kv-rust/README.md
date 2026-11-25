@@ -3,22 +3,24 @@
 This opt-in package checks [a Rust prototype](../../src/rust/kv-spike) against the existing [KV model](../kv/Kv/Model/Transitions.lean).
 It is not linked into production CCF and does not change the existing Lean specification.
 
-The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, associative transaction state, and an append-only archive of version frames.
+The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, associative transaction state, and an archive of version frames backed by a reference-counted radix arena.
 Each frame holds a single persistent radix root ordered by packed `(map_len, map, key)` bytes, supporting prefix-scoped map scans without maintaining a second chronology index.
 Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
-Compaction advances the global frontier and changes which map views can be acquired; it does not yet reclaim old frames.
+Compaction advances the global frontier, changes which map views can be acquired, and releases compacted frame roots so unreachable radix nodes and rows are reclaimed through a bounded retirement FIFO.
+Rollback similarly releases rolled-back frame roots, and ending a transaction releases its pinned view roots before draining the retirement budget.
 The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
 
 The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
-The [indexed publication proof](KvRust/IndexedPublication.lean) checks the extracted right-to-left write-set fold against `Kv.Model.publish`, with numeric bounds on packed keys, path copies, row slots, and the stamp counter.
-The [archive relation](KvRust/IndexedHistory.lean) ties every archived frame to its ordered index view, including frames no longer on the active branch after rollback.
+The [single-radix reclamation proofs](KvRust/RadixSingleReclaim.lean) establish exact reference-count accounting, bounded FIFO retirement, and lockstep view preservation across `put`, `remove`, sorted batch publication, root retention/release, and slot recycling.
+The [indexed publication proof](KvRust/IndexedPublication.lean) checks the extracted right-to-left write-set fold against `Kv.Model.publish`, releasing intermediate roots and preserving live pins under numeric bounds on packed keys, path copies, row slots, reference counts, and the retirement queue.
+The [archive relation](KvRust/IndexedHistory.lean) ties active frames at or above the global cut to their live radix views while tracking an immutable ghost native archive for metadata and historical lineage across compaction and rollback.
 The [retained-cut proof](KvRust/RetainedCuts.lean) shows that an older acquisition which remains available can read the compacted map image, or the empty placeholder, without changing its observation.
 It preserves the revision invariant across the modeled apply, compact, and rollback steps.
-On ordinary histories, an available acquisition below the global cut now pins the compacted image without changing its local revision or observations.
+On ordinary histories, an available acquisition below the global cut pins the compacted image without changing its local revision or observations, while compaction clears and releases superseded frame roots below the cut.
 Imported and recovered histories keep the original two-cut path.
-Existing handles keep their pins; the engine does not yet release archived roots.
+Existing handles keep their retained radix roots until `End` releases them and drains the retirement budget.
 The indexed [materialization](KvRust/IndexedImage.lean) and [pin](KvRust/PinnedImage.lean) proofs relate selected maps and point reads to those views without reconstructing the whole store.
 The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
 The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
@@ -184,12 +186,12 @@ This benchmark still does not cover replicated CCF.
 
 After switching committed frames to the verified dual index, two paired runs on the same host measured:
 
-| Workload                    | Rust               | C++                |
-| --------------------------- | ------------------ | ------------------ |
-| Point read, 2,048 entries   | 0.207-0.221 us     | 0.651-0.711 us     |
-| Logging mix, 512 entries    | 0.962-0.973 us/tx  | 1.159-1.212 us/tx  |
-| Governance mix, 64 entries  | 12.38-12.57 us/tx  | 7.45-8.22 us/tx    |
-| Commit 2,048 replacements   | 2.97-3.13 ms       | 0.81-0.98 ms       |
+| Workload                   | Rust              | C++               |
+| -------------------------- | ----------------- | ----------------- |
+| Point read, 2,048 entries  | 0.207-0.221 us    | 0.651-0.711 us    |
+| Logging mix, 512 entries   | 0.962-0.973 us/tx | 1.159-1.212 us/tx |
+| Governance mix, 64 entries | 12.38-12.57 us/tx | 7.45-8.22 us/tx   |
+| Commit 2,048 replacements  | 2.97-3.13 ms      | 0.81-0.98 ms      |
 
 These are ranges of run medians, not confidence intervals.
 The indexed engine wins on point reads and this logging mix, but not on the governance mix or bulk commits.

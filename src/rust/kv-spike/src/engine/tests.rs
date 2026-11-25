@@ -405,10 +405,10 @@ fn older_acquisition_reuses_compacted_images_only_on_ordinary_history() {
     ));
     let tx = &store.txs.0[store.tx_index(1).unwrap()].1;
     let view = tx.views.get_ref(&name).unwrap();
-    let PinnedImage::Frame(frame) = view.local else {
-        panic!("live map must pin a frame");
+    let PinnedImage::Root(root) = view.local else {
+        panic!("live map must pin a root");
     };
-    assert_eq!(store.history.log.read(frame).version, 2);
+    assert_eq!(root.0, store.history.at_cut(2).data.0);
     assert!(view.global.is_none());
     assert_read(&mut store, 1, map, b"k", false, Some(b"stable"));
 
@@ -422,10 +422,10 @@ fn older_acquisition_reuses_compacted_images_only_on_ordinary_history() {
     ));
     let tx = &store.txs.0[store.tx_index(2).unwrap()].1;
     let view = tx.views.get_ref(&name).unwrap();
-    let PinnedImage::Frame(frame) = view.local else {
-        panic!("live imported map must pin a frame");
+    let PinnedImage::Root(root) = view.local else {
+        panic!("live imported map must pin a root");
     };
-    assert_eq!(store.history.log.read(frame).version, 3);
+    assert_eq!(root.0, store.history.at_cut(3).data.0);
     assert!(view.global.is_some());
     assert_read(&mut store, 2, map, b"k", false, Some(b"stable"));
 }
@@ -932,6 +932,8 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
     put(&mut store, 0, b"a", b"k", b"first", 1);
     put(&mut store, 0, b"a", b"k", b"discarded", 2);
     let pinned = store.history.log.at_cut(2);
+    let pinned_root = store.history.log.read(pinned).data;
+    store.history.index.retain_root(pinned_root);
     assert!(matches!(
         run(&mut store, Action::Rollback(1, 1)),
         Output::RolledBack(1)
@@ -943,11 +945,12 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
     };
     let saved = store.history.log.read(pinned);
     assert_eq!(saved.version, 2);
+    assert!(saved.data.is_empty());
     assert_eq!(
         store
             .history
             .index
-            .get(saved.data, &key)
+            .get(pinned_root, &key)
             .unwrap()
             .value
             .as_slice(),
@@ -969,16 +972,18 @@ fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
     assert_eq!(store.history.log.active_len(), 1);
     assert_eq!(store.history.head().version, 3);
     let saved = store.history.log.read(pinned);
+    assert_eq!(saved.version, 2);
     assert_eq!(
         store
             .history
             .index
-            .get(saved.data, &key)
+            .get(pinned_root, &key)
             .unwrap()
             .value
             .as_slice(),
         b"discarded"
     );
+    store.history.index.release_root(pinned_root);
 }
 
 #[test]

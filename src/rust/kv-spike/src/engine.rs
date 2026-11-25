@@ -569,16 +569,28 @@ fn publish_selected(
     publish_indexed(index, base, pending, version)
 }
 
+const RETIRE_BUDGET: usize = 16;
+
 fn publish_indexed(
     index: &mut AddressIndex<Cell>,
-    mut root: RadixRoot,
+    base: RadixRoot,
     pending: &Pending,
     version: Version,
 ) -> RadixRoot {
+    let mut root = base;
+    let mut owned = false;
     let mut i = pending.0.len();
     while i > 0 {
         i -= 1;
-        root = publish_indexed_row(index, root, &pending.0[i], version);
+        let next = publish_indexed_row(index, root, &pending.0[i], version);
+        if owned {
+            index.release_root(root);
+        }
+        root = next;
+        owned = true;
+    }
+    if !owned {
+        index.retain_root(root);
     }
     root
 }
@@ -646,11 +658,17 @@ fn append_snapshot_cell(
 
 fn index_from_rows(index: &mut AddressIndex<Cell>, rows: Data) -> RadixRoot {
     let mut root = index.empty_root();
+    let mut owned = false;
     let mut i = rows.0.len();
     while i > 0 {
         i -= 1;
         let (address, cell) = &rows.0[i];
-        root = index.put(root, address.clone(), cell.clone());
+        let next = index.put(root, address.clone(), cell.clone());
+        if owned {
+            index.release_root(root);
+        }
+        root = next;
+        owned = true;
     }
     root
 }
@@ -709,6 +727,14 @@ impl History {
         self.log.read(self.pin_cut(cut))
     }
 
+    fn retained_data(&self, cut: Version, fallback: RadixRoot) -> RadixRoot {
+        if self.reuse_compacted_images && cut < self.global {
+            self.at_cut(self.global).data
+        } else {
+            fallback
+        }
+    }
+
     fn prepare_frame(&mut self, version: Version, identity: u64, pending: &Pending) -> Frame {
         let head = self.log.active_at(self.log.active_len() - 1);
         head.advance(&mut self.index, version, identity, pending)
@@ -729,8 +755,30 @@ impl History {
         false
     }
 
+    fn release_active_range(&mut self, start: usize, end: usize) {
+        let mut i = start;
+        while i < end {
+            if let Some(id) = self.log.resolve(i) {
+                let old = self.log.read(id).data;
+                if !old.is_empty() {
+                    self.log.read_mut(id).data = self.index.empty_root();
+                    self.index.release_root(old);
+                }
+            }
+            i += 1;
+        }
+    }
+
     fn compact(&mut self, requested: Version) -> Version {
-        self.global = compact_cut(self.global, self.head().version, requested);
+        let old_global = self.global;
+        let next = compact_cut(old_global, self.head().version, requested);
+        self.global = next;
+        if self.reuse_compacted_images && old_global < next {
+            let start = self.relative_cut(old_global) as usize;
+            let end = self.relative_cut(next) as usize;
+            self.release_active_range(start, end);
+            self.index.retire_budget(RETIRE_BUDGET);
+        }
         self.global
     }
 
@@ -745,8 +793,11 @@ impl History {
         let cut = rollback_cut(self.global, head, requested);
         if cut < head {
             // The cut's offset is below the last retained frame's index.
-            let offset = self.relative_cut(cut);
-            assert!(self.log.rewind(offset as usize));
+            let offset = self.relative_cut(cut) as usize;
+            let active_len = self.log.active_len();
+            self.release_active_range(offset + 1, active_len);
+            assert!(self.log.rewind(offset));
+            self.index.retire_budget(RETIRE_BUDGET);
         }
         self.term = term;
         Ok(Output::RolledBack(cut))
@@ -775,7 +826,7 @@ struct Snapshot {
 #[derive(Clone)]
 enum PinnedImage {
     Empty,
-    Frame(FrameId),
+    Root(RadixRoot),
     Recovered(Image),
 }
 
@@ -783,7 +834,7 @@ impl PinnedImage {
     fn point(&self, history: &History, address: &Address) -> Option<Cell> {
         match self {
             Self::Empty => None,
-            Self::Frame(id) => match history.index.get(history.log.read(*id).data, address) {
+            Self::Root(root) => match history.index.get(*root, address) {
                 Some(cell) => Some(cell.clone()),
                 None => None,
             },
@@ -794,9 +845,27 @@ impl PinnedImage {
     fn materialize(&self, history: &History, map: &Bytes) -> Image {
         match self {
             Self::Empty => Assoc::new(),
-            Self::Frame(id) => indexed_image(&history.index, history.log.read(*id).data, map),
+            Self::Root(root) => indexed_image(&history.index, *root, map),
             Self::Recovered(rows) => rows.clone(),
         }
+    }
+}
+
+fn release_pin(index: &mut AddressIndex<Cell>, pin: &PinnedImage) {
+    if let PinnedImage::Root(root) = pin {
+        index.release_root(*root);
+    }
+}
+
+fn release_tx_pins(index: &mut AddressIndex<Cell>, tx: &Tx) {
+    let mut i = 0;
+    while i < tx.views.0.len() {
+        let view = &tx.views.0[i].1;
+        release_pin(index, &view.local);
+        if let Some(global) = &view.global {
+            release_pin(index, global);
+        }
+        i += 1;
     }
 }
 
@@ -817,27 +886,27 @@ impl View {
     }
 }
 
-fn pin_global(global: FrameId, local_cut: Version, global_cut: Version) -> Option<PinnedImage> {
-    if local_cut == global_cut {
-        None
-    } else {
-        Some(PinnedImage::Frame(global))
-    }
-}
-
 fn pin_maps(
-    history: &History,
+    history: &mut History,
     local: FrameId,
     global: FrameId,
     local_cut: Version,
 ) -> (PinnedImage, Option<PinnedImage>) {
     if history.reuse_compacted_images && local_cut < history.global {
-        return (PinnedImage::Frame(global), None);
+        let root = history.log.read(global).data;
+        history.index.retain_root(root);
+        return (PinnedImage::Root(root), None);
     }
-    (
-        PinnedImage::Frame(local),
-        pin_global(global, local_cut, history.global),
-    )
+    let local_root = history.log.read(local).data;
+    history.index.retain_root(local_root);
+    let global_pin = if local_cut == history.global {
+        None
+    } else {
+        let global_root = history.log.read(global).data;
+        history.index.retain_root(global_root);
+        Some(PinnedImage::Root(global_root))
+    };
+    (PinnedImage::Root(local_root), global_pin)
 }
 
 #[derive(Clone)]
@@ -973,7 +1042,7 @@ impl Tx {
         }
     }
 
-    fn acquire(&mut self, history: &History, map: Bytes) -> Result<Output, Error> {
+    fn acquire(&mut self, history: &mut History, map: Bytes) -> Result<Output, Error> {
         let Some(snapshot) = self.snapshot else {
             return Err(Error::Disabled);
         };
@@ -1442,8 +1511,10 @@ impl Store {
                 Ok(Output::Unit)
             }
             Action::End(tx) => {
-                self.tx_index(tx)?;
+                let i = self.tx_index(tx)?;
+                release_tx_pins(&mut self.history.index, &self.txs.0[i].1);
                 erase_attempt(&mut self.txs, tx);
+                self.history.index.retire_budget(RETIRE_BUDGET);
                 Ok(Output::Unit)
             }
             Action::SetTerm(term) => {
@@ -1466,7 +1537,7 @@ impl Store {
             }
             Action::Acquire(tx, map) => {
                 let i = self.tx_index(tx)?;
-                self.txs.0[i].1.acquire(&self.history, map)
+                self.txs.0[i].1.acquire(&mut self.history, map)
             }
             Action::Operate(tx, map, op) => {
                 let i = self.tx_index(tx)?;
@@ -1546,23 +1617,26 @@ impl Store {
             let birth = local.births.get(&map);
             if birth.is_some() {
                 let revision = local.revision(&map);
+                let local_data = local.data;
                 if revision.version < global.revision {
                     t.unavailable = true;
                     return Ok(Output::Unavailable);
                 }
+                let local_root = self.history.retained_data(snapshot.version, local_data);
+                self.history.index.retain_root(local_root);
                 t.views.set(
                     map,
                     View {
                         birth,
                         revision,
-                        local: PinnedImage::Frame(local_id),
+                        local: PinnedImage::Root(local_root),
                         global: Some(PinnedImage::Recovered(global.image)),
                     },
                 );
                 return Ok(Output::Acquired(revision.version, global.revision));
             }
         }
-        t.acquire(&self.history, map)
+        t.acquire(&mut self.history, map)
     }
 
     pub fn compact_ccf(&mut self, version: Version) -> Output {
@@ -1742,7 +1816,10 @@ impl Store {
             i += 1;
         }
         frame.data = index_from_rows(&mut self.history.index, rows);
+        let active_len = self.history.log.active_len();
+        self.history.release_active_range(0, active_len);
         self.history.log.reset_branch(frame);
+        self.history.index.retire_budget(RETIRE_BUDGET);
         self.history.next_identity = identity + 1;
         self.history.global = version;
         self.history.reuse_compacted_images = false;
@@ -1811,15 +1888,17 @@ impl Store {
     fn recovery_frame(
         output: &mut AddressIndex<Cell>,
         base: &Frame,
-        initial: &AddressIndex<Cell>,
+        destination: &History,
         source: &History,
         names: &Vec<Bytes>,
         identity: u64,
     ) -> Frame {
         let mut next = base.clone();
+        let base_data = destination.retained_data(base.version, base.data);
         let donor = source.at_cut(base.version);
-        let mut rows = indexed_data(initial, base.data);
-        let donor_rows = indexed_data(&source.index, donor.data);
+        let donor_data = source.retained_data(donor.version, donor.data);
+        let mut rows = indexed_data(&destination.index, base_data);
+        let donor_rows = indexed_data(&source.index, donor_data);
         let mut i = 0;
         while i < names.len() {
             Self::copy_recovery_map(
@@ -1846,7 +1925,7 @@ impl Store {
         let mut frames = BranchLog::new(Self::recovery_frame(
             &mut index,
             destination.log.active_at(0),
-            &destination.index,
+            destination,
             source,
             names,
             identity,
@@ -1856,7 +1935,7 @@ impl Store {
             frames.append(Self::recovery_frame(
                 &mut index,
                 destination.log.active_at(i),
-                &destination.index,
+                destination,
                 source,
                 names,
                 identity,
@@ -2009,6 +2088,7 @@ impl Store {
         };
         self.history.log.append(next);
         self.history.next_identity += 1;
+        self.history.index.retire_budget(RETIRE_BUDGET);
         self.txs.0[i].1.phase = Phase::Applied(version);
         Ok(Output::Applied(version, self.history.term, writes))
     }

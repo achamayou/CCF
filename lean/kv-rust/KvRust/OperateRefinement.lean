@@ -53,10 +53,11 @@ def OperationCase.fits (encode : List U8 → String) (n : Spike.engine.Tx)
             ≤ Usize.max)
 
 /-- Capacity of an enabled operation, given both live attempt rows. -/
-def OperationCase.indexRoom (history : Spike.engine.History) (m : Spike.engine.Bytes)
+def OperationCase.indexRoom (history : Spike.engine.History) (t : Spike.engine.Tx)
+    (m : Spike.engine.Bytes)
     : OperationCase → Prop
   | .point op => op.indexRoom m
-  | .whole _ => HistoryScanRoom history ∧ 2 * (8 + m.val.length) ≤ Usize.max
+  | .whole _ => ViewsScanRoom history.index t.views ∧ 2 * (8 + m.val.length) ≤ Usize.max
 
 def FitsOperate (encode : List U8 → String) (sid : Nat) (n : Spike.engine.Store)
     (w : State) (id : U64) (m : Spike.engine.Bytes) (op : OperationCase)
@@ -64,7 +65,7 @@ def FitsOperate (encode : List U8 → String) (sid : Nat) (n : Spike.engine.Stor
   ∀ t store tx,
     find n.txs.val id = some t
     → lookupTx w sid id.val = some (store, tx)
-    → op.fits encode t tx m ∧ op.indexRoom n.history m
+    → op.fits encode t tx m ∧ op.indexRoom n.history t m
 
 private theorem op_map (encode : List U8 → String) (m : Spike.engine.Bytes)
     (op : OperationCase)
@@ -138,19 +139,20 @@ private theorem operation_keeps (t : Tx) (op : Operation)
         exact record_keeps _ _ hl hm
 
 private theorem related_operated (encode : List U8 → String) (sid : Nat)
-    (history : Spike.engine.History) (archive : List Frame)
+    (index : CellIndex) (natArchive archive : List Frame)
     (native after : Spike.engine.Tx) (tx : Tx) (op : Operation)
-    (bef : AttemptMatches encode sid history archive native tx)
+    (bef : AttemptMatches encode sid index natArchive archive native tx)
     (hm : (find tx.globalViews op.map).isSome)
     (hw : (pointWrites encode after).Perm (executeOperation tx op).1.normal.writes)
     (hso : PendingSorted after.pending.val)
     (hd
       : List.Forall₂ DependencyOrderEq (pointDeps encode after)
           (executeOperation tx op).1.normal.deps)
-    (hno : NativeDepsFromViews encode history after)
+    (hno : NativeDepsFromViews encode index after)
     (hmo : ModelDepsFromViews (executeOperation tx op).1)
     (hc : pointKeepsContext native after)
-    : AttemptMatches encode sid history archive after (executeOperation tx op).1 := by
+    : AttemptMatches encode sid index natArchive archive after
+        (executeOperation tx op).1 := by
   obtain ⟨hModel, hLog⟩ := operation_keeps tx op bef.log hm
   have hStore := congrArg Tx.store hModel
   have hSnap := congrArg Tx.snapshot hModel
@@ -219,20 +221,22 @@ private theorem find_mem_of_some {K V : Type} [DecidableEq K] {rows : Assoc K V}
 
 private theorem operate_enabled (encode : List U8 → String)
     (inj : Function.Injective encode) (order : PreservesByteOrder encode) (sid : Nat)
-    (history : Spike.engine.History) (archive : List Frame) (t : Spike.engine.Tx)
-    (tx : Tx) (m : Spike.engine.Bytes) (op : OperationCase)
-    (h : AttemptMatches encode sid history archive t tx) (hp : t.phase = .Active)
-    (v : GlobalView) (hv : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some v)
+    (history : Spike.engine.History) (natArchive archive : List Frame)
+    (t : Spike.engine.Tx) (tx : Tx) (m : Spike.engine.Bytes) (op : OperationCase)
+    (h : AttemptMatches encode sid history.index natArchive archive t tx)
+    (hp : t.phase = .Active) (v : GlobalView)
+    (hv : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some v)
     (hArchUnique : ∀ f ∈ archive, Kv.Properties.Unique f.data)
     (room : op.fits encode t tx m) (indexed : HistoryIndexValid history)
-    (space : op.indexRoom history m)
+    (space : op.indexRoom history t m)
     : WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (out, next) =>
           ∃ value,
             out = .Ok value
             ∧ OutputMatches (.operation sid 0 (op.model encode m))
                 (modelOutput encode value) (executeOperation tx (op.model encode m)).2
-            ∧ AttemptMatches encode sid history archive next
+            ∧ next.views = t.views
+            ∧ AttemptMatches encode sid history.index natArchive archive next
                 (executeOperation tx (op.model encode m)).1) := by
   have hFor : (find tx.globalViews (op.model encode m).map).isSome := by rw [op_map, hv]; rfl
   have finish (r : core.result.Result Spike.engine.Output Spike.engine.Error) (after : Spike.engine.Tx)
@@ -243,16 +247,18 @@ private theorem operate_enabled (encode : List U8 → String)
       (hso : PendingSorted after.pending.val)
       (hd : List.Forall₂ DependencyOrderEq (pointDeps encode after)
         (executeOperation tx (op.model encode m)).1.normal.deps)
-      (hno : NativeDepsFromViews encode history after)
+      (hno : NativeDepsFromViews encode history.index after)
       (hmo : ModelDepsFromViews (executeOperation tx (op.model encode m)).1)
       (hc : pointKeepsContext t after) :
       ∃ value, r = .Ok value
         ∧ OutputMatches (.operation sid 0 (op.model encode m)) (modelOutput encode value)
             (executeOperation tx (op.model encode m)).2
-        ∧ AttemptMatches encode sid history archive after (executeOperation tx (op.model encode m)).1 := by
+        ∧ after.views = t.views
+        ∧ AttemptMatches encode sid history.index natArchive archive after
+            (executeOperation tx (op.model encode m)).1 := by
     obtain ⟨value, hr, he⟩ := output_projection encode op r _ ho
-    exact ⟨value, hr, he.symm ▸ hm,
-      related_operated encode sid history archive t after tx (op.model encode m) h hFor hw hso hd
+    exact ⟨value, hr, he.symm ▸ hm, by simpa using congrArg Spike.engine.Tx.views hc,
+      related_operated encode sid history.index natArchive archive t after tx (op.model encode m) h hFor hw hso hd
         hno hmo hc⟩
   cases op with
   | point op =>
@@ -261,7 +267,7 @@ private theorem operate_enabled (encode : List U8 → String)
       apply WP.spec_mono
         (operate_point_matches_model encode inj history t tx m op v hp hv h.views
           (h.localImage hv) (h.dataUnique _) hGlobalUnique h.writes h.sorted h.deps
-          h.nativeDeps h.modelDeps room h.live indexed space)
+          h.nativeDeps h.modelDeps room h.live space)
       rintro ⟨out, next⟩ ⟨ho, hw, hd, hc, hso, hno, hmo⟩
       exact finish out next _ ho (OutputMatches.of_eq rfl) hw hso hd hno hmo hc
   | whole op =>
@@ -270,7 +276,7 @@ private theorem operate_enabled (encode : List U8 → String)
       apply WP.spec_mono
         (operate_scan_matches_model encode inj order history t tx m op v hp hv h.views
           (h.localImage hv) h.writes h.sorted h.deps h.nativeDeps h.modelDeps room rows
-          (h.dataUnique _) clear h.live indexed mapRoom scanSpace)
+          (h.dataUnique _) clear h.live indexed.index mapRoom scanSpace)
       rintro ⟨out, next⟩ ⟨⟨obs, ho, hmatch⟩, hw, hd, hc, hso, hno, hmo⟩
       have hmatch' : OutputMatches (.operation sid 0 (op.model encode (encode m.val))) obs
           (executeOperation tx (op.model encode (encode m.val))).2 := by
@@ -284,9 +290,10 @@ theorem operate_disabled (encode : List U8 → String)
     (op : Spike.engine.Operation)
     (bad
       : t.phase ≠ .Active
-        ∨ find (rustPinnedViews encode history t.views) (encode (alloc.vec.Vec.val m))
+        ∨ find (rustPinnedViews encode history.index t.views)
+            (encode (alloc.vec.Vec.val m))
           = none)
-    (live : ViewsLive history t.views)
+    (live : ViewsLive history.index t.views)
     : WP.spec (Spike.engine.Tx.operate t history m op)
         (fun r => r = (.Err .Disabled, t)) := by
   cases hp : t.phase with
@@ -303,7 +310,7 @@ theorem operate_disabled (encode : List U8 → String)
       have hf := bad.resolve_left (by simp [hp])
       have hr : {t with phase := .Active} = t := by rw [← hp]
       simp only [Spike.engine.Tx.operate, hp, bind_ok]
-      apply WP.spec_bind (view_lookup encode inj history t m live)
+      apply WP.spec_bind (view_lookup encode inj history.index t m live)
       intro found ⟨he, _⟩
       rw [hf] at he
       cases found
@@ -318,7 +325,7 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
     : WP.spec (Spike.engine.Store.execute n (.Operate id m op.rust))
         (StepMatches encode sid (.operation sid id.val (op.model encode m)) n
           (execute w (.operation sid id.val (op.model encode m)))) := by
-  obtain ⟨store, archive, hStore, hist, hattempts⟩ := h.history
+  obtain ⟨store, natArchive, archive, hStore, hist, hattempts⟩ := h.history
   unfold Spike.engine.Store.execute
   apply WP.spec_bind (tx_index n id)
   intro found hf
@@ -349,7 +356,7 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
         rw [hback.2]
         exact alloc.vec.Vec.set_val_eq _ _ _
       have reject
-          (bad : t.phase ≠ .Active ∨ find (rustPinnedViews encode n.history t.views) k = none)
+          (bad : t.phase ≠ .Active ∨ find (rustPinnedViews encode n.history.index t.views) k = none)
           (disabled : execute w modelAction = none)
           : WP.spec
               (do
@@ -368,10 +375,11 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
       by_cases hp : t.phase = .Active
       · cases hview : find tx.globalViews k with
         | none =>
-            have hNatNone : find (rustPinnedViews encode n.history t.views) k = none := by
+            have hNatNone
+                : find (rustPinnedViews encode n.history.index t.views) k = none := by
               have hrel := rel.views.find k
               rw [projected_view_missing _ _ hview] at hrel
-              cases hn' : find (rustPinnedViews encode n.history t.views) k with
+              cases hn' : find (rustPinnedViews encode n.history.index t.views) k with
               | none => rfl
               | some _ => rw [hn'] at hrel; cases hrel
             apply reject (.inr hNatNone)
@@ -401,15 +409,22 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
                   have he : (Phase.active != Phase.active) = false := rfl
                   simp [modelAction, execute, hLookup, modelActive, modelMap, hview, hs, he, w', ref]
             apply WP.spec_bind
-              (operate_enabled encode inj order sid n.history archive t tx m op rel hp v
-                hview hist.modelArchive.unique (room t store tx hfind hLookup).1
+              (operate_enabled encode inj order sid n.history natArchive archive t tx m op
+                rel hp v hview hist.modelArchive.unique (room t store tx hfind hLookup).1
                 hist.indexValid (room t store tx hfind hLookup).2)
-            rintro ⟨out, next⟩ ⟨nativeOut, ho, hout, hrel⟩
+            rintro ⟨out, next⟩ ⟨nativeOut, ho, hout, hviews, hrel⟩
             have hout'
                 : OutputMatches modelAction (modelOutput encode nativeOut) ref.2 := by
               cases op with
               | point pop => cases pop <;> cases nativeOut <;> exact hout
               | whole wop => cases wop <;> cases nativeOut <;> exact hout
+            have hliveAfter : IndexLiveness n.history.index
+                (storePins {n with txs := back (id, next)}) := by
+              have hpins : storePins {n with txs := back (id, next)} = storePins n := by
+                unfold storePins
+                rw [hupdate next, txsPins_set_same_views n.txs.val i.val id t next hrow hviews]
+              rw [hpins]
+              exact h.liveness
             change WP.spec (Result.ok (out, ({n with txs := back (id,next)} : Spike.engine.Store))) _
             rw [WP.spec_ok]
             change StepMatches encode sid modelAction n (execute w modelAction) _
@@ -418,9 +433,9 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
               nativeOut,
               ho,
               hout',
-              replace_attempt h.unique hattempts hist id i.val t next ref.1 hrow
-                (hupdate next) rfl hStore hist hrel (reachable_execute h.reachable hw)
-                (HistoryKeeps.of_same rfl rfl) (fun _ hm => hm)
+              replace_attempt h.unique hattempts id i.val t next ref.1 hrow (hupdate next)
+                rfl hStore hist hliveAfter hrel (reachable_execute h.reachable hw)
+                (SinglePreservesPins.refl _ _) (fun _ hm => hm) (fun _ hm => hm)
             ⟩
       · apply reject (.inl hp)
         have hf : (tx.phase != .active) = true := by

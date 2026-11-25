@@ -293,15 +293,16 @@ private theorem stamp_loop (encode : List U8 → String) (inj : Function.Injecti
 exact revision and birth metadata. -/
 theorem frame_advance_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (before : Spike.engine.Frame)
-    (index : CellIndex) (valid : IndexValid index)
+    (index : CellIndex) (pins : List U32) (live : IndexLiveness index pins)
+    (hrootPin : before.data = 0#u32 ∨ before.data ∈ pins)
     (view : IndexView index before.data (indexRows index before.data)) (model : Store)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
     (version identity : U64) (hBefore : model.head = modelFrame encode index before)
     (hVersion : version.val = model.head.version + 1)
     (hIdentity : identity.val = model.nextIdentity)
     (space
-      : IndexBatchRoom index ((indexRows index before.data).length + pending.val.length)
-          pending.val.length)
+      : IndexBatchRoom index pins.length
+          ((indexRows index before.data).length + pending.val.length) pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     (hRevs : before.revisions.val.length + pending.val.length ≤ Usize.max)
     (hBirths : before.births.val.length + pending.val.length ≤ Usize.max)
@@ -310,8 +311,12 @@ theorem frame_advance_matches_model (encode : List U8 → String)
           FrameOrderEq (modelFrame encode arena after)
             (advance model (encodeWrites encode (byteWrites pending.val))).head
           ∧ IndexView arena after.data (indexRows arena after.data)
-          ∧ IndexValid arena
-          ∧ IndexKeeps index arena) := by
+          ∧ IndexLiveness arena (if after.data = 0#u32 then pins else after.data :: pins)
+          ∧ IndexKeeps index arena
+          ∧ IndexGrowth index arena
+              (pending.val.length
+                * ((indexRows index before.data).length + pending.val.length + 1))
+              pending.val.length) := by
   let data := indexRows index before.data
   unfold Spike.engine.Frame.advance
   simp only [clone_assoc, bind_ok]
@@ -326,12 +331,13 @@ theorem frame_advance_matches_model (encode : List U8 → String)
     Result.ok (({version, data := root, revisions := rev, births := birth} : Spike.engine.Frame),
       after)) _
   apply WP.spec_bind
-    (publication_base_refines index before.data data pending view valid space)
+    (publication_base_refines index before.data data pending pins.length view live.valid
+      space)
   intro base chosen
   apply WP.spec_bind
-    (sorted_publication_refines index before.data base data pending version
-      view valid space addresses chosen)
-  rintro ⟨root, after⟩ ⟨⟨out, updated, hPermOut⟩, arenaValid, kept⟩
+    (sorted_publication_refines index before.data base data pending version pins
+      view live hrootPin space addresses chosen)
+  rintro ⟨root, after⟩ ⟨⟨out, updated, hPermOut⟩, arenaLive, kept, growth⟩
   have hw : encodeWrites encode (byteWrites pending.val) = pending.val.map (encodeRow encode) := by
     simp only [encodeWrites, byteWrites, List.map_map, Function.comp_def]
     apply List.map_congr_left
@@ -346,7 +352,7 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   change WP.spec (Result.ok (({version, data := root, revisions := rev, births := birth} :
     Spike.engine.Frame), after)) _
   rw [WP.spec_ok]
-  refine ⟨?_, projected.symm ▸ updated, arenaValid, kept⟩
+  refine ⟨?_, projected.symm ▸ updated, arenaLive, kept, growth⟩
   refine ⟨?_, ?_, ?_, ?_⟩
   · simp only [modelFrame, modelMetadata, advance]
     exact hVersion
@@ -371,7 +377,8 @@ theorem frame_advance_matches_model (encode : List U8 → String)
 without requiring either the existing bindings or staged writes to be ordered alike. -/
 theorem frame_advance_order_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (before : Spike.engine.Frame)
-    (index : CellIndex) (valid : IndexValid index)
+    (index : CellIndex) (pins : List U32) (live : IndexLiveness index pins)
+    (hrootPin : before.data = 0#u32 ∨ before.data ∈ pins)
     (view : IndexView index before.data (indexRows index before.data)) (model : Store)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
     (referenceWrites : Pending) (version identity : U64)
@@ -382,8 +389,8 @@ theorem frame_advance_order_matches_model (encode : List U8 → String)
     (hVersion : version.val = model.head.version + 1)
     (hIdentity : identity.val = model.nextIdentity)
     (space
-      : IndexBatchRoom index ((indexRows index before.data).length + pending.val.length)
-          pending.val.length)
+      : IndexBatchRoom index pins.length
+          ((indexRows index before.data).length + pending.val.length) pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     (hRevs : before.revisions.val.length + pending.val.length ≤ Usize.max)
     (hBirths : before.births.val.length + pending.val.length ≤ Usize.max)
@@ -392,23 +399,26 @@ theorem frame_advance_order_matches_model (encode : List U8 → String)
           FrameOrderEq (modelFrame encode arena after)
             (advance model referenceWrites).head
           ∧ IndexView arena after.data (indexRows arena after.data)
-          ∧ IndexValid arena
+          ∧ IndexLiveness arena (if after.data = 0#u32 then pins else after.data :: pins)
           ∧ IndexKeeps index arena) := by
   let representative := {model with head := modelFrame encode index before}
   have nextVersion : version.val = representative.head.version + 1 :=
     heads.version.symm ▸ hVersion
-  apply WP.spec_mono (frame_advance_matches_model encode inj before index valid view
+  apply WP.spec_mono (frame_advance_matches_model encode inj before index pins live hrootPin view
     representative pending version identity rfl nextVersion hIdentity space addresses hRevs hBirths)
-  rintro ⟨after, arena⟩ ⟨published, retained, live, kept⟩
-  refine ⟨?_, retained, live, kept⟩
+  rintro ⟨after, arena⟩ ⟨published, retained, lAfter, kept, _⟩
+  refine ⟨?_, retained, lAfter, kept⟩
   exact published.trans (advance_order_eq representative model _ _ heads rfl related
     (unique_of_perm heads.data.symm uniqueData) uniqueWrites)
 
 theorem prepare_frame_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (history : Spike.engine.History)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (extraPins : List U32)
     (branch : BranchValid history.log) (split : history.activeFrames = prior ++ [head])
-    (valid : HistoryIndexValid history) (model : Store)
+    (valid : HistoryIndexValid history)
+    (live : IndexLiveness history.index (framePins history.log.frames.val ++ extraPins))
+    (model : Store)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
     (version identity : U64)
     (before : model.head = modelFrame encode history.index head)
@@ -416,6 +426,7 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
     (nextId : identity.val = model.nextIdentity)
     (room
       : IndexBatchRoom history.index
+          (framePins history.log.frames.val ++ extraPins).length
           ((indexRows history.index head.data).length + pending.val.length)
           pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
@@ -428,8 +439,16 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
             ∧ FrameOrderEq (modelFrame encode arena after)
                 (advance model (encodeWrites encode (byteWrites pending.val))).head
             ∧ IndexView arena after.data (indexRows arena after.data)
-            ∧ IndexValid arena
-            ∧ IndexKeeps history.index arena) := by
+            ∧ IndexLiveness arena
+                (if after.data = 0#u32 then
+                    framePins history.log.frames.val ++ extraPins
+                  else
+                    after.data :: (framePins history.log.frames.val ++ extraPins))
+            ∧ IndexKeeps history.index arena
+            ∧ IndexGrowth history.index arena
+                (pending.val.length
+                  * ((indexRows history.index head.data).length + pending.val.length + 1))
+                pending.val.length) := by
   unfold Spike.engine.History.prepare_frame
   apply WP.spec_bind (branch_active_len history.log branch)
   intro count hc
@@ -446,8 +465,16 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
   apply WP.spec_bind (branch_active_at history.log branch off head selected)
   intro f h
   subst f
+  have hheadPin : head.data = 0#u32 ∨ head.data ∈ framePins history.log.frames.val ++ extraPins := by
+    by_cases hz : head.data = 0#u32
+    · exact Or.inl hz
+    · have hmemAct : head ∈ history.activeFrames := by simp [split]
+      obtain ⟨id, _, hsaved⟩ := List.mem_filterMap.mp hmemAct
+      exact Or.inr (List.mem_append_left extraPins
+        (List.mem_filterMap.mpr ⟨head, List.mem_iff_getElem?.mpr ⟨id.val, hsaved⟩, by simp [hz]⟩))
   apply WP.spec_bind
-    (frame_advance_matches_model encode inj head history.index valid.index
+    (frame_advance_matches_model encode inj head history.index
+      (framePins history.log.frames.val ++ extraPins) live hheadPin
       (valid.head prior head split) model pending version identity before nextVersion
       nextId room addresses revisions births)
   rintro ⟨next, arena⟩ spec

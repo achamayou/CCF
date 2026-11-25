@@ -3,7 +3,7 @@
 
 module
 
-public import KvRust.RadixSingle
+public import KvRust.RadixSingleReclaim
 public import KvRust.Publication
 
 @[expose] public section
@@ -95,6 +95,15 @@ theorem index_rows_view {V : Type} {index : Spike.kv_index.AddressIndex V}
 def IndexValid {V : Type} (index : Spike.kv_index.AddressIndex V) : Prop :=
   ArenaValid index.values
 
+def IndexLiveness {V : Type} (index : Spike.kv_index.AddressIndex V) (pins : List U32)
+    : Prop :=
+  SingleLiveness index pins
+
+def IndexPreservesPins {V : Type} (before after : Spike.kv_index.AddressIndex V)
+    (pins : List U32)
+    : Prop :=
+  SinglePreservesPins before after pins
+
 def IndexKeeps {V : Type} (before after : Spike.kv_index.AddressIndex V) : Prop :=
   ArenaKeeps before.values after.values
 
@@ -107,6 +116,55 @@ theorem IndexKeeps.trans {V : Type} {a b c : Spike.kv_index.AddressIndex V}
     : IndexKeeps a c :=
   ArenaKeeps.trans ab bc
 
+theorem IndexPreservesPins.refl {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (pins : List U32)
+    : IndexPreservesPins index index pins :=
+  SinglePreservesPins.refl index pins
+
+theorem IndexPreservesPins.trans {V : Type} {a b c : Spike.kv_index.AddressIndex V}
+    {pins : List U32} (ab : IndexPreservesPins a b pins)
+    (bc : IndexPreservesPins b c pins)
+    : IndexPreservesPins a c pins :=
+  SinglePreservesPins.trans ab bc
+
+theorem IndexPreservesPins.mono {V : Type} {a b : Spike.kv_index.AddressIndex V}
+    {p1 p2 : List U32} (h : IndexPreservesPins a b p2) (hsub : ∀ r ∈ p1, r ∈ p2)
+    : IndexPreservesPins a b p1 :=
+  fun r hr bs hv => h r (hsub r hr) bs hv
+
+theorem index_preserves_pins_of_keeps {V : Type}
+    {before after : Spike.kv_index.AddressIndex V} {pins : List U32}
+    (kept : IndexKeeps before after)
+    : IndexPreservesPins before after pins :=
+  single_preserves_pins_of_arena_keeps kept
+
+theorem index_preserves_pins_view {V : Type} {old next : Spike.kv_index.AddressIndex V}
+    {pins : List U32} (kept : IndexPreservesPins old next pins)
+    (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
+    (hpin : root = 0#u32 ∨ root ∈ pins) (view : IndexView old root rows)
+    : IndexView next root rows := by
+  rcases hpin with rfl | hmem
+  · have hrows : rows = [] :=
+      index_view_unique view
+        ⟨
+          [],
+          by
+            simpa [Spike.radix.SingleRadix.empty_root, WP.spec_ok]
+              using single_empty_root_refines old,
+          rfl
+        ⟩
+    subst hrows
+    exact ⟨
+      [],
+      by
+        simpa [Spike.radix.SingleRadix.empty_root, WP.spec_ok]
+          using single_empty_root_refines next,
+      rfl
+    ⟩
+  · obtain ⟨links, single, projection⟩ := view.witness
+    obtain ⟨after, same⟩ := kept root hmem links single
+    exact ⟨links, after, same.trans projection⟩
+
 theorem index_keeps_view {V : Type} {old next : Spike.kv_index.AddressIndex V}
     (kept : IndexKeeps old next) (root : Spike.radix.RadixRoot)
     (rows : List (Spike.engine.Address × V)) (view : IndexView old root rows)
@@ -118,21 +176,85 @@ theorem index_keeps_view {V : Type} {old next : Spike.kv_index.AddressIndex V}
 theorem index_new_refines (V : Type)
     : WP.spec (Spike.kv_index.AddressIndex.new V)
         (fun index =>
-          IndexValid index
+          IndexLiveness index []
           ∧ WP.spec (Spike.kv_index.AddressIndex.empty_root index)
-              (fun root => IndexView index root [])) := by
+              (fun root => root = 0#u32 ∧ IndexView index root [])) := by
   unfold Spike.kv_index.AddressIndex.new Spike.kv_index.AddressIndex.empty_root
   apply WP.spec_bind (single_new_refines (Spike.kv_index.Binding V))
-  intro index ⟨validValues, empty⟩
+  intro index ⟨liveValues, empty⟩
   rw [WP.spec_ok]
-  refine ⟨validValues, ?_⟩
-  exact WP.spec_mono empty (fun _ view => ⟨[], view, rfl⟩)
+  refine ⟨liveValues, ?_⟩
+  unfold Spike.radix.SingleRadix.empty_root at empty ⊢
+  rw [WP.spec_ok] at empty ⊢
+  exact ⟨rfl, ⟨[], empty, rfl⟩⟩
+
+theorem index_retain_root_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (pins : List U32) (root : Spike.radix.RadixRoot)
+    (live : IndexLiveness index pins)
+    (rootRef
+      : root ≠ 0#u32
+        → SingleLinkLive index.values.dirs.val index.values.rows.val root
+          ∧ radixReferences index.values.dirs.val pins root > 0)
+    (room : root ≠ 0#u32 → radixReferences index.values.dirs.val pins root < U32.max)
+    : WP.spec (Spike.kv_index.AddressIndex.retain_root index root)
+        (fun after =>
+          after.values = index.values
+          ∧ IndexLiveness after (if root = 0#u32 then pins else root :: pins)) := by
+  unfold Spike.kv_index.AddressIndex.retain_root
+  apply WP.spec_bind
+    (single_retain_root_refines index pins root live
+      (fun h => (rootRef h).1) (fun h => (rootRef h).2) room)
+  intro after h
+  rw [WP.spec_ok]
+  exact h
+
+theorem index_release_root_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (pins : List U32) (root : Spike.radix.RadixRoot)
+    (live : IndexLiveness index (if root = 0#u32 then pins else root :: pins))
+    (queueRoom
+      : 2 * (index.values.dirs.val.length + index.values.rows.val.length) + 1 ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.release_root index root)
+        (fun after =>
+          after.values = index.values ∧ IndexLiveness after pins) := by
+  unfold Spike.kv_index.AddressIndex.release_root
+  apply WP.spec_bind (single_release_root_refines index pins root live queueRoom)
+  intro after h
+  rw [WP.spec_ok]
+  exact h
+
+theorem index_retire_budget_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
+    (pins : List U32) (budget : Usize)
+    (live : IndexLiveness index pins)
+    (queueRoom
+      : 2 * (index.values.dirs.val.length + index.values.rows.val.length) + 1 ≤ Usize.max)
+    : WP.spec (Spike.kv_index.AddressIndex.retire_budget index budget)
+        (fun (_, after) =>
+          IndexLiveness after pins
+          ∧ IndexPreservesPins index after pins
+          ∧ after.values.dirs.val.length = index.values.dirs.val.length
+          ∧ after.values.rows.val.length = index.values.rows.val.length) := by
+  unfold Spike.kv_index.AddressIndex.retire_budget
+  apply WP.spec_bind (single_retire_budget_refines index budget pins live queueRoom)
+  rintro ⟨n, after⟩ h
+  change WP.spec (Result.ok (n, after)) _
+  rw [WP.spec_ok]
+  exact h
 
 theorem index_empty_root_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
     : WP.spec (Spike.kv_index.AddressIndex.empty_root index)
-        (fun root => IndexView index root []) := by
-  unfold Spike.kv_index.AddressIndex.empty_root
-  exact WP.spec_mono (single_empty_root_refines index) (fun _ view => ⟨[], view, rfl⟩)
+        (fun root => root = 0#u32 ∧ IndexView index root []) := by
+  unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root
+  rw [WP.spec_ok]
+  exact ⟨
+    rfl,
+    ⟨
+      [],
+      by
+        simpa [Spike.radix.SingleRadix.empty_root, WP.spec_ok]
+          using single_empty_root_refines index,
+      rfl
+    ⟩
+  ⟩
 
 private theorem address_key_matches (a : Spike.engine.Address)
     (capacity : 8 + a.map.val.length + a.key.val.length ≤ Usize.max)
@@ -249,16 +371,23 @@ def IndexGrowth {V : Type} (before after : Spike.kv_index.AddressIndex V)
 
 theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
     (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
+    (pins : List U32)
     (related : IndexView index root rows)
     (address : Spike.engine.Address) (value : V)
-    (valid : IndexValid index)
+    (live : IndexLiveness index pins)
+    (rootRef
+      : root ≠ 0#u32
+        → SingleLinkLive index.values.dirs.val index.values.rows.val root
+          ∧ radixReferences index.values.dirs.val pins root > 0)
     (lookupRoom : index.values.dirs.val.length + rows.length + 1 ≤ 2147483647)
     (valueRoom : index.values.rows.val.length < 2147483647)
     (keyRoom : 2 * (8 + address.map.val.length + address.key.val.length) + 1 ≤ Usize.max)
+    (refRoom
+      : pins.length + 17 * (index.values.dirs.val.length + rows.length + 2) + 1 ≤ U32.max)
     : WP.spec (Spike.kv_index.AddressIndex.put index root address value)
         (fun (next, after) =>
           (∃ out, IndexView after next out ∧ out.Perm (Kv.Model.set rows address value))
-          ∧ IndexValid after
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ IndexKeeps index after
           ∧ IndexGrowth index after (rows.length + 1) 1) := by
   obtain ⟨links, view, projection⟩ := related.witness
@@ -269,9 +398,9 @@ theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   dsimp only at he hb len
   subst binding
   apply WP.spec_bind
-    (single_put_refines index root {key := encoded, value := {address, value}} links
-      view valid (by omega) valueRoom (by simpa [len] using keyRoom))
-  rintro ⟨next, after⟩ ⟨vAfter, kAfter, gAfter, sorted, sv, hperm⟩
+    (single_put_refines index root {key := encoded, value := {address, value}} links pins
+      view live rootRef (by omega) valueRoom (by simpa [len] using keyRoom) (by omega))
+  rintro ⟨next, after⟩ ⟨lAfter, kAfter, gAfter, sorted, sv, hperm⟩
   change WP.spec (Result.ok (next, after)) _
   rw [WP.spec_ok]
   let out : List (Spike.engine.Address × V) :=
@@ -301,18 +430,25 @@ theorem index_put_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   have hOutPerm : out.Perm (Kv.Model.set rows address value) := by
     have hmap := hPackedPerm.map (fun e : List U8 × Spike.kv_index.Binding V => (e.2.address, e.2.value))
     simpa [out, packedBindings, List.map_map, Function.comp_def, Prod.mk.eta] using hmap
-  exact ⟨⟨out, ⟨sorted, sv, hPackedEq⟩, hOutPerm⟩, vAfter, kAfter, count ▸ gAfter⟩
+  exact ⟨⟨out, ⟨sorted, sv, hPackedEq⟩, hOutPerm⟩, lAfter, kAfter, count ▸ gAfter⟩
 
 theorem index_remove_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
     (root : Spike.radix.RadixRoot) (rows : List (Spike.engine.Address × V))
+    (pins : List U32)
     (related : IndexView index root rows)
-    (address : Spike.engine.Address) (valid : IndexValid index)
+    (address : Spike.engine.Address) (live : IndexLiveness index pins)
+    (rootRef
+      : root ≠ 0#u32
+        → SingleLinkLive index.values.dirs.val index.values.rows.val root
+          ∧ radixReferences index.values.dirs.val pins root > 0)
     (lookupRoom : index.values.dirs.val.length + rows.length ≤ 2147483647)
     (capacity : 8 + address.map.val.length + address.key.val.length ≤ Usize.max)
+    (refRoom
+      : pins.length + 17 * (index.values.dirs.val.length + rows.length + 1) + 1 ≤ U32.max)
     : WP.spec (Spike.kv_index.AddressIndex.remove index root address)
         (fun (next, after) =>
           IndexView after next (Kv.Model.erase rows address)
-          ∧ IndexValid after
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ IndexKeeps index after
           ∧ IndexGrowth index after rows.length 0) := by
   obtain ⟨links, view, projection⟩ := related.witness
@@ -321,13 +457,13 @@ theorem index_remove_refines {V : Type} (index : Spike.kv_index.AddressIndex V)
   apply WP.spec_bind (address_key_matches address capacity)
   intro encoded he
   apply WP.spec_bind
-    (single_remove_refines index root (alloc.vec.Vec.deref encoded) links view valid
-      (by omega))
-  rintro ⟨next, after⟩ ⟨vAfter, kAfter, gAfter, sv, hp⟩
+    (single_remove_refines index root (alloc.vec.Vec.deref encoded) links pins view live
+      rootRef (by omega) (by omega))
+  rintro ⟨next, after⟩ ⟨lAfter, kAfter, gAfter, sv, hp⟩
   change WP.spec (Result.ok (next, after)) _
   rw [WP.spec_ok]
   refine ⟨⟨Kv.Model.erase links (alloc.vec.Vec.deref encoded).val, sv, ?_⟩,
-    vAfter, kAfter, count ▸ gAfter⟩
+    lAfter, kAfter, count ▸ gAfter⟩
   rw [hp, projection, show (alloc.vec.Vec.deref encoded).val = packedAddress address from by
     simpa [alloc.vec.Vec.deref] using he, packed_erase]
 

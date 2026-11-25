@@ -226,16 +226,17 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
     (history : Spike.engine.History)
     (t : Spike.engine.Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View) (tx : Tx)
     (hLocal
-      : encodeImage encode (pinImage history m view.local)
+      : encodeImage encode (pinImage history.index m view.local)
         = image tx.data (encode (alloc.vec.Vec.val m)))
-    (live : PinLive history view.local)
-    (indexed : HistoryIndexValid history)
+    (live : PinLive history.index view.local)
+    (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
-    (space : PinScanRoom history view.local)
+    (space : PinScanRoom history.index view.local)
     (hWrites : pointWrites encode t = tx.normal.writes)
     (hDeps : pointDeps encode t = tx.normal.deps)
     (room : t.deps.val.length < Usize.max)
-    (rowsRoom : (pinImage history m view.local).length + t.pending.val.length ≤ Usize.max)
+    (rowsRoom
+      : (pinImage history.index m view.local).length + t.pending.val.length ≤ Usize.max)
     : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
         (fun (rows, deps) =>
           let next := {t with deps}
@@ -247,10 +248,10 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
                 (image tx.data (encode (alloc.vec.Vec.val m)))
               :: tx.normal.deps
           ∧ rows.val.length
-            ≤ (pinImage history m view.local).length + t.pending.val.length) := by
+            ≤ (pinImage history.index m view.local).length + t.pending.val.length) := by
   simp only [Spike.engine.Tx.scan, clone_bytes, Spike.engine.Assoc.new, bind_ok]
   apply WP.spec_bind
-    (pin_materialize_refines history m view.local live indexed mapRoom space)
+    (pin_materialize_refines history m view.local live valid mapRoom space)
   intro cells hCells
   have localEq : encodeImage encode (byteImage cells) = image tx.data (encode m.val) :=
     (congrArg (encodeImage encode) hCells).trans hLocal
@@ -259,7 +260,7 @@ theorem scan_matches_model (encode : List U8 → String) (inj : Function.Injecti
   subst retained
   apply WP.spec_bind (deps_push encode t (.Map m cells) room)
   intro deps hd
-  have hlen : base.val.length = (pinImage history m view.local).length := by
+  have hlen : base.val.length = (pinImage history.index m view.local).length := by
     rw [← hCells]
     simp [hb, byteImage]
   apply WP.spec_bind
@@ -287,26 +288,28 @@ theorem scan_by_contents_matches (encode : List U8 → String)
     (inj : Function.Injective encode) (history : Spike.engine.History)
     (t : Spike.engine.Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View) (tx : Tx)
     (localImage
-      : (encodeImage encode (pinImage history m view.local)).Perm
+      : (encodeImage encode (pinImage history.index m view.local)).Perm
           (image tx.data (encode m.val)))
     (writes : (pointWrites encode t).Perm tx.normal.writes)
     (unique : Kv.Properties.Unique (image tx.data (encode m.val)))
-    (sorted : PendingSorted t.pending.val) (live : PinLive history view.local)
-    (indexed : HistoryIndexValid history)
+    (sorted : PendingSorted t.pending.val) (live : PinLive history.index view.local)
+    (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
-    (space : PinScanRoom history view.local)
+    (space : PinScanRoom history.index view.local)
     (room : t.deps.val.length < Usize.max)
-    (rowsRoom : (pinImage history m view.local).length + t.pending.val.length ≤ Usize.max)
+    (rowsRoom
+      : (pinImage history.index m view.local).length + t.pending.val.length ≤ Usize.max)
     : WP.spec (Spike.engine.Tx.scan history t.pending t.deps m view)
         (fun (rows, deps) =>
           (modelEntries encode rows).Perm (scanAt tx.data tx.normal.writes (encode m.val))
           ∧ pointDeps encode {t with deps}
-            = .map (encode m.val) (encodeImage encode (pinImage history m view.local))
+            = .map (encode m.val)
+                (encodeImage encode (pinImage history.index m view.local))
               :: pointDeps encode t
           ∧ rows.val.length
-            ≤ (pinImage history m view.local).length + t.pending.val.length) := by
+            ≤ (pinImage history.index m view.local).length + t.pending.val.length) := by
   let table := encode m.val
-  let pinned := encodeImage encode (pinImage history m view.local)
+  let pinned := encodeImage encode (pinImage history.index m view.local)
   let representative : Tx := {tx with
     data := pinned.map (fun (key, cell) => ((table, key), cell))
     normal := {tx.normal with writes := pointWrites encode t, deps := pointDeps encode t}}
@@ -319,7 +322,7 @@ theorem scan_by_contents_matches (encode : List U8 → String)
   have observed := scan_perm table projected writes validImage (sorted_pending_unique encode inj t sorted)
   apply WP.spec_mono
     (scan_matches_model encode inj history t m view representative same.symm
-      live indexed mapRoom space rfl rfl room rowsRoom)
+      live valid mapRoom space rfl rfl room rowsRoom)
   rintro ⟨rows, deps⟩ ⟨read, _, dependency, bound⟩
   refine ⟨?_, ?_, bound⟩
   · rw [read]
@@ -480,14 +483,14 @@ theorem operate_scan_matches_model (encode : List U8 → String)
     (hView : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some view)
     (hPinned
       : ViewsOrderEq (modelPinnedViews tx.globalViews)
-          (rustPinnedViews encode history t.views))
+          (rustPinnedViews encode history.index t.views))
     (hLocal
       : image view.current.data (encode (alloc.vec.Vec.val m))
         = image tx.data (encode (alloc.vec.Vec.val m)))
     (hWrites : (pointWrites encode t).Perm tx.normal.writes)
     (hSorted : PendingSorted t.pending.val)
     (hDeps : List.Forall₂ DependencyOrderEq (pointDeps encode t) tx.normal.deps)
-    (hNativeOrig : NativeDepsFromViews encode history t)
+    (hNativeOrig : NativeDepsFromViews encode history.index t)
     (hModelOrig : ModelDepsFromViews tx)
     (room : t.deps.val.length < Usize.max)
     (rowsRoom
@@ -499,10 +502,10 @@ theorem operate_scan_matches_model (encode : List U8 → String)
         → t.pending.val.length
             + (scanAt tx.data tx.normal.writes (encode (alloc.vec.Vec.val m))).length
           ≤ Usize.max)
-    (live : ViewsLive history t.views)
-    (indexed : HistoryIndexValid history)
+    (live : ViewsLive history.index t.views)
+    (valid : IndexValid history.index)
     (mapRoom : 2 * (8 + m.val.length) ≤ Usize.max)
-    (space : HistoryScanRoom history)
+    (space : ViewsScanRoom history.index t.views)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
       WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
@@ -515,7 +518,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
           ∧ List.Forall₂ DependencyOrderEq (pointDeps encode after) expected.1.normal.deps
           ∧ pointKeepsContext t after
           ∧ PendingSorted after.pending.val
-          ∧ NativeDepsFromViews encode history after
+          ∧ NativeDepsFromViews encode history.index after
           ∧ ModelDepsFromViews expected.1) := by
   let mapName := encode (alloc.vec.Vec.val m)
   let visible := scanAt tx.data tx.normal.writes mapName
@@ -524,30 +527,30 @@ theorem operate_scan_matches_model (encode : List U8 → String)
   rw [he] at hRelFound
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
   simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
-  apply WP.spec_bind (view_lookup encode inj history t m live)
+  apply WP.spec_bind (view_lookup encode inj history.index t m live)
   intro found ⟨hf, alive⟩
   rw [← hf] at hRelFound
   cases found with
   | none => cases hRelFound
   | some native =>
       have hv : PinnedViewOrderEq (modelPinnedView mapName view)
-          (rustPinnedView encode history m native) :=
+          (rustPinnedView encode history.index m native) :=
         Option.rel_some_some.mp hRelFound
-      have hl : (encodeImage encode (pinImage history m native.local)).Perm (image tx.data mapName) :=
+      have hl : (encodeImage encode (pinImage history.index m native.local)).Perm (image tx.data mapName) :=
         hv.localImage.symm.trans (hLocal ▸ .rfl)
-      have hlen : (pinImage history m native.local).length = (image tx.data mapName).length := by
+      have hlen : (pinImage history.index m native.local).length = (image tx.data mapName).length := by
         simpa [encodeImage] using hl.length_eq
-      have hNativeFound : find (rustPinnedViews encode history t.views) mapName =
-          some (rustPinnedView encode history m native) := by
+      have hNativeFound : find (rustPinnedViews encode history.index t.views) mapName =
+          some (rustPinnedView encode history.index m native) := by
         simpa [mapName] using hf.symm
       have addNativeOrig (deps : alloc.vec.Vec Spike.engine.Dependency)
           (hd : pointDeps encode {t with deps} =
-            .map mapName (encodeImage encode (pinImage history m native.local)) :: pointDeps encode t) :
-          NativeDepsFromViews encode history {t with deps} := by
+            .map mapName (encodeImage encode (pinImage history.index m native.local)) :: pointDeps encode t) :
+          NativeDepsFromViews encode history.index {t with deps} := by
         intro d hm
         rw [hd] at hm
         rcases List.mem_cons.mp hm with rfl | old
-        · exact ⟨rustPinnedView encode history m native, hNativeFound, rfl⟩
+        · exact ⟨rustPinnedView encode history.index m native, hNativeFound, rfl⟩
         · exact hNativeOrig d old
       have addModelOrig (deps : List (Dependency String String String))
           (hd : deps = .map mapName (image tx.data mapName) :: tx.normal.deps) :
@@ -561,7 +564,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
         · exact hModelOrig d old
       have hscan :=
         scan_by_contents_matches encode inj history t m native tx hl hWrites unique hSorted
-          (alive native rfl).1 indexed mapRoom (space.pin native.local) room
+          (alive native rfl).2.1 valid mapRoom (space (m, native) (alive native rfl).1).1 room
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>
@@ -660,7 +663,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
             (pointWrites encode after).Perm outRef.1.normal.writes ∧
             List.Forall₂ DependencyOrderEq (pointDeps encode after) outRef.1.normal.deps ∧
             pointKeepsContext t after ∧ PendingSorted after.pending.val ∧
-            NativeDepsFromViews encode history after ∧ ModelDepsFromViews outRef.1
+            NativeDepsFromViews encode history.index after ∧ ModelDepsFromViews outRef.1
           let fullScan
               : Result
                   (core.result.Result Spike.engine.Output Spike.engine.Error
@@ -746,11 +749,12 @@ theorem operate_scan_matches_model (encode : List U8 → String)
                 exact List.eq_nil_of_length_eq_zero (hWrites.length_eq.symm.trans hlen0)
               simp only [nonemptyScan, emptyTest, clean, decide_true, bind_tc_ok, ite_true,
                 committedRange]
-              apply WP.spec_bind (pin_materialize_refines history m native.local
-                (alive native rfl).1 indexed mapRoom (space.pin native.local))
+              apply WP.spec_bind
+                (pin_materialize_refines history m native.local (alive native rfl).2.1
+                  valid mapRoom (space (m, native) (alive native rfl).1).1)
               intro base cells
               have baseEq : encodeImage encode (byteImage base) =
-                  encodeImage encode (pinImage history m native.local) :=
+                  encodeImage encode (pinImage history.index m native.local) :=
                 congrArg (encodeImage encode) cells
               have basePerm : (encodeImage encode (byteImage base)).Perm (image tx.data mapName) :=
                 baseEq ▸ hl
@@ -776,7 +780,7 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               apply WP.spec_bind (deps_push encode t (.Map m base) room)
               intro deps updated
               have dep : pointDeps encode {t with deps} =
-                  .map mapName (encodeImage encode (pinImage history m native.local))
+                  .map mapName (encodeImage encode (pinImage history.index m native.local))
                   :: pointDeps encode t := by
                 simpa [byteDependency, encodeDependency, baseEq, mapName] using updated
               rw [← hPhase, WP.spec_ok]

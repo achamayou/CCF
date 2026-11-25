@@ -48,7 +48,7 @@ for module in KvRust.Extracted.Types KvRust.Extracted.Funs KvRust.Reference \
   KvRust.Validation KvRust.Lineage KvRust.Apply KvRust.Advance KvRust.Acquire \
   KvRust.OrderEquivalence KvRust.PendingWrites KvRust.PinnedImage KvRust.Point \
   KvRust.Radix KvRust.RadixAddress KvRust.RadixBatch KvRust.RadixDual \
-  KvRust.RadixDualBatch KvRust.RadixLiveness KvRust.RadixSingle \
+  KvRust.RadixDualBatch KvRust.RadixLiveness KvRust.RadixSingle KvRust.RadixSingleReclaim \
   KvRust.RetainedCuts KvRust.RetireQueue \
   KvRust.Range KvRust.Scan KvRust.Relation KvRust.Lifecycle \
   KvRust.LifecycleRefinement KvRust.Environment KvRust.ApplyRefinement \

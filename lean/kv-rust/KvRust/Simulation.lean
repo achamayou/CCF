@@ -30,14 +30,23 @@ def modelAction (encode : List U8 → String) (sid : Nat) : Spike.engine.Action 
   | .Compact cut => .compact sid cut.val
   | .Rollback cut term => .rollback sid cut.val term.val
 
+/-- Capacity for retirement queue operations on reclamation paths (`End`, `Compact`, `Rollback`). -/
+def QueueRoom (n : Spike.engine.Store) : Prop :=
+  2 * (n.history.index.values.dirs.val.length + n.history.index.values.rows.val.length)
+    + 1
+  ≤ Usize.max
+
 /-- Exclude overflow of Rust counters and length arithmetic; the reference uses unbounded sizes. -/
 def FitsAction (encode : List U8 → String) (sid : Nat)
     (n : Spike.engine.Store) (w : State)
     : Spike.engine.Action → Prop
   | .Begin id => find n.txs.val id = none → n.txs.val.length < Usize.max
+  | .End _ => QueueRoom n
   | .Acquire id _ => FitsAcquire n id
   | .Operate id m op => FitsOperate encode sid n w id m (operationCase op)
   | .Apply id => FitsApply n id
+  | .Compact _ => QueueRoom n
+  | .Rollback _ _ => QueueRoom n
   | _ => True
 
 /-- The extracted store takes the same enabled transitions on representable inputs,
@@ -52,7 +61,7 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
           (execute w (modelAction encode sid action))) := by
   cases action with
   | Begin id => exact begin_step_matches encode sid n w id rel room
-  | End id => exact end_step_matches encode sid n w id rel
+  | End id => exact end_step_matches encode sid n w id rel room
   | SetTerm term => exact set_term_step_matches encode sid n w term rel
   | Snapshot id => exact snapshot_step_matches encode sid n w id rel
   | Acquire id m => exact acquire_step_matches encode inj sid n w id m rel room
@@ -65,8 +74,8 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
   | Apply id => exact apply_step_matches encode inj sid n w id rel room
   | CommitResult id result =>
       exact commit_result_step_matches encode sid n w id result rel
-  | Compact cut => exact compact_step_matches encode sid n w cut rel
-  | Rollback cut term => exact rollback_step_matches encode sid n w cut term rel
+  | Compact cut => exact compact_step_matches encode sid n w cut rel room
+  | Rollback cut term => exact rollback_step_matches encode sid n w cut term rel room
 
 /-- Relate an optional action result modulo relaxed scan/apply ordering. -/
 def OptionOutputMatches (action : Action) : Option Output → Option Output → Prop

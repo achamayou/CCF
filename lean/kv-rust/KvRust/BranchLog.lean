@@ -17,6 +17,37 @@ open Aeneas.Std
 def BranchValid {T : Type} (log : Spike.branch_log.BranchLog T) : Prop :=
   log.branch.val ≠ [] ∧ ∀ id ∈ log.branch.val, id.val < log.frames.val.length
 
+/-- No frame ID appears twice on the active branch. -/
+def BranchUnique {T : Type} (log : Spike.branch_log.BranchLog T) : Prop :=
+  log.branch.val.Nodup
+
+theorem branch_new_unique {T : Type} (log : Spike.branch_log.BranchLog T)
+    (h : log.branch.val = [0#usize])
+    : BranchUnique log := by
+  simp [BranchUnique, h]
+
+theorem branch_append_unique {T : Type} {log after : Spike.branch_log.BranchLog T}
+    (valid : BranchValid log) (unique : BranchUnique log)
+    {id : Usize} (hid : id.val = log.frames.val.length)
+    (hbranch : after.branch.val = log.branch.val ++ [id])
+    : BranchUnique after := by
+  unfold BranchUnique
+  rw [hbranch, List.nodup_append]
+  refine ⟨unique, List.nodup_singleton id, ?_⟩
+  intro a ha b hb heq
+  rw [List.mem_singleton.mp hb] at heq
+  have hlt := valid.2 a ha
+  rw [heq, hid] at hlt
+  exact Nat.lt_irrefl _ hlt
+
+theorem branch_rewind_unique {T : Type} {log after : Spike.branch_log.BranchLog T}
+    (unique : BranchUnique log) {n : Nat}
+    (hbranch : after.branch.val = log.branch.val.take n)
+    : BranchUnique after := by
+  unfold BranchUnique
+  rw [hbranch]
+  exact unique.sublist (List.take_sublist _ _)
+
 def branchValues {T : Type} (log : Spike.branch_log.BranchLog T) : List T :=
   log.branch.val.filterMap fun id => log.frames.val[id.val]?
 
@@ -45,7 +76,10 @@ theorem branch_active_len {T : Type} (log : Spike.branch_log.BranchLog T)
 theorem branch_new_refines {T : Type} (base : T)
     : WP.spec (Spike.branch_log.BranchLog.new base)
         (fun log =>
-          BranchValid log ∧ branchValues log = [base] ∧ log.frames.val = [base]) := by
+          BranchValid log
+          ∧ branchValues log = [base]
+          ∧ log.frames.val = [base]
+          ∧ log.branch.val = [0#usize]) := by
   have room : 0 < Usize.max := by scalar_tac
   unfold Spike.branch_log.BranchLog.new
   apply WP.spec_bind (alloc.vec.Vec.push_spec (alloc.vec.Vec.new T) base room)
@@ -220,7 +254,8 @@ theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (f
           ∧ after.frames.val[id.val]? = some frame
           ∧ (∀ previous,
               previous < id.val → after.frames.val[previous]? = log.frames.val[previous]?)
-          ∧ after.frames.val = log.frames.val ++ [frame]) := by
+          ∧ after.frames.val = log.frames.val ++ [frame]
+          ∧ after.branch.val = log.branch.val ++ [id]) := by
   unfold Spike.branch_log.BranchLog.append
   apply WP.spec_bind (alloc.vec.Vec.push_spec log.frames frame room)
   intro frames hf
@@ -236,7 +271,7 @@ theorem branch_append_refines {T : Type} (log : Spike.branch_log.BranchLog T) (f
   have keep : ∀ i, i < id.val → frames.val[i]? = log.frames.val[i]? := by
     intro i hi
     rw [hf, List.getElem?_append_left (index ▸ hi)]
-  refine ⟨?_, ?_, index, newest, keep, hf⟩
+  refine ⟨?_, ?_, index, newest, keep, hf, hb⟩
   · change branch.val ≠ [] ∧ ∀ j ∈ branch.val, j.val < frames.val.length
     rw [hb]
     refine ⟨by simp, ?_⟩
@@ -282,6 +317,7 @@ theorem branch_rewind_refines {T : Type} (log : Spike.branch_log.BranchLog T)
           ∧ after.frames = log.frames
           ∧ if ok then
               branchValues after = (branchValues log).take (offset.val + 1)
+              ∧ after.branch.val = log.branch.val.take (offset.val + 1)
             else
               after = log) := by
   unfold Spike.branch_log.BranchLog.rewind
@@ -313,8 +349,34 @@ theorem branch_rewind_refines {T : Type} (log : Spike.branch_log.BranchLog T)
       cases h : log.branch.val with
       | nil => exact (valid.1 h).elim
       | cons hd tail => simp
-    · change branch.val.filterMap (fun id => log.frames.val[id.val]?) = _
+    · refine ⟨?_, take⟩
+      change branch.val.filterMap (fun id => log.frames.val[id.val]?) = _
       rw [take, branch_take_values _ _ valid.2]
       rfl
+
+theorem branch_read_mut_refines {T : Type} (log : Spike.branch_log.BranchLog T)
+    (id : Spike.branch_log.FrameId) (frame : T)
+    (saved : log.frames.val[id.val]? = some frame)
+    : WP.spec (Spike.branch_log.BranchLog.read_mut log id)
+        (fun (got, back) =>
+          got = frame
+          ∧ ∀ next,
+              (back next).branch = log.branch
+              ∧ (back next).frames.val = log.frames.val.set id.val next) := by
+  unfold Spike.branch_log.BranchLog.read_mut
+  rw [alloc.vec.Vec.index_mut_slice_index]
+  have inside : id.val < log.frames.val.length := by
+    by_contra absent
+    simp [List.getElem?_eq_none (Nat.le_of_not_gt absent)] at saved
+  apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec log.frames id inside)
+  rintro ⟨got, indexBack⟩ ⟨hgot, hback⟩
+  change WP.spec (Result.ok _) _
+  rw [WP.spec_ok]
+  refine ⟨?_, ?_⟩
+  · rw [List.getElem?_eq_getElem inside, ← hgot, Option.some.injEq] at saved
+    exact saved
+  · intro next
+    refine ⟨rfl, ?_⟩
+    simp [hback, alloc.vec.Vec.set]
 
 end KvRust

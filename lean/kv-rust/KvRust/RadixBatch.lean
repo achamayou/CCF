@@ -815,7 +815,9 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
           ∧ RadixFree after left
           ∧ RadixDirectoryInvariant after
           ∧ RadixKnowledge after (radixKeyOf rows.val)
-          ∧ RadixTree after.val bindings.length root bindings) := by
+          ∧ RadixTree after.val bindings.length root bindings
+          ∧ after.val.length
+            ≤ dirs.val.length + batchWork ceiling parents.val frame + 1) := by
   unfold Spike.radix.build_sorted_loop
   apply loop.spec_decr_nat
     (fun (_, _, ps, current) => batchWork ceiling ps.val current)
@@ -824,7 +826,8 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
       ∧ RadixFree arena vacant
       ∧ RadixDirectoryInvariant arena
       ∧ RadixKnowledge arena (radixKeyOf rows.val)
-      ∧ arena.val.length + batchWork ceiling ps.val current < 2147483647
+      ∧ arena.val.length + batchWork ceiling ps.val current
+          ≤ dirs.val.length + batchWork ceiling parents.val frame
       ∧ ∃ begin,
           BatchFrameView arena.val bindings current begin current.cursor.val
           ∧ BatchSuspension arena.val bindings ps.val.reverse begin current.end.val
@@ -867,7 +870,9 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
           validFree,
           directories,
           prefixes,
-          by simp [batchInterval, first, last] at tree; exact tree
+          by simp [batchInterval, first, last] at tree; exact tree,
+          Nat.le_trans growth
+            (Nat.add_le_add_right (Nat.le_trans (Nat.le_add_right _ _) capacity) 1)
         ⟩
       · rw [ite_eq_right empty]
         obtain nil | ⟨rest, parent, split⟩ := List.eq_nil_or_concat ps.val
@@ -1000,7 +1005,7 @@ private theorem build_sorted_loop_refines {V : Type} (original dirs : BuildDirs)
         refine ⟨⟨retained, freeSlots, invariant, knowledge, by omega, current.cursor.val, ?_,
           suspended⟩, smaller⟩
         rwa [atStart]
-  · exact ⟨kept, available, valid, known, room, ready⟩
+  · exact ⟨kept, available, valid, known, Nat.le_refl _, ready⟩
 
 /-- The extracted sorted builder constructs precisely the supplied live
 bindings without changing the directories reachable from prior roots.
@@ -1022,7 +1027,9 @@ theorem build_sorted_refines {V : Type}
           ∧ RadixFree after left
           ∧ RadixDirectoryInvariant after
           ∧ RadixKnowledge after (radixKeyOf rows.val)
-          ∧ RadixTree after.val bindings.length root bindings) := by
+          ∧ RadixTree after.val bindings.length root bindings
+          ∧ after.val.length
+            ≤ dirs.val.length + 2 * (bindings.length * (ceiling + 1)) + 1) := by
   unfold Spike.radix.build_sorted
   let past := Slice.len sorted
   have size : past.val = bindings.length := by
@@ -1036,7 +1043,7 @@ theorem build_sorted_refines {V : Type}
   by_cases empty : past = 0#usize
   · rw [ite_eq_left empty, WP.spec_ok]
     have none : bindings = [] := by apply List.length_eq_zero_iff.mp; rw [← size, empty, zero]
-    exact ⟨keep, available, valid, known, by rw [none]; exact .empty _⟩
+    exact ⟨keep, available, valid, known, by rw [none]; exact .empty _, by omega⟩
   · rw [ite_eq_right empty]
     by_cases single : past = 1#usize
     · rw [ite_eq_left single]
@@ -1049,7 +1056,7 @@ theorem build_sorted_refines {V : Type}
           apply WP.spec_bind (batch_link_at rows sorted [entry] input 0#usize (by simp))
           intro link ⟨same, row, tag, _, _⟩
           rw [WP.spec_ok]
-          refine ⟨keep, available, valid, known, ?_⟩
+          refine ⟨keep, available, valid, known, ?_, by omega⟩
           change link = entry.2 at same
           rw [same]
           exact .leaf _ _ _ (by rw [← same]; exact Nat.le_of_lt tag)
@@ -1068,15 +1075,19 @@ theorem build_sorted_refines {V : Type}
         · simpa only [start, zero] using current
         · rw [last, size]
           exact .top
-      have space : dirs.val.length + batchWork ceiling stack.val frame < 2147483647 := by
+      have workLe : batchWork ceiling stack.val frame ≤ 2 * (bindings.length * (ceiling + 1)) := by
         have scale := Nat.mul_le_mul_left bindings.length
           (show ceiling - frame.dir.digit.val + 1 ≤ ceiling + 1 by omega)
         have emptyStack : stack.val = [] := rfl
         simp only [batchWork, frameWork, emptyStack, List.map_nil, List.sum_nil, List.length_nil,
           Nat.zero_add, Nat.add_zero, start, last, size, zero, Nat.sub_zero]
-        change dirs.val.length + 2 * (bindings.length * (ceiling - frame.dir.digit.val + 1)) < 2147483647
+        change 2 * (bindings.length * (ceiling - frame.dir.digit.val + 1)) ≤ _
         omega
-      exact build_sorted_loop_refines dirs dirs free rows sorted bindings input ordered ceiling
-        bounded keyRoom stack frame ready space keep available valid known
+      have space : dirs.val.length + batchWork ceiling stack.val frame < 2147483647 := by omega
+      apply WP.spec_mono
+        (build_sorted_loop_refines dirs dirs free rows sorted bindings input ordered ceiling
+          bounded keyRoom stack frame ready space keep available valid known)
+      rintro ⟨root, after, left⟩ ⟨h1, h2, h3, h4, h5, hlen⟩
+      exact ⟨h1, h2, h3, h4, h5, by omega⟩
 
 end KvRust

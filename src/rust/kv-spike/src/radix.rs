@@ -3,6 +3,8 @@
 
 //! Routing for the experimental persistent radix index.
 
+use crate::retire_queue::{RetireQueue, release_owner};
+
 /// Prefix shared by every packed address belonging to `map`.
 pub fn map_prefix(map: &[u8]) -> Vec<u8> {
     let length = (map.len() as u64).to_le_bytes();
@@ -763,15 +765,178 @@ impl RadixRoot {
     }
 }
 
-/// Persistent single-arena radix storage ordered by ascending byte key.
+#[inline]
+fn alloc_counted<T>(
+    slots: &mut Vec<Option<T>>,
+    refs: &mut Vec<u32>,
+    free: &mut Vec<usize>,
+    value: T,
+) -> usize {
+    let index = allocate(slots, free, value);
+    if index == refs.len() {
+        refs.push(0);
+    } else {
+        assert!(refs[index] == 0, "recycled radix slot still referenced");
+    }
+    index
+}
+
+#[inline]
+fn retain_link(dir_refs: &mut Vec<u32>, row_refs: &mut Vec<u32>, link: u32) {
+    if link == 0 {
+        return;
+    }
+    if link < RADIX_LEAF_TAG {
+        let index = (link - 1) as usize;
+        retain_reference(&mut dir_refs[index]);
+    } else {
+        let index = (link - RADIX_LEAF_TAG - 1) as usize;
+        retain_reference(&mut row_refs[index]);
+    }
+}
+
+#[inline]
+fn release_link(
+    dir_refs: &mut Vec<u32>,
+    row_refs: &mut Vec<u32>,
+    retired: &mut RetireQueue,
+    link: u32,
+) {
+    if link == 0 {
+        return;
+    }
+    if link < RADIX_LEAF_TAG {
+        let index = (link - 1) as usize;
+        release_owner(&mut dir_refs[index], retired, link);
+    } else {
+        let index = (link - RADIX_LEAF_TAG - 1) as usize;
+        release_owner(&mut row_refs[index], retired, link);
+    }
+}
+
+fn retain_children(dir_refs: &mut Vec<u32>, row_refs: &mut Vec<u32>, dir: &RadixDir) {
+    let mut slot = 0;
+    while slot < RADIX_FANOUT {
+        let child = dir.children[slot];
+        if child != 0 {
+            retain_link(dir_refs, row_refs, child);
+        }
+        slot += 1;
+    }
+}
+
+fn add_directory_counted(
+    dirs: &mut Vec<Option<RadixDir>>,
+    dir_refs: &mut Vec<u32>,
+    row_refs: &mut Vec<u32>,
+    free: &mut Vec<usize>,
+    mut dir: RadixDir,
+) -> u32 {
+    let first = dir.first_child();
+    assert!(first != 0, "cannot publish an empty radix directory");
+    dir.first = if first >= RADIX_LEAF_TAG {
+        first
+    } else {
+        directory(dirs, first).first
+    };
+    retain_children(dir_refs, row_refs, &dir);
+    link_at(alloc_counted(dirs, dir_refs, free, dir), false)
+}
+
+fn copy_parent_counted(
+    dirs: &mut Vec<Option<RadixDir>>,
+    dir_refs: &mut Vec<u32>,
+    row_refs: &mut Vec<u32>,
+    free: &mut Vec<usize>,
+    parent: u32,
+    slot: usize,
+    child: u32,
+) -> u32 {
+    let mut dir = *directory(dirs, parent);
+    dir.set_child(slot, child);
+    if dir.mask.is_power_of_two() {
+        dir.first_child()
+    } else {
+        add_directory_counted(dirs, dir_refs, row_refs, free, dir)
+    }
+}
+
+fn rebuild_path_counted(
+    dirs: &mut Vec<Option<RadixDir>>,
+    dir_refs: &mut Vec<u32>,
+    row_refs: &mut Vec<u32>,
+    free: &mut Vec<usize>,
+    path: &[(u32, usize)],
+    mut child: u32,
+) -> u32 {
+    let mut end = path.len();
+    while end > 0 {
+        end -= 1;
+        let (parent, slot) = path[end];
+        child = copy_parent_counted(dirs, dir_refs, row_refs, free, parent, slot, child);
+    }
+    child
+}
+
+fn build_sorted_counted<V>(
+    dirs: &mut Vec<Option<RadixDir>>,
+    dir_refs: &mut Vec<u32>,
+    row_refs: &mut Vec<u32>,
+    free: &mut Vec<usize>,
+    rows: &[Option<RadixRow<V>>],
+    sorted: &[u32],
+) -> u32 {
+    let end = sorted.len();
+    if end == 0 {
+        return 0;
+    }
+    if end == 1 {
+        return sorted[0];
+    }
+    let mut parents = Vec::new();
+    let mut frame = sorted_frame(rows, sorted, 0, end, 0);
+    loop {
+        if frame.cursor == frame.end {
+            let completed = add_directory_counted(dirs, dir_refs, row_refs, free, frame.dir);
+            if parents.is_empty() {
+                return completed;
+            }
+            let depth = parents.len() - 1;
+            let mut parent: BuildFrame = parents[depth];
+            parents.resize(depth, frame);
+            parent.dir.set_child(frame.parent_slot, completed);
+            frame = parent;
+        } else {
+            let begin = frame.cursor;
+            let slot = symbol(&row_at(rows, sorted[begin]).key, frame.dir.digit);
+            let end = sorted_group_end(rows, sorted, begin, frame.end, frame.dir.digit, slot);
+            frame.cursor = end;
+            if end == begin + 1 {
+                frame.dir.set_child(slot, sorted[begin]);
+            } else {
+                parents.push(frame);
+                frame = sorted_frame(rows, sorted, begin, end, slot);
+            }
+        }
+    }
+}
+
+/// Persistent single-arena radix storage ordered by ascending byte key, with
+/// exact root/edge reference counting and bounded FIFO retirement.
 pub struct SingleRadix<V> {
     values: Arena<V>,
+    dir_refs: Vec<u32>,
+    row_refs: Vec<u32>,
+    retired: RetireQueue,
 }
 
 impl<V> SingleRadix<V> {
     pub fn new() -> Self {
         Self {
             values: Arena::new(),
+            dir_refs: Vec::new(),
+            row_refs: Vec::new(),
+            retired: RetireQueue::new(),
         }
     }
 
@@ -779,26 +944,88 @@ impl<V> SingleRadix<V> {
         RadixRoot(0)
     }
 
+    pub fn retain_root(&mut self, root: RadixRoot) {
+        retain_link(&mut self.dir_refs, &mut self.row_refs, root.0);
+    }
+
+    pub fn release_root(&mut self, root: RadixRoot) {
+        release_link(
+            &mut self.dir_refs,
+            &mut self.row_refs,
+            &mut self.retired,
+            root.0,
+        );
+    }
+
+    /// Reclaim at most one retired directory or leaf back to its free list.
+    pub fn retire_one(&mut self) -> bool {
+        let Some(link) = self.retired.pop_front() else {
+            return false;
+        };
+        if link < RADIX_LEAF_TAG {
+            let index = (link - 1) as usize;
+            let dir = recycle_slot(&mut self.values.dirs, &mut self.values.free_dirs, index);
+            let mut slot = 0;
+            while slot < RADIX_FANOUT {
+                let child = dir.children[slot];
+                if child != 0 {
+                    release_link(
+                        &mut self.dir_refs,
+                        &mut self.row_refs,
+                        &mut self.retired,
+                        child,
+                    );
+                }
+                slot += 1;
+            }
+        } else {
+            let index = (link - RADIX_LEAF_TAG - 1) as usize;
+            let _ = recycle_slot(&mut self.values.rows, &mut self.values.free_rows, index);
+        }
+        true
+    }
+
+    /// Reclaim up to `budget` retired slots in bounded time.
+    pub fn retire_budget(&mut self, budget: usize) -> usize {
+        let mut completed = 0;
+        while completed < budget {
+            if !self.retire_one() {
+                break;
+            }
+            completed += 1;
+        }
+        completed
+    }
+
     /// Stage one leaf without publishing directories.
     pub fn stage_batch_leaf(&mut self, row: RadixRow<V>) -> u32 {
         link_at(
-            allocate(&mut self.values.rows, &mut self.values.free_rows, row),
+            alloc_counted(
+                &mut self.values.rows,
+                &mut self.row_refs,
+                &mut self.values.free_rows,
+                row,
+            ),
             true,
         )
     }
 
     /// Publish staged leaves given in strictly increasing byte-key order.
     pub fn publish_batch_leaves(&mut self, lookup: &[u32]) -> RadixRoot {
-        RadixRoot(build_sorted(
+        let root = build_sorted_counted(
             &mut self.values.dirs,
+            &mut self.dir_refs,
+            &mut self.row_refs,
             &mut self.values.free_dirs,
             &self.values.rows,
             lookup,
-        ))
+        );
+        retain_link(&mut self.dir_refs, &mut self.row_refs, root);
+        RadixRoot(root)
     }
 
     /// Publish an unpublished image whose rows are present and in strictly
-    /// increasing byte-key order.
+    /// increasing byte-key order. Returns an owned root.
     pub fn build_sorted_batch(&mut self, mut rows: Vec<Option<RadixRow<V>>>) -> RadixRoot {
         let n = rows.len();
         let mut lookup = Vec::with_capacity(n);
@@ -819,13 +1046,86 @@ impl<V> SingleRadix<V> {
         get(&self.values.dirs, &self.values.rows, root.0, key)
     }
 
+    /// Insert or replace `row` on `root` without consuming `root`. Returns an owned root.
     pub fn put(&mut self, root: RadixRoot, row: RadixRow<V>) -> RadixRoot {
-        let (lookup, _, _) = self.values.put(root.0, row);
-        RadixRoot(lookup)
+        if root.0 == 0 {
+            let leaf = link_at(
+                alloc_counted(
+                    &mut self.values.rows,
+                    &mut self.row_refs,
+                    &mut self.values.free_rows,
+                    row,
+                ),
+                true,
+            );
+            retain_link(&mut self.dir_refs, &mut self.row_refs, leaf);
+            return RadixRoot(leaf);
+        }
+        let (stem, split) = prepare_insert(
+            &self.values.dirs,
+            &self.values.rows,
+            &mut self.values.path,
+            root.0,
+            &row.key,
+        );
+        let leaf = link_at(
+            alloc_counted(
+                &mut self.values.rows,
+                &mut self.row_refs,
+                &mut self.values.free_rows,
+                row,
+            ),
+            true,
+        );
+        let child = match split {
+            None => leaf,
+            Some(split) => {
+                let mut dir = split_directory(&self.values.dirs, stem, &split);
+                dir.set_child(split.new_slot, leaf);
+                add_directory_counted(
+                    &mut self.values.dirs,
+                    &mut self.dir_refs,
+                    &mut self.row_refs,
+                    &mut self.values.free_dirs,
+                    dir,
+                )
+            }
+        };
+        let next = rebuild_path_counted(
+            &mut self.values.dirs,
+            &mut self.dir_refs,
+            &mut self.row_refs,
+            &mut self.values.free_dirs,
+            &self.values.path,
+            child,
+        );
+        retain_link(&mut self.dir_refs, &mut self.row_refs, next);
+        RadixRoot(next)
     }
 
+    /// Remove `key` on `root` without consuming `root`. Returns an owned root.
     pub fn remove(&mut self, root: RadixRoot, key: &[u8]) -> RadixRoot {
-        RadixRoot(self.values.remove(root.0, key))
+        let leaf = record_path(
+            &self.values.dirs,
+            &mut self.values.path,
+            root.0,
+            key,
+            None,
+        );
+        if leaf == 0 || check_leaf(&self.values.rows, leaf, key).is_none() {
+            retain_link(&mut self.dir_refs, &mut self.row_refs, root.0);
+            return root;
+        }
+        let next = rebuild_path_counted(
+            &mut self.values.dirs,
+            &mut self.dir_refs,
+            &mut self.row_refs,
+            &mut self.values.free_dirs,
+            &self.values.path,
+            0,
+        );
+        retain_link(&mut self.dir_refs, &mut self.row_refs, next);
+        RadixRoot(next)
     }
 
     pub fn scan_links(&self, root: RadixRoot) -> Vec<u32> {

@@ -4,6 +4,7 @@
 module
 
 public import KvRust.BranchLog
+public import KvRust.KvIndex
 public import Kv.Model
 
 import all Aeneas.Data.List.List
@@ -251,23 +252,383 @@ theorem model_cut_version (s : Spike.engine.History) (model : Store)
     List.getElem?_eq_getElem hi]
   exact indexed _ hi
 
-/-- Compaction preserves the frames, term and identity counter, and matches the model's frontier. -/
+/-- All non-empty radix roots currently retained by archived frames. -/
+def framePins (frames : List Spike.engine.Frame) : List U32 :=
+  frames.filterMap fun f => if f.data = 0#u32 then none else some f.data
+
+theorem framePins_append (frames : List Spike.engine.Frame) (f : Spike.engine.Frame)
+    : (framePins (frames ++ [f])).Perm
+        (if f.data = 0#u32 then framePins frames else f.data :: framePins frames) := by
+  unfold framePins
+  rw [List.filterMap_append, List.filterMap_cons, List.filterMap_nil]
+  by_cases hz : f.data = 0#u32
+  · simp [hz]
+  · simp only [hz, ite_false]
+    exact List.perm_append_singleton f.data _
+
+theorem framePins_set_clear (frames : List Spike.engine.Frame) (i : Nat)
+    (f : Spike.engine.Frame) (hget : frames[i]? = some f)
+    : (framePins frames).Perm
+        (if f.data = 0#u32 then
+            framePins (frames.set i { f with data := 0#u32 })
+          else
+            f.data :: framePins (frames.set i { f with data := 0#u32 })) := by
+  induction frames generalizing i with
+  | nil => simp at hget
+  | cons hd tl ih =>
+      cases i with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hget
+          subst hget
+          unfold framePins
+          simp only [List.set_cons_zero, List.filterMap_cons, ite_true]
+          by_cases hz : hd.data = 0#u32 <;> simp [hz]
+      | succ j =>
+          simp only [List.getElem?_cons_succ] at hget
+          have hsub := ih j hget
+          unfold framePins at hsub ⊢
+          simp only [List.set_cons_succ, List.filterMap_cons]
+          by_cases hhd : hd.data = 0#u32
+          · simp only [hhd, ite_true]
+            exact hsub
+          · simp only [hhd, ite_false]
+            by_cases hf : f.data = 0#u32
+            · simp only [hf, ite_true] at hsub ⊢
+              exact hsub.cons hd.data
+            · simp only [hf, ite_false] at hsub ⊢
+              exact (hsub.cons hd.data).trans (List.Perm.swap f.data hd.data _)
+
+/-- Releasing active frames in `[start, end)` clears only their `data` roots,
+keeps all frame metadata and branch IDs intact, and preserves liveness against
+the updated `framePins ++ extraPins`. -/
+theorem history_release_active_range_refines (s : Spike.engine.History)
+    (start «end» : Usize) (extraPins : List U32)
+    (valid : BranchValid s.log) (unique : BranchUnique s.log)
+    (hle : start.val ≤ «end».val) (hbound : «end».val ≤ s.log.branch.val.length)
+    (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
+    (queueRoom
+      : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
+        ≤ Usize.max)
+    : WP.spec (Spike.engine.History.release_active_range s start «end»)
+        (fun after =>
+          after.log.branch = s.log.branch
+          ∧ after.global = s.global
+          ∧ after.term = s.term
+          ∧ after.next_identity = s.next_identity
+          ∧ after.reuse_compacted_images = s.reuse_compacted_images
+          ∧ after.index.values = s.index.values
+          ∧ BranchValid after.log
+          ∧ BranchUnique after.log
+          ∧ IndexLiveness after.index (framePins after.log.frames.val ++ extraPins)
+          ∧ after.log.frames.val.length = s.log.frames.val.length
+          ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+              s.log.frames.val[k]? = some f
+              → ∃ f',
+                  after.log.frames.val[k]? = some f'
+                  ∧ f'.version = f.version
+                  ∧ f'.revisions = f.revisions
+                  ∧ f'.births = f.births
+                  ∧ (f'.data = f.data ∨ f'.data = 0#u32)
+                  ∧ ((∀ off (id : Usize),
+                        start.val ≤ off
+                        → off < «end».val
+                        → s.log.branch.val[off]? = some id
+                        → id.val ≠ k)
+                      → f' = f))) := by
+  unfold Spike.engine.History.release_active_range Spike.engine.History.release_active_range_loop
+  let endVal := «end».val
+  apply loop.spec_decr_nat
+    (fun (_, i) => endVal - i.val)
+    (fun (cur, i) =>
+      start.val ≤ i.val ∧ i.val ≤ endVal
+      ∧ cur.log.branch = s.log.branch
+      ∧ cur.global = s.global
+      ∧ cur.term = s.term
+      ∧ cur.next_identity = s.next_identity
+      ∧ cur.reuse_compacted_images = s.reuse_compacted_images
+      ∧ cur.index.values = s.index.values
+      ∧ BranchValid cur.log
+      ∧ BranchUnique cur.log
+      ∧ IndexLiveness cur.index (framePins cur.log.frames.val ++ extraPins)
+      ∧ cur.log.frames.val.length = s.log.frames.val.length
+      ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+          s.log.frames.val[k]? = some f →
+          ∃ f', cur.log.frames.val[k]? = some f'
+            ∧ f'.version = f.version
+            ∧ f'.revisions = f.revisions
+            ∧ f'.births = f.births
+            ∧ (f'.data = f.data ∨ f'.data = 0#u32)
+            ∧ ((∀ off (id : Usize), start.val ≤ off → off < i.val →
+                  s.log.branch.val[off]? = some id → id.val ≠ k)
+                → f' = f))
+    _ _ _
+  · rintro ⟨cur, i⟩ ⟨hsi, hie, hbr, hgl, htm, hid, hreuse, hvals, hval, huniq, hlive, hflen, hslots⟩
+    dsimp only at hsi hie hbr hgl htm hid hreuse hvals hval huniq hlive hflen hslots ⊢
+    unfold Spike.engine.History.release_active_range_loop.body
+    by_cases hlt : i < «end»
+    · have hilt : i.val < «end».val := hlt
+      have hcap : «end».val ≤ Usize.max := by scalar_tac
+      have hone : (1#usize : Usize).val = 1 := rfl
+      rw [ite_eq_left hlt]
+      apply WP.spec_bind (branch_resolve_refines cur.log i)
+      intro opt hopt
+      have hiBr : i.val < cur.log.branch.val.length := by rw [hbr]; omega
+      obtain ⟨id, hidAt⟩ : ∃ id, cur.log.branch.val[i.val]? = some id :=
+        ⟨cur.log.branch.val[i.val], List.getElem?_eq_getElem hiBr⟩
+      rw [hidAt] at hopt
+      subst opt
+      have hidBound : id.val < cur.log.frames.val.length :=
+        hval.2 id (List.mem_iff_getElem?.mpr ⟨i.val, hidAt⟩)
+      obtain ⟨fCur, hfCur⟩ : ∃ fCur, cur.log.frames.val[id.val]? = some fCur :=
+        ⟨cur.log.frames.val[id.val], List.getElem?_eq_getElem hidBound⟩
+      have hbody :
+          WP.spec
+            (do
+              let f ← Spike.branch_log.BranchLog.read cur.log id
+              let b ← Spike.radix.RadixRoot.is_empty f.data
+              if b then Result.ok (cur.log, cur.index)
+              else do
+                let rr ← Spike.kv_index.AddressIndex.empty_root cur.index
+                let (f1, read_mut_back) ← Spike.branch_log.BranchLog.read_mut cur.log id
+                let ai1 ← Spike.kv_index.AddressIndex.release_root cur.index f.data
+                let bl1 := read_mut_back { f1 with data := rr }
+                Result.ok (bl1, ai1))
+            (fun (bl1, ai1) =>
+              bl1.branch = s.log.branch
+              ∧ ai1.values = s.index.values
+              ∧ BranchValid bl1
+              ∧ BranchUnique bl1
+              ∧ IndexLiveness ai1 (framePins bl1.frames.val ++ extraPins)
+              ∧ bl1.frames.val.length = s.log.frames.val.length
+              ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                  s.log.frames.val[k]? = some f →
+                  ∃ f', bl1.frames.val[k]? = some f'
+                    ∧ f'.version = f.version
+                    ∧ f'.revisions = f.revisions
+                    ∧ f'.births = f.births
+                    ∧ (f'.data = f.data ∨ f'.data = 0#u32)
+                    ∧ ((∀ off (id0 : Usize), start.val ≤ off → off < i.val + 1 →
+                          s.log.branch.val[off]? = some id0 → id0.val ≠ k)
+                        → f' = f)) := by
+        apply WP.spec_bind (branch_read_refines cur.log id fCur hfCur)
+        intro fRead hfRead
+        subst fRead
+        unfold Spike.radix.RadixRoot.is_empty
+        by_cases hzero : fCur.data = 0#u32
+        · simp only [hzero, decide_true, bind_ok, ite_true, WP.spec_ok]
+          refine ⟨hbr, hvals, hval, huniq, hlive, hflen, fun k f hf => ?_⟩
+          obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots k f hf
+          refine ⟨f', hf', hv, hr, hb, hd, fun hno => ?_⟩
+          exact hunt (fun off id0 h1 h2 h3 => hno off id0 h1 (by omega) h3)
+        · simp only [hzero, decide_false, bind_ok, Bool.false_eq_true, ite_false]
+          apply WP.spec_bind (index_empty_root_refines cur.index)
+          intro rr ⟨hrr0, _⟩
+          subst hrr0
+          apply WP.spec_bind (branch_read_mut_refines cur.log id fCur hfCur)
+          rintro ⟨f1, back⟩ ⟨hf1Eq, hback⟩
+          subst f1
+          let bl1 := back { fCur with data := 0#u32 }
+          obtain ⟨hblBr, hblFr⟩ := hback { fCur with data := 0#u32 }
+          have hperm := framePins_set_clear cur.log.frames.val id.val fCur hfCur
+          simp only [hzero, ite_false] at hperm
+          have hlivePerm : IndexLiveness cur.index
+              (if fCur.data = 0#u32 then framePins bl1.frames.val ++ extraPins
+               else fCur.data :: (framePins bl1.frames.val ++ extraPins)) := by
+            simp only [hzero, ite_false]
+            have hp2 : (framePins cur.log.frames.val ++ extraPins).Perm
+                (fCur.data :: (framePins bl1.frames.val ++ extraPins)) := by
+              rw [hblFr]
+              exact (hperm.append_right extraPins).trans List.Perm.rfl
+            exact hlive.perm hp2
+          have hqCur : 2 * (cur.index.values.dirs.val.length + cur.index.values.rows.val.length) + 1 ≤ Usize.max := by
+            rw [hvals]; exact queueRoom
+          apply WP.spec_bind
+            (index_release_root_refines cur.index (framePins bl1.frames.val ++ extraPins)
+              fCur.data hlivePerm hqCur)
+          intro ai1 ⟨haiVals, haiLive⟩
+          change WP.spec (Result.ok (bl1, ai1)) _
+          rw [WP.spec_ok]
+          have hblLen : bl1.frames.val.length = s.log.frames.val.length := by
+            rw [hblFr, List.length_set, hflen]
+          have hblValid : BranchValid bl1 := by
+            refine ⟨hblBr.symm ▸ hval.1, fun j hj => ?_⟩
+            rw [hblLen, ← hflen]
+            exact hval.2 j (hblBr ▸ hj)
+          have hblUniq : BranchUnique bl1 := by
+            unfold BranchUnique; rw [hblBr]; exact huniq
+          refine ⟨hblBr.trans hbr, haiVals.trans hvals, hblValid, hblUniq, haiLive, hblLen, ?_⟩
+          intro k f hf
+          obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots k f hf
+          by_cases hk : k = id.val
+          · subst hk
+            have hsame : f' = fCur := Option.some.inj (hf'.symm.trans hfCur)
+            subst hsame
+            refine ⟨{ f' with data := 0#u32 }, ?_, hv, hr, hb, Or.inr rfl, fun hno => ?_⟩
+            · rw [hblFr, List.getElem?_set_self hidBound]
+            · exfalso
+              exact hno i.val id hsi (by omega) (hbr ▸ hidAt) rfl
+          · refine ⟨f', ?_, hv, hr, hb, hd, fun hno => ?_⟩
+            · rw [hblFr, List.getElem?_set_ne (Ne.symm hk)]
+              exact hf'
+            · exact hunt (fun off id0 h1 h2 h3 => hno off id0 h1 (by omega) h3)
+      apply WP.spec_bind hbody
+      rintro ⟨bl1, ai1⟩ ⟨hbr1, hvals1, hval1, huniq1, hlive1, hflen1, hslots1⟩
+      apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+      intro i1 hi1
+      change WP.spec (Result.ok (ControlFlow.cont ({ cur with log := bl1, index := ai1 }, i1))) _
+      rw [WP.spec_ok]
+      dsimp only
+      refine ⟨⟨by omega, by omega, hbr1, hgl, htm, hid, hreuse, hvals1, hval1, huniq1,
+        hlive1, hflen1, ?_⟩, by omega⟩
+      intro k f hf
+      obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots1 k f hf
+      exact ⟨f', hf', hv, hr, hb, hd, fun hno => hunt (fun off id0 h1 h2 h3 =>
+        hno off id0 h1 (by omega) h3)⟩
+    · have hiEq : i.val = endVal := by
+        have : ¬ i.val < «end».val := hlt
+        omega
+      rw [ite_eq_right hlt, WP.spec_ok]
+      refine ⟨hbr, hgl, htm, hid, hreuse, hvals, hval, huniq, hlive, hflen, ?_⟩
+      intro k f hf
+      obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots k f hf
+      refine ⟨f', hf', hv, hr, hb, hd, fun hno => hunt (fun off id0 h1 h2 h3 => ?_)⟩
+      exact hno off id0 h1 (by omega) h3
+  · exact ⟨Nat.le_refl _, hle, rfl, rfl, rfl, rfl, rfl, rfl, valid, unique, live, rfl,
+      fun k f hf => ⟨f, hf, rfl, rfl, rfl, Or.inl rfl, fun _ => rfl⟩⟩
+
+/-- Compaction advances the frontier, releases compacted roots `< next` when
+`reuse_compacted_images` is enabled, runs bounded retirement, and preserves all
+remaining pins. -/
 theorem history_compact (s : Spike.engine.History) (requested : U64)
     (model : Store) (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (extraPins : List U32)
     (hframes : s.activeFrames = prior ++ [head]) (hg : model.global = s.global.val)
     (hh : model.head.version = head.version.val)
-    (valid : BranchValid s.log)
-    : ∃ cut,
-        Spike.engine.History.compact s requested = .ok (cut, {s with global := cut})
-        ∧ cut.val = (compactStore model requested.val).global := by
-  have hcut := compact_cut_model s.global head.version requested model hg hh
-  rw [Spike.engine.History.compact, history_head s prior head hframes valid]
-  cases h : Spike.engine.compact_cut s.global head.version requested
+    (hIndexed : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
+    (valid : BranchValid s.log) (unique : BranchUnique s.log)
+    (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
+    (queueRoom
+      : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
+        ≤ Usize.max)
+    : WP.spec (Spike.engine.History.compact s requested)
+        (fun (cut, after) =>
+          cut.val = (compactStore model requested.val).global
+          ∧ after.global = cut
+          ∧ after.term = s.term
+          ∧ after.next_identity = s.next_identity
+          ∧ after.reuse_compacted_images = s.reuse_compacted_images
+          ∧ after.log.branch = s.log.branch
+          ∧ BranchValid after.log
+          ∧ BranchUnique after.log
+          ∧ IndexLiveness after.index (framePins after.log.frames.val ++ extraPins)
+          ∧ IndexPreservesPins s.index after.index
+              (framePins after.log.frames.val ++ extraPins)
+          ∧ after.index.values.dirs.val.length = s.index.values.dirs.val.length
+          ∧ after.index.values.rows.val.length = s.index.values.rows.val.length
+          ∧ after.log.frames.val.length = s.log.frames.val.length
+          ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+              s.log.frames.val[k]? = some f
+              → ∃ f',
+                  after.log.frames.val[k]? = some f'
+                  ∧ f'.version = f.version
+                  ∧ f'.revisions = f.revisions
+                  ∧ f'.births = f.births
+                  ∧ (f'.data = f.data ∨ f'.data = 0#u32)
+                  ∧ ((s.reuse_compacted_images = false
+                        ∨ ∀ off (id : Usize),
+                            s.global.val ≤ off
+                            → off < cut.val
+                            → s.log.branch.val[off]? = some id
+                            → id.val ≠ k)
+                      → f' = f))) := by
+  have hcutModel := compact_cut_model s.global head.version requested model hg hh
+  have hnonempty : s.activeFrames ≠ [] := by simp [hframes]
+  have hheadVer : head.version.val = prior.length := by
+    have hidx : prior.length < s.activeFrames.length := by simp [hframes]
+    have hi := hIndexed prior.length hidx
+    have he : s.activeFrames[prior.length] = head := by
+      apply Option.some.inj
+      rw [← List.getElem?_eq_getElem hidx, hframes]
+      simp
+    rwa [he] at hi
+  unfold Spike.engine.History.compact
+  rw [history_head s prior head hframes valid, bind_ok]
+  cases hcutRun : Spike.engine.compact_cut s.global head.version requested
     using Result.cases with
-  | ret cut =>
-      exact ⟨cut, by simp [h], by simpa [h] using hcut⟩
-  | vis _ _ => simp [h] at hcut
-  | div => simp [h] at hcut
+  | div => rw [hcutRun] at hcutModel; simp at hcutModel
+  | vis _ _ => rw [hcutRun] at hcutModel; simp at hcutModel
+  | ret next =>
+      change Spike.engine.compact_cut s.global head.version requested = Result.ok next at hcutRun
+      have hnextVal : next.val = (compactStore model requested.val).global := by
+        simpa [hcutRun] using hcutModel
+      rw [bind_ok]
+      by_cases hreuse : s.reuse_compacted_images = true
+      · rw [ite_eq_left hreuse]
+        by_cases hlt : s.global < next
+        · rw [ite_eq_left hlt]
+          have hltVal : s.global.val < next.val := hlt
+          have hnextLe : next.val ≤ head.version.val := by
+            unfold Spike.engine.compact_cut at hcutRun
+            split at hcutRun
+            · split at hcutRun
+              · rw [Result.ok.injEq] at hcutRun; subst hcutRun; assumption
+              · rw [Result.ok.injEq] at hcutRun; subst hcutRun; exact absurd hltVal (Nat.lt_irrefl _)
+            · rw [Result.ok.injEq] at hcutRun; subst hcutRun; exact absurd hltVal (Nat.lt_irrefl _)
+          have hzero1 := history_relative_cut_zero { s with global := next } s.global hnonempty hIndexed valid
+          have hzero2 := history_relative_cut_zero { s with global := next } next hnonempty hIndexed valid
+          simp only [hzero1, hzero2, lift, bind_ok]
+          have hsize : s.activeFrames.length ≤ Usize.max := branch_values_capacity s.log
+          have hactLen : s.activeFrames.length = prior.length + 1 := by simp [hframes]
+          have hbrLen : s.log.branch.val.length = prior.length + 1 := by
+            rw [← branch_values_length s.log valid]
+            exact hactLen
+          have hstartVal : (UScalar.cast .Usize s.global).val = s.global.val := by
+            apply UScalar.cast_val_mod_pow_of_inBounds_eq
+            have hcap : s.global.val ≤ Usize.max := by omega
+            rw [← UScalar.max_USize_eq, UScalar.max] at hcap
+            have := Nat.two_pow_pos UScalarTy.Usize.numBits
+            omega
+          have hendVal : (UScalar.cast .Usize next).val = next.val := by
+            apply UScalar.cast_val_mod_pow_of_inBounds_eq
+            have hcap : next.val ≤ Usize.max := by omega
+            rw [← UScalar.max_USize_eq, UScalar.max] at hcap
+            have := Nat.two_pow_pos UScalarTy.Usize.numBits
+            omega
+          apply WP.spec_bind
+            (history_release_active_range_refines { s with global := next }
+              (UScalar.cast .Usize s.global) (UScalar.cast .Usize next) extraPins
+              valid unique (by rw [hstartVal, hendVal]; omega)
+              (by change (UScalar.cast .Usize next).val ≤ s.log.branch.val.length; rw [hendVal]; omega)
+              live queueRoom)
+          intro s1 ⟨hbr1, hgl1, htm1, hid1, hre1, hvals1, hval1, huniq1, hlive1, hflen1, hslots1⟩
+          have hq1 : 2 * (s1.index.values.dirs.val.length + s1.index.values.rows.val.length) + 1 ≤ Usize.max := by
+            rw [hvals1]; exact queueRoom
+          apply WP.spec_bind
+            (index_retire_budget_refines s1.index (framePins s1.log.frames.val ++ extraPins)
+              Spike.engine.RETIRE_BUDGET hlive1 hq1)
+          rintro ⟨_, ai⟩ ⟨hlive2, hpres2, hdLen2, hrLen2⟩
+          change WP.spec (Result.ok (s1.global, { s1 with index := ai })) _
+          rw [WP.spec_ok]
+          have hpres1 : IndexPreservesPins s.index s1.index (framePins s1.log.frames.val ++ extraPins) :=
+            index_preserves_pins_of_keeps (by unfold IndexKeeps; rw [hvals1]; exact .refl _)
+          refine ⟨hgl1.symm ▸ hnextVal, rfl, htm1, hid1, hre1, hbr1, hval1, huniq1, hlive2,
+            hpres1.trans hpres2, by rw [hdLen2, hvals1], by rw [hrLen2, hvals1], hflen1, ?_⟩
+          intro k f hf
+          obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots1 k f hf
+          refine ⟨f', hf', hv, hr, hb, hd, ?_⟩
+          rintro (hfalse | hno)
+          · rw [hreuse] at hfalse; cases hfalse
+          · apply hunt
+            intro off id0 h1 h2 hEq
+            rw [hstartVal] at h1
+            rw [hendVal] at h2
+            exact hno off id0 h1 (hgl1.symm ▸ h2) (by simpa using hEq)
+        · rw [ite_eq_right hlt, WP.spec_ok]
+          exact ⟨hnextVal, rfl, rfl, rfl, rfl, rfl, valid, unique, live, .refl _ _, rfl, rfl, rfl,
+            fun k f hf => ⟨f, hf, rfl, rfl, rfl, Or.inl rfl, fun _ => rfl⟩⟩
+      · rw [ite_eq_right hreuse, WP.spec_ok]
+        exact ⟨hnextVal, rfl, rfl, rfl, rfl, rfl, valid, unique, live, .refl _ _, rfl, rfl, rfl,
+          fun k f hf => ⟨f, hf, rfl, rfl, rfl, Or.inl rfl, fun _ => rfl⟩⟩
 
 /-- A request below the irrevocable cut reports rejection and leaves the entire Rust store unchanged. -/
 theorem rollback_rejected (s : Spike.engine.Store) (requested term : U64)
@@ -283,25 +644,52 @@ theorem rollback_stale_term (s : Spike.engine.Store) (requested term : U64)
       = .ok (.Err .Disabled, s) := by
   simp [Spike.engine.Store.execute, Spike.engine.History.rollback, Nat.not_lt.mpr hcut, hterm]
 
-/-- A legal rollback keeps exactly the prefix through the cut and does not reuse identities. -/
+/-- A legal rollback releases discarded frames `> cut`, rewinds the active branch
+to the prefix through `cut`, runs bounded retirement, and preserves all surviving pins. -/
 theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
+    (extraPins : List U32)
     (hframes : s.activeFrames = prior ++ [head])
     (hindex : head.version.val = prior.length)
     (hzero : ∀ cut, Spike.engine.History.relative_cut s cut = .ok cut)
     (hcut : s.global.val ≤ requested.val) (hterm : s.term.val ≤ term.val)
-    (valid : BranchValid s.log)
-    : ∃ cut after,
-        Spike.engine.History.rollback s requested term
-          = .ok (.Ok (.RolledBack cut), after)
-        ∧ cut.val = max s.global.val (min head.version.val requested.val)
-        ∧ after.activeFrames = s.activeFrames.take (cut.val + 1)
-        ∧ after.global = s.global
-        ∧ after.next_identity = s.next_identity
-        ∧ after.term = term
-        ∧ BranchValid after.log
-        ∧ after.log.frames = s.log.frames
-        ∧ after.index = s.index := by
+    (valid : BranchValid s.log) (unique : BranchUnique s.log)
+    (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
+    (queueRoom
+      : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
+        ≤ Usize.max)
+    : WP.spec (Spike.engine.History.rollback s requested term)
+        (fun (out, after) =>
+          ∃ cut,
+            out = .Ok (.RolledBack cut)
+            ∧ cut.val = max s.global.val (min head.version.val requested.val)
+            ∧ after.log.branch.val = s.log.branch.val.take (cut.val + 1)
+            ∧ after.global = s.global
+            ∧ after.next_identity = s.next_identity
+            ∧ after.term = term
+            ∧ after.reuse_compacted_images = s.reuse_compacted_images
+            ∧ BranchValid after.log
+            ∧ BranchUnique after.log
+            ∧ IndexLiveness after.index (framePins after.log.frames.val ++ extraPins)
+            ∧ IndexPreservesPins s.index after.index
+                (framePins after.log.frames.val ++ extraPins)
+            ∧ after.index.values.dirs.val.length = s.index.values.dirs.val.length
+            ∧ after.index.values.rows.val.length = s.index.values.rows.val.length
+            ∧ after.log.frames.val.length = s.log.frames.val.length
+            ∧ (∀ (k : Nat) (f : Spike.engine.Frame),
+                s.log.frames.val[k]? = some f
+                → ∃ f',
+                    after.log.frames.val[k]? = some f'
+                    ∧ f'.version = f.version
+                    ∧ f'.revisions = f.revisions
+                    ∧ f'.births = f.births
+                    ∧ (f'.data = f.data ∨ f'.data = 0#u32)
+                    ∧ ((∀ off (id : Usize),
+                          cut.val + 1 ≤ off
+                          → off < s.log.branch.val.length
+                          → s.log.branch.val[off]? = some id
+                          → id.val ≠ k)
+                        → f' = f))) := by
   let model : Store := { global := s.global.val, head := {version := head.version.val} }
   have hspec := rollback_cut_model s.global head.version requested model rfl rfl
   have hsuccess : ∃ cut, Spike.engine.rollback_cut s.global head.version requested = .ok cut
@@ -313,94 +701,80 @@ theorem history_rollback (s : Spike.engine.History) (requested term : U64)
     | div => simp [h] at hspec
   obtain ⟨cut, hcalc, hvalue⟩ := hsuccess
   have hlen : s.activeFrames.length = prior.length + 1 := by simp [hframes]
-  by_cases hsmall : cut.val < head.version.val
-  · let i := UScalar.cast .Usize cut
+  have hbrLen : s.log.branch.val.length = prior.length + 1 := by
+    rw [← branch_values_length s.log valid]
+    exact hlen
+  unfold Spike.engine.History.rollback
+  have hnotLow : ¬ (requested < s.global) := by change ¬ (requested.val < s.global.val); omega
+  have hnotTerm : ¬ (term < s.term) := by change ¬ (term.val < s.term.val); omega
+  rw [ite_eq_right hnotLow, ite_eq_right hnotTerm,
+    history_head s prior head hframes valid, bind_ok, hcalc, bind_ok]
+  by_cases hsmall : cut < head.version
+  · rw [ite_eq_left hsmall]
+    have hsmallVal : cut.val < head.version.val := hsmall
+    rw [hzero cut, bind_ok, lift, bind_ok]
+    let offset := UScalar.cast .Usize cut
     have hsize : s.activeFrames.length ≤ Usize.max := branch_values_capacity s.log
     have hbound : cut.val ≤ Usize.max := by omega
-    have hi : i.val = cut.val := by
+    have hoff : offset.val = cut.val := by
       apply UScalar.cast_val_mod_pow_of_inBounds_eq
       have := hbound
       rw [← UScalar.max_USize_eq, UScalar.max] at this
       have := Nat.two_pow_pos UScalarTy.Usize.numBits
       omega
-    have inside : i.val < s.log.branch.val.length := by
-      rw [← branch_values_length s.log valid]
-      change i.val < s.activeFrames.length
+    have hone : (1#usize : Usize).val = 1 := rfl
+    apply WP.spec_bind (branch_active_len s.log valid)
+    intro activeLen hal
+    have halVal : activeLen.val = prior.length + 1 := by
+      change activeLen.val = s.activeFrames.length at hal
       omega
-    obtain ⟨⟨ok, retained⟩, hrewind, hok, hvalid, hkept, htake⟩ :=
-      returning (branch_rewind_refines s.log i valid)
-    have accepted : ok = true := by simpa [inside] using hok
-    rw [accepted] at hrewind htake
-    have hasPrefix : branchValues retained = s.activeFrames.take (cut.val + 1) := by
-      simpa [hi] using htake
-    refine ⟨cut, {s with log := retained, term}, ?_, hvalue,
-      hasPrefix, rfl, rfl, rfl, hvalid, hkept, rfl⟩
-    simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
-      history_head s prior head hframes valid, hcalc, hsmall, ← show i = UScalar.cast .Usize cut from rfl,
-      hzero, lift, hrewind, massert]
-  · refine ⟨cut, {s with term}, ?_, hvalue, ?_, rfl, rfl, rfl, valid, rfl, rfl⟩
-    · simp [Spike.engine.History.rollback, Nat.not_lt.mpr hcut, Nat.not_lt.mpr hterm,
-        history_head s prior head hframes valid, hcalc, hsmall]
-    · symm
-      apply List.take_of_length_le
-      omega
-
-/-- Successful extracted rollback retains exactly the frames kept by `rollbackStore`. -/
-theorem rollback_retains_model_frames (s : Spike.engine.Store) (requested term : U64)
-    (model : Store) (project : Spike.engine.Frame → Frame)
-    (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
-    (hframes : s.history.activeFrames = prior ++ [head])
-    (hindex : head.version.val = prior.length)
-    (hzero : ∀ cut, Spike.engine.History.relative_cut s.history cut = .ok cut)
-    (hversions
-      : ∀ i (hi : i < s.history.activeFrames.length),
-          (project s.history.activeFrames[i]).version = i)
-    (hmodel : model.history = modelFrames s.history project)
-    (hglobal : model.global = s.history.global.val)
-    (hhead : model.head.version = head.version.val)
-    (hcut : s.history.global.val ≤ requested.val) (hterm : s.history.term.val ≤ term.val)
-    (valid : BranchValid s.history.log)
-    : ∃ cut after,
-        Spike.engine.Store.execute s (.Rollback requested term)
-          = .ok (.Ok (.RolledBack cut), after)
-        ∧ cut.val = rollbackCut model requested.val
-        ∧ after.history.activeFrames = s.history.activeFrames.take (cut.val + 1)
-        ∧ modelFrames after.history project
-          = (rollbackStore model requested.val term.val).history
-        ∧ after.txs = s.txs
-        ∧ after.history.global = s.history.global
-        ∧ after.history.next_identity = s.history.next_identity
-        ∧ after.history.term = term
-        ∧ BranchValid after.history.log
-        ∧ after.history.log.frames = s.history.log.frames
-        ∧ after.history.index = s.history.index := by
-  obtain ⟨cut, retained, hrun, hvalue, htake, hg, hi, ht, hvalid, hkept, hindexKept⟩ :=
-    history_rollback s.history requested term prior head hframes hindex hzero hcut hterm valid
-  have hmodelcut : cut.val = rollbackCut model requested.val := by
-    simpa [rollbackCut, hglobal, hhead] using hvalue
-  refine ⟨
-    cut,
-    {s with history := retained},
-    ?_,
-    hmodelcut,
-    htake,
-    ?_,
-    rfl,
-    hg,
-    hi,
-    ht,
-    hvalid,
-    hkept,
-    hindexKept
-  ⟩
-  · simp [Spike.engine.Store.execute, hrun]
-  · have hfilter : s.history.activeFrames.filter
-        (fun f => decide ((project f).version ≤ cut.val))
-      = s.history.activeFrames.take (cut.val + 1) := by
-      apply filter_is_take
-      intro i hi'
-      simp [hversions i hi']
-    simp only [rollbackStore, modelFrames, hmodel, List.filter_map, List.filter_reverse,
-      ← hmodelcut, Function.comp_def, hfilter, htake]
+    apply WP.spec_bind (Usize.add_spec (x := offset) (y := 1#usize) (by omega))
+    intro start hstart
+    have hstartVal : start.val = cut.val + 1 := by omega
+    apply WP.spec_bind
+      (history_release_active_range_refines s start activeLen extraPins valid unique
+        (by omega) (by omega) live queueRoom)
+    intro s1 ⟨hbr1, hgl1, htm1, hid1, hre1, hvals1, hval1, huniq1, hlive1, hflen1, hslots1⟩
+    apply WP.spec_bind (branch_rewind_refines s1.log offset hval1)
+    rintro ⟨ok, bl⟩ ⟨hok, hvalBl, hfrBl, hrew⟩
+    have hoffLt : offset.val < s1.log.branch.val.length := by rw [hbr1, hbrLen]; omega
+    have hokTrue : ok = true := by simpa [hoffLt] using hok
+    subst hokTrue
+    simp only [ite_true] at hrew
+    obtain ⟨_, hbrBl⟩ := hrew
+    change WP.spec (do
+      massert true
+      let (_, ai) ← Spike.kv_index.AddressIndex.retire_budget s1.index Spike.engine.RETIRE_BUDGET
+      Result.ok (core.result.Result.Ok (Spike.engine.Output.RolledBack cut),
+        { s1 with log := bl, index := ai, term })) _
+    simp only [massert, ite_true, bind_ok]
+    have hq1 : 2 * (s1.index.values.dirs.val.length + s1.index.values.rows.val.length) + 1 ≤ Usize.max := by
+      rw [hvals1]; exact queueRoom
+    apply WP.spec_bind
+      (index_retire_budget_refines s1.index (framePins s1.log.frames.val ++ extraPins)
+        Spike.engine.RETIRE_BUDGET hlive1 hq1)
+    rintro ⟨_, ai⟩ ⟨hlive2, hpres2, hdLen2, hrLen2⟩
+    change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.RolledBack cut),
+      { s1 with log := bl, index := ai, term })) _
+    rw [WP.spec_ok]
+    have hpres1 : IndexPreservesPins s.index s1.index (framePins s1.log.frames.val ++ extraPins) :=
+      index_preserves_pins_of_keeps (by unfold IndexKeeps; rw [hvals1]; exact .refl _)
+    have huniqBl : BranchUnique bl := branch_rewind_unique huniq1 hbrBl
+    refine ⟨cut, rfl, hvalue, ?_, hgl1, hid1, rfl, hre1, hvalBl, huniqBl,
+      by rw [hfrBl]; exact hlive2, by rw [hfrBl]; exact hpres1.trans hpres2,
+      by rw [hdLen2, hvals1], by rw [hrLen2, hvals1], by rw [hfrBl, hflen1], ?_⟩
+    · rw [hbrBl, hbr1, hoff]
+    · intro k f hf
+      rw [hfrBl]
+      obtain ⟨f', hf', hv, hr, hb, hd, hunt⟩ := hslots1 k f hf
+      refine ⟨f', hf', hv, hr, hb, hd, fun hno => hunt (fun off id0 h1 h2 hEq => ?_)⟩
+      exact hno off id0 (by omega) (by omega) hEq
+  · rw [ite_eq_right hsmall, WP.spec_ok]
+    have hge : head.version.val ≤ cut.val := Nat.le_of_not_gt hsmall
+    refine ⟨cut, rfl, hvalue, ?_, rfl, rfl, rfl, rfl, valid, unique, live, .refl _ _, rfl, rfl, rfl,
+      fun k f hf => ⟨f, hf, rfl, rfl, rfl, Or.inl rfl, fun _ => rfl⟩⟩
+    symm
+    apply List.take_of_length_le
+    omega
 
 end KvRust

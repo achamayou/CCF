@@ -12,9 +12,12 @@ namespace KvRust
 open Aeneas.Std
 open Kv.Model
 
-/-- Capacity for inserting one new map handle. -/
+/-- Capacity for inserting one new map handle and retaining its radix root references. -/
 def FitsAcquire (n : Spike.engine.Store) (id : U64) : Prop :=
-  ∀ t, find n.txs.val id = some t → t.views.val.length < Usize.max
+  ∀ t,
+    find n.txs.val id = some t
+    → t.views.val.length < Usize.max
+      ∧ (storePins n).length + 17 * n.history.index.values.dirs.val.length + 2 ≤ U32.max
 
 private theorem selected_unique (w : State) (sid : Nat) (s : Store) (snap : Snapshot)
     (m : String) (h : transitionSystem.Reachable w) (hs : find w.stores sid = some s)
@@ -46,14 +49,14 @@ private theorem acquire_observation (encode : List U8 → String)
       cases out <;> cases h <;> rfl
 
 private theorem native_view_present (encode : List U8 → String) (sid : Nat)
-    (history : Spike.engine.History) (archive : List Frame) (t : Spike.engine.Tx)
+    (index : CellIndex) (natArchive archive : List Frame) (t : Spike.engine.Tx)
     (tx : Tx) (view : GlobalView) (key : String)
-    (rel : AttemptMatches encode sid history archive t tx)
+    (rel : AttemptMatches encode sid index natArchive archive t tx)
     (hf : find tx.globalViews key = some view)
-    : (find (rustPinnedViews encode history t.views) key).isSome := by
+    : (find (rustPinnedViews encode index t.views) key).isSome := by
   have hrel := rel.views.find key
   rw [lookup_model_view _ _ _ hf] at hrel
-  cases h : find (rustPinnedViews encode history t.views) key with
+  cases h : find (rustPinnedViews encode index t.views) key with
   | none => rw [h] at hrel; cases hrel
   | some _ => rfl
 
@@ -66,21 +69,24 @@ private theorem atCut_in_archive {s : Store} {archive : List Frame}
   | some f => exact sub f (List.mem_of_find?_eq_some hf)
 
 private theorem updated_relation (encode : List U8 → String) (sid : Nat)
-    (history : Spike.engine.History) (archive : List Frame) (s : Store) (snap : Snapshot)
-    (rustSnap : Spike.engine.Snapshot) (key : String) (t t' : Spike.engine.Tx)
-    (tx tx' : Tx) (rel : AttemptMatches encode sid history archive t tx)
-    (hSnap : t.snapshot = some rustSnap) (hFreshModel : find tx.globalViews key = none)
+    (oldIndex newIndex : CellIndex) (natArchive archive : List Frame) (s : Store)
+    (snap : Snapshot) (rustSnap : Spike.engine.Snapshot) (key : String)
+    (t t' : Spike.engine.Tx) (tx tx' : Tx)
+    (rel : AttemptMatches encode sid oldIndex natArchive archive t tx)
+    (hvals : newIndex.values = oldIndex.values) (hSnap : t.snapshot = some rustSnap)
+    (hFreshModel : find tx.globalViews key = none)
     (hModelSub : ∀ f ∈ s.history, f ∈ archive) (hEmptyIn : ({} : Frame) ∈ archive)
     (unique : Kv.Properties.Unique (image (captureLocal s snap key).data key))
     (v
       : ViewsOrderEq (modelPinnedViews tx'.globalViews)
-          (rustPinnedViews encode history t'.views))
-    (live : ViewsLive history t'.views) (orig : ViewsOrigin encode history t'.views)
+          (rustPinnedViews encode newIndex t'.views))
+    (live : ViewsLive newIndex t'.views)
+    (orig : ViewsOrigin encode newIndex natArchive t'.views)
     (otherViews
       : ∀ m,
           m ≠ key
-          → find (rustPinnedViews encode history t'.views) m
-            = find (rustPinnedViews encode history t.views) m)
+          → find (rustPinnedViews encode newIndex t'.views) m
+            = find (rustPinnedViews encode oldIndex t.views) m)
     (hu : tx'.unavailable = t'.unavailable)
     (hn
       : if available s snap key then
@@ -97,15 +103,19 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
           }
         else
           tx' = {tx with unavailable := true})
-    : AttemptMatches encode sid history archive t' tx' := by
+    : AttemptMatches encode sid newIndex natArchive archive t' tx' := by
+  have hpresAll : ∀ pins, IndexPreservesPins oldIndex newIndex pins := by
+    intro pins r _ bindings hview
+    exact ⟨⟨by rw [hvals]; exact hview.lookup, by rw [hvals]; exact hview.values, hview.sorted⟩,
+      by simp [singleBindings, hvals]⟩
   by_cases ha : available s snap key
   · rw [ite_eq_left ha] at hn hm
     have hnone : t'.snapshot = some rustSnap := by
       simpa only [hSnap] using congrArg Spike.engine.Tx.snapshot hn
-    have hFreshNative : find (rustPinnedViews encode history t.views) key = none := by
+    have hFreshNative : find (rustPinnedViews encode oldIndex t.views) key = none := by
       have hr := rel.views.find key
       rw [projected_view_missing tx.globalViews key hFreshModel] at hr
-      cases h : find (rustPinnedViews encode history t.views) key with
+      cases h : find (rustPinnedViews encode oldIndex t.views) key with
       | none => rfl
       | some _ => rw [h] at hr; cases hr
     refine ⟨?_, ?_, ?_, v, live, orig, ?_, ?_, ?_, ?_, ?_, hu, ?_, ?_, ?_, ?_, ?_⟩
@@ -186,7 +196,10 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
           exact hgv
   · rw [ite_eq_right ha] at hn hm
     rw [hn, hm]
-    exact {rel with unavailable := rfl}
+    have hrelNew := rel.withPreservedPins (hpresAll (txPins t))
+      (fun row hrow r hr => List.mem_flatMap.mpr ⟨row, hrow, hr⟩)
+      (fun _ hm => hm) (fun _ hm => hm)
+    exact {hrelNew with unavailable := rfl}
 
 /-- Lazy acquisition preserves the relation, including stale and duplicate acquisition guards. -/
 theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
@@ -195,11 +208,11 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
     : WP.spec (Spike.engine.Store.execute n (.Acquire id m))
         (StepMatches encode sid (.acquire sid id.val (encode (alloc.vec.Vec.val m))) n
           (execute w (.acquire sid id.val (encode (alloc.vec.Vec.val m))))) := by
-  obtain ⟨s, archive, hs, hh, hattempts⟩ := rel.history
+  obtain ⟨s, natArchive, archive, hs, hh, hattempts⟩ := rel.history
   let key := encode (alloc.vec.Vec.val m)
   have bind_some {α β : Type} (x : α) (f : α → Option β) : (some x >>= f) = f x := rfl
   have refuse (bad : ∀ t, find n.txs.val id = some t →
-      t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history t.views) key).isSome)
+      t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history.index t.views) key).isSome)
       (hm : execute w (.acquire sid id.val key) = none) :
       WP.spec (Spike.engine.Store.execute n (.Acquire id m))
         (StepMatches encode sid (.acquire sid id.val key) n (execute w (.acquire sid id.val key))) := by
@@ -214,7 +227,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
   | some t =>
       obtain ⟨tx, hlookup, hr⟩ := lookup_of_attempts hs hattempts hn
       have bad (p : Prop) (hp : p) (why : p →
-          t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history t.views) key).isSome)
+          t.snapshot = none ∨ t.phase ≠ .Active ∨ (find (rustPinnedViews encode n.history.index t.views) key).isSome)
           (hm : execute w (.acquire sid id.val key) = none) :
           WP.spec (Spike.engine.Store.execute n (.Acquire id m))
             (StepMatches encode sid (.acquire sid id.val key) n (execute w (.acquire sid id.val key))) :=
@@ -235,8 +248,8 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                 cases hm : find tx.globalViews key with
                 | some view =>
                     exact bad _
-                      (native_view_present encode sid n.history archive t tx view key hr
-                        hm)
+                      (native_view_present encode sid n.history.index natArchive archive t
+                        tx view key hr hm)
                       (Or.inr ∘ Or.inr) (by simp [execute, hlookup, hms, hm, hphase])
                 | none =>
                     have hCut : snap.current.version = rustSnap.version.val := by
@@ -244,36 +257,70 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       rw [hms, hns] at he
                       exact congrArg Prod.fst (Option.some.inj he)
                     obtain ⟨prior, head, hf, _⟩ := hh.split
+                    obtain ⟨hViewRoom, hRefRoom⟩ := room t hn
                     apply WP.spec_mono
-                      (execute_acquire_matches_model encode inj n id w sid s tx t snap
-                        rustSnap m prior head hf hh.frames hh.indexed hh.global
-                        hh.revisions hn hlookup hns hms hCut hp hphase hr.views
-                        hr.unavailable hm (hr.fresh_log hm) (room t hn) hh.valid hr.live
+                      (execute_acquire_matches_model encode inj n id w sid s natArchive tx
+                        t snap rustSnap m prior head hf hh.frames hh.indexed hh.global
+                        hh.globalBound hh.revisions hn hlookup hns hms hCut hp hphase
+                        hr.views hr.unavailable hm (hr.fresh_log hm) hViewRoom hh.valid
+                        hh.indexValid hh.aligned rel.liveness hRefRoom hr.live
                         hr.nativeOrig)
                     rintro ⟨output, after⟩ ⟨modelAfter, txAfter, tAfter, obs, index, hstep, ho, hw, hv, hu,
-                      han, ham, _, hhist, hidx, hrow, hLive, hOrig, hOther⟩
+                      han, ham, _, hlog, hglobal, hterm, hident, hreuse, hvals, hliveAfter,
+                      hidx, hrow, hLive, hOrig, hOther⟩
                     rw [hstep]
                     obtain ⟨out, hout, hc⟩ := acquire_observation encode output obs ho
+                    have hpres : IndexPreservesPins n.history.index after.history.index (storePins after) := by
+                      intro r _ bindings hview
+                      exact ⟨⟨by rw [hvals]; exact hview.lookup, by rw [hvals]; exact hview.values,
+                        hview.sorted⟩, by simp [singleBindings, hvals]⟩
+                    have hidxValidAfter : HistoryIndexValid after.history :=
+                      hh.indexValid.of_preserves_pins hliveAfter.valid hpres (fun i f' hf' =>
+                        Or.inr ⟨i, f', hlog ▸ hf', rfl⟩)
+                    have halignedAfter : ArchiveAligned encode after.history natArchive :=
+                      hh.aligned.of_preserves_pins hh.indexValid hpres
+                        (congrArg Spike.branch_log.BranchLog.branch hlog)
+                        (congrArg Spike.branch_log.BranchLog.frames hlog)
+                        hglobal hreuse
+                    have hhistAfter : HistoryMatches encode after.history s natArchive archive :=
+                      { hh with
+                        nonempty := by unfold Spike.engine.History.activeFrames; rw [hlog]; exact hh.nonempty
+                        frames := by rw [hlog]; exact hh.frames
+                        indexed := by unfold Spike.engine.History.activeFrames; rw [hlog]; exact hh.indexed
+                        global := by rw [hglobal]; exact hh.global
+                        globalBound := by
+                          unfold Spike.engine.History.activeFrames
+                          rw [hglobal, hlog]
+                          exact hh.globalBound
+                        term := by rw [hterm]; exact hh.term
+                        identity := by rw [hident]; exact hh.identity
+                        valid := by rw [hlog]; exact hh.valid
+                        unique := by rw [hlog]; exact hh.unique
+                        indexValid := hidxValidAfter
+                        aligned := halignedAfter
+                        revisions := by rw [hlog]; exact hh.revisions
+                        nativeArchive := by rw [hident]; exact hh.nativeArchive }
                     refine ⟨
                       out,
                       hout,
                       OutputMatches.of_eq hc,
-                      replace_attempt rel.unique hattempts hh id index t tAfter txAfter
+                      replace_attempt rel.unique hattempts id index t tAfter txAfter
                         hidx hrow
                         (congrArg State.txs hw)
                         (by rw [hw]; exact hs)
-                        (by rw [hhist]; exact hh)
+                        hhistAfter
+                        hliveAfter
                         ?_
                         (reachable_execute rel.reachable hstep)
-                        (HistoryKeeps.of_same (congrArg (fun h => h.log.frames) hhist)
-                          (congrArg (fun h => h.index) hhist))
+                        hpres
+                        (fun _ hm => hm)
                         (fun _ hm => hm)
                     ⟩
-                    · rw [hhist]
-                      exact updated_relation encode sid n.history archive s snap rustSnap key t
-                        tAfter tx txAfter hr hns hm hh.modelSub hh.modelArchive.emptyPresent
-                        (selected_unique w sid s snap key rel.reachable hs)
-                        hv hLive hOrig hOther hu han ham
+                    exact updated_relation encode sid n.history.index after.history.index
+                      natArchive archive s snap rustSnap key t tAfter tx txAfter hr hvals
+                      hns hm hh.modelSub hh.modelArchive.emptyPresent
+                      (selected_unique w sid s snap key rel.reachable hs)
+                      hv hLive hOrig hOther hu han ham
               · have hm : (tx.phase != .active) = true := by
                   rw [hr.phase]
                   exact model_phase_inactive t.phase hp

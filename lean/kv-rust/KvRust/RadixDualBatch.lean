@@ -168,13 +168,13 @@ theorem publish_batch_leaves_refines {V : Type} (arena : Spike.radix.DualRadix V
       (alloc.vec.Vec.deref arena.values.rows) lookup byKey lookupRows keySorted keyCeiling
       keyRoom.depth keyRoom.keys keyRoom.arena values.dirs values.directories
       (by simpa [alloc.vec.Vec.deref] using values.knowledge))
-  rintro ⟨keyRoot, keyDirs, keyFree⟩ ⟨keyKept, keyVacant, keyValid, keyKnown, keyTree⟩
+  rintro ⟨keyRoot, keyDirs, keyFree⟩ ⟨keyKept, keyVacant, keyValid, keyKnown, keyTree, _⟩
   apply WP.spec_bind
     (build_sorted_refines arena.order.dirs arena.order.free_dirs
       (alloc.vec.Vec.deref arena.order.rows) order stamps orderRows stampSorted
       stampCeiling stampRoom.depth stampRoom.keys stampRoom.arena chronology.dirs
       chronology.directories (by simpa [alloc.vec.Vec.deref] using chronology.knowledge))
-  rintro ⟨stampRoot, stampDirs, stampFree⟩ ⟨stampKept, stampVacant, stampValid, stampKnown, stampTree⟩
+  rintro ⟨stampRoot, stampDirs, stampFree⟩ ⟨stampKept, stampVacant, stampValid, stampKnown, stampTree, _⟩
   let after := {arena with
     values := {arena.values with dirs := keyDirs, free_dirs := keyFree},
     order := {arena.order with dirs := stampDirs, free_dirs := stampFree}}

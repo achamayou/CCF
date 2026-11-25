@@ -63,6 +63,10 @@ impl<T> BranchLog<T> {
         &self.frames[id.0]
     }
 
+    pub fn read_mut(&mut self, id: FrameId) -> &mut T {
+        &mut self.frames[id.0]
+    }
+
     pub fn rewind(&mut self, offset: usize) -> bool {
         if offset >= self.branch.len() {
             return false;

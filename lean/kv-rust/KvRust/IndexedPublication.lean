@@ -90,17 +90,28 @@ theorem indexed_fold_cover (rows : CellRows) (writes : List IndexWrite) (version
   simp [indexed_fold_suffix rows writes version, cleared]
 
 /-- Conservative headroom for every edit in the batch on the single-radix arena. -/
-structure IndexBatchRoom (index : CellIndex) (peak writes : Nat) : Prop where
+structure IndexBatchRoom (index : CellIndex) (pinsCount peak writes : Nat) : Prop where
   lookup : index.values.dirs.val.length + writes * (peak + 1) ≤ 2147483647
   values : index.values.rows.val.length + writes ≤ 2147483647
+  refs
+    : pinsCount + 17 * (index.values.dirs.val.length + writes * (peak + 1) + 2) + 2
+      ≤ U32.max
+  queue
+    : 2
+          * (index.values.dirs.val.length
+              + writes * (peak + 1)
+              + index.values.rows.val.length
+              + writes)
+        + 1
+      ≤ Usize.max
 
-theorem IndexBatchRoom.shrink {index : CellIndex} {peak smaller writes : Nat}
-    (room : IndexBatchRoom index peak writes) (fits : smaller ≤ peak)
-    : IndexBatchRoom index smaller writes := by
-  refine ⟨?_, room.values⟩
+theorem IndexBatchRoom.shrink {index : CellIndex} {pinsCount peak smaller writes : Nat}
+    (room : IndexBatchRoom index pinsCount peak writes) (fits : smaller ≤ peak)
+    : IndexBatchRoom index pinsCount smaller writes := by
   have bound := Nat.mul_le_mul_left writes (show smaller + 1 ≤ peak + 1 by omega)
-  have total := room.lookup
-  omega
+  refine ⟨by have := room.lookup; omega, room.values, ?_, ?_⟩
+  · have := room.refs; omega
+  · have := room.queue; omega
 
 private theorem applyIndexedWrite_perm (version : U64) (row : IndexWrite)
     {a b : CellRows} (perm : a.Perm b)
@@ -134,7 +145,8 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
               ∧ WP.spec (Spike.kv_index.AddressIndex.scan_row index link) (· = entry))
     : WP.spec (Spike.engine.publication_base_loop index root pending count links 0#usize)
         (fun base =>
-          base = root ∨ (IndexView index base [] ∧ Covers rows pending.val)) := by
+          base = root
+          ∨ (base = 0#u32 ∧ IndexView index base [] ∧ Covers rows pending.val)) := by
   unfold Spike.engine.publication_base_loop
   apply loop.spec_decr_nat (fun (i : Usize) => count.val - i.val)
     (fun i => ∀ j, j < i.val →
@@ -192,9 +204,9 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
         exact Or.inl rfl
     · rw [ite_eq_right run]
       apply WP.spec_bind (index_empty_root_refines index)
-      intro fresh empty
+      intro fresh ⟨hfresh0, empty⟩
       rw [WP.spec_ok]
-      refine Or.inr ⟨empty, ?_⟩
+      refine Or.inr ⟨hfresh0, empty, ?_⟩
       intro entry present
       obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp present
       have bound := (List.getElem?_eq_some_iff.mp hj).1
@@ -208,12 +220,16 @@ private theorem publication_compare (index : CellIndex) (root : Spike.radix.Radi
 theorem publication_base_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
     (rows : CellRows)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write)
+    (pinsCount : Nat)
     (view : IndexView index root rows) (valid : IndexValid index)
-    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    (space
+      : IndexBatchRoom index pinsCount (rows.length + pending.val.length)
+          pending.val.length)
     : WP.spec (Spike.engine.publication_base index root pending)
         (fun base =>
           base = root
-          ∨ (IndexView index base []
+          ∨ (base = 0#u32
+              ∧ IndexView index base []
               ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst)) := by
   unfold Spike.engine.publication_base
   let count := alloc.vec.Vec.len pending
@@ -260,32 +276,39 @@ theorem publication_base_refines (index : CellIndex) (root : Spike.radix.RadixRo
         exact Or.inl rfl
 
 private theorem indexed_row_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
-    (rows : CellRows) (write : IndexWrite) (version : U64)
-    (view : IndexView index root rows) (valid : IndexValid index)
-    (keyRoom : IndexKeyRoom write) (space : IndexBatchRoom index rows.length 1)
+    (rows : CellRows) (write : IndexWrite) (version : U64) (pins : List U32)
+    (view : IndexView index root rows) (live : IndexLiveness index pins)
+    (rootRef
+      : root ≠ 0#u32
+        → SingleLinkLive index.values.dirs.val index.values.rows.val root
+          ∧ radixReferences index.values.dirs.val pins root > 0)
+    (keyRoom : IndexKeyRoom write)
+    (space : IndexBatchRoom index pins.length rows.length 1)
     : WP.spec (Spike.engine.publish_indexed_row index root write version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out ∧ out.Perm (applyIndexedWrite version write rows))
-          ∧ IndexValid after
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ IndexKeeps index after
           ∧ IndexGrowth index after (rows.length + 1) 1) := by
   obtain ⟨address, action⟩ := write
   have lookup := space.lookup
   have values := space.values
+  have refs := space.refs
   have key : 2 * (8 + address.map.val.length + address.key.val.length) + 1 ≤ Usize.max :=
     keyRoom
-  simp only [Nat.one_mul] at lookup
+  simp only [Nat.one_mul] at lookup refs
   cases action with
   | Put value =>
       simp only [Spike.engine.publish_indexed_row, clone_address, clone_bytes, bind_ok,
         applyIndexedWrite]
-      exact index_put_refines index root rows view address {value, version} valid
-        (by omega) (by omega) key
+      exact index_put_refines index root rows pins view address {value, version} live
+        rootRef (by omega) (by omega) key (by omega)
   | Remove =>
       simp only [Spike.engine.publish_indexed_row, applyIndexedWrite]
       apply WP.spec_mono
-        (index_remove_refines index root rows view address valid (by omega) (by omega))
+        (index_remove_refines index root rows pins view address live rootRef
+          (by omega) (by omega) (by omega))
       rintro ⟨next, after⟩ ⟨updated, good, kept, ⟨ld, lv⟩⟩
       dsimp only
       exact ⟨
@@ -301,19 +324,37 @@ private theorem indexed_write_length (version : U64) (row : IndexWrite) (data : 
   have erased : (Kv.Model.erase data a).length ≤ data.length := List.length_filter_le _ _
   cases w <;> simp only [applyIndexedWrite, Kv.Model.set, List.length_cons] <;> omega
 
-/-- Extracted publication implements the fold up to permutation and retains every prior root. -/
+private theorem pin_root_ref {V : Type} {index : Spike.kv_index.AddressIndex V}
+    {pins : List U32} {root : U32} (live : IndexLiveness index pins)
+    (hpin : root = 0#u32 ∨ root ∈ pins)
+    : root ≠ 0#u32
+      → SingleLinkLive index.values.dirs.val index.values.rows.val root
+        ∧ radixReferences index.values.dirs.val pins root > 0 := by
+  intro hnz
+  rcases hpin with rfl | hmem
+  · exact (hnz rfl).elim
+  · refine ⟨live.pinsLive root hmem, ?_⟩
+    rw [radixReferences_eq]
+    exact List.count_pos_iff.mpr (List.mem_append_left _ hmem)
+
+/-- Extracted publication implements the fold up to permutation, balances every
+intermediate root pin, and retains every prior root. -/
 theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.RadixRoot)
     (rows : CellRows)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
-    (view : IndexView index root rows) (valid : IndexValid index)
-    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    (pins : List U32)
+    (view : IndexView index root rows) (live : IndexLiveness index pins)
+    (hrootPin : root = 0#u32 ∨ root ∈ pins)
+    (space
+      : IndexBatchRoom index pins.length (rows.length + pending.val.length)
+          pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     : WP.spec (Spike.engine.publish_indexed index root pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out
             ∧ out.Perm (pending.val.foldr (applyIndexedWrite version) rows))
-          ∧ IndexValid after
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
           ∧ IndexKeeps index after
           ∧ IndexGrowth index after
               (pending.val.length * (rows.length + pending.val.length + 1))
@@ -322,104 +363,235 @@ theorem indexed_publication_refines (index : CellIndex) (root : Spike.radix.Radi
   let peak := rows.length + total
   let lookupCost := peak + 1
   let expected := pending.val.foldr (applyIndexedWrite version) rows
+  let optPin (owned : Bool) (cut : Spike.radix.RadixRoot) : List U32 :=
+    if owned then (if cut = 0#u32 then pins else cut :: pins) else pins
   change WP.spec _ (fun (next, after) =>
     (∃ out, IndexView after next out ∧ out.Perm expected)
-    ∧ IndexValid after ∧ IndexKeeps index after
+    ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
+    ∧ IndexKeeps index after
     ∧ IndexGrowth index after (total * lookupCost) total)
-  unfold Spike.engine.publish_indexed Spike.engine.publish_indexed_loop
-  apply loop.spec_decr_nat (fun (_, _, i) => (i : Usize).val)
-    (fun (arena, cut, i) =>
-      i.val ≤ total
-      ∧ IndexValid arena
-      ∧ IndexKeeps index arena
-      ∧ IndexGrowth index arena ((total - i.val) * lookupCost) (total - i.val)
-      ∧ ∃ current : CellRows,
-          IndexView arena cut current
-          ∧ current.length + i.val ≤ peak
-          ∧ ((pending.val.take i.val).foldr (applyIndexedWrite version) current).Perm
-              expected)
-    _ _ _
-  · rintro ⟨arena, cut, i⟩ ⟨hi, good, kept, growth, current, related, size, remaining⟩
-    dsimp only at hi good kept growth related size remaining ⊢
-    unfold Spike.engine.publish_indexed_loop.body
-    have one : (1#usize : Usize).val = 1 := rfl
-    by_cases run : (0#usize : Usize) < i
-    · have positive : 0 < i.val := run
-      rw [ite_eq_left run]
-      apply WP.spec_bind (Usize.sub_spec (x := i) (y := 1#usize) (by omega))
-      intro j hj
-      have step : i.val = j.val + 1 := by omega
-      have bound : j.val < pending.val.length := by change j.val < total; omega
-      rw [alloc.vec.Vec.index_slice_index]
-      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec pending j bound)
-      intro row read
-      have keys : IndexKeyRoom row := addresses row (read ▸ List.getElem_mem _)
-      have used : total - j.val = (total - i.val).succ := by omega
-      have split (cost : Nat) :
-          (total - i.val) * cost + cost ≤ total * cost := by
-        rw [← Nat.succ_mul, ← used]
-        exact Nat.mul_le_mul_right _ (Nat.sub_le _ _)
-      obtain ⟨ld, lv⟩ := growth
-      have lookupStep := split lookupCost
-      have ⟨pl, pv⟩ : IndexBatchRoom index peak total := space
-      have smaller : current.length ≤ peak := by omega
-      have lstep : current.length + 1 ≤ lookupCost := by dsimp [lookupCost]; omega
-      change index.values.dirs.val.length + total * lookupCost ≤ 2147483647 at pl
-      have nextRoom : IndexBatchRoom arena current.length 1 :=
-        ⟨by simp only [Nat.one_mul]; omega, by omega⟩
-      apply WP.spec_bind (indexed_row_refines arena cut current row version related good keys nextRoom)
-      rintro ⟨next, after⟩ ⟨⟨nextRows, nextView, nextPerm⟩, nextValid, nextKeeps, ⟨dl, vl⟩⟩
-      change WP.spec (Result.ok (ControlFlow.cont (after, next, j))) _
-      rw [WP.spec_ok]
-      dsimp only
-      refine ⟨⟨by omega, nextValid, kept.trans nextKeeps, ?_,
-        nextRows, nextView, ?_, ?_⟩, by omega⟩
-      · rw [used, Nat.succ_mul]
-        exact ⟨by omega, by omega⟩
-      · have len := indexed_write_length version row current
+  unfold Spike.engine.publish_indexed
+  have hloop :
+      WP.spec
+        (Spike.engine.publish_indexed_loop index pending version root false (alloc.vec.Vec.len pending))
+        (fun (after, cut, owned) =>
+          (∃ out, IndexView after cut out ∧ out.Perm expected)
+          ∧ IndexLiveness after (optPin owned cut)
+          ∧ (cut = 0#u32 ∨ cut ∈ optPin owned cut)
+          ∧ IndexKeeps index after
+          ∧ IndexGrowth index after (total * lookupCost) total) := by
+    unfold Spike.engine.publish_indexed_loop
+    apply loop.spec_decr_nat (fun (_, _, _, i) => (i : Usize).val)
+      (fun (arena, cut, owned, i) =>
+        i.val ≤ total
+        ∧ IndexLiveness arena (optPin owned cut)
+        ∧ (cut = 0#u32 ∨ cut ∈ optPin owned cut)
+        ∧ IndexKeeps index arena
+        ∧ IndexGrowth index arena ((total - i.val) * lookupCost) (total - i.val)
+        ∧ ∃ current : CellRows,
+            IndexView arena cut current
+            ∧ current.length + i.val ≤ peak
+            ∧ ((pending.val.take i.val).foldr (applyIndexedWrite version) current).Perm
+                expected)
+      _ _ _
+    · rintro ⟨arena, cut, owned, i⟩ ⟨hi, lCur, hcutPin, kept, growth, current, related, size, remaining⟩
+      dsimp only at hi lCur hcutPin kept growth related size remaining ⊢
+      unfold Spike.engine.publish_indexed_loop.body
+      have one : (1#usize : Usize).val = 1 := rfl
+      by_cases run : (0#usize : Usize) < i
+      · have positive : 0 < i.val := run
+        rw [ite_eq_left run]
+        apply WP.spec_bind (Usize.sub_spec (x := i) (y := 1#usize) (by omega))
+        intro j hj
+        have step : i.val = j.val + 1 := by omega
+        have bound : j.val < pending.val.length := by change j.val < total; omega
+        rw [alloc.vec.Vec.index_slice_index]
+        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec pending j bound)
+        intro row read
+        have keys : IndexKeyRoom row := addresses row (read ▸ List.getElem_mem _)
+        have used : total - j.val = (total - i.val).succ := by omega
+        have split (cost : Nat) :
+            (total - i.val) * cost + cost ≤ total * cost := by
+          rw [← Nat.succ_mul, ← used]
+          exact Nat.mul_le_mul_right _ (Nat.sub_le _ _)
+        obtain ⟨ld, lv⟩ := growth
+        have lookupStep := split lookupCost
+        have ⟨pl, pv, pr, pq⟩ : IndexBatchRoom index pins.length peak total := space
+        have smaller : current.length ≤ peak := by omega
+        have lstep : current.length + 1 ≤ lookupCost := by dsimp [lookupCost]; omega
+        have hoptLen : (optPin owned cut).length ≤ pins.length + 1 := by
+          cases owned <;> by_cases hcz : cut = 0#u32 <;> simp [optPin, hcz]
+        change index.values.dirs.val.length + total * lookupCost ≤ 2147483647 at pl
+        change pins.length + 17 * (index.values.dirs.val.length + total * lookupCost + 2) + 2 ≤ U32.max at pr
+        change 2 * (index.values.dirs.val.length + total * lookupCost + index.values.rows.val.length + total) + 1 ≤ Usize.max at pq
+        have nextRoom : IndexBatchRoom arena (optPin owned cut).length current.length 1 := by
+          refine ⟨by simp only [Nat.one_mul]; omega, by omega, ?_, ?_⟩
+          · simp only [Nat.one_mul]; omega
+          · simp only [Nat.one_mul]; omega
+        apply WP.spec_bind
+          (indexed_row_refines arena cut current row version (optPin owned cut) related
+            lCur (pin_root_ref lCur hcutPin) keys nextRoom)
+        rintro ⟨next, after⟩ ⟨⟨nextRows, nextView, nextPerm⟩, nextLive, nextKeeps, ⟨dl, vl⟩⟩
+        have hlen := indexed_write_length version row current
         have hlenEq := nextPerm.length_eq
+        have hpermRem : ((pending.val.take j.val).foldr (applyIndexedWrite version) nextRows).Perm expected := by
+          rw [step, List.take_succ_eq_append_getElem bound, ← read, List.foldr_append] at remaining
+          exact (indexed_fold_perm version (pending.val.take j.val) nextPerm).trans remaining
+        have hgrowthNext : IndexGrowth index after ((total - j.val) * lookupCost) (total - j.val) := by
+          rw [used, Nat.succ_mul]
+          exact ⟨by omega, by omega⟩
+        have hnextPinIn : next = 0#u32 ∨ next ∈ optPin true next := by
+          by_cases hnz : next = 0#u32
+          · exact Or.inl hnz
+          · exact Or.inr (by simp [optPin, hnz])
+        cases owned with
+        | false =>
+            simp only [Bool.false_eq_true, ite_false]
+            change WP.spec (Result.ok (ControlFlow.cont (after, next, true, j))) _
+            rw [WP.spec_ok]
+            dsimp only
+            exact ⟨
+              ⟨
+                by omega,
+                by simpa [optPin] using nextLive,
+                hnextPinIn,
+                kept.trans nextKeeps,
+                hgrowthNext,
+                nextRows,
+                nextView,
+                by omega,
+                hpermRem
+              ⟩,
+              by omega
+            ⟩
+        | true =>
+            simp only [ite_true]
+            have hnextLivePerm : IndexLiveness after
+                (if cut = 0#u32 then (if next = 0#u32 then pins else next :: pins)
+                 else cut :: (if next = 0#u32 then pins else next :: pins)) := by
+              by_cases hcz : cut = 0#u32 <;> by_cases hnz : next = 0#u32
+              · simpa [optPin, hcz, hnz] using nextLive
+              · simpa [optPin, hcz, hnz] using nextLive
+              · simpa [optPin, hcz, hnz] using nextLive
+              · simp only [optPin, ite_true, hcz, hnz, ite_false] at nextLive ⊢
+                exact nextLive.perm (List.Perm.swap cut next pins)
+            have hqRoom : 2 * (after.values.dirs.val.length + after.values.rows.val.length) + 1 ≤ Usize.max := by
+              have h1 := hgrowthNext.1
+              have h2 := hgrowthNext.2
+              have h3 : (total - j.val) * lookupCost ≤ total * lookupCost :=
+                Nat.mul_le_mul_right _ (Nat.sub_le _ _)
+              omega
+            apply WP.spec_bind
+              (index_release_root_refines after
+                (if next = 0#u32 then pins else next :: pins) cut hnextLivePerm hqRoom)
+            intro after2 ⟨hvalsEq, lAfter2⟩
+            change WP.spec (Result.ok (ControlFlow.cont (after2, next, true, j))) _
+            rw [WP.spec_ok]
+            dsimp only
+            have hk2 : IndexKeeps after after2 := by
+              unfold IndexKeeps; rw [hvalsEq]; exact .refl _
+            have hview2 : IndexView after2 next nextRows := index_keeps_view hk2 next nextRows nextView
+            have hg2 : IndexGrowth index after2 ((total - j.val) * lookupCost) (total - j.val) := by
+              unfold IndexGrowth ArenaGrowth at hgrowthNext ⊢
+              rw [hvalsEq]; exact hgrowthNext
+            exact ⟨
+              ⟨
+                by omega,
+                by simpa [optPin] using lAfter2,
+                hnextPinIn,
+                (kept.trans nextKeeps).trans hk2,
+                hg2,
+                nextRows,
+                hview2,
+                by omega,
+                hpermRem
+              ⟩,
+              by omega
+            ⟩
+      · have zero : i.val = 0 := by
+          have notPositive : ¬ 0 < i.val := run
+          omega
+        rw [ite_eq_right run, WP.spec_ok]
+        rw [zero, Nat.sub_zero] at growth
+        simp only [zero, List.take_zero, List.foldr_nil] at remaining
+        exact ⟨⟨current, related, remaining⟩, lCur, hcutPin, kept, growth⟩
+    · have length : (alloc.vec.Vec.len pending).val = total := alloc.vec.Vec.len_val pending
+      simp only [length, Nat.sub_self, Nat.zero_mul, Nat.le_refl, true_and, optPin, Bool.false_eq_true, ite_false]
+      exact ⟨live, hrootPin, .refl _, ⟨Nat.le_refl _, Nat.le_refl _⟩, rows, view, Nat.le_refl _,
+        by simp [total, expected]⟩
+  apply WP.spec_bind hloop
+  rintro ⟨after, cut, owned⟩ ⟨hview, lAfter, hcutPin, kept, growth⟩
+  cases owned with
+  | true =>
+      change WP.spec (Result.ok (cut, after)) _
+      rw [WP.spec_ok]
+      exact ⟨hview, by simpa [optPin] using lAfter, kept, growth⟩
+  | false =>
+      simp only [optPin, Bool.false_eq_true, ite_false] at lAfter hcutPin
+      have hrefRoom : cut ≠ 0#u32 → radixReferences after.values.dirs.val pins cut < U32.max := by
+        intro _
+        have hb := owners_count_le_bound after.values.dirs.val pins cut
+        have hg := growth.1
+        have hpr := space.refs
+        dsimp [total, peak, lookupCost] at hg hpr
+        rw [radixReferences_eq]
         omega
-      · rw [step, List.take_succ_eq_append_getElem bound, ← read, List.foldr_append] at remaining
-        exact (indexed_fold_perm version (pending.val.take j.val) nextPerm).trans remaining
-    · have zero : i.val = 0 := by
-        have notPositive : ¬ 0 < i.val := run
-        omega
-      rw [ite_eq_right run, WP.spec_ok]
-      rw [zero, Nat.sub_zero] at growth
-      simp only [zero, List.take_zero, List.foldr_nil] at remaining
-      exact ⟨⟨current, related, remaining⟩, good, kept, growth⟩
-  · have length : (alloc.vec.Vec.len pending).val = total := alloc.vec.Vec.len_val pending
-    simp only [length, Nat.sub_self, Nat.zero_mul, Nat.le_refl, true_and]
-    exact ⟨valid, .refl _, ⟨Nat.le_refl _, Nat.le_refl _⟩, rows, view, Nat.le_refl _,
-      by simp [total, expected]⟩
+      apply WP.spec_bind
+        (index_retain_root_refines after pins cut lAfter (pin_root_ref lAfter hcutPin)
+          hrefRoom)
+      intro after2 ⟨hvalsEq, lAfter2⟩
+      change WP.spec (Result.ok (cut, after2)) _
+      rw [WP.spec_ok]
+      have hk2 : IndexKeeps after after2 := by
+        unfold IndexKeeps; rw [hvalsEq]; exact .refl _
+      obtain ⟨out, hvOut, hpOut⟩ := hview
+      have hg2 : IndexGrowth index after2 (total * lookupCost) total := by
+        unfold IndexGrowth ArenaGrowth at growth ⊢
+        rw [hvalsEq]; exact growth
+      exact ⟨
+        ⟨out, index_keeps_view hk2 cut out hvOut, hpOut⟩,
+        lAfter2,
+        kept.trans hk2,
+        hg2
+      ⟩
 
 theorem indexed_publish_selected (index : CellIndex) (root base : Spike.radix.RadixRoot)
     (rows : CellRows)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
-    (view : IndexView index root rows) (valid : IndexValid index)
-    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    (pins : List U32)
+    (view : IndexView index root rows) (live : IndexLiveness index pins)
+    (hrootPin : root = 0#u32 ∨ root ∈ pins)
+    (space
+      : IndexBatchRoom index pins.length (rows.length + pending.val.length)
+          pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     (chosen
       : base = root
-        ∨ (IndexView index base [] ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
+        ∨ (base = 0#u32
+            ∧ IndexView index base []
+            ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
     : WP.spec (Spike.engine.publish_indexed index base pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out
             ∧ out.Perm (pending.val.foldr (applyIndexedWrite version) rows))
-          ∧ IndexValid after
-          ∧ IndexKeeps index after) := by
-  rcases chosen with rfl | ⟨empty, covers⟩
-  · apply WP.spec_mono (indexed_publication_refines index base rows pending version
-      view valid space addresses)
-    rintro ⟨_, _⟩ ⟨refined, good, kept, _⟩
-    exact ⟨refined, good, kept⟩
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
+          ∧ IndexKeeps index after
+          ∧ IndexGrowth index after
+              (pending.val.length * (rows.length + pending.val.length + 1))
+              pending.val.length) := by
+  rcases chosen with rfl | ⟨hbase0, empty, covers⟩
+  · exact indexed_publication_refines index base rows pending version pins
+      view live hrootPin space addresses
   · rw [indexed_fold_cover rows pending.val version covers]
-    have fits : IndexBatchRoom index (([] : CellRows).length + pending.val.length) pending.val.length :=
+    have fits : IndexBatchRoom index pins.length (([] : CellRows).length + pending.val.length) pending.val.length :=
       space.shrink (by simp)
-    apply WP.spec_mono (indexed_publication_refines index base [] pending version
-      empty valid fits addresses)
-    rintro ⟨_, _⟩ ⟨refined, good, kept, _⟩
-    exact ⟨refined, good, kept⟩
+    apply WP.spec_mono (indexed_publication_refines index base [] pending version pins
+      empty live (Or.inl hbase0) fits addresses)
+    rintro ⟨_, _⟩ ⟨refined, good, kept, g1, g2⟩
+    refine ⟨refined, good, kept, ?_, g2⟩
+    have hle := Nat.mul_le_mul_left pending.val.length (show ([] : CellRows).length + pending.val.length + 1 ≤
+      rows.length + pending.val.length + 1 by simp)
+    omega
 
 end KvRust

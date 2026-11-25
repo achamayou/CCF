@@ -58,6 +58,45 @@ theorem HistoryKeeps.rows {before after : Spike.engine.History}
     : indexRows after.index frame.data = indexRows before.index frame.data :=
   index_rows_eq (index_keeps_view kept.index _ _ (valid.archived i frame saved))
 
+theorem HistoryIndexValid.of_preserves_pins {before after : Spike.engine.History}
+    {extraPins : List U32}
+    (valid : HistoryIndexValid before)
+    (liveAfter : IndexValid after.index)
+    (pres
+      : IndexPreservesPins before.index after.index
+          (framePins after.log.frames.val ++ extraPins))
+    (slots
+      : ∀ (i : Nat) (f' : Spike.engine.Frame),
+          after.log.frames.val[i]? = some f'
+          → f'.data = 0#u32
+            ∨ ∃ (j : Nat) (f : Spike.engine.Frame),
+                before.log.frames.val[j]? = some f ∧ f'.data = f.data)
+    : HistoryIndexValid after := by
+  refine ⟨liveAfter, ?_⟩
+  intro i f' hf'
+  rcases slots i f' hf' with h0 | ⟨j, f, hf, hdata⟩
+  · have hemp : IndexView after.index 0#u32 [] := by
+      have h := index_empty_root_refines after.index
+      unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+      rw [WP.spec_ok] at h
+      exact h.2
+    rw [h0, index_rows_eq hemp]
+    exact hemp
+  · by_cases hzero : f'.data = 0#u32
+    · have hemp : IndexView after.index 0#u32 [] := by
+        have h := index_empty_root_refines after.index
+        unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+        rw [WP.spec_ok] at h
+        exact h.2
+      rw [hzero, index_rows_eq hemp]
+      exact hemp
+    · have hmem : f'.data ∈ framePins after.log.frames.val :=
+        List.mem_filterMap.mpr ⟨f', List.mem_iff_getElem?.mpr ⟨i, hf'⟩, by simp [hzero]⟩
+      have hvOld := valid.archived j f hf
+      rw [← hdata] at hvOld
+      have hvNew := index_preserves_pins_view pres f'.data _ (Or.inr (List.mem_append_left extraPins hmem)) hvOld
+      rwa [index_rows_eq hvNew]
+
 /-- Project the entire extracted frame into the executable model. -/
 noncomputable def modelFrame (encode : List U8 → String) (index : CellIndex)
     (frame : Spike.engine.Frame)
@@ -66,6 +105,277 @@ noncomputable def modelFrame (encode : List U8 → String) (index : CellIndex)
     modelMetadata (encode ∘ alloc.vec.Vec.val) frame with
       data := encodeData encode (indexedCellData (indexRows index frame.data))
   }
+
+/-- Ghost active branch frames derived from the immutable ghost native archive. -/
+def natModelFrames (log : Spike.branch_log.BranchLog Spike.engine.Frame)
+    (natArchive : List Kv.Model.Frame)
+    : List Kv.Model.Frame :=
+  log.branch.val.reverse.filterMap fun id => natArchive[id.val]?
+
+/-- A native frame agrees on all metadata fields with its ghost archive entry. -/
+def FrameMetaEq (encode : List U8 → String) (nf : Spike.engine.Frame)
+    (gf : Kv.Model.Frame)
+    : Prop :=
+  gf.version = nf.version.val
+  ∧ gf.revisions = (modelMetadata (encode ∘ alloc.vec.Vec.val) nf).revisions
+  ∧ gf.births = (modelMetadata (encode ∘ alloc.vec.Vec.val) nf).births
+
+theorem frame_meta_eq_modelFrame (encode : List U8 → String) (index : CellIndex)
+    (nf : Spike.engine.Frame)
+    : FrameMetaEq encode nf (modelFrame encode index nf) :=
+  ⟨rfl, rfl, rfl⟩
+
+/-- Alignment between the native frame archive (whose compacted/rolled-back
+entries may have `data = 0#u32`) and the immutable ghost native archive `natArchive`. -/
+structure ArchiveAligned (encode : List U8 → String) (history : Spike.engine.History)
+    (natArchive : List Kv.Model.Frame)
+    : Prop where
+  len : natArchive.length = history.log.frames.val.length
+  metaEq
+    : ∀ (i : Nat) nf gf,
+        history.log.frames.val[i]? = some nf
+        → natArchive[i]? = some gf
+        → FrameMetaEq encode nf gf
+  activeLive
+    : ∀ (off : Nat) (id : Usize) nf gf,
+        history.log.branch.val[off]? = some id
+        → history.log.frames.val[id.val]? = some nf
+        → natArchive[id.val]? = some gf
+        → (history.reuse_compacted_images = true → history.global.val ≤ nf.version.val)
+        → modelFrame encode history.index nf = gf
+
+theorem natModelFrames_length {log : Spike.branch_log.BranchLog Spike.engine.Frame}
+    {natArchive : List Kv.Model.Frame} (valid : BranchValid log)
+    (hlen : natArchive.length = log.frames.val.length)
+    : (natModelFrames log natArchive).length = log.branch.val.length := by
+  have hl (ids : List Usize) (h : ∀ id ∈ ids, id.val < natArchive.length) :
+      (ids.filterMap fun id => natArchive[id.val]?).length = ids.length := by
+    induction ids with
+    | nil => rfl
+    | cons a t ih =>
+        simp [List.getElem?_eq_getElem (h a List.mem_cons_self),
+          ih (fun x hx => h x (List.mem_cons_of_mem _ hx))]
+  unfold natModelFrames
+  rw [hl _ (fun id hid => hlen.symm ▸ valid.2 id (List.mem_reverse.mp hid)), List.length_reverse]
+
+theorem natModelFrames_append
+    {before after : Spike.branch_log.BranchLog Spike.engine.Frame}
+    {natArchive : List Kv.Model.Frame} {gf : Kv.Model.Frame} {id : Usize}
+    (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
+    (hid : id.val = before.frames.val.length)
+    (hbr : after.branch.val = before.branch.val ++ [id])
+    : natModelFrames after (natArchive ++ [gf])
+      = gf :: natModelFrames before natArchive := by
+  unfold natModelFrames
+  rw [hbr, List.reverse_append, List.reverse_singleton, List.singleton_append, List.filterMap_cons]
+  have hnew : (natArchive ++ [gf])[id.val]? = some gf := by
+    rw [hid, ← hlen, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]; rfl
+  rw [hnew]
+  dsimp only
+  congr 1
+  apply List.filterMap_congr
+  intro x hx
+  have hlt : x.val < natArchive.length := hlen.symm ▸ valid.2 x (List.mem_reverse.mp hx)
+  exact List.getElem?_append_left hlt
+
+private theorem list_filter_is_take {α : Type} (xs : List α) (p : α → Bool) (n : Nat)
+    (h : ∀ i (hi : i < xs.length), p xs[i] = decide (i < n))
+    : xs.filter p = xs.take n := by
+  induction xs generalizing n with
+  | nil => simp
+  | cons x xs ih =>
+      have hhead := h 0 (by simp)
+      change p x = decide (0 < n) at hhead
+      cases n with
+      | zero =>
+          have htail : ∀ i (hi : i < xs.length), p xs[i] = decide (i < 0) := by
+            intro i hi
+            have he := h (i + 1) (by simp; omega)
+            change p xs[i] = decide (i + 1 < 0) at he
+            simpa using he
+          simp [hhead, ih 0 htail]
+      | succ n =>
+          have htail : ∀ i (hi : i < xs.length), p xs[i] = decide (i < n) := by
+            intro i hi
+            have he := h (i + 1) (by simp; omega)
+            change p xs[i] = decide (i + 1 < n + 1) at he
+            simpa using he
+          simp [hhead, ih n htail]
+
+theorem natModelFrames_take {before after : Spike.branch_log.BranchLog Spike.engine.Frame}
+    {natArchive : List Kv.Model.Frame} {n : Nat}
+    (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
+    (hbr : after.branch.val = before.branch.val.take n)
+    (hver
+      : ∀ (i : Nat) (hi : i < before.branch.val.length) (gf : Kv.Model.Frame),
+          natArchive[before.branch.val[i].val]? = some gf → gf.version = i)
+    (hn : 0 < n)
+    : natModelFrames after natArchive
+      = (natModelFrames before natArchive).filter
+          (fun f => decide (f.version ≤ n - 1)) := by
+  have hfm_rev : ∀ (ids : List Usize),
+      ids.reverse.filterMap (fun id => natArchive[id.val]?)
+      = (ids.filterMap fun id => natArchive[id.val]?).reverse := by
+    intro ids
+    induction ids with
+    | nil => rfl
+    | cons a t ih =>
+        simp [List.reverse_cons, List.filterMap_append, List.filterMap_cons, ih]
+        cases natArchive[a.val]? <;> simp
+  unfold natModelFrames
+  rw [hbr, hfm_rev, hfm_rev, List.filter_reverse]
+  congr 1
+  have hbd : ∀ id ∈ before.branch.val, id.val < natArchive.length :=
+    fun id hid => hlen.symm ▸ valid.2 id hid
+  have htake : ∀ (ids : List Usize) (m : Nat),
+      (∀ id ∈ ids, id.val < natArchive.length) →
+      (ids.take m).filterMap (fun id => natArchive[id.val]?) =
+      (ids.filterMap (fun id => natArchive[id.val]?)).take m := by
+    intro ids
+    induction ids with
+    | nil => intro m _; simp
+    | cons a t ih =>
+        intro m hbd'
+        have hb := hbd' a List.mem_cons_self
+        have hr := fun k => ih k (fun x hx => hbd' x (List.mem_cons_of_mem _ hx))
+        cases m <;> simp [List.getElem?_eq_getElem hb, hr]
+  rw [htake _ _ hbd]
+  symm
+  apply list_filter_is_take
+  intro i hi
+  have hlenF : (before.branch.val.filterMap fun id => natArchive[id.val]?).length =
+      before.branch.val.length := by
+    have := natModelFrames_length valid hlen
+    unfold natModelFrames at this
+    rw [hfm_rev, List.length_reverse] at this
+    exact this
+  have hi' : i < before.branch.val.length := hlenF ▸ hi
+  have hget : ∀ (ids : List Usize) (k : Nat) (hk : k < ids.length),
+      (∀ id ∈ ids, id.val < natArchive.length) →
+      (ids.filterMap fun id => natArchive[id.val]?)[k]? = natArchive[ids[k].val]? := by
+    intro ids
+    induction ids with
+    | nil => intro k hk _; simp at hk
+    | cons a t ih =>
+        intro k hk hbd'
+        have hb := hbd' a List.mem_cons_self
+        cases k with
+        | zero => simp [List.getElem?_eq_getElem hb]
+        | succ j =>
+            simp only [List.filterMap_cons, List.getElem?_eq_getElem hb, List.getElem?_cons_succ,
+              List.getElem_cons_succ]
+            exact ih j (by simpa using hk)
+              (fun x hx => hbd' x (List.mem_cons_of_mem _ hx))
+  have hv := hver i hi' ((before.branch.val.filterMap fun id => natArchive[id.val]?)[i])
+    (by rw [← hget _ i hi' hbd, List.getElem?_eq_getElem hi])
+  rw [hv]
+  exact decide_eq_decide.mpr (by omega)
+
+theorem ArchiveAligned.of_preserves_pins {encode : List U8 → String}
+    {before after : Spike.engine.History} {natArchive : List Kv.Model.Frame}
+    {extraPins : List U32}
+    (aligned : ArchiveAligned encode before natArchive)
+    (validBefore : HistoryIndexValid before)
+    (pres
+      : IndexPreservesPins before.index after.index
+          (framePins after.log.frames.val ++ extraPins))
+    (hbr : after.log.branch = before.log.branch)
+    (hframes : after.log.frames = before.log.frames)
+    (hglobal : after.global = before.global)
+    (hreuse : after.reuse_compacted_images = before.reuse_compacted_images)
+    : ArchiveAligned encode after natArchive := by
+  refine ⟨
+    by rw [hframes]; exact aligned.len,
+    fun i nf gf hnf hgf => aligned.metaEq i nf gf (hframes ▸ hnf) hgf,
+    ?_
+  ⟩
+  intro off id nf gf hid hnf hgf hlive
+  have hnf0 : before.log.frames.val[id.val]? = some nf := hframes ▸ hnf
+  have hmf0 := aligned.activeLive off id nf gf (hbr ▸ hid) hnf0 hgf
+    (by rw [← hreuse, ← hglobal]; exact hlive)
+  have hpin : nf.data = 0#u32 ∨ nf.data ∈ framePins after.log.frames.val ++ extraPins := by
+    by_cases hz : nf.data = 0#u32
+    · exact Or.inl hz
+    · exact Or.inr (List.mem_append_left extraPins
+        (List.mem_filterMap.mpr ⟨nf, List.mem_iff_getElem?.mpr ⟨id.val, hnf⟩, by simp [hz]⟩))
+  have hview := index_preserves_pins_view pres nf.data _ hpin (validBefore.archived id.val nf hnf0)
+  have hrows : indexRows after.index nf.data = indexRows before.index nf.data :=
+    index_rows_eq hview
+  simpa only [modelFrame, hrows] using hmf0
+
+theorem ArchiveAligned.append {encode : List U8 → String}
+    {before after : Spike.engine.History} {natArchive : List Kv.Model.Frame}
+    {nfNew : Spike.engine.Frame} {idNew : Usize} {extraPins : List U32}
+    (aligned : ArchiveAligned encode before natArchive)
+    (validBefore : HistoryIndexValid before)
+    (validLogBefore : BranchValid before.log)
+    (pres
+      : IndexPreservesPins before.index after.index
+          (framePins after.log.frames.val ++ extraPins))
+    (hframes : after.log.frames.val = before.log.frames.val ++ [nfNew])
+    (hbr : after.log.branch.val = before.log.branch.val ++ [idNew])
+    (hidNew : idNew.val = before.log.frames.val.length)
+    (hglobal : after.global = before.global)
+    (hreuse : after.reuse_compacted_images = before.reuse_compacted_images)
+    : ArchiveAligned encode after
+        (natArchive ++ [modelFrame encode after.index nfNew]) := by
+  refine ⟨
+    by rw [hframes, List.length_append, List.length_append, aligned.len]; rfl,
+    ?_,
+    ?_
+  ⟩
+  · intro i nf gf hnf hgf
+    rw [hframes] at hnf
+    by_cases hlt : i < before.log.frames.val.length
+    · rw [List.getElem?_append_left hlt] at hnf
+      rw [List.getElem?_append_left (aligned.len.symm ▸ hlt)] at hgf
+      exact aligned.metaEq i nf gf hnf hgf
+    · have hge := Nat.le_of_not_gt hlt
+      rw [List.getElem?_append_right hge] at hnf
+      rw [List.getElem?_append_right (aligned.len.symm ▸ hge)] at hgf
+      have hsub : i - before.log.frames.val.length = 0 := by
+        have := (List.getElem?_eq_some_iff.mp hnf).1
+        simp at this; omega
+      have hsub' : i - natArchive.length = 0 := aligned.len.symm ▸ hsub
+      rw [hsub] at hnf; rw [hsub'] at hgf
+      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
+      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
+      subst hnfEq hgfEq
+      exact frame_meta_eq_modelFrame encode after.index nf
+  · intro off id nf gf hid hnf hgf hlive
+    rw [hbr] at hid
+    by_cases hoff : off < before.log.branch.val.length
+    · rw [List.getElem?_append_left hoff] at hid
+      have hidLt : id.val < before.log.frames.val.length :=
+        validLogBefore.2 id (List.mem_iff_getElem?.mpr ⟨off, hid⟩)
+      have hnf0 : before.log.frames.val[id.val]? = some nf := by
+        rwa [hframes, List.getElem?_append_left hidLt] at hnf
+      have hgf0 : natArchive[id.val]? = some gf := by
+        rwa [List.getElem?_append_left (aligned.len.symm ▸ hidLt)] at hgf
+      have hmf0 := aligned.activeLive off id nf gf hid hnf0 hgf0
+        (by rw [← hreuse, ← hglobal]; exact hlive)
+      have hpin : nf.data = 0#u32 ∨ nf.data ∈ framePins after.log.frames.val ++ extraPins := by
+        by_cases hz : nf.data = 0#u32
+        · exact Or.inl hz
+        · exact Or.inr (List.mem_append_left extraPins
+            (List.mem_filterMap.mpr ⟨nf, List.mem_iff_getElem?.mpr ⟨id.val, hnf⟩, by simp [hz]⟩))
+      have hview := index_preserves_pins_view pres nf.data _ hpin (validBefore.archived id.val nf hnf0)
+      have hrows : indexRows after.index nf.data = indexRows before.index nf.data :=
+        index_rows_eq hview
+      simpa only [modelFrame, hrows] using hmf0
+    · rw [List.getElem?_append_right (Nat.le_of_not_gt hoff)] at hid
+      have hsub : off - before.log.branch.val.length = 0 := by
+        have := (List.getElem?_eq_some_iff.mp hid).1
+        simp at this; omega
+      rw [hsub] at hid
+      have hidEq : id = idNew := Option.some.inj (by simpa using hid.symm)
+      subst hidEq
+      rw [hframes, hidNew, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hnf
+      rw [hidNew, ← aligned.len, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hgf
+      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
+      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
+      subst hnfEq hgfEq
+      rfl
 
 theorem model_frame_retained (encode : List U8 → String) {before after : CellIndex}
     (kept : IndexKeeps before after) (frame : Spike.engine.Frame)
@@ -121,7 +431,7 @@ private theorem encKeyLt_trans {encode : List U8 → String}
   have hkb : kb = kb' := inj (hb.trans hb'.symm)
   exact ⟨ka, kc, ha, hc, lt_trans hlt1 (hkb ▸ hlt2)⟩
 
-private theorem encKeyLt_perm_eq {encode : List U8 → String}
+theorem encKeyLt_perm_eq {encode : List U8 → String}
     (inj : Function.Injective encode) {a b : List (String × Kv.Model.Cell String)}
     (ha : a.Pairwise (encKeyLt encode)) (hb : b.Pairwise (encKeyLt encode))
     (perm : a.Perm b)

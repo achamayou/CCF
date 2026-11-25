@@ -22,6 +22,18 @@ impl<V> AddressIndex<V> {
         self.0.empty_root()
     }
 
+    pub fn retain_root(&mut self, root: RadixRoot) {
+        self.0.retain_root(root);
+    }
+
+    pub fn release_root(&mut self, root: RadixRoot) {
+        self.0.release_root(root);
+    }
+
+    pub fn retire_budget(&mut self, budget: usize) -> usize {
+        self.0.retire_budget(budget)
+    }
+
     pub(crate) fn batch_row(address: Address, value: V) -> RadixRow<Binding<V>> {
         let key = address_key(address.map.as_slice(), address.key.as_slice());
         RadixRow {

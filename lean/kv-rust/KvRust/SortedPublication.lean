@@ -287,19 +287,21 @@ private theorem prepare_sorted_batch_refines
     · simp [lenEq]
     · simp
 
-private theorem sorted_batch_publishes (index : CellIndex) (valid : IndexValid index)
+private theorem sorted_batch_publishes (index : CellIndex) (pins : List U32)
+    (live : IndexLiveness index pins)
     (pending : List IndexWrite) (version : U64)
     (batch : alloc.vec.Vec (Option BatchRow)) (prepared : Prepared version pending batch)
     (large : 256 ≤ pending.length)
     (peak : Nat) (peakSize : pending.length ≤ peak)
-    (space : IndexBatchRoom index peak pending.length)
+    (space : IndexBatchRoom index pins.length peak pending.length)
     : WP.spec (Spike.kv_index.AddressIndex.build_sorted_batch index batch)
         (fun (root, after) =>
           (∃ out,
             IndexView after root out
             ∧ out.Perm (pending.foldr (applyIndexedWrite version) []))
-          ∧ IndexValid after
-          ∧ IndexKeeps index after) := by
+          ∧ IndexLiveness after (if root = 0#u32 then pins else root :: pins)
+          ∧ IndexKeeps index after
+          ∧ IndexGrowth index after (pending.length * (peak + 1)) pending.length) := by
   obtain ⟨rows, info⟩ := prepared
   have size := (prepared_length info).2
   have sameKeys : rows.map (fun row => row.key.val) =
@@ -330,11 +332,19 @@ private theorem sorted_batch_publishes (index : CellIndex) (valid : IndexValid i
     omega
   have hRowRoom : index.values.rows.val.length + rows.length ≤ 2147483647 := by
     rw [size]; exact space.values
+  have hRefRoom :
+      pins.length + 17 * (index.values.dirs.val.length + 2 * (rows.length * (112 + 1)) + 2) + 1
+        ≤ U32.max := by
+    rw [size]
+    have strict := Nat.mul_lt_mul_of_pos_left (show 226 < peak + 1 by omega)
+      (show 0 < pending.length by omega)
+    have bound := space.refs
+    omega
   unfold Spike.kv_index.AddressIndex.build_sorted_batch
   apply WP.spec_bind
-    (single_build_sorted_batch_refines index batch rows valid info.owned ordered 112
-      hDepth hKeys hDirRoom hRowRoom)
-  rintro ⟨root, after⟩ ⟨valueValid, valueKeeps, links, view, bindings⟩
+    (single_build_sorted_batch_refines index batch rows pins live info.owned ordered 112
+      hDepth hKeys hDirRoom hRowRoom hRefRoom)
+  rintro ⟨root, after⟩ ⟨valueLive, valueKeeps, valueGrowth, links, view, bindings⟩
   change WP.spec (Result.ok (root, after)) _
   rw [WP.spec_ok]
   have reverseImage : rows.reverse.map batchImage = pending.map (sourceRow version) := by
@@ -346,26 +356,49 @@ private theorem sorted_batch_publishes (index : CellIndex) (valid : IndexValid i
     rw [bindings]
     have hrev := congrArg List.reverse hRevFold
     simpa only [List.map_reverse, List.reverse_reverse, packedBindings, out] using hrev
-  exact ⟨⟨out, ⟨links, view, hPacked⟩, List.reverse_perm _⟩, valueValid, valueKeeps⟩
+  refine ⟨
+    ⟨out, ⟨links, view, hPacked⟩, List.reverse_perm _⟩,
+    valueLive,
+    valueKeeps,
+    ?_,
+    ?_
+  ⟩
+  · have h1 := valueGrowth.1
+    rw [size] at h1
+    have hmul := Nat.mul_lt_mul_of_pos_left (show 226 < peak + 1 by omega)
+      (show 0 < pending.length by omega)
+    omega
+  · have h2 := valueGrowth.2
+    rw [size] at h2
+    exact h2
 
 theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.RadixRoot)
     (rows : CellRows)
     (pending : Spike.engine.Assoc Spike.engine.Address Spike.engine.Write) (version : U64)
-    (view : IndexView index root rows) (valid : IndexValid index)
-    (space : IndexBatchRoom index (rows.length + pending.val.length) pending.val.length)
+    (pins : List U32)
+    (view : IndexView index root rows) (live : IndexLiveness index pins)
+    (hrootPin : root = 0#u32 ∨ root ∈ pins)
+    (space
+      : IndexBatchRoom index pins.length (rows.length + pending.val.length)
+          pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     (chosen
       : base = root
-        ∨ (IndexView index base [] ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
+        ∨ (base = 0#u32
+            ∧ IndexView index base []
+            ∧ ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst))
     : WP.spec (Spike.engine.publish_selected index base pending version)
         (fun (next, after) =>
           (∃ out,
             IndexView after next out
             ∧ out.Perm (pending.val.foldr (applyIndexedWrite version) rows))
-          ∧ IndexValid after
-          ∧ IndexKeeps index after) := by
-  have fallback := indexed_publish_selected index root base rows pending version
-    view valid space addresses chosen
+          ∧ IndexLiveness after (if next = 0#u32 then pins else next :: pins)
+          ∧ IndexKeeps index after
+          ∧ IndexGrowth index after
+              (pending.val.length * (rows.length + pending.val.length + 1))
+              pending.val.length) := by
+  have fallback := indexed_publish_selected index root base rows pending version pins
+    view live hrootPin space addresses chosen
   unfold Spike.engine.publish_selected Spike.radix.RadixRoot.is_empty
   by_cases emptyBase : base = 0#u32
   · subst emptyBase
@@ -378,17 +411,18 @@ theorem sorted_publication_refines (index : CellIndex) (root base : Spike.radix.
       | none => exact fallback
       | some batch =>
           have empty : IndexView index 0#u32 [] := by
-            simpa [Spike.kv_index.AddressIndex.empty_root,
-              Spike.radix.SingleRadix.empty_root, WP.spec_ok]
-              using index_empty_root_refines index
+            have h := index_empty_root_refines index
+            unfold Spike.kv_index.AddressIndex.empty_root Spike.radix.SingleRadix.empty_root at h
+            rw [WP.spec_ok] at h
+            exact h.2
           have cover : ∀ entry ∈ rows, entry.1 ∈ pending.val.map Prod.fst := by
             rcases chosen with same | covered
             · have noRows := index_view_unique view (same ▸ empty)
               simp [noRows]
-            · exact covered.2
+            · exact covered.2.2
           rw [indexed_fold_cover rows pending.val version cover]
           have minSize : 256 ≤ pending.val.length := by simpa using large
-          exact sorted_batch_publishes index valid pending.val version batch
+          exact sorted_batch_publishes index pins live pending.val version batch
             (prep batch rfl) minSize _ (by omega) space
     · simpa only [ite_eq_right large] using fallback
   · simpa only [emptyBase, decide_false, bind_ok, Bool.false_eq_true, ite_false] using fallback
