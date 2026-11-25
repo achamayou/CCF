@@ -40,14 +40,16 @@ def FitsAction (encode : List U8 → String) (sid : Nat)
   | .Apply id => FitsApply n id
   | _ => True
 
-/-- The extracted store takes exactly the same enabled transitions on representable inputs.
+/-- The extracted store takes the same enabled transitions on representable inputs,
+returning identical observations except that scans and apply reports may permute their bindings.
 A reference rejection leaves the native store unchanged. -/
 theorem execute_matches (encode : List U8 → String) (inj : Function.Injective encode)
     (order : PreservesByteOrder encode) (sid : Nat)
     (n : Spike.engine.Store) (w : State) (action : Spike.engine.Action)
     (rel : StateMatches encode sid n w) (room : FitsAction encode sid n w action)
     : WP.spec (Spike.engine.Store.execute n action)
-        (StepMatches encode sid n (execute w (modelAction encode sid action))) := by
+        (StepMatches encode sid (modelAction encode sid action) n
+          (execute w (modelAction encode sid action))) := by
   cases action with
   | Begin id => exact begin_step_matches encode sid n w id rel room
   | End id => exact end_step_matches encode sid n w id rel
@@ -65,6 +67,21 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
       exact commit_result_step_matches encode sid n w id result rel
   | Compact cut => exact compact_step_matches encode sid n w cut rel
   | Rollback cut term => exact rollback_step_matches encode sid n w cut term rel
+
+/-- Relate an optional action result modulo relaxed scan/apply ordering. -/
+def OptionOutputMatches (action : Action) : Option Output → Option Output → Prop
+  | none, none => True
+  | some actual, some expected => OutputMatches action actual expected
+  | _, _ => False
+
+/-- Relate two complete trace output lists step by step against their input actions. -/
+def TraceOutputsMatch (encode : List U8 → String) (sid : Nat)
+    : List Spike.engine.Action → List (Option Output) → List (Option Output) → Prop
+  | [], [], [] => True
+  | a :: actions, x :: xs, y :: ys =>
+      OptionOutputMatches (modelAction encode sid a) x y
+      ∧ TraceOutputsMatch encode sid actions xs ys
+  | _, _, _ => False
 
 /-- Project an externally visible result, including the rejected-action marker. -/
 def observeResult (encode : List U8 → String)
@@ -114,36 +131,38 @@ private theorem returned {α : Type} {r : Result α} {p : α → Prop} (h : WP.s
   | vis _ _ => simp at h
   | div => simp at h
 
-/-- All finite in-bounds runs from related states return the same observations and end related. -/
+/-- All finite in-bounds runs from related states return matching observations and end related. -/
 theorem run_matches (encode : List U8 → String) (inj : Function.Injective encode)
     (order : PreservesByteOrder encode) (sid : Nat)
     (actions : List Spike.engine.Action) (n : Spike.engine.Store) (w : State)
     (rel : StateMatches encode sid n w) (room : FitsTrace encode sid actions n w)
     : WP.spec (runNative encode actions n)
         (fun (after, outputs) =>
-          outputs = (runReference encode sid actions w).2
+          TraceOutputsMatch encode sid actions outputs
+            (runReference encode sid actions w).2
           ∧ StateMatches encode sid after (runReference encode sid actions w).1) := by
   induction actions generalizing n w with
-  | nil => simp [runNative, runReference, rel]
+  | nil => simp [runNative, runReference, TraceOutputsMatch, rel]
   | cons a rest ih =>
       obtain ⟨fit, fitRest⟩ := room
       let obs := execute w (modelAction encode sid a)
       obtain ⟨⟨result, next⟩, he, hr⟩ :=
         returned (execute_matches encode inj order sid n w a rel fit)
-      change StepMatches encode sid n obs (result, next) at hr
+      change StepMatches encode sid (modelAction encode sid a) n obs (result, next) at hr
       have hs
           : StateMatches encode sid next (modelNext w obs)
-            ∧ observeResult encode result = obs.map Prod.snd := by
+            ∧ OptionOutputMatches (modelAction encode sid a)
+                (observeResult encode result) (obs.map Prod.snd) := by
         cases ho : obs with
         | none =>
             simp only [ho, StepMatches] at hr
             cases hr
-            exact ⟨rel, rfl⟩
+            exact ⟨rel, trivial⟩
         | some pair =>
             obtain ⟨state, out⟩ := pair
             simp only [ho, StepMatches] at hr
             obtain ⟨nativeOut, hret, hobs, hrel⟩ := hr
-            exact ⟨hrel, by simp [hret, observeResult, hobs]⟩
+            exact ⟨hrel, by simpa [hret, observeResult, OptionOutputMatches] using hobs⟩
       simp only [runNative, he, bind_ok]
       change WP.spec (do
         let (after, outputs) ← runNative encode rest next
@@ -159,7 +178,7 @@ theorem run_matches (encode : List U8 → String) (inj : Function.Injective enco
         rfl
       change WP.spec (Result.ok (after, observeResult encode result :: outputs)) _
       rw [WP.spec_ok, hstep]
-      exact ⟨by rw [hs.2, hout], hrel⟩
+      exact ⟨⟨hs.2, hout⟩, hrel⟩
 
 /-- Construct a native store and run any finite in-bounds action trace against the original model. -/
 theorem initialized_run_matches (sid : Nat) (term : U64)
@@ -171,7 +190,8 @@ theorem initialized_run_matches (sid : Nat) (term : U64)
             ∧ (FitsTrace encodeBytes sid actions n w
                 → WP.spec (runNative encodeBytes actions n)
                     (fun (after, outputs) =>
-                      outputs = (runReference encodeBytes sid actions w).2
+                      TraceOutputsMatch encodeBytes sid actions outputs
+                        (runReference encodeBytes sid actions w).2
                       ∧ StateMatches encodeBytes sid after
                           (runReference encodeBytes sid actions w).1))) := by
   apply WP.spec_mono (new_matches encodeBytes sid term)

@@ -228,7 +228,10 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ after.txs.val = s.txs.val.set index (id, {t with phase := .Applied version})
             ∧ BranchValid after.history.log
             ∧ HistoryIndexValid after.history
-            ∧ HistoryKeeps s.history after.history) := by
+            ∧ HistoryKeeps s.history after.history
+            ∧ after.history.log.frames.val.map (modelFrame encode after.history.index)
+              = s.history.log.frames.val.map (modelFrame encode s.history.index)
+                ++ [expected.head]) := by
   dsimp only
   unfold Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -298,7 +301,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       rw [WP.spec_ok]
       refine ⟨version, reported, ?_⟩
       refine ⟨rfl, hv', hTerm.symm, hreported, ?_, hGlobal.symm,
-        hTerm.symm, ?_, i.val, hrow, ?_, logValid, ?_, ⟨?_, indexKept⟩⟩
+        hTerm.symm, ?_, i.val, hrow, ?_, logValid, ?_, ⟨?_, indexKept⟩, ?_⟩
       · simp only [modelFrames, Spike.engine.History.activeFrames, hf, List.reverse_append,
           List.reverse_singleton, List.singleton_append,
           List.map_cons]
@@ -318,6 +321,13 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
           rw [List.getElem?_eq_none (Nat.le_of_not_gt hn)] at saved
           cases saved
         exact (kept j bound).trans saved
+      · change log.frames.val.map (modelFrame encode arena) = _
+        rw [archive, List.map_append, List.map_singleton, hnext]
+        congr 1
+        apply List.map_congr_left
+        intro f hfmem
+        obtain ⟨j, hj⟩ := List.mem_iff_getElem?.mp hfmem
+        exact model_frame_retained encode indexKept f (indexed.archived j f hj)
 
 /-- The wire-size preflight reads exactly the write set used by the KV model. -/
 theorem pending_writes_match (encode : List U8 → String)

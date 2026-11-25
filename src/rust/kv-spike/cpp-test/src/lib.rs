@@ -255,7 +255,6 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
         }
         Ok(_) if inspect_finished => Reply::status(Status::InvalidRequest),
         Ok(Action::Acquire(t, m)) => Reply::output(store.acquire_ccf(t, m)),
-        Ok(Action::Operate(t, m, op)) => Reply::output(store.operate_ccf(t, m, op)),
         Ok(Action::Compact(version)) => Reply::output(Ok(store.compact_ccf(version))),
         Ok(action) => Reply::output(store.execute(action)),
         Err(()) => Reply::status(Status::InvalidRequest),

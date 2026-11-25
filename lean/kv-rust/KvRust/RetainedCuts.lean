@@ -493,4 +493,159 @@ theorem retained_branch_compact (s : Store) (request : Nat)
   congr 1
   simp only [Function.comp_def, retained_frame_raise raised]
 
+/-- Across all frames ever produced by one store (even across rollbacks),
+each map revision stamp uniquely determines the exact ordered image of that map,
+unborn maps are empty, and all cells are bounded by their frame version. -/
+structure ArchiveConsistent (frames : List Frame) (nextIdentity : Nat) : Prop where
+  emptyPresent : ({} : Frame) ∈ frames
+  identities : ∀ f ∈ frames, ∀ m, (revision f m).identity < nextIdentity
+  unborn
+    : ∀ f ∈ frames,
+        ∀ m, find f.births m = none → image f.data m = [] ∧ find f.revisions m = none
+  sameRevision
+    : ∀ f1 ∈ frames,
+      ∀ f2 ∈ frames,
+        ∀ m, revision f1 m = revision f2 m → image f1.data m = image f2.data m
+  bounded : ∀ f ∈ frames, Kv.Properties.CellsBounded f.data f.version
+  unique : ∀ f ∈ frames, Kv.Properties.Unique f.data
+
+theorem archive_consistent_new : ArchiveConsistent [{}] 1 := by
+  refine ⟨List.mem_cons_self, ?_, ?_, ?_, ?_, ?_⟩
+  · intro f hf m
+    rw [List.mem_singleton.mp hf]
+    simp [revision, find]
+  · intro f hf m _
+    rw [List.mem_singleton.mp hf]
+    simp [image, find]
+  · intro f1 h1 f2 h2 m _
+    rw [List.mem_singleton.mp h1, List.mem_singleton.mp h2]
+  · intro f hf k c hc
+    rw [List.mem_singleton.mp hf] at hc
+    simp [find] at hc
+  · intro f hf
+    rw [List.mem_singleton.mp hf]
+    exact List.Pairwise.nil
+
+private theorem publish_cells_bounded (db : Data) (version : Nat) (writes : Pending)
+    (prior : Nat) (hbound : Kv.Properties.CellsBounded db prior) (hle : prior ≤ version)
+    : Kv.Properties.CellsBounded (publish db version writes) version := by
+  intro key cell found
+  rw [Kv.Properties.publish_lookup] at found
+  cases hw : find writes key with
+  | none =>
+      rw [hw] at found
+      exact Nat.le_trans (hbound key cell found) hle
+  | some w =>
+      cases w with
+      | none => rw [hw] at found; cases found
+      | some v =>
+          rw [hw] at found
+          have eq := Option.some.inj found
+          rw [← eq]
+
+theorem ArchiveConsistent.append {frames : List Frame} {s : Store}
+    (inv : ArchiveConsistent frames s.nextIdentity) (headIn : s.head ∈ frames)
+    (writes : Pending)
+    : ArchiveConsistent (frames ++ [(advance s writes).head]) (s.nextIdentity + 1) := by
+  let next := (advance s writes).head
+  let stamp : Stamp := {version := s.head.version + 1, identity := s.nextIdentity}
+  have revEq (m : String) : revision next m =
+      if writes.any (mapWriteTouches s.head.data m) then stamp else revision s.head m := by
+    have folded := revisions_fold s.head.data m stamp writes s.head.revisions
+    change find next.revisions m = _ at folded
+    unfold revision
+    rw [folded]
+    split <;> rfl
+  have birthEq (m : String) : find next.births m =
+      (find s.head.births m).or (if writes.any (fun row => row.1.1 == m) then some stamp else none) :=
+    births_fold m stamp writes s.head.births
+  have headRevLt (f : Frame) (hf : f ∈ frames) (m : String) :
+      (revision f m).identity < s.nextIdentity := inv.identities f hf m
+  have nextIdLt (m : String) : (revision next m).identity < s.nextIdentity + 1 := by
+    rw [revEq m]
+    split
+    · exact Nat.lt_succ_self _
+    · exact Nat.lt_trans (headRevLt s.head headIn m) (Nat.lt_succ_self _)
+  have nextUnborn (m : String) (absent : find next.births m = none) :
+      image next.data m = [] ∧ find next.revisions m = none := by
+    rw [birthEq m] at absent
+    have oldAbsent : find s.head.births m = none := by
+      cases h : find s.head.births m <;> simp [h] at absent ⊢
+    have noWrite : writes.any (fun row => row.1.1 == m) = false := by
+      cases h : writes.any (fun row => row.1.1 == m) <;> simp [oldAbsent, h] at absent ⊢
+    have quiet : writes.any (mapWriteTouches s.head.data m) = false := by
+      apply List.any_eq_false.mpr
+      intro row hr
+      have hne := List.any_eq_false.mp noWrite row hr
+      simp [mapWriteTouches, hne]
+    obtain ⟨oldImg, oldRev⟩ := inv.unborn s.head headIn m oldAbsent
+    refine ⟨?_, ?_⟩
+    · exact (publish_untouched_image s.head.data m (s.head.version + 1) writes quiet).trans oldImg
+    · have folded := revisions_fold s.head.data m stamp writes s.head.revisions
+      change find next.revisions m = _ at folded
+      rw [folded, quiet]
+      simpa using oldRev
+  have nextSameRev (f : Frame) (hf : f ∈ frames) (m : String)
+      (eq : revision f m = revision next m) : image f.data m = image next.data m := by
+    rw [revEq m] at eq
+    by_cases touched : writes.any (mapWriteTouches s.head.data m) = true
+    · rw [ite_eq_left touched] at eq
+      have lt := headRevLt f hf m
+      have bad := congrArg Stamp.identity eq
+      change (revision f m).identity = s.nextIdentity at bad
+      omega
+    · have quiet : writes.any (mapWriteTouches s.head.data m) = false :=
+        Bool.eq_false_of_not_eq_true touched
+      rw [ite_eq_right touched] at eq
+      exact (inv.sameRevision f hf s.head headIn m eq).trans
+        (publish_untouched_image s.head.data m (s.head.version + 1) writes quiet).symm
+  refine ⟨List.mem_append_left _ inv.emptyPresent, ?_, ?_, ?_, ?_, ?_⟩
+  · intro f hf m
+    rcases List.mem_append.mp hf with old | fresh
+    · exact Nat.lt_trans (headRevLt f old m) (Nat.lt_succ_self _)
+    · rw [List.mem_singleton.mp fresh]; exact nextIdLt m
+  · intro f hf m absent
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.unborn f old m absent
+    · rw [List.mem_singleton.mp fresh] at absent ⊢; exact nextUnborn m absent
+  · intro f1 h1 f2 h2 m eq
+    rcases List.mem_append.mp h1 with o1 | n1 <;> rcases List.mem_append.mp h2 with o2 | n2
+    · exact inv.sameRevision f1 o1 f2 o2 m eq
+    · rw [List.mem_singleton.mp n2] at eq ⊢; exact nextSameRev f1 o1 m eq
+    · rw [List.mem_singleton.mp n1] at eq ⊢; exact (nextSameRev f2 o2 m eq.symm).symm
+    · rw [List.mem_singleton.mp n1, List.mem_singleton.mp n2]
+  · intro f hf
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.bounded f old
+    · rw [List.mem_singleton.mp fresh]
+      exact publish_cells_bounded s.head.data (s.head.version + 1) writes s.head.version
+        (inv.bounded s.head headIn) (Nat.le_succ _)
+  · intro f hf
+    rcases List.mem_append.mp hf with old | fresh
+    · exact inv.unique f old
+    · rw [List.mem_singleton.mp fresh]
+      exact Kv.Properties.publish_unique s.head.data (s.head.version + 1) writes
+        (inv.unique s.head headIn)
+
+theorem archive_image_cells_bounded {frames : List Frame} {nextId : Nat}
+    (inv : ArchiveConsistent frames nextId) {f : Frame} (hf : f ∈ frames) (m : String)
+    : ∀ row ∈ image f.data m, row.2.version ≤ f.version := by
+  intro ⟨k, c⟩ hmem
+  have uniqueImg := unique_image f.data m (inv.unique f hf)
+  have hfind := (lookup_eq_some_iff_mem (image f.data m) uniqueImg k c).mpr hmem
+  have hdb : find f.data (m, k) = some c := by
+    have hi : find (image f.data m) k = find f.data (m, k) := by
+      induction f.data with
+      | nil => rfl
+      | cons row rest ih =>
+          obtain ⟨⟨table, key⟩, cell⟩ := row
+          by_cases hm : table = m
+          · subst table
+            simp [image, find] at ih ⊢
+            by_cases hk : key = k <;> simp [hk, ih]
+          · simp [image, find, hm] at ih ⊢
+            exact ih
+    exact hi.symm.trans hfind
+  exact inv.bounded f hf (m, k) c hdb
+
 end KvRust

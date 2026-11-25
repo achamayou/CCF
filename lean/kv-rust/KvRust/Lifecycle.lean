@@ -32,6 +32,7 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
         (fun s =>
           ∃ head,
             s.history.activeFrames = [head]
+            ∧ s.history.log.frames.val = [head]
             ∧ modelFrame encode s.history.index head = ({term := term.val} : Store).head
             ∧ modelFrames s.history (modelFrame encode s.history.index)
               = ({term := term.val} : Store).history
@@ -58,6 +59,7 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
   refine ⟨
     emptyFrame root,
     hframes,
+    saved,
     zero,
     ?_,
     by simp,
@@ -507,36 +509,45 @@ def lifecycleOutcome : Spike.engine.Outcome → Outcome
 
 /-- The parts of attempt correspondence needed by lifecycle guards. -/
 structure LifecycleAttempt (encode : List U8 → String) (history : Spike.engine.History)
-    (native : Spike.engine.Tx)
-    (tx : Tx)
+    (archive : List Frame) (native : Spike.engine.Tx) (tx : Tx)
     : Prop where
   phase : lifecyclePhase native.phase = tx.phase
   snapshot
     : lifecycleSnapshot native.snapshot
       = tx.snapshot.map fun s => (s.current.version, s.term)
-  writes : pointWrites encode native = tx.normal.writes
+  writes : (pointWrites encode native).Perm tx.normal.writes
   unavailable : native.unavailable = tx.unavailable
   /-- Preserve the complete attempt relation across a lifecycle action. -/
-  related : AttemptMatches encode tx.store history native tx
+  related : AttemptMatches encode tx.store history archive native tx
 
 /-- Full attempt correspondence supplies the lifecycle guard projections. -/
 theorem LifecycleAttempt.ofMatched {encode : List U8 → String} {sid : Nat}
-    {history : Spike.engine.History} {n : Spike.engine.Tx} {t : Tx}
-    (h : AttemptMatches encode sid history n t)
-    : LifecycleAttempt encode history n t :=
+    {history : Spike.engine.History} {archive : List Frame} {n : Spike.engine.Tx} {t : Tx}
+    (h : AttemptMatches encode sid history archive n t)
+    : LifecycleAttempt encode history archive n t :=
   ⟨h.phase.symm, h.snapshot.symm, h.writes, h.unavailable.symm, h.store ▸ h⟩
 
 /-- A fresh native attempt agrees with the model's default lifecycle fields at any owner. -/
 theorem lifecycle_new_attempt (encode : List U8 → String) (sid : Nat)
-    (history : Spike.engine.History)
-    : LifecycleAttempt encode history lifecycleNewTx {store := sid} := by
+    (history : Spike.engine.History) (archive : List Frame)
+    : LifecycleAttempt encode history archive lifecycleNewTx {store := sid} := by
   apply LifecycleAttempt.ofMatched (sid := sid)
-  constructor <;> first | rfl | (intros; rfl) | (intro; exact List.Pairwise.nil) | (intro _ h; cases h)
+  refine ⟨rfl, rfl, rfl, .nil, ?_, ?_, ?_, ?_, ?_, ?_, ?_, rfl, .rfl, List.Pairwise.nil, .nil, ?_, ?_⟩
+  · intro _ h; cases h
+  · intro _ h; cases h
+  · intro _ h; cases h
+  · intro _; rfl
+  · intro _; exact List.Pairwise.nil
+  · intro _ h; cases h
+  · intro _; rfl
+  · intro _ h; cases h
+  · intro _ h; cases h
 
 /-- `CommitResult` uses exactly the model's phase, outcome, and pending-write guard. -/
 theorem lifecycle_commit_version_matches_model (encode : List U8 → String)
     (t : Spike.engine.Tx) (tx : Tx) (outcome : Spike.engine.Outcome)
-    {history : Spike.engine.History} (h : LifecycleAttempt encode history t tx)
+    {history : Spike.engine.History} {archive : List Frame}
+    (h : LifecycleAttempt encode history archive t tx)
     : (lifecycleCommitVersion t outcome).map (fun v => v.val)
       = match tx.phase with
         | .applied v => if lifecycleOutcome outcome == .conflict then none else some v
@@ -548,8 +559,11 @@ theorem lifecycle_commit_version_matches_model (encode : List U8 → String)
               some 0
         | _ => none := by
   have hw : tx.normal.writes = [] ↔ t.pending.val = [] := by
-    rw [← h.writes]
-    simp [pointWrites, encodeWrites, byteWrites]
+    have hlen : tx.normal.writes.length = t.pending.val.length := by
+      have hp := h.writes.length_eq.symm
+      simpa [pointWrites, encodeWrites, byteWrites] using hp
+    exact ⟨fun h0 => List.eq_nil_of_length_eq_zero (by rw [← hlen, h0]; rfl),
+      fun h0 => List.eq_nil_of_length_eq_zero (by rw [hlen, h0]; rfl)⟩
   have hsuccess (o : Outcome) : (o == .success) = decide (o = .success) := by
     cases o <;> rfl
   have hconflict (o : Outcome) : (o == .conflict) = decide (o = .conflict) := by
@@ -582,7 +596,7 @@ def LifecycleModelPost (s : Spike.engine.Store) (step : Option (State × Output)
 
 /-- For a live store, the duplicate-attempt guard and fresh attempt agree with `execute`. -/
 theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.engine.Store)
-    (w : State) (sid : Nat) (id : U64) (model : Store)
+    (w : State) (sid : Nat) (id : U64) (model : Store) (archive : List Frame)
     (hStore : find w.stores sid = some model)
     (hExists : (find w.txs id.val).isSome = (find s.txs.val id).isSome)
     (room : find s.txs.val id = none → s.txs.val.length < Usize.max)
@@ -592,7 +606,8 @@ theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.eng
             w' = {w with txs := Kv.Model.set w.txs id.val {store := sid}}
             ∧ s'.history = s.history
             ∧ s'.txs.val = Kv.Model.set s.txs.val id lifecycleNewTx
-            ∧ LifecycleAttempt encode s.history lifecycleNewTx {store := sid}) := by
+            ∧ LifecycleAttempt encode s.history archive lifecycleNewTx
+                {store := sid}) := by
   apply WP.spec_mono (execute_begin_lifecycle s id room)
   rintro ⟨out, after⟩ h
   cases ht : find s.txs.val id with
@@ -600,7 +615,7 @@ theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.eng
       simp only [ht] at h
       obtain ⟨rfl, hh, hr⟩ := h
       simp [execute, hStore, hExists, ht, LifecycleModelPost, lifecycleOutput, hh, hr,
-        lifecycle_new_attempt encode sid s.history]
+        lifecycle_new_attempt encode sid s.history archive]
   | some t =>
       simpa [execute, hStore, hExists, ht, LifecycleModelPost] using h
 
@@ -643,17 +658,17 @@ theorem execute_set_term_matches_model (s : Spike.engine.Store) (w : State) (sid
     simp [execute, hStore, hTerm, hlt, LifecycleModelPost, lifecycleOutput]
 
 /-- The exact model row replacement and native in-place update for a matched attempt. -/
-def LifecycleModelRow (encode : List U8 → String) (s : Spike.engine.Store)
-    (w : State) (sid : Nat) (id : U64) (w' : State) (s' : Spike.engine.Store)
+def LifecycleModelRow (encode : List U8 → String) (s : Spike.engine.Store) (w : State)
+    (sid : Nat) (id : U64) (archive : List Frame) (w' : State) (s' : Spike.engine.Store)
     : Prop :=
   ∃ old next nextModel,
     find s.txs.val id = some old
     ∧ w' = {w with txs := Kv.Model.set w.txs id.val nextModel}
     ∧ LifecycleRowUpdate s s' id old next
-    ∧ AttemptMatches encode sid s.history next nextModel
+    ∧ AttemptMatches encode sid s.history archive next nextModel
 
 private theorem match_attempt_step (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64) (archive : List Frame)
     (action : Spike.engine.Action) (modelAction : Action)
     (nativeStep : Spike.engine.Tx → Option (Spike.engine.Output × Spike.engine.Tx))
     (modelStep : Store → Tx → Option (Output × Tx))
@@ -667,7 +682,7 @@ private theorem match_attempt_step (encode : List U8 → String)
           → Option.Rel
               (fun n m =>
                 lifecycleOutput (.Ok n.1) = some m.1
-                ∧ LifecycleAttempt encode s.history n.2 m.2)
+                ∧ LifecycleAttempt encode s.history archive n.2 m.2)
               (nativeStep t) (modelStep store tx))
     (owner
       : ∀ store tx out next,
@@ -683,7 +698,7 @@ private theorem match_attempt_step (encode : List U8 → String)
       : WP.spec (Spike.engine.Store.execute s action) (LifecycleTxPost s id nativeStep))
     : WP.spec (Spike.engine.Store.execute s action)
         (LifecycleModelPost s (execute w modelAction)
-          (LifecycleModelRow encode s w sid id)) := by
+          (LifecycleModelRow encode s w sid id archive)) := by
   apply WP.spec_mono hNative
   intro r hr
   rw [hModel]
@@ -727,21 +742,21 @@ private theorem lifecycle_option_bind_some {α β : Type} (a : α) (f : α → O
 
 /-- On related lookups, `CommitBegin` agrees with the model without assuming either guard. -/
 theorem execute_commit_begin_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64) (archive : List Frame)
     (lookup
-      : Option.Rel (fun t (_, tx) => LifecycleAttempt encode s.history t tx)
+      : Option.Rel (fun t (_, tx) => LifecycleAttempt encode s.history archive t tx)
           (find s.txs.val id) (lookupTx w sid id.val))
     : WP.spec (Spike.engine.Store.execute s (.CommitBegin id))
         (LifecycleModelPost s (execute w (.commitBegin sid id.val))
-          (LifecycleModelRow encode s w sid id)) := by
+          (LifecycleModelRow encode s w sid id archive)) := by
   let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
     match t.phase with
     | .Active => some (.Unit, {t with phase := .Committing})
     | _ => none
   let mStep (_ : Store) (tx : Tx) : Option (Output × Tx) :=
     if tx.phase != .active then none else some (.unit, {tx with phase := .committing})
-  refine match_attempt_step encode s w sid id _ _ nStep mStep
-    (fun t _ tx => LifecycleAttempt encode s.history t tx) lookup ?_ ?_ ?_
+  refine match_attempt_step encode s w sid id archive _ _ nStep mStep
+    (fun t _ tx => LifecycleAttempt encode s.history archive t tx) lookup ?_ ?_ ?_
     (execute_commit_begin_lifecycle s id)
   · intro t _ tx h
     dsimp only [nStep, mStep]
@@ -761,21 +776,21 @@ theorem execute_commit_begin_matches_model (encode : List U8 → String)
 
 /-- On related lookups, `Snapshot` agrees with the model's fresh-active guard and frozen fields. -/
 theorem execute_snapshot_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64) (archive : List Frame)
     (prior : List Spike.engine.Frame) (head : Spike.engine.Frame)
     (hframes : s.history.activeFrames = prior ++ [head])
     (valid : BranchValid s.history.log)
     (lookup
       : Option.Rel
           (fun t (model, tx) =>
-            LifecycleAttempt encode s.history t tx
-            ∧ model.head = modelFrame encode s.history.index head
+            LifecycleAttempt encode s.history archive t tx
+            ∧ model.head.version = head.version.val
             ∧ model.global = s.history.global.val
             ∧ model.term = s.history.term.val)
           (find s.txs.val id) (lookupTx w sid id.val))
     : WP.spec (Spike.engine.Store.execute s (.Snapshot id))
         (LifecycleModelPost s (execute w (.snapshot sid id.val))
-          (LifecycleModelRow encode s w sid id)) := by
+          (LifecycleModelRow encode s w sid id archive)) := by
   let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
     match t.phase, t.snapshot with
     | .Active, none =>
@@ -786,16 +801,14 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
     if tx.phase != .active || tx.snapshot.isSome then none
     else some (.snapshot store.head.version store.global store.term,
       {tx with snapshot := some {current := store.head, term := store.term}})
-  refine match_attempt_step encode s w sid id _ _ nStep mStep
-    (fun t model tx => LifecycleAttempt encode s.history t tx
-      ∧ model.head = modelFrame encode s.history.index head
+  refine match_attempt_step encode s w sid id archive _ _ nStep mStep
+    (fun t model tx => LifecycleAttempt encode s.history archive t tx
+      ∧ model.head.version = head.version.val
       ∧ model.global = s.history.global.val ∧ model.term = s.history.term.val)
     lookup ?_ ?_ ?_ (execute_snapshot_lifecycle s id prior head hframes valid)
-  · intro t store tx ⟨h, hh, hg, ht⟩
+  · intro t store tx ⟨h, hvs, hg, ht⟩
     dsimp only [nStep, mStep]
     rw [phase_not_active, ← h.phase]
-    have hvs : store.head.version = head.version.val := by
-      simp [hh, modelFrame, modelMetadata]
     have hsome : tx.snapshot.isSome = t.snapshot.isSome := by
       have hs := congrArg Option.isSome h.snapshot
       simpa [lifecycleSnapshot] using hs.symm
@@ -820,15 +833,15 @@ theorem execute_snapshot_matches_model (encode : List U8 → String)
 
 /-- On related lookups, all `CommitResult` guards, versions and updates match `execute`. -/
 theorem execute_commit_result_matches_model (encode : List U8 → String)
-    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64)
+    (s : Spike.engine.Store) (w : State) (sid : Nat) (id : U64) (archive : List Frame)
     (outcome : Spike.engine.Outcome)
     (lookup
-      : Option.Rel (fun t (_, tx) => LifecycleAttempt encode s.history t tx)
+      : Option.Rel (fun t (_, tx) => LifecycleAttempt encode s.history archive t tx)
           (find s.txs.val id) (lookupTx w sid id.val))
     : WP.spec (Spike.engine.Store.execute s (.CommitResult id outcome))
         (LifecycleModelPost s
           (execute w (.commitResult sid id.val (lifecycleOutcome outcome)))
-          (LifecycleModelRow encode s w sid id)) := by
+          (LifecycleModelRow encode s w sid id archive)) := by
   let nStep (t : Spike.engine.Tx) : Option (Spike.engine.Output × Spike.engine.Tx) :=
     (lifecycleCommitVersion t outcome).map fun v =>
       (.Committed outcome v, {t with phase := .Finished})
@@ -841,8 +854,8 @@ theorem execute_commit_result_matches_model (encode : List U8 → String)
     | _ => none
   let mStep (_ : Store) (tx : Tx) : Option (Output × Tx) :=
     (version tx).map fun v => (.committed (lifecycleOutcome outcome) v, {tx with phase := .finished})
-  refine match_attempt_step encode s w sid id _ _ nStep mStep
-    (fun t _ tx => LifecycleAttempt encode s.history t tx) lookup ?_ ?_ ?_
+  refine match_attempt_step encode s w sid id archive _ _ nStep mStep
+    (fun t _ tx => LifecycleAttempt encode s.history archive t tx) lookup ?_ ?_ ?_
     (execute_commit_result_lifecycle s id outcome)
   · intro t _ tx h
     have hv : (lifecycleCommitVersion t outcome).map (fun v => v.val) = version tx :=

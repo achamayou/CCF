@@ -105,6 +105,138 @@ structure FrameOrderEq (a b : Frame) : Prop where
   revisions : ∀ map, find a.revisions map = find b.revisions map
   births : ∀ map, find a.births map = find b.births map
 
+theorem FrameOrderEq.refl (f : Frame) : FrameOrderEq f f :=
+  ⟨rfl, .rfl, fun _ => rfl, fun _ => rfl⟩
+
+theorem FrameOrderEq.symm {a b : Frame} (h : FrameOrderEq a b) : FrameOrderEq b a :=
+  ⟨h.version.symm, h.data.symm, fun m => (h.revisions m).symm, fun m => (h.births m).symm⟩
+
+theorem FrameOrderEq.trans {a b c : Frame} (ab : FrameOrderEq a b) (bc : FrameOrderEq b c)
+    : FrameOrderEq a c :=
+  ⟨
+    ab.version.trans bc.version,
+    ab.data.trans bc.data,
+    fun m => (ab.revisions m).trans (bc.revisions m),
+    fun m => (ab.births m).trans (bc.births m)
+  ⟩
+
+theorem FrameOrderEq.revision_eq {a b : Frame} (h : FrameOrderEq a b) (m : String)
+    : revision a m = revision b m := by
+  simp only [revision, h.revisions m]
+
+theorem FrameOrderEq.image_perm {a b : Frame} (h : FrameOrderEq a b) (m : String)
+    : (image a.data m).Perm (image b.data m) :=
+  h.data.filterMap _
+
+theorem history_order_eq_findCut {a b : List Frame} (h : List.Forall₂ FrameOrderEq a b)
+    (cut : Nat)
+    : FrameOrderEq
+        ((a.find? fun f => decide (f.version ≤ cut)).getD {})
+        ((b.find? fun f => decide (f.version ≤ cut)).getD {}) := by
+  induction h with
+  | nil => exact .refl {}
+  | @cons x y xs ys head _ ih =>
+      simp only [List.find?_cons, head.version]
+      by_cases le : y.version ≤ cut
+      · simpa [le] using head
+      · simpa [le] using ih
+
+theorem history_order_eq_atCut {s t : Store}
+    (h : List.Forall₂ FrameOrderEq s.history t.history) (cut : Nat)
+    : FrameOrderEq (atCut s cut) (atCut t cut) :=
+  history_order_eq_findCut h cut
+
+theorem history_order_eq_mapLineage {s t : Store}
+    (h : List.Forall₂ FrameOrderEq s.history t.history) {f g : Frame}
+    (fg : FrameOrderEq f g) (m : String)
+    : mapLineage s f m = mapLineage t g m := by
+  unfold mapLineage
+  generalize s.history = xs at h
+  generalize t.history = ys at h
+  induction h with
+  | nil => rfl
+  | @cons x y xs ys head _ ih =>
+      rw [List.any_cons, List.any_cons, ih, head.births m, head.revision_eq m,
+        fg.births m, fg.revision_eq m]
+
+theorem history_order_eq_captureLocal {s t : Store}
+    (h : List.Forall₂ FrameOrderEq s.history t.history) (snap : Snapshot) (m : String)
+    : FrameOrderEq (captureLocal s snap m) (captureLocal t snap m) := by
+  have cut := history_order_eq_atCut h snap.current.version
+  unfold captureLocal
+  rw [cut.births m]
+  split
+  · exact cut
+  · exact .refl {}
+
+theorem history_order_eq_available {s t : Store}
+    (h : List.Forall₂ FrameOrderEq s.history t.history) (hg : s.global = t.global)
+    (snap : Snapshot) (m : String)
+    : available s snap m = available t snap m := by
+  have loc := history_order_eq_captureLocal h snap m
+  have glob := history_order_eq_atCut h t.global
+  unfold available mapAvailable
+  rw [loc.births m]
+  cases find (captureLocal t snap m).births m with
+  | none =>
+      have emptyEq : (image (captureLocal s snap m).data m).isEmpty =
+          (image (captureLocal t snap m).data m).isEmpty := by
+        cases h1 : image (captureLocal s snap m).data m <;>
+          cases h2 : image (captureLocal t snap m).data m
+        · rfl
+        · have len := (loc.image_perm m).length_eq
+          simp [h1, h2] at len
+        · have len := (loc.image_perm m).length_eq
+          simp [h1, h2] at len
+        · rfl
+      rw [emptyEq, loc.revisions m]
+  | some _ =>
+      rw [loc.revision_eq m, hg, glob.revision_eq m, history_order_eq_mapLineage h loc m]
+
+theorem history_order_eq_captureGlobal_frame {s t : Store}
+    (h : List.Forall₂ FrameOrderEq s.history t.history) (hg : s.global = t.global)
+    (snap : Snapshot) (m : String)
+    : FrameOrderEq (captureGlobal s snap m).frame (captureGlobal t snap m).frame := by
+  have loc := history_order_eq_captureLocal h snap m
+  unfold captureGlobal
+  dsimp only
+  rw [loc.births m]
+  split
+  · exact .refl {}
+  · rw [hg]; exact history_order_eq_atCut h t.global
+
+theorem history_order_eq_filter {a b : List Frame} (h : List.Forall₂ FrameOrderEq a b)
+    (cut : Nat)
+    : List.Forall₂ FrameOrderEq
+        (a.filter fun f => decide (f.version ≤ cut))
+        (b.filter fun f => decide (f.version ≤ cut)) := by
+  induction h with
+  | nil => exact .nil
+  | @cons x y xs ys head _ ih =>
+      simp only [List.filter_cons, head.version]
+      by_cases le : y.version ≤ cut
+      · simpa [le] using List.Forall₂.cons head ih
+      · simpa [le] using ih
+
+/-- Outputs agree identically except that scans and apply reports may permute
+their unique key/address bindings; byte-sorted ranges remain exact. -/
+def OutputMatches (action : Action) (actual expected : Output) : Prop :=
+  match action, actual, expected with
+  | .operation _ _ (.scan _), .entries a, .entries b => a.Perm b
+  | .apply _ _, .applied v t a, .applied v' t' b => v = v' ∧ t = t' ∧ a.Perm b
+  | _, a, b => a = b
+
+theorem OutputMatches.of_eq {action : Action} {a b : Output} (h : a = b)
+    : OutputMatches action a b := by
+  subst b
+  cases action with
+  | operation _ _ op =>
+      cases op <;> cases a <;> simp [OutputMatches]
+  | apply _ _ =>
+      cases a <;> simp [OutputMatches]
+  | _ =>
+      cases a <;> simp [OutputMatches]
+
 private def mapRows {M K V : Type} [DecidableEq M] (rows : Assoc (Addr M K) V) (m : M)
     : Assoc K V :=
   rows.filterMap fun (a, v) => if a.1 = m then some (a.2, v) else none

@@ -232,7 +232,7 @@ fn ccf_pending_writes_replace_and_clear_without_recency_order() {
     for map in [b"m", b"n"] {
         acquire(&mut store, 0, map);
     }
-    let mut operation = |map: &[u8], op| store.operate_ccf(0, Bytes::copy_from(map), op).unwrap();
+    let mut operation = |map: &[u8], operation| op(&mut store, 0, map, operation);
     let write = |key: &[u8], value: Option<&[u8]>| {
         Operation::Write(Bytes::copy_from(key), value.map(Bytes::copy_from))
     };

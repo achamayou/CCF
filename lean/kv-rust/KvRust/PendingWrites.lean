@@ -193,12 +193,11 @@ changes only the order of the write set compared with the list model. -/
 theorem stage_write_by_key_refines (rows : alloc.vec.Vec PendingWrite)
     (address : Spike.engine.Address) (write : Spike.engine.Write)
     (sorted : PendingSorted rows.val) (room : rows.val.length < Usize.max)
-    : WP.spec (Spike.engine.stage_write rows address write true)
+    : WP.spec (Spike.engine.stage_write rows address write)
         (fun next =>
           PendingSorted next.val
           ∧ next.val.Perm (Kv.Model.set rows.val address write)) := by
   unfold Spike.engine.stage_write
-  simp only [ite_true]
   apply WP.spec_bind (Pₘ := fun next : alloc.vec.Vec PendingWrite =>
     PendingSorted next.val ∧ next.val.Perm (Kv.Model.set rows.val address write))
   swap

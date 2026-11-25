@@ -242,11 +242,7 @@ fn pending_key_order(a: &Address, b: &Address) -> i8 {
     a.map.compare(&b.map)
 }
 
-fn stage_write(pending: &mut Pending, address: Address, write: Write, by_key: bool) {
-    if !by_key {
-        pending.set(address, write);
-        return;
-    }
+fn stage_write(pending: &mut Pending, address: Address, write: Write) {
     // Keep keys descending so the bulk publisher can consume a single map
     // in ascending order without a separate sort.
     let mut lo = 0;
@@ -1070,16 +1066,6 @@ impl Tx {
     }
 
     fn operate(&mut self, history: &History, map: Bytes, op: Operation) -> Result<Output, Error> {
-        self.operate_with_order(history, map, op, false)
-    }
-
-    fn operate_with_order(
-        &mut self,
-        history: &History,
-        map: Bytes,
-        op: Operation,
-        by_key: bool,
-    ) -> Result<Output, Error> {
         if !matches!(self.phase, Phase::Active) {
             return Err(Error::Disabled);
         }
@@ -1118,7 +1104,6 @@ impl Tx {
                     &mut self.pending,
                     Address { map, key },
                     Write::from_option(value),
-                    by_key,
                 );
                 Ok(Output::Unit)
             }
@@ -1143,7 +1128,6 @@ impl Tx {
                             key: entries[i].0.clone(),
                         },
                         Write::Remove,
-                        by_key,
                     );
                     i += 1;
                 }
@@ -1499,15 +1483,6 @@ impl Store {
             Action::Compact(version) => Ok(Output::Compacted(self.history.compact(version))),
             Action::Rollback(version, term) => self.history.rollback(version, term),
         }
-    }
-
-    /// Execute a CCF handle operation without a write-recency ordering guarantee.
-    /// All active map operations on a CCF attempt use this entry point.
-    pub fn operate_ccf(&mut self, tx: Attempt, map: Bytes, op: Operation) -> Result<Output, Error> {
-        let i = self.tx_index(tx)?;
-        self.txs.0[i]
-            .1
-            .operate_with_order(&self.history, map, op, true)
     }
 
     /// CCF commit preparation. Submitting a locally applied write set and

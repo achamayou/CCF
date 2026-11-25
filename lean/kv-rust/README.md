@@ -30,7 +30,8 @@ The [point-operation proofs](KvRust/Point.lean) cover enabled `Get`, `Has`, `Pre
 The [map-operation proofs](KvRust/Scan.lean) cover scans, sizes, clears, and half-open ranges sorted in byte order.
 The [lifecycle proofs](KvRust/Lifecycle.lean) cover store initialization, attempt creation and removal, term and snapshot capture, and commit initiation and completion.
 
-[`initialized_run_matches`](KvRust/Simulation.lean) composes these results from the actual model's empty state: every in-bounds finite trace over the native single-store action surface produces the same observations and ends in related states.
+[`initialized_run_matches`](KvRust/Simulation.lean) composes these results from the actual model's empty state: every in-bounds finite trace over the native single-store action surface produces matching observations and ends in related states.
+Point reads, sizes, byte-sorted half-open ranges, commit decisions, rollbacks, and rejections match the model identically, while whole-map scans and applied write reports match up to list permutation.
 A disabled model action maps to an unchanged native store with `Error::Disabled`; rollback below the compacted frontier is a separate observable result in both implementations.
 The proof uses an injective, order-preserving encoding of native byte strings into the model's string type.
 `FitsTrace` states the capacity requirements for the counters, vectors, packed addresses, radix growth, and scan work that the original, unbounded model does not have.
@@ -85,14 +86,11 @@ The same fuzzer schedules and assertions run on both backends, but the C++ trace
 
 The test adapter serializes commit submission and only fills reserved slots in order.
 It does not implement the full CCF store interface or production replication.
-The existing trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
-The CCF adapter stages writes by key rather than write recency; the exact-order dispatcher retains the original behavior while the separate relaxed refinement is being composed.
+The trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
+Both the action dispatcher and the CCF adapter now stage writes in descending key order with binary search and in-place replacement; the separate recency-order path has been removed.
 The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.
-The [order-equivalence lemmas](KvRust/OrderEquivalence.lean) are the bridge to the relaxed contract.
-The extracted `Write` and `Clear` actions, local point-read and scan observations, and frame publication preserve whole bindings and exact version metadata while ignoring incidental list order.
-The range builder still returns the exact sorted result for any permutation of the input.
-The ordinary-branch OCC proof checks the same cells and previous-write versions when each whole-map dependency comes from a surviving cut.
-These results are not yet composed into a trace theorem for the key-ordered dispatcher.
+The [order-equivalence lemmas](KvRust/OrderEquivalence.lean) bridge key-ordered staging to the unchanged model through archive-wide revision consistency.
+[`initialized_run_matches`](KvRust/Simulation.lean) composes these results end-to-end: exact point observations, sizes, byte-sorted half-open ranges, OCC validation decisions, and lifecycles match identically, while whole-map scans and applied write reports match up to permutation.
 The extracted ordinary ledger replay proof shows that, after decoding, a successful next-version replay advances the model with exactly the supplied writes, and a rejected replay does not mutate the store.
 Provisional replacement replay and snapshot import are tested, but not covered by that theorem.
 

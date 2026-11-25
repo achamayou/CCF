@@ -324,49 +324,42 @@ theorem scan_by_contents_matches (encode : List U8 → String)
     rw [same] at dependency
     exact dependency
 
-private def ClearWritesMatch (byKey : Bool) (a b : Pending) : Prop :=
-  if byKey then a.Perm b else a = b
+private theorem clear_writes_fold (m : String)
+    (entries : Assoc String String) {a b : Pending} (related : a.Perm b)
+    : (entries.foldl (removeEntry m) a).Perm (entries.foldl (removeEntry m) b) := by
+  induction entries generalizing a b with
+  | nil => exact related
+  | cons row rest ih => exact ih (set_perm related (m, row.1) none)
 
-private theorem clear_writes_fold (byKey : Bool) (m : String)
-    (entries : Assoc String String) {a b : Pending} (related : ClearWritesMatch byKey a b)
-    : ClearWritesMatch byKey (entries.foldl (removeEntry m) a)
-        (entries.foldl (removeEntry m) b) := by
-  cases byKey
-  · exact congrArg (entries.foldl (removeEntry m)) related
-  · induction entries generalizing a b with
-    | nil => exact related
-    | cons row rest ih => exact ih (set_perm related (m, row.1) none)
-
-private theorem clear_rows_with_order (encode : List U8 → String)
+private theorem clear_rows (encode : List U8 → String)
     (inj : Function.Injective encode) (t : Spike.engine.Tx) (m : Bytes)
-    (entries : Entries) (byKey : Bool)
-    (sorted : byKey = true → PendingSorted t.pending.val)
+    (entries : Entries) (sorted : PendingSorted t.pending.val)
     (room : t.pending.val.length + entries.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.operate_with_order_loop t.pending m byKey entries 0#usize)
+    : WP.spec (Spike.engine.Tx.operate_loop t.pending m entries 0#usize)
         (fun next =>
-          ClearWritesMatch byKey (pointWrites encode {t with pending := next})
+          (pointWrites encode {t with pending := next}).Perm
             ((modelEntries encode entries).foldl (removeEntry (encode m.val))
               (pointWrites encode t))
-          ∧ (byKey = true → PendingSorted next.val)) := by
+          ∧ PendingSorted next.val) := by
   let project := fun (p : Bytes × Bytes) =>
     (encode (alloc.vec.Vec.val p.1), encode (alloc.vec.Vec.val p.2))
   let table := encode m.val
   let remaining := fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write)) (i : Nat) =>
     ((entries.val.drop i).map project).foldl (removeEntry table)
       (pointWrites encode {t with pending := p})
-  unfold Spike.engine.Tx.operate_with_order_loop
+  unfold Spike.engine.Tx.operate_loop
   apply loop.spec_decr_nat
     (fun (p : alloc.vec.Vec (Spike.engine.Address × Spike.engine.Write) × Usize) =>
       entries.val.length - p.2.val)
     (fun (s, i) =>
       i.val ≤ entries.val.length
       ∧ s.val.length + (entries.val.length - i.val) ≤ Usize.max
-      ∧ ClearWritesMatch byKey (remaining s i.val) (remaining t.pending 0)
-      ∧ (byKey = true → PendingSorted s.val))
+      ∧ (remaining s i.val).Perm (remaining t.pending 0)
+      ∧ PendingSorted s.val)
     _ _ _
   · rintro ⟨s, i⟩ ⟨hi, hsize, hs, hsOrder⟩
     dsimp only at hi hsize hs hsOrder ⊢
-    unfold Spike.engine.Tx.operate_with_order_loop.body
+    unfold Spike.engine.Tx.operate_loop.body
     have hlen : (alloc.vec.Vec.len entries).val = entries.val.length := alloc.vec.Vec.len_val _
     have hcap := alloc.vec.Vec.len_ineq entries
     have hone : (1#usize : Usize).val = 1 := rfl
@@ -377,41 +370,28 @@ private theorem clear_rows_with_order (encode : List U8 → String)
       rintro ⟨key, value⟩ hr
       change WP.spec (do
         let key' ← Spike.engine.Bytes.Insts.CoreCloneClone.clone key
-        let pending ← Spike.engine.stage_write s {map := m, key := key'} .Remove byKey
+        let pending ← Spike.engine.stage_write s {map := m, key := key'} .Remove
         let j ← i + 1#usize
         Result.ok (ControlFlow.cont (pending, j))) _
       simp only [clone_bytes, bind_ok]
       have hroom : s.val.length < Usize.max := by omega
       let updated := removeEntry table (pointWrites encode {t with pending := s}) (project (key, value))
-      have replace : WP.spec (Spike.engine.stage_write s {map := m, key} .Remove byKey)
-          (fun next => ClearWritesMatch byKey (pointWrites encode {t with pending := next}) updated
-            ∧ next.val.length ≤ s.val.length + 1 ∧ (byKey = true → PendingSorted next.val)) := by
-        cases byKey
-        · simp only [Spike.engine.stage_write, Bool.false_eq_true, ite_false]
-          apply WP.spec_mono (stage_write_bounded encode inj {t with pending := s}
-            {map := m, key} .Remove hroom)
-          intro next ⟨write, growth⟩
-          exact ⟨write, growth, by simp⟩
-        · apply WP.spec_mono (stage_key_write encode inj {t with pending := s}
-            {map := m, key} .Remove _ .rfl (hsOrder rfl) hroom)
-          intro next ⟨write, ordered, growth⟩
-          exact ⟨write, growth, fun _ => ordered⟩
-      apply WP.spec_bind replace
-      intro pending ⟨related, hpBound, hpOrder⟩
+      apply WP.spec_bind (stage_key_write encode inj {t with pending := s}
+        {map := m, key} .Remove _ .rfl hsOrder hroom)
+      intro pending ⟨related, hpOrder, hpBound⟩
+      dsimp only at hpBound
       apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
       intro j hj
       have hj' : j.val = i.val + 1 := by omega
       have hdrop : entries.val.drop i.val = (key, value) :: entries.val.drop j.val := by
         rw [hj', List.drop_eq_getElem_cons hb, ← hr]
       rw [WP.spec_ok]
-      have same := clear_writes_fold byKey table ((entries.val.drop j.val).map project) related
-      have hFold : ClearWritesMatch byKey (remaining pending j.val) (remaining t.pending 0) := by
-        change ClearWritesMatch byKey (remaining pending j.val)
+      have same := clear_writes_fold table ((entries.val.drop j.val).map project) related
+      have hFold : (remaining pending j.val).Perm (remaining t.pending 0) := by
+        change (remaining pending j.val).Perm
           (((entries.val.drop j.val).map project).foldl (removeEntry table) updated) at same
         simp only [remaining, hdrop, List.map_cons, List.foldl_cons] at hs
-        cases byKey
-        · exact Eq.trans same hs
-        · exact List.Perm.trans same hs
+        exact List.Perm.trans same hs
       exact ⟨⟨show j.val ≤ entries.val.length by omega,
         show pending.val.length + (entries.val.length - j.val) ≤ Usize.max by omega,
         hFold, hpOrder⟩, show entries.val.length - j.val < entries.val.length - i.val by omega⟩
@@ -422,23 +402,9 @@ private theorem clear_rows_with_order (encode : List U8 → String)
         List.map_nil, List.foldl_nil] using hs
   · change 0 ≤ entries.val.length ∧
       t.pending.val.length + (entries.val.length - 0) ≤ Usize.max ∧
-      ClearWritesMatch byKey (remaining t.pending 0) (remaining t.pending 0) ∧
-      (byKey = true → PendingSorted t.pending.val)
-    refine ⟨Nat.zero_le _, room, ?_, sorted⟩
-    cases byKey
-    · rfl
-    · exact .rfl
-
-private theorem clear_rows (encode : List U8 → String) (inj : Function.Injective encode)
-    (t : Spike.engine.Tx) (m : Bytes) (entries : Entries)
-    (room : t.pending.val.length + entries.val.length ≤ Usize.max)
-    : WP.spec (Spike.engine.Tx.operate_with_order_loop t.pending m false entries 0#usize)
-        (fun next =>
-          pointWrites encode {t with pending := next}
-          = (modelEntries encode entries).foldl (removeEntry (encode m.val))
-              (pointWrites encode t)) :=
-  WP.spec_mono (clear_rows_with_order encode inj t m entries false (by simp) room)
-    (fun _ h => h.1)
+      (remaining t.pending 0).Perm (remaining t.pending 0) ∧
+      PendingSorted t.pending.val
+    exact ⟨Nat.zero_le _, room, .rfl, sorted⟩
 
 private theorem clear_reference (entries : Assoc String String) (t : Tx) (m : String)
     : let clear :=
@@ -453,73 +419,6 @@ private theorem clear_reference (entries : Assoc String String) (t : Tx) (m : St
       obtain ⟨key, value⟩ := a
       simpa [recordOp, needs, stage, removeEntry]
         using ih {t with normal := recordOp t.data t.normal (.write (m, key) none)}
-
-/-- Clearing a map through the extracted fast path marks the same visible keys
-for deletion even if the native scan uses a different order. -/
-theorem operate_key_clear_matches_model (encode : List U8 → String)
-    (inj : Function.Injective encode) (history : Spike.engine.History)
-    (t : Spike.engine.Tx) (tx : Tx) (m : Spike.engine.Bytes) (view : Spike.engine.View)
-    (active : t.phase = .Active) (acquired : find t.views.val m = some view)
-    (localImage
-      : (encodeImage encode (pinImage history m view.local)).Perm
-          (image tx.data (encode m.val)))
-    (writes : (pointWrites encode t).Perm tx.normal.writes)
-    (deps : List.Forall₂ DependencyOrderEq (pointDeps encode t) tx.normal.deps)
-    (unique : Kv.Properties.Unique (image tx.data (encode m.val)))
-    (sorted : PendingSorted t.pending.val) (live : PinLive history view.local)
-    (indexed : HistoryIndexValid history) (space : PinScanRoom history view.local)
-    (room : t.deps.val.length < Usize.max)
-    (clearRoom
-      : t.pending.val.length
-          + ((pinImage history m view.local).length + t.pending.val.length)
-        ≤ Usize.max)
-    : let expected := executeOperation tx (.clear (encode m.val))
-      WP.spec (Spike.engine.Tx.operate_with_order t history m .Clear true)
-        (fun (output, after) =>
-          output = .Ok .Unit
-          ∧ (pointWrites encode after).Perm expected.1.normal.writes
-          ∧ List.Forall₂ DependencyOrderEq (pointDeps encode after) expected.1.normal.deps
-          ∧ pointKeepsContext t after
-          ∧ PendingSorted after.pending.val) := by
-  simp only [Spike.engine.Tx.operate_with_order, active, bind_ok]
-  apply WP.spec_bind (assoc_get_ref Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineKey
-    t.views m (fun b => key_same b m))
-  intro found selected
-  rw [acquired] at selected
-  subst found
-  rw [← active]
-  apply WP.spec_bind
-    (scan_by_contents_matches encode inj history t m view tx
-      localImage writes unique sorted live indexed space room (by omega))
-  rintro ⟨entries, recorded⟩ ⟨visible, dependency, count⟩
-  change WP.spec (do
-    let pending ← Spike.engine.Tx.operate_with_order_loop t.pending m true entries 0#usize
-    Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
-      ({t with pending, deps := recorded} : Spike.engine.Tx))) _
-  apply WP.spec_bind
-    (clear_rows_with_order encode inj t m entries true (fun _ => sorted) (by omega))
-  intro pending ⟨removed, ordered⟩
-  rw [WP.spec_ok]
-  let table := encode m.val
-  let observed := scanAt tx.data tx.normal.writes table
-  let afterScan := {tx with normal := recordOp tx.data tx.normal (.scan table observed)}
-  let after := (executeOperation tx (.clear table)).1
-  have projected := clear_reference observed afterScan table
-  have finalWrites : after.normal.writes = observed.foldl (removeEntry table) tx.normal.writes :=
-    projected.1
-  have finalDeps : after.normal.deps = .map table (image tx.data table) :: tx.normal.deps :=
-    projected.2
-  have matching : (pointWrites encode {t with pending}).Perm
-      (observed.foldl (removeEntry table) tx.normal.writes) :=
-    List.Perm.trans removed
-      (clear_entries_perm table visible writes (sorted_pending_unique encode inj t sorted))
-  refine ⟨rfl, ?_, ?_, rfl, ordered rfl⟩
-  · change (pointWrites encode {t with pending}).Perm after.normal.writes
-    rwa [finalWrites]
-  · change List.Forall₂ DependencyOrderEq (pointDeps encode {t with deps := recorded})
-      after.normal.deps
-    rw [dependency, finalDeps]
-    exact .cons (.map table localImage) deps
 
 /-- Operations whose result or effect is determined by the whole visible map. -/
 inductive ScanOperation where
@@ -567,19 +466,25 @@ theorem lookup_model_view (rows : Assoc String GlobalView) (m : String) (v : Glo
       · simp [find, hk, modelPinnedViews] at h ⊢
         exact ih h
 
-/-- An enabled scan, size, or clear agrees with the reference action and dependency updates. -/
+/-- An enabled scan, size, clear, or range agrees with the relaxed reference contract. -/
 theorem operate_scan_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (order : PreservesByteOrder encode)
     (history : Spike.engine.History)
     (t : Spike.engine.Tx) (tx : Tx) (m : Spike.engine.Bytes) (op : ScanOperation)
     (view : GlobalView) (hPhase : t.phase = .Active)
     (hView : find tx.globalViews (encode (alloc.vec.Vec.val m)) = some view)
-    (hPinned : rustPinnedViews encode history t.views = modelPinnedViews tx.globalViews)
+    (hPinned
+      : ViewsOrderEq (modelPinnedViews tx.globalViews)
+          (rustPinnedViews encode history t.views))
     (hLocal
       : image view.current.data (encode (alloc.vec.Vec.val m))
         = image tx.data (encode (alloc.vec.Vec.val m)))
-    (hWrites : pointWrites encode t = tx.normal.writes)
-    (hDeps : pointDeps encode t = tx.normal.deps) (room : t.deps.val.length < Usize.max)
+    (hWrites : (pointWrites encode t).Perm tx.normal.writes)
+    (hSorted : PendingSorted t.pending.val)
+    (hDeps : List.Forall₂ DependencyOrderEq (pointDeps encode t) tx.normal.deps)
+    (hNativeOrig : NativeDepsFromViews encode history t)
+    (hModelOrig : ModelDepsFromViews tx)
+    (room : t.deps.val.length < Usize.max)
     (rowsRoom
       : (image tx.data (encode (alloc.vec.Vec.val m))).length + t.pending.val.length
         ≤ Usize.max)
@@ -594,82 +499,161 @@ theorem operate_scan_matches_model (encode : List U8 → String)
     : let expected := executeOperation tx (op.model encode (encode (alloc.vec.Vec.val m)))
       WP.spec (Spike.engine.Tx.operate t history m op.rust)
         (fun (output, after) =>
-          scanOutput encode output = some expected.2
-          ∧ pointWrites encode after = expected.1.normal.writes
-          ∧ pointDeps encode after = expected.1.normal.deps
-          ∧ pointKeepsContext t after) := by
+          (∃ obs,
+            scanOutput encode output = some obs
+            ∧ OutputMatches
+                (.operation 0 0 (op.model encode (encode (alloc.vec.Vec.val m)))) obs
+                expected.2)
+          ∧ (pointWrites encode after).Perm expected.1.normal.writes
+          ∧ List.Forall₂ DependencyOrderEq (pointDeps encode after) expected.1.normal.deps
+          ∧ pointKeepsContext t after
+          ∧ PendingSorted after.pending.val
+          ∧ NativeDepsFromViews encode history after
+          ∧ ModelDepsFromViews expected.1) := by
   let mapName := encode (alloc.vec.Vec.val m)
   let visible := scanAt tx.data tx.normal.writes mapName
   have he := lookup_model_view tx.globalViews mapName view hView
+  have hRelFound := hPinned.find mapName
+  rw [he] at hRelFound
   have hActive : {t with phase := .Active} = t := by rw [← hPhase]
-  simp only [Spike.engine.Tx.operate, Spike.engine.Tx.operate_with_order, hPhase, bind_ok]
+  simp only [Spike.engine.Tx.operate, hPhase, bind_ok]
   apply WP.spec_bind (view_lookup encode inj history t m live)
   intro found ⟨hf, alive⟩
-  rw [hPinned, he] at hf
+  rw [← hf] at hRelFound
   cases found with
-  | none => cases hf
+  | none => cases hRelFound
   | some native =>
-      have hl : encodeImage encode (pinImage history m native.local) = image tx.data mapName :=
-        (congrArg PinnedView.localImage (Option.some.inj hf)).trans hLocal
+      have hv : PinnedViewOrderEq (modelPinnedView mapName view)
+          (rustPinnedView encode history m native) :=
+        Option.rel_some_some.mp hRelFound
+      have hl : (encodeImage encode (pinImage history m native.local)).Perm (image tx.data mapName) :=
+        hv.localImage.symm.trans (hLocal ▸ .rfl)
       have hlen : (pinImage history m native.local).length = (image tx.data mapName).length := by
-        simpa [encodeImage] using congrArg List.length hl
+        simpa [encodeImage] using hl.length_eq
+      have hNativeFound : find (rustPinnedViews encode history t.views) mapName =
+          some (rustPinnedView encode history m native) := by
+        simpa [mapName] using hf.symm
+      have addNativeOrig (deps : alloc.vec.Vec Spike.engine.Dependency)
+          (hd : pointDeps encode {t with deps} =
+            .map mapName (encodeImage encode (pinImage history m native.local)) :: pointDeps encode t) :
+          NativeDepsFromViews encode history {t with deps} := by
+        intro d hm
+        rw [hd] at hm
+        rcases List.mem_cons.mp hm with rfl | old
+        · exact ⟨rustPinnedView encode history m native, hNativeFound, rfl⟩
+        · exact hNativeOrig d old
+      have addModelOrig (deps : List (Dependency String String String))
+          (hd : deps = .map mapName (image tx.data mapName) :: tx.normal.deps) :
+          ∀ d ∈ deps, match d with
+            | .key _ _ => True
+            | .map k expected => ∃ gv, find tx.globalViews k = some gv ∧ expected = image gv.current.data k := by
+        intro d hm
+        rw [hd] at hm
+        rcases List.mem_cons.mp hm with rfl | old
+        · exact ⟨view, hView, hLocal.symm⟩
+        · exact hModelOrig d old
       have hscan :=
-        scan_matches_model encode inj history t m native tx hl (alive native rfl).1 indexed
-          (space.pin native.local) hWrites hDeps room
+        scan_by_contents_matches encode inj history t m native tx hl hWrites unique hSorted
+          (alive native rfl).1 indexed (space.pin native.local) room
           (by simpa [hlen] using rowsRoom)
       cases op with
       | scan =>
           simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
-          rw [← hPhase]
-          simp [executeOperation, ScanOperation.model, recordOp, stage, needs, scanOutput,
-            hr, hw, hd, pointKeepsContext]
+          rintro ⟨rows, deps⟩ ⟨hr, hd, _⟩
+          change WP.spec (Result.ok _) _
+          rw [← hPhase, WP.spec_ok]
+          refine ⟨⟨.entries (modelEntries encode rows), rfl, hr⟩, hWrites, ?_, rfl, hSorted,
+            addNativeOrig deps hd, addModelOrig _ rfl⟩
+          change List.Forall₂ DependencyOrderEq (pointDeps encode {t with deps})
+            (.map mapName (image tx.data mapName) :: tx.normal.deps)
+          rw [hd]
+          exact .cons (.map mapName hl) hDeps
       | size =>
           simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
+          rintro ⟨rows, deps⟩ ⟨hr, hd, _⟩
           have hcount : rows.val.length = visible.length := by
-            simpa [modelEntries] using congrArg List.length hr
-          rw [← hPhase]
-          simp [executeOperation, ScanOperation.model, recordOp, stage, needs, scanOutput, hcount,
-            visible, mapName, hw, hd, pointKeepsContext]
+            simpa [modelEntries] using hr.length_eq
+          change WP.spec (Result.ok _) _
+          rw [← hPhase, WP.spec_ok]
+          refine ⟨
+            ⟨
+              .size rows.val.length,
+              rfl,
+              by
+                simp [OutputMatches, executeOperation, ScanOperation.model, hcount, visible, mapName]
+            ⟩,
+            hWrites,
+            ?_,
+            rfl,
+            hSorted,
+            addNativeOrig deps hd,
+            addModelOrig _ rfl
+          ⟩
+          change List.Forall₂ DependencyOrderEq (pointDeps encode {t with deps})
+            (.map mapName (image tx.data mapName) :: tx.normal.deps)
+          rw [hd]
+          exact .cons (.map mapName hl) hDeps
       | clear =>
           simp only [ScanOperation.rust]
           apply WP.spec_bind hscan
-          rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
+          rintro ⟨rows, deps⟩ ⟨hr, hd, _⟩
           have hcount : rows.val.length = visible.length := by
-            simpa [modelEntries] using congrArg List.length hr
+            simpa [modelEntries] using hr.length_eq
           have hspace : t.pending.val.length + rows.val.length ≤ Usize.max := by
             rw [hcount]
             exact clearRoom rfl
           change WP.spec (do
-            let pending ← Spike.engine.Tx.operate_with_order_loop t.pending m false rows 0#usize
+            let pending ← Spike.engine.Tx.operate_loop t.pending m rows 0#usize
             Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
               {t with pending, deps, phase := .Active})) _
-          apply WP.spec_bind (clear_rows encode inj t m rows hspace)
-          intro pending ho
+          apply WP.spec_bind (clear_rows encode inj t m rows hSorted hspace)
+          intro pending ⟨ho, hpOrder⟩
           let out : Spike.engine.Tx := {t with pending, deps, phase := .Active}
           have hcontext : pointKeepsContext t out := by
             simp [out, pointKeepsContext, ← hPhase]
           have hclear := clear_reference visible
             {tx with normal := recordOp tx.data tx.normal (.scan mapName visible)} mapName
           have hw'
-              : pointWrites encode out
-                = visible.foldl (removeEntry mapName) tx.normal.writes := by
-            change pointWrites encode {t with pending} = _
-            rw [ho, show pointWrites encode t = tx.normal.writes from hw]
-            exact congrArg
-              (fun entries => entries.foldl (removeEntry mapName) tx.normal.writes) hr
-          have hd' : pointDeps encode out = _ := hd
+              : (pointWrites encode out).Perm
+                  (visible.foldl (removeEntry mapName) tx.normal.writes) :=
+            List.Perm.trans ho
+              (clear_entries_perm mapName hr hWrites (sorted_pending_unique encode inj t hSorted))
+          have hDepEq : List.Forall₂ DependencyOrderEq (pointDeps encode out)
+              (.map mapName (image tx.data mapName) :: tx.normal.deps) := by
+            change List.Forall₂ DependencyOrderEq (pointDeps encode {t with deps}) _
+            rw [hd]
+            exact .cons (.map mapName hl) hDeps
+          have hClearViews : (executeOperation tx (.clear mapName)).1.globalViews = tx.globalViews := by
+            have foldViews (rows : Assoc String String) (acc : Tx) (ha : acc.globalViews = tx.globalViews) :
+                (rows.foldl (fun (acc : Tx) (k, _) =>
+                  {acc with normal := recordOp acc.data acc.normal (.write (mapName, k) none)})
+                  acc).globalViews = tx.globalViews := by
+              induction rows generalizing acc with
+              | nil => exact ha
+              | cons row rest ih => exact ih _ ha
+            exact foldViews visible _ rfl
           rw [WP.spec_ok]
-          exact ⟨rfl, hw'.trans hclear.1.symm, hd'.trans hclear.2.symm, hcontext⟩
+          refine ⟨⟨.unit, rfl, rfl⟩, ?_, ?_, hcontext, hpOrder, addNativeOrig deps hd, ?_⟩
+          · exact hw'.trans (hclear.1.symm ▸ .rfl)
+          · exact hclear.2.symm ▸ hDepEq
+          · intro d hm
+            change d ∈ (executeOperation tx (.clear mapName)).1.normal.deps at hm
+            simp only [ScanOperation.model]
+            rw [hClearViews]
+            exact addModelOrig _ hclear.2 d hm
       | range lower upper =>
           let outRef := executeOperation tx (Operation.range mapName
             (encodeBound encode lower) (encodeBound encode upper))
-          let post := fun (out, after) => scanOutput encode out = some outRef.2 ∧
-            pointWrites encode after = outRef.1.normal.writes ∧
-            pointDeps encode after = outRef.1.normal.deps ∧ pointKeepsContext t after
+          let post := fun (out, after) =>
+            (∃ obs, scanOutput encode out = some obs ∧
+              OutputMatches (.operation 0 0 (Operation.range mapName
+                (encodeBound encode lower) (encodeBound encode upper))) obs outRef.2) ∧
+            (pointWrites encode after).Perm outRef.1.normal.writes ∧
+            List.Forall₂ DependencyOrderEq (pointDeps encode after) outRef.1.normal.deps ∧
+            pointKeepsContext t after ∧ PendingSorted after.pending.val ∧
+            NativeDepsFromViews encode history after ∧ ModelDepsFromViews outRef.1
           let fullScan
               : Result
                   (core.result.Result Spike.engine.Output Spike.engine.Error
@@ -699,25 +683,46 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               : WP.spec fullScan post := by
             unfold fullScan
             apply WP.spec_bind hscan
-            rintro ⟨rows, deps⟩ ⟨hr, hw, hd, _⟩
-            have hUnique : Kv.Properties.Unique (encodeEntries encode rows) := by
-              change Kv.Properties.Unique (modelEntries encode rows)
-              rw [hr]
-              exact unique_scan tx.data tx.normal.writes mapName unique
+            rintro ⟨rows, deps⟩ ⟨hr, hd, _⟩
+            have hVisUnique : Kv.Properties.Unique visible :=
+              unique_scan tx.data tx.normal.writes mapName unique
+            have hEntriesPerm : (encodeRangeEntries encode id rows.val).Perm visible := by
+              simpa [encodeRangeEntries, modelEntries] using hr
             change WP.spec (do
               let filtered ← Spike.engine.ordered_range
                 Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue rows lower upper
               Result.ok (core.result.Result.Ok (Spike.engine.Output.Entries filtered),
                 {t with deps, phase := .Active})) post
-            apply WP.spec_bind (ordered_range order rows lower upper hUnique)
+            apply WP.spec_bind
+              (ordered_range_by_contents order
+                Spike.engine.Bytes.Insts.Ccf_kv_spikeEngineRangeValue id (fun _ => rfl)
+                rows visible lower upper hVisUnique hEntriesPerm)
             intro filtered hfiltered
             change modelEntries encode filtered = _ at hfiltered
-            have hf : encodeEntries encode rows = visible := hr
-            rw [hf] at hfiltered
-            rw [← hPhase]
-            simp [post, outRef, executeOperation, hEmpty, scanOutput, hfiltered, recordOp,
-              stage, needs, hw, hd, pointKeepsContext,
-              visible, mapName]
+            rw [← hPhase, WP.spec_ok]
+            have hNotEmpty : emptyRange (encodeBound encode lower) (encodeBound encode upper) = false :=
+              Bool.eq_false_of_not_eq_true hEmpty
+            refine ⟨
+              ⟨.entries (modelEntries encode filtered), rfl, ?_⟩,
+              ?_,
+              ?_,
+              rfl,
+              hSorted,
+              addNativeOrig deps hd,
+              ?_
+            ⟩
+            · simp only [OutputMatches, outRef, executeOperation, hNotEmpty, Bool.false_eq_true,
+                ite_false, hfiltered]
+              rfl
+            · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false,
+                recordOp, stage]
+              exact hWrites
+            · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false,
+                recordOp, needs, List.cons_append, List.nil_append]
+              rw [hd]
+              exact .cons (.map mapName hl) hDeps
+            · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false]
+              exact addModelOrig _ rfl
           have go
               (hEmpty
                 : ¬emptyRange (encodeBound encode lower) (encodeBound encode upper)
@@ -729,42 +734,68 @@ theorem operate_scan_matches_model (encode : List U8 → String)
               exact congrArg Result.ok (decide_eq_decide.mpr List.length_eq_zero_iff)
             by_cases clean : t.pending.val = []
             · have noWrites : tx.normal.writes = [] := by
-                simpa [pointWrites, encodeWrites, byteWrites, clean] using hWrites.symm
+                have hlen0 : (pointWrites encode t).length = 0 := by
+                  simp [pointWrites, encodeWrites, byteWrites, clean]
+                exact List.eq_nil_of_length_eq_zero (hWrites.length_eq.symm.trans hlen0)
               simp only [nonemptyScan, emptyTest, clean, decide_true, bind_tc_ok, ite_true,
                 committedRange]
               apply WP.spec_bind (pin_materialize_refines history m native.local
                 (alive native rfl).1 indexed (space.pin native.local))
               intro base cells
-              have baseEq : encodeImage encode (byteImage base) = image tx.data mapName :=
-                (congrArg (encodeImage encode) cells).trans hl
-              have committed : encodeRangeEntries encode Spike.engine.Cell.value base.val =
-                  (image tx.data mapName).map (fun (k, c) => (k, c.value)) := by
-                rw [← baseEq]
-                simp [encodeRangeEntries, encodeImage, byteImage, List.map_map,
-                  Function.comp_def, encodeCell, byteCell]
-              have baseUnique :
-                  ((encodeRangeEntries encode Spike.engine.Cell.value base.val).map Prod.fst).Nodup := by
-                rw [committed]
-                simpa [List.map_map, Function.comp_def, Kv.Properties.Unique] using unique
-              have visibleEq : encodeRangeEntries encode Spike.engine.Cell.value base.val = visible := by
-                rw [committed]
+              have baseEq : encodeImage encode (byteImage base) =
+                  encodeImage encode (pinImage history m native.local) :=
+                congrArg (encodeImage encode) cells
+              have basePerm : (encodeImage encode (byteImage base)).Perm (image tx.data mapName) :=
+                baseEq ▸ hl
+              have committed : (encodeRangeEntries encode Spike.engine.Cell.value base.val).Perm
+                  ((image tx.data mapName).map (fun (k, c) => (k, c.value))) := by
+                have hproj : encodeRangeEntries encode Spike.engine.Cell.value base.val =
+                    (encodeImage encode (byteImage base)).map (fun (k, c) => (k, c.value)) := by
+                  simp [encodeRangeEntries, encodeImage, byteImage, List.map_map,
+                    Function.comp_def, encodeCell, byteCell]
+                rw [hproj]
+                exact basePerm.map _
+              have visibleEq : visible = (image tx.data mapName).map (fun (k, c) => (k, c.value)) := by
                 simp [visible, scanAt, noWrites, writeValues]
+              have hVisUnique : Kv.Properties.Unique visible :=
+                unique_scan tx.data tx.normal.writes mapName unique
               apply WP.spec_bind
-                (ordered_range_projected order
+                (ordered_range_by_contents order
                   Spike.engine.Cell.Insts.Ccf_kv_spikeEngineRangeValue
-                  Spike.engine.Cell.value (fun _ => rfl) base lower upper baseUnique)
+                  Spike.engine.Cell.value (fun _ => rfl) base visible lower upper
+                  hVisUnique (visibleEq ▸ committed))
               intro rows output
-              rw [visibleEq] at output
+              change modelEntries encode rows = _ at output
               apply WP.spec_bind (deps_push encode t (.Map m base) room)
               intro deps updated
-              have dep : pointDeps encode {t with deps} = .map mapName (image tx.data mapName)
-                  :: tx.normal.deps := by
-                simpa [byteDependency, encodeDependency, baseEq, mapName, hDeps]
-                  using updated
-              rw [← hPhase]
-              simp [post, outRef, executeOperation, hEmpty, scanOutput, recordOp,
-                stage, needs, dep, pointKeepsContext, modelEntries, mapName]
-              exact ⟨output, hWrites⟩
+              have dep : pointDeps encode {t with deps} =
+                  .map mapName (encodeImage encode (pinImage history m native.local))
+                  :: pointDeps encode t := by
+                simpa [byteDependency, encodeDependency, baseEq, mapName] using updated
+              rw [← hPhase, WP.spec_ok]
+              have hNotEmpty : emptyRange (encodeBound encode lower) (encodeBound encode upper) = false :=
+                Bool.eq_false_of_not_eq_true hEmpty
+              refine ⟨
+                ⟨.entries (modelEntries encode rows), rfl, ?_⟩,
+                ?_,
+                ?_,
+                rfl,
+                hSorted,
+                addNativeOrig deps dep,
+                ?_
+              ⟩
+              · simp only [OutputMatches, outRef, executeOperation, hNotEmpty, Bool.false_eq_true,
+                  ite_false, output]
+                rfl
+              · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false,
+                  recordOp, stage]
+                exact hWrites
+              · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false,
+                  recordOp, needs, List.cons_append, List.nil_append]
+                rw [dep]
+                exact .cons (.map mapName hl) hDeps
+              · simp only [outRef, executeOperation, hNotEmpty, Bool.false_eq_true, ite_false]
+                exact addModelOrig _ rfl
             · simpa [nonemptyScan, emptyTest, clean] using withOverlay hEmpty
           change WP.spec _ post
           simp only [ScanOperation.rust]
@@ -783,8 +814,9 @@ theorem operate_scan_matches_model (encode : List U8 → String)
                     = true
                   · have hp : cmp ≥ 0#i8 := of_decide_eq_true (hcmp.trans he)
                     rw [← hPhase]
-                    simp [hp, post, outRef, executeOperation, he, scanOutput, modelEntries, hWrites,
-                      hDeps, pointKeepsContext]
+                    simp only [hp, ite_true, WP.spec_ok, post, outRef, executeOperation, he]
+                    exact ⟨⟨.entries [], rfl, rfl⟩, hWrites, hDeps, rfl, hSorted,
+                      hNativeOrig, hModelOrig⟩
                   · have hp : ¬cmp ≥ 0#i8 :=
                       fun h => he (hcmp.symm.trans (decide_eq_true h))
                     rw [ite_eq_right hp]
