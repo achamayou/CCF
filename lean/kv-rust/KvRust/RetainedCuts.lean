@@ -187,7 +187,10 @@ theorem advance_preserves_same_revision (store : Store) (m : String) (writes : P
     : (revision store.head m).version ≤ (revision (advance store writes).head m).version
       ∧ ((revision (advance store writes).head m).version
             = (revision store.head m).version
-          → image (advance store writes).head.data m = image store.head.data m)
+          → image (advance store writes).head.data m = image store.head.data m
+            ∧ revision (advance store writes).head m = revision store.head m)
+      ∧ ((find store.head.births m).isSome
+          → find (advance store writes).head.births m = find store.head.births m)
       ∧ (revision (advance store writes).head m).version
         ≤ (advance store writes).head.version := by
   let stamp : Stamp := {version := store.head.version + 1, identity := store.nextIdentity}
@@ -202,38 +205,99 @@ theorem advance_preserves_same_revision (store : Store) (m : String) (writes : P
             {} :=
         congrArg (fun result : Option Stamp => result.getD {}) folded
       _ = _ := by split <;> rfl
+  have hbirth : (find store.head.births m).isSome →
+      find (advance store writes).head.births m = find store.head.births m := by
+    intro hsome
+    have hfold : ∀ (ws : Pending) (bs : Assoc String Stamp),
+        (find bs m).isSome = true →
+        find (ws.foldl (fun acc (a, _) =>
+          if (find acc a.1).isSome then acc else set acc a.1 stamp) bs) m = find bs m := by
+      intro ws
+      induction ws with
+      | nil => intro bs _; rfl
+      | cons w rest ih =>
+          rcases w with ⟨a, val⟩
+          intro bs hbs
+          simp only [List.foldl_cons]
+          by_cases hfm : (find bs a.1).isSome = true
+          · rw [ite_eq_left hfm]
+            exact ih bs hbs
+          · rw [ite_eq_right hfm]
+            have hne : a.1 ≠ m := by
+              intro heq; subst heq; exact hfm hbs
+            have hset : find (set bs a.1 stamp) m = find bs m := by
+              simp [find_set_key, Ne.symm hne]
+            rw [ih (set bs a.1 stamp) (hset.symm ▸ hbs), hset]
+    exact hfold writes store.head.births hsome
   by_cases touched : writes.any (mapWriteTouches store.head.data m) = true
   · simp only [rev, touched, ite_true]
     change _ ≤ store.head.version + 1 ∧ (store.head.version + 1 = _ → _)
-      ∧ store.head.version + 1 ≤ store.head.version + 1
-    exact ⟨by omega, fun same => (by omega : False).elim, Nat.le_refl _⟩
+      ∧ _ ∧ store.head.version + 1 ≤ store.head.version + 1
+    exact ⟨by omega, fun same => (by omega : False).elim, hbirth, Nat.le_refl _⟩
   · have quiet : writes.any (mapWriteTouches store.head.data m) = false :=
       Bool.eq_false_of_not_eq_true touched
-    simp only [rev, quiet, Bool.false_eq_true, ite_false]
-    exact ⟨Nat.le_refl _, fun _ => publish_untouched_image store.head.data m _ writes quiet,
-      Nat.le_trans bounded (Nat.le_succ _)⟩
+    have revEq : revision (advance store writes).head m = revision store.head m := by
+      simp [rev, quiet]
+    refine ⟨by rw [revEq], ?_, hbirth, by rw [revEq]; exact Nat.le_trans bounded (Nat.le_succ _)⟩
+    intro _
+    exact ⟨publish_untouched_image store.head.data m _ writes quiet, revEq⟩
 
-/-- On one branch, a map's revision orders its images, including their scan order. -/
+/-- On one branch, a map's revision orders its images and stamps, including birth persistence. -/
 def RevisionFlow (newer older : Frame) : Prop :=
   ∀ m,
     (revision older m).version ≤ (revision newer m).version
     ∧ ((revision newer m).version = (revision older m).version
-        → image newer.data m = image older.data m)
+        → image newer.data m = image older.data m ∧ revision newer m = revision older m)
+    ∧ ((find older.births m).isSome → find newer.births m = find older.births m)
 
 theorem RevisionFlow.refl (f : Frame) : RevisionFlow f f :=
-  fun _ => ⟨Nat.le_refl _, fun _ => rfl⟩
+  fun _ => ⟨Nat.le_refl _, fun _ => ⟨rfl, rfl⟩, fun _ => rfl⟩
 
 theorem RevisionFlow.trans {newer middle older : Frame}
     (first : RevisionFlow newer middle) (second : RevisionFlow middle older)
     : RevisionFlow newer older := by
   intro m
-  obtain ⟨hm, sameNew⟩ := first m
-  obtain ⟨ho, sameOld⟩ := second m
+  obtain ⟨hm, sameNew, birthNew⟩ := first m
+  obtain ⟨ho, sameOld, birthOld⟩ := second m
   exact ⟨
     ho.trans hm,
     fun equal =>
-      (sameNew (by omega)).trans (sameOld (by omega))
+      ⟨
+        (sameNew (by omega)).1.trans (sameOld (by omega)).1,
+        (sameNew (by omega)).2.trans (sameOld (by omega)).2
+      ⟩,
+    fun hsome => by
+      have hmid := birthOld hsome
+      exact (birthNew (hmid.symm ▸ hsome)).trans hmid
   ⟩
+
+/-- If an older and newer frame on the same branch share a map's birth and revision stamps,
+every frame between them on that branch has the same birth and revision stamps. -/
+theorem RevisionFlow.stamps_between {newer middle older : Frame}
+    (hnm : RevisionFlow newer middle) (hmo : RevisionFlow middle older) (m : String)
+    (hbirth : find older.births m = find newer.births m)
+    (hrev : revision older m = revision newer m)
+    : find middle.births m = find older.births m
+      ∧ revision middle m = revision older m := by
+  obtain ⟨hnmLe, _, hnmBirth⟩ := hnm m
+  obtain ⟨hmoLe, hmoEq, hmoBirth⟩ := hmo m
+  have hrevVer : (revision middle m).version = (revision older m).version := by
+    have heqVer : (revision older m).version = (revision newer m).version :=
+      congrArg Stamp.version hrev
+    omega
+  refine ⟨?_, (hmoEq hrevVer).2⟩
+  cases ho : find older.births m with
+  | some b =>
+      have := hmoBirth (by simp [ho])
+      rwa [ho] at this
+  | none =>
+      cases hm : find middle.births m with
+      | none => rfl
+      | some b =>
+          have hnb := hnmBirth (by simp [hm])
+          rw [hm] at hnb
+          rw [hnb] at hbirth
+          simp [ho] at hbirth
 
 structure RevisionHistory (frames : List Frame) : Prop where
   bounds : ∀ f ∈ frames, ∀ m, (revision f m).version ≤ f.version
@@ -257,12 +321,12 @@ theorem RevisionHistory.advance {store : Store} (stable : RevisionHistory store.
   have bounded := stable.bounds store.head member
   have step (m : String) := advance_preserves_same_revision store m writes (bounded m)
   have first : RevisionFlow (Kv.Model.advance store writes).head store.head :=
-    fun m => ⟨(step m).1, (step m).2.1⟩
+    fun m => ⟨(step m).1, (step m).2.1, (step m).2.2.1⟩
   change RevisionHistory ((Kv.Model.advance store writes).head :: store.history)
   refine ⟨?_, List.pairwise_cons.mpr ⟨?_, stable.flow⟩⟩
   · intro f member m
     rcases List.mem_cons.mp member with rfl | earlier
-    · exact (step m).2.2
+    · exact (step m).2.2.2
     · exact stable.bounds f earlier m
   · intro f member
     apply first.trans
@@ -299,13 +363,16 @@ theorem RevisionHistory.advance_order {s : Store} (stable : RevisionHistory s.hi
   · refine List.pairwise_cons.mpr ⟨?_, stable.flow⟩
     intro f hf m
     have hflow := (List.pairwise_cons.mp hExact.flow).1 f hf m
-    refine ⟨by rw [order.revision_eq m]; exact hflow.1, ?_⟩
-    intro heq
-    rw [order.revision_eq m] at heq
-    have hEqExact := hflow.2 heq
-    have hperm : (image next.data m).Perm (image f.data m) :=
-      hEqExact ▸ order.image_perm m
-    exact canon f hf m hperm
+    refine ⟨by rw [order.revision_eq m]; exact hflow.1, ?_, ?_⟩
+    · intro heq
+      rw [order.revision_eq m] at heq
+      have hEqExact := hflow.2.1 heq
+      have hperm : (image next.data m).Perm (image f.data m) :=
+        hEqExact.1 ▸ order.image_perm m
+      exact ⟨canon f hf m hperm, by rw [order.revision_eq m]; exact hEqExact.2⟩
+    · intro hsome
+      rw [order.births]
+      exact hflow.2.2 hsome
 
 theorem RevisionHistory.filter {frames : List Frame} (stable : RevisionHistory frames)
     (keep : Frame → Bool)
@@ -375,7 +442,7 @@ theorem available_compacted_image (store : Store) (stable : RevisionHistory stor
                   decide_eq_true_eq] at canRead
                 exact canRead.1
               rw [captured, globalEq]
-              exact Or.inr (monotone.2 (Nat.le_antisymm notStale monotone.1)).symm
+              exact Or.inr (monotone.2.1 (Nat.le_antisymm notStale monotone.1)).1.symm
 
 /-- Projection of a frame whose payload may be reclaimed, but whose lineage
 metadata must still be available to lazy acquisitions and validation. -/

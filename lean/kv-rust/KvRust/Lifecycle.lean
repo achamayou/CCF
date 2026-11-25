@@ -24,6 +24,7 @@ private def emptyFrame (root : Spike.radix.RadixRoot) : Spike.engine.Frame :=
     data := root
     revisions := alloc.vec.Vec.new _
     births := alloc.vec.Vec.new _
+    meta_live := true
   }
 
 /-- The extracted constructor creates the model's empty version-zero history. -/
@@ -89,8 +90,17 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
     subst frame
     change IndexView index root (indexRows index root)
     rwa [index_rows_eq view]
-  · refine ⟨by simp [saved], ?_, ?_⟩
+  · refine ⟨by simp [saved], ?_, ?_, ?_, ?_⟩
     · intro i nf gf hnf hgf
+      change log.frames.val[i]? = some nf at hnf
+      rw [saved] at hnf
+      cases i with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf hgf
+          subst hnf hgf
+          rfl
+      | succ _ => simp at hnf
+    · intro i nf gf hnf hgf _
       change log.frames.val[i]? = some nf at hnf
       rw [saved] at hnf
       cases i with
@@ -99,6 +109,20 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
           subst hnf hgf
           exact ⟨rfl, rfl, rfl⟩
       | succ _ => simp at hnf
+    · intro pos id nf hpos hnf _
+      change log.branch.val[pos]? = some id at hpos
+      change log.frames.val[id.val]? = some nf at hnf
+      rw [hbr] at hpos
+      cases pos with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hpos
+          subst hpos
+          have h0 : (0#usize).val = 0 := rfl
+          rw [h0, saved] at hnf
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf
+          subst hnf
+          rfl
+      | succ _ => simp at hpos
     · intro pos id nf gf hpos hnf hgf _
       change log.branch.val[pos]? = some id at hpos
       change log.frames.val[id.val]? = some nf at hnf
@@ -311,10 +335,17 @@ private theorem erase_eq_eraseIdx {K V : Type} [DecidableEq K] (rows : Assoc K V
             not_false_eq_true, ite_true, List.cons.injEq, true_and]
           exact ih j unique.2 hget
 
-/-- Enabled `End` releases the attempt's pins, erases its row, and retires freed nodes;
+/-- Enabled `End` releases the attempt's pins, erases its row, opportunistically elides
+compacted snapshot metadata when no remaining attempt needs it, and retires freed nodes;
 missing IDs leave the store unchanged. -/
 theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
     (unique : (s.txs.val.map Prod.fst).Nodup)
+    (hnonempty : s.history.activeFrames ≠ [])
+    (hIndexed
+      : ∀ i (hi : i < s.history.activeFrames.length),
+          s.history.activeFrames[i].version.val = i)
+    (hGlobalBound : s.history.global.val < s.history.activeFrames.length)
+    (valid : BranchValid s.history.log) (branchUnique : BranchUnique s.history.log)
     (live : IndexLiveness s.history.index (storePins s))
     (queueRoom
       : 2
@@ -328,11 +359,33 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
           | none => (out, after) = (.Err .Disabled, s)
           | some _ =>
               out = .Ok .Unit
-              ∧ after.history = {s.history with index := after.history.index}
+              ∧ after.history.log.branch = s.history.log.branch
+              ∧ after.history.global = s.history.global
+              ∧ after.history.term = s.history.term
+              ∧ after.history.next_identity = s.history.next_identity
+              ∧ after.history.reuse_compacted_images = s.history.reuse_compacted_images
+              ∧ BranchValid after.history.log
+              ∧ BranchUnique after.history.log
+              ∧ after.history.log.frames.val.length = s.history.log.frames.val.length
               ∧ after.txs.val = erase s.txs.val id
               ∧ IndexLiveness after.history.index (storePins after)
-              ∧ IndexPreservesPins s.history.index after.history.index
-                  (storePins after)) := by
+              ∧ IndexPreservesPins s.history.index after.history.index (storePins after)
+              ∧ ∃ globalId globalFrame,
+                  s.history.log.branch.val[s.history.global.val]? = some globalId
+                  ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
+                  ∧ after.history.log.frames.val[globalId.val]? = some globalFrame
+                  ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                      s.history.log.frames.val[k]? = some f
+                      → ∃ f',
+                          after.history.log.frames.val[k]? = some f'
+                          ∧ f'.version = f.version
+                          ∧ f'.data = f.data
+                          ∧ (f' = f
+                              ∨ (f'.meta_live = false
+                                  ∧ f.version.val < s.history.global.val
+                                  ∧ s.history.reuse_compacted_images = true
+                                  ∧ Spike.engine.txs_need_frame after.txs f globalFrame
+                                    = .ok false))) := by
   unfold Spike.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro index hi
@@ -373,18 +426,95 @@ theorem execute_end_lifecycle (s : Spike.engine.Store) (id : U64)
       intro ai ⟨haiVals, haiLive⟩
       apply WP.spec_bind (erase_attempt_matches s.txs id)
       intro next hn
+      have hbrLen : s.history.log.branch.val.length = s.history.activeFrames.length :=
+        (branch_values_length s.history.log valid).symm
+      have hglBrLt : s.history.global.val < s.history.log.branch.val.length := by omega
+      let globalId0 := s.history.log.branch.val[s.history.global.val]'hglBrLt
+      have hglBrAt0 : s.history.log.branch.val[s.history.global.val]? = some globalId0 :=
+        List.getElem?_eq_getElem hglBrLt
+      have hglIdLt0 : globalId0.val < s.history.log.frames.val.length :=
+        valid.2 globalId0 (List.getElem_mem hglBrLt)
+      let globalFrame0 := s.history.log.frames.val[globalId0.val]'hglIdLt0
+      have hglFrAt0 : s.history.log.frames.val[globalId0.val]? = some globalFrame0 :=
+        List.getElem?_eq_getElem hglIdLt0
+      have hElideSpec : WP.spec
+          (match t.snapshot with
+            | none => Result.ok {s.history with index := ai}
+            | some snap =>
+              Spike.engine.History.try_elide_compacted_version
+                {s.history with index := ai} snap.version next)
+          (fun h =>
+            h.log.branch = s.history.log.branch
+            ∧ h.index = ai
+            ∧ h.global = s.history.global
+            ∧ h.term = s.history.term
+            ∧ h.next_identity = s.history.next_identity
+            ∧ h.reuse_compacted_images = s.history.reuse_compacted_images
+            ∧ BranchValid h.log
+            ∧ BranchUnique h.log
+            ∧ framePins h.log.frames.val = framePins s.history.log.frames.val
+            ∧ h.log.frames.val.length = s.history.log.frames.val.length
+            ∧ ∃ globalId globalFrame,
+                s.history.log.branch.val[s.history.global.val]? = some globalId
+                ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
+                ∧ h.log.frames.val[globalId.val]? = some globalFrame
+                ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                    s.history.log.frames.val[k]? = some f
+                    → ∃ f',
+                        h.log.frames.val[k]? = some f'
+                        ∧ f'.version = f.version
+                        ∧ f'.data = f.data
+                        ∧ (f' = f
+                            ∨ (f'.meta_live = false
+                                ∧ f.version.val < s.history.global.val
+                                ∧ s.history.reuse_compacted_images = true
+                                ∧ Spike.engine.txs_need_frame next f globalFrame = .ok false))) := by
+        cases hsnap : t.snapshot with
+        | none =>
+            rw [WP.spec_ok]
+            refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, valid, branchUnique, rfl, rfl,
+              globalId0, globalFrame0, hglBrAt0, hglFrAt0, hglFrAt0, ?_⟩
+            intro k f hf
+            exact ⟨f, hf, rfl, rfl, Or.inl rfl⟩
+        | some snap =>
+            apply WP.spec_mono
+              (history_try_elide_compacted_version_refines {s.history with index := ai}
+                snap.version next hnonempty hIndexed hGlobalBound valid branchUnique)
+            rintro h ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
+              gid, gf, hgidBr, hgidFr, hslots⟩
+            have hgfVer : gf.version.val = s.history.global.val := by
+              have hact : s.history.activeFrames[s.history.global.val]? = some gf := by
+                rw [branch_active_getElem? s.history.log valid s.history.global.val, hgidBr]
+                simpa using hgidFr
+              have heq : s.history.activeFrames[s.history.global.val] = gf :=
+                Option.some.inj ((List.getElem?_eq_getElem hGlobalBound).symm.trans hact)
+              rw [← heq]
+              exact hIndexed s.history.global.val hGlobalBound
+            obtain ⟨gf', hgf', _, _, hgfCase⟩ := hslots gid.val gf hgidFr
+            have hgfEq : gf' = gf := by
+              rcases hgfCase with rfl | ⟨_, hlt, _, _⟩
+              · rfl
+              · exact absurd hlt (by change ¬ gf.version.val < s.history.global.val; omega)
+            rw [hgfEq] at hgf'
+            exact ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
+              gid, gf, hgidBr, hgidFr, hgf', hslots⟩
+      apply WP.spec_bind hElideSpec
+      rintro h ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
+        gid, gf, hgidBr, hgidFr, hgidAfter, hslots⟩
       have haiQueue : 2 * (ai.values.dirs.val.length + ai.values.rows.val.length) + 1 ≤ Usize.max := by
         rw [haiVals]; exact queueRoom
+      rw [hidxEq]
       apply WP.spec_bind
         (index_retire_budget_refines ai restPins Spike.engine.RETIRE_BUDGET haiLive
           haiQueue)
       rintro ⟨_, ai1⟩ ⟨hai1Live, hai1Pres, _, _⟩
       change WP.spec (Result.ok (core.result.Result.Ok Spike.engine.Output.Unit,
-        ({s with history := {s.history with index := ai1}, txs := next} : Spike.engine.Store))) _
+        ({s with history := {h with index := ai1}, txs := next} : Spike.engine.Store))) _
       rw [WP.spec_ok]
-      have hpinsAfter : storePins {s with history := {s.history with index := ai1}, txs := next} = restPins := by
-        simp [storePins, restPins, hn]
-      refine ⟨rfl, rfl, hn, ?_, ?_⟩
+      have hpinsAfter : storePins {s with history := {h with index := ai1}, txs := next} = restPins := by
+        simp [storePins, restPins, hfp, hn]
+      refine ⟨rfl, hbr, hgl, htm, hid, hre, hv, hu, hlen, hn, ?_, ?_,
+        gid, gf, hgidBr, hgidFr, hgidAfter, hslots⟩
       · simpa only [hpinsAfter] using hai1Live
       · rw [hpinsAfter]
         have hkeptAi : IndexPreservesPins s.history.index ai restPins := by
@@ -755,6 +885,12 @@ theorem execute_begin_matches_model (encode : List U8 → String) (s : Spike.eng
 theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Nat)
     (id : U64) (hExists : (lookupTx w sid id.val).isSome = (find s.txs.val id).isSome)
     (unique : (s.txs.val.map Prod.fst).Nodup)
+    (hnonempty : s.history.activeFrames ≠ [])
+    (hIndexed
+      : ∀ i (hi : i < s.history.activeFrames.length),
+          s.history.activeFrames[i].version.val = i)
+    (hGlobalBound : s.history.global.val < s.history.activeFrames.length)
+    (valid : BranchValid s.history.log) (branchUnique : BranchUnique s.history.log)
     (live : IndexLiveness s.history.index (storePins s))
     (queueRoom
       : 2
@@ -766,11 +902,36 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
         (LifecycleModelPost s (execute w (.txEnd sid id.val))
           fun w' s' =>
             w' = {w with txs := erase w.txs id.val}
-            ∧ s'.history = {s.history with index := s'.history.index}
+            ∧ s'.history.log.branch = s.history.log.branch
+            ∧ s'.history.global = s.history.global
+            ∧ s'.history.term = s.history.term
+            ∧ s'.history.next_identity = s.history.next_identity
+            ∧ s'.history.reuse_compacted_images = s.history.reuse_compacted_images
+            ∧ BranchValid s'.history.log
+            ∧ BranchUnique s'.history.log
+            ∧ s'.history.log.frames.val.length = s.history.log.frames.val.length
             ∧ s'.txs.val = erase s.txs.val id
             ∧ IndexLiveness s'.history.index (storePins s')
-            ∧ IndexPreservesPins s.history.index s'.history.index (storePins s')) := by
-  apply WP.spec_mono (execute_end_lifecycle s id unique live queueRoom)
+            ∧ IndexPreservesPins s.history.index s'.history.index (storePins s')
+            ∧ ∃ globalId globalFrame,
+                s.history.log.branch.val[s.history.global.val]? = some globalId
+                ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
+                ∧ s'.history.log.frames.val[globalId.val]? = some globalFrame
+                ∧ ∀ (k : Nat) (f : Spike.engine.Frame),
+                    s.history.log.frames.val[k]? = some f
+                    → ∃ f',
+                        s'.history.log.frames.val[k]? = some f'
+                        ∧ f'.version = f.version
+                        ∧ f'.data = f.data
+                        ∧ (f' = f
+                            ∨ (f'.meta_live = false
+                                ∧ f.version.val < s.history.global.val
+                                ∧ s.history.reuse_compacted_images = true
+                                ∧ Spike.engine.txs_need_frame s'.txs f globalFrame
+                                  = .ok false))) := by
+  apply WP.spec_mono
+    (execute_end_lifecycle s id unique hnonempty hIndexed hGlobalBound valid branchUnique
+      live queueRoom)
   rintro ⟨out, after⟩ h
   cases hm : lookupTx w sid id.val <;> cases ht : find s.txs.val id <;>
     simp only [hm, ht, Option.isSome_none, Option.isSome_some] at hExists
@@ -778,9 +939,9 @@ theorem execute_end_matches_model (s : Spike.engine.Store) (w : State) (sid : Na
   · cases hExists
   · cases hExists
   · simp only [ht] at h
-    obtain ⟨rfl, hh, hr, hlive, hpres⟩ := h
+    obtain ⟨rfl, hrest⟩ := h
     simp only [execute, hm, LifecycleModelPost, lifecycleOutput]
-    exact ⟨rfl, rfl, hh, hr, hlive, hpres⟩
+    exact ⟨rfl, rfl, hrest⟩
 
 /-- `SetTerm` compares the same natural-number terms as the model, preserving other fields. -/
 theorem execute_set_term_matches_model (s : Spike.engine.Store) (w : State) (sid : Nat)

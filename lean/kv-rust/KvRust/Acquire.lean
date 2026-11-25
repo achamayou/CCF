@@ -774,10 +774,10 @@ private theorem history_pin_cut_matches_nat (s : Spike.engine.History) (cut : U6
         have hkAct : k < s.activeFrames.length := hlenBr ▸ hkBr
         have hjk : s.log.branch.val[k].val < s.log.frames.val.length :=
           valid.2 _ (List.getElem_mem hkBr)
-        have hmeta := aligned.metaEq _ s.log.frames.val[s.log.branch.val[k].val] xs[k]
+        have hmeta := aligned.versionEq _ s.log.frames.val[s.log.branch.val[k].val] xs[k]
           (List.getElem?_eq_getElem hjk)
           (by rw [← hxsAt k hkBr, List.getElem?_eq_getElem hk])
-        rw [hmeta.1]
+        rw [hmeta]
         have hactK : s.activeFrames[k] = s.log.frames.val[s.log.branch.val[k].val] := by
           apply Option.some.inj
           rw [← List.getElem?_eq_getElem hkAct]
@@ -867,6 +867,12 @@ theorem acquire_matches_model (encode : List U8 → String)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.log) (idxValid : HistoryIndexValid s)
     (aligned : ArchiveAligned encode s natArchive)
+    (hSnapMetaLive
+      : ∀ (id : Usize) nf,
+          s.log.branch.val[min rustSnap.version.val (s.log.branch.val.length - 1)]?
+            = some id
+          → s.log.frames.val[id.val]? = some nf
+          → nf.meta_live = true)
     (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
     (refRoom
       : (framePins s.log.frames.val ++ extraPins).length
@@ -936,6 +942,7 @@ theorem acquire_matches_model (encode : List U8 → String)
       intro frame hf
       subst frame
       have hcurMeta := aligned.metaEq currentId.val current gfLocal currentSaved gfLocalAt
+        (hSnapMetaLive currentId current hcurBrAt currentSaved)
       have hCutFrame : gfLocal = atCut model snap.current.version := by rwa [hCut]
       apply WP.spec_bind (stamps_find enc hi current.births m)
       intro birth hbirth
@@ -1002,6 +1009,10 @@ theorem acquire_matches_model (encode : List U8 → String)
           intro frame hf
           subst frame
           have hglobMeta := aligned.metaEq globalId.val global gfGlobal globalSaved gfGlobalAt
+            (aligned.globalMetaLive _ globalId global hglobBrAt globalSaved (fun _ => by
+              have hbrLen : s.log.branch.val.length = s.activeFrames.length :=
+                (branch_values_length s.log valid).symm
+              omega))
           have hGlobal : gfGlobal = atCut model model.global := by
             rw [hglobal]; exact hGlobalCut
           have hView : v = { current := gfLocal, frame := gfGlobal } := by
@@ -1227,6 +1238,13 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.history.log) (idxValid : HistoryIndexValid s.history)
     (aligned : ArchiveAligned encode s.history natArchive)
+    (hSnapMetaLive
+      : ∀ (id : Usize) nf,
+          s.history.log.branch.val[min rustSnap.version.val
+                                    (s.history.log.branch.val.length - 1)]?
+            = some id
+          → s.history.log.frames.val[id.val]? = some nf
+          → nf.meta_live = true)
     (live : IndexLiveness s.history.index (storePins s))
     (refRoom
       : (storePins s).length + 17 * s.history.index.values.dirs.val.length + 2 ≤ U32.max)
@@ -1279,6 +1297,10 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             ∧ ViewsLive after.history.index tAfter.views
             ∧ ViewsOrigin encode after.history.index natArchive tAfter.views
             ∧ (∀ row ∈ t.views.val, row ∈ tAfter.views.val)
+            ∧ (if available model snap (encode (alloc.vec.Vec.val m)) then
+                  ∃ newView, tAfter.views.val = (m, newView) :: t.views.val
+                else
+                  tAfter.views = t.views)
             ∧ ∀ other,
                 other ≠ encode (alloc.vec.Vec.val m)
                 → find (rustPinnedViews encode after.history.index tAfter.views) other
@@ -1351,7 +1373,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         (acquire_matches_model encode inj s.history nativeModel natArchive
           (txsPins s.txs.val) t snap rustSnap m prior head hframes rfl hversions hglobal
           hglobalBound hNativeSnap stable hCut hNativePhase hMissing hRoom valid idxValid
-          aligned live refRoom oldLive oldOrig)
+          aligned hSnapMetaLive live refRoom oldLive oldOrig)
       rintro ⟨out, next, hist⟩ ⟨hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hn⟩
       rw [hAvailEq] at hn
       have hupdate : (back (id, next)).val = s.txs.val.set i.val (id, next) := by
@@ -1395,7 +1417,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
           hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hLiveAfter.perm hstorePinsPerm,
-          hrow, hupdate, ?_, ?_, ?_, ?_⟩
+          hrow, hupdate, ?_, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_left ha, ← hl', ← hg']
         · rw [hout]
@@ -1430,6 +1452,8 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         · intro row hrowMem
           rw [hNext, hcons]
           exact List.mem_cons_of_mem _ hrowMem
+        · rw [ite_eq_left ha]
+          exact ⟨newView, by rw [hNext, hcons]⟩
         · intro other hne
           rw [hNext, hViews, find_set_key]
           exact ite_eq_right hne
@@ -1445,7 +1469,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
           rfl, rfl, rfl, rfl, rfl, rfl, hstorePinsEq.symm ▸ live,
-          hrow, hupdate, ?_, ?_, ?_, ?_⟩
+          hrow, hupdate, ?_, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_right ha]
         · rw [hout]
@@ -1462,6 +1486,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         · rw [hNext]; exact oldLive
         · rw [hNext]; exact oldOrig
         · intro row hrowMem; rw [hNext]; exact hrowMem
+        · rw [ite_eq_right ha, hNext]
         · intro other _; rw [hNext]
 
 end KvRust

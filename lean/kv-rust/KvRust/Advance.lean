@@ -316,7 +316,8 @@ theorem frame_advance_matches_model (encode : List U8 → String)
           ∧ IndexGrowth index arena
               (pending.val.length
                 * ((indexRows index before.data).length + pending.val.length + 1))
-              pending.val.length) := by
+              pending.val.length
+          ∧ after.meta_live = true) := by
   let data := indexRows index before.data
   unfold Spike.engine.Frame.advance
   simp only [clone_assoc, bind_ok]
@@ -328,8 +329,8 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   change WP.spec (do
     let base ← Spike.engine.publication_base index before.data pending
     let (root, after) ← Spike.engine.publish_selected index base pending version
-    Result.ok (({version, data := root, revisions := rev, births := birth} : Spike.engine.Frame),
-      after)) _
+    Result.ok (({version, data := root, revisions := rev, births := birth, meta_live := true} :
+      Spike.engine.Frame), after)) _
   apply WP.spec_bind
     (publication_base_refines index before.data data pending pins.length view live.valid
       space)
@@ -349,10 +350,15 @@ theorem frame_advance_matches_model (encode : List U8 → String)
         (encodeWrites encode (byteWrites pending.val))) := by
     rw [projected, ← publish_encoding encode inj, ← indexed_fold_projects]
     exact (hPermOut.map _).map _
-  change WP.spec (Result.ok (({version, data := root, revisions := rev, births := birth} :
-    Spike.engine.Frame), after)) _
+  change WP.spec (Result.ok (({
+      version := version
+      data := root
+      revisions := rev
+      births := birth
+      meta_live := true
+    } : Spike.engine.Frame), after)) _
   rw [WP.spec_ok]
-  refine ⟨?_, projected.symm ▸ updated, arenaLive, kept, growth⟩
+  refine ⟨?_, projected.symm ▸ updated, arenaLive, kept, growth, rfl⟩
   refine ⟨?_, ?_, ?_, ?_⟩
   · simp only [modelFrame, modelMetadata, advance]
     exact hVersion
@@ -406,7 +412,7 @@ theorem frame_advance_order_matches_model (encode : List U8 → String)
     heads.version.symm ▸ hVersion
   apply WP.spec_mono (frame_advance_matches_model encode inj before index pins live hrootPin view
     representative pending version identity rfl nextVersion hIdentity space addresses hRevs hBirths)
-  rintro ⟨after, arena⟩ ⟨published, retained, lAfter, kept, _⟩
+  rintro ⟨after, arena⟩ ⟨published, retained, lAfter, kept, _, _⟩
   refine ⟨?_, retained, lAfter, kept⟩
   exact published.trans (advance_order_eq representative model _ _ heads rfl related
     (unique_of_perm heads.data.symm uniqueData) uniqueWrites)
@@ -448,7 +454,8 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
             ∧ IndexGrowth history.index arena
                 (pending.val.length
                   * ((indexRows history.index head.data).length + pending.val.length + 1))
-                pending.val.length) := by
+                pending.val.length
+            ∧ after.meta_live = true) := by
   unfold Spike.engine.History.prepare_frame
   apply WP.spec_bind (branch_active_len history.log branch)
   intro count hc

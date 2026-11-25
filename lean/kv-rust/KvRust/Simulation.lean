@@ -61,7 +61,7 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
           (execute w (modelAction encode sid action))) := by
   cases action with
   | Begin id => exact begin_step_matches encode sid n w id rel room
-  | End id => exact end_step_matches encode sid n w id rel room
+  | End id => exact end_step_matches encode inj sid n w id rel room
   | SetTerm term => exact set_term_step_matches encode sid n w term rel
   | Snapshot id => exact snapshot_step_matches encode sid n w id rel
   | Acquire id m => exact acquire_step_matches encode inj sid n w id m rel room
@@ -74,7 +74,7 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
   | Apply id => exact apply_step_matches encode inj sid n w id rel room
   | CommitResult id result =>
       exact commit_result_step_matches encode sid n w id result rel
-  | Compact cut => exact compact_step_matches encode sid n w cut rel room
+  | Compact cut => exact compact_step_matches encode inj sid n w cut rel room
   | Rollback cut term => exact rollback_step_matches encode sid n w cut term rel room
 
 /-- Relate an optional action result modulo relaxed scan/apply ordering. -/

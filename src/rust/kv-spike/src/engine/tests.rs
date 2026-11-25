@@ -1022,3 +1022,52 @@ fn identity_exhaustion_never_looks_like_conflict_or_partially_applies() {
     acquire(&mut s, 1, b"a");
     assert_read(&mut s, 1, b"a", b"k", false, None);
 }
+
+#[test]
+fn compacted_metadata_elides_when_unneeded_and_preserves_rollback_lineage() {
+    let mut s = Store::new(0);
+    // v1 writes map "m"; v2 writes "other" so v2 still carries v1's lineage for "m".
+    put(&mut s, 0, b"m", b"k1", b"v1", 1);
+    put(&mut s, 0, b"other", b"o2", b"v2", 2);
+    // Compact to v2 with no live transactions: v0 and v1 metadata must be elided.
+    run(&mut s, Action::Compact(2));
+    assert!(!s.history.log.read(s.history.log.resolve(0).unwrap()).meta_live);
+    assert!(!s.history.log.read(s.history.log.resolve(1).unwrap()).meta_live);
+    assert!(s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
+
+    // Hold a snapshot at v2 so compaction past v2 must retain v2's metadata until End.
+    begin(&mut s, 10);
+
+    // Advance to v3 and v4 touching only "other", and have tx 11 acquire "m" at v4.
+    put(&mut s, 0, b"other", b"o3", b"v3", 3);
+    put(&mut s, 0, b"other", b"o4", b"v4", 4);
+    begin(&mut s, 11);
+    acquire(&mut s, 11, b"m");
+
+    // Same-term rollback to v3, then overwrite "m" on a different key at v4' and v5'.
+    assert!(matches!(
+        run(&mut s, Action::Rollback(3, 0)),
+        Output::RolledBack(3)
+    ));
+    put(&mut s, 0, b"m", b"k2", b"v4b", 4);
+    put(&mut s, 0, b"m", b"k3", b"v5b", 5);
+
+    // Compact to v5: v2/v3 are below global, and v5 no longer matches tx 11's view of "m",
+    // so v2 and v3 must stay meta_live for tx 11's lineage check (and v2 for tx 10's snapshot),
+    // while v4' stays meta_live because tx 11's snapshot version is 4.
+    run(&mut s, Action::Compact(5));
+    assert!(s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
+    assert!(s.history.log.read(s.history.log.resolve(3).unwrap()).meta_live);
+    assert!(s.history.log.read(s.history.log.resolve(4).unwrap()).meta_live);
+    assert!(s.history.log.read(s.history.log.resolve(5).unwrap()).meta_live);
+
+    // tx 11 writes a disjoint key on "m" and must still apply cleanly because v2/v3 survive;
+    // ending tx 11 inside applied() opportunistically elides v4' (its compacted snapshot version).
+    write(&mut s, 11, b"m", b"k4", Some(b"ok"));
+    applied(&mut s, 11, Outcome::Success, 6);
+    assert!(!s.history.log.read(s.history.log.resolve(4).unwrap()).meta_live);
+
+    // Ending tx 10 now allows v2's compacted metadata to elide immediately on Action::End.
+    run(&mut s, Action::End(10));
+    assert!(!s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
+}

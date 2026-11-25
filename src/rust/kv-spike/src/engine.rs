@@ -435,6 +435,7 @@ struct Frame {
     data: RadixRoot,
     revisions: Assoc<Bytes, Stamp>,
     births: Assoc<Bytes, Stamp>,
+    meta_live: bool,
 }
 
 impl Frame {
@@ -444,6 +445,7 @@ impl Frame {
             data,
             revisions: Assoc::new(),
             births: Assoc::new(),
+            meta_live: true,
         }
     }
 
@@ -455,6 +457,9 @@ impl Frame {
     }
 
     fn matches_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
+        if !self.meta_live {
+            return false;
+        }
         let same_birth = match (self.births.get(map), birth) {
             (Some(a), Some(b)) => a.same(b),
             (None, None) => true,
@@ -491,6 +496,7 @@ impl Frame {
             data: publish_selected(index, base, pending, version),
             revisions,
             births,
+            meta_live: true,
         }
     }
 }
@@ -766,19 +772,68 @@ impl History {
                     self.log.read_mut(id).data = self.index.empty_root();
                     self.index.release_root(old);
                 }
+                let slot = self.log.read_mut(id);
+                slot.revisions = Assoc::new();
+                slot.births = Assoc::new();
+                slot.meta_live = false;
             }
             i += 1;
         }
     }
 
-    fn compact(&mut self, requested: Version) -> Version {
+    fn release_compacted_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        global_id: FrameId,
+        txs: &Assoc<Attempt, Tx>,
+    ) {
+        let mut i = start;
+        while i < end {
+            if let Some(id) = self.log.resolve(i) {
+                let old = self.log.read(id).data;
+                if !old.is_empty() {
+                    self.log.read_mut(id).data = self.index.empty_root();
+                    self.index.release_root(old);
+                }
+                let elide = !txs_need_frame(txs, self.log.read(id), self.log.read(global_id));
+                if elide {
+                    let slot = self.log.read_mut(id);
+                    slot.revisions = Assoc::new();
+                    slot.births = Assoc::new();
+                    slot.meta_live = false;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    fn try_elide_compacted_version(&mut self, version: Version, txs: &Assoc<Attempt, Tx>) {
+        if !self.reuse_compacted_images || version >= self.global {
+            return;
+        }
+        let offset = self.relative_cut(version) as usize;
+        let global_id = self.pin_cut(self.global);
+        if let Some(id) = self.log.resolve(offset) {
+            let elide = !txs_need_frame(txs, self.log.read(id), self.log.read(global_id));
+            if elide {
+                let slot = self.log.read_mut(id);
+                slot.revisions = Assoc::new();
+                slot.births = Assoc::new();
+                slot.meta_live = false;
+            }
+        }
+    }
+
+    fn compact(&mut self, requested: Version, txs: &Assoc<Attempt, Tx>) -> Version {
         let old_global = self.global;
         let next = compact_cut(old_global, self.head().version, requested);
         self.global = next;
         if self.reuse_compacted_images && old_global < next {
             let start = self.relative_cut(old_global) as usize;
             let end = self.relative_cut(next) as usize;
-            self.release_active_range(start, end);
+            let global_id = self.pin_cut(next);
+            self.release_compacted_range(start, end, global_id, txs);
             self.index.retire_budget(RETIRE_BUDGET);
         }
         self.global
@@ -957,6 +1012,39 @@ fn release_pin(index: &mut AddressIndex<Cell>, pin: &PinnedImage) {
     if let PinnedImage::Root(root) = pin {
         index.release_root(*root);
     }
+}
+
+fn view_needs_frame(row: &(Bytes, View), frame: &Frame, global_frame: &Frame) -> bool {
+    let (map, view) = row;
+    frame.matches_lineage(map, view.birth, view.revision)
+        && !global_frame.matches_lineage(map, view.birth, view.revision)
+}
+
+fn tx_needs_frame(tx: &Tx, frame: &Frame, global_frame: &Frame) -> bool {
+    if let Some(snap) = tx.snapshot {
+        if snap.version == frame.version {
+            return true;
+        }
+    }
+    let mut i = 0;
+    while i < tx.views.0.len() {
+        if view_needs_frame(&tx.views.0[i], frame, global_frame) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn txs_need_frame(txs: &Assoc<Attempt, Tx>, frame: &Frame, global_frame: &Frame) -> bool {
+    let mut i = 0;
+    while i < txs.0.len() {
+        if tx_needs_frame(&txs.0[i].1, frame, global_frame) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn release_tx_pins(index: &mut AddressIndex<Cell>, tx: &Tx) {
@@ -1656,8 +1744,12 @@ impl Store {
             }
             Action::End(tx) => {
                 let i = self.tx_index(tx)?;
+                let snap = self.txs.0[i].1.snapshot;
                 release_tx_pins(&mut self.history.index, &self.txs.0[i].1);
                 erase_attempt(&mut self.txs, tx);
+                if let Some(s) = snap {
+                    self.history.try_elide_compacted_version(s.version, &self.txs);
+                }
                 self.history.index.retire_budget(RETIRE_BUDGET);
                 Ok(Output::Unit)
             }
@@ -1698,7 +1790,9 @@ impl Store {
             }
             Action::Apply(tx) => self.apply(tx, true),
             Action::CommitResult(tx, result) => self.finish(tx, result),
-            Action::Compact(version) => Ok(Output::Compacted(self.history.compact(version))),
+            Action::Compact(version) => {
+                Ok(Output::Compacted(self.history.compact(version, &self.txs)))
+            }
             Action::Rollback(version, term) => self.history.rollback(version, term),
         }
     }
@@ -1785,7 +1879,7 @@ impl Store {
 
     pub fn compact_ccf(&mut self, version: Version) -> Output {
         let previous = self.history.global;
-        let cut = self.history.compact(version);
+        let cut = self.history.compact(version, &self.txs);
         if previous <= version && cut == version {
             let frame = self.history.at_cut(cut);
             let mut retained = Assoc::new();
@@ -1901,6 +1995,16 @@ impl Store {
 
     pub fn map_revision_at(&self, version: Version, map: &Bytes) -> Option<Version> {
         let frame = self.history.at_cut(version);
+        if !frame.meta_live {
+            let global_frame = self.history.at_cut(self.history.global);
+            if let Some(birth) = global_frame.births.get(map) {
+                if birth.version <= version {
+                    let rev = global_frame.revision(map).version;
+                    return Some(if rev <= version { rev } else { version });
+                }
+            }
+            return None;
+        }
         if frame.births.index(map).is_none() {
             return None;
         }

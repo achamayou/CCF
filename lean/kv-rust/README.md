@@ -6,8 +6,8 @@ It is not linked into production CCF and does not change the existing Lean speci
 The [dynamic engine](../../src/rust/kv-spike/src/engine.rs) implements the single-store action surface with byte strings, associative transaction state, and an archive of version frames backed by a reference-counted radix arena.
 Each frame holds a single persistent radix root ordered by packed `(map_len, map, key)` bytes, supporting prefix-scoped map scans without maintaining a second chronology index.
 Callers explicitly capture a snapshot before acquiring the first map, and explicitly supply the result of replication after local application.
-Compaction advances the global frontier, changes which map views can be acquired, and releases compacted frame roots so unreachable radix nodes and rows are reclaimed through a bounded retirement FIFO.
-Rollback similarly releases rolled-back frame roots, and ending a transaction releases its pinned view roots before draining the retirement budget.
+Compaction advances the global frontier, changes which map views can be acquired, releases compacted frame roots so unreachable radix nodes and rows are reclaimed through a bounded retirement FIFO, and elides compacted frame metadata (`revisions` and `births`) whenever no live transaction snapshot or acquired view lineage needs that frame.
+Rollback similarly releases rolled-back frame roots and metadata, and ending a transaction releases its pinned view roots, opportunistically elides its compacted snapshot frame's metadata when no remaining transaction needs it, and drains the retirement budget.
 The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
 
 The [original two-map proofs](KvRust/Correspondence.lean) still exercise the scheduling and publication slice.
@@ -15,7 +15,8 @@ The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, repla
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
 The [single-radix reclamation proofs](KvRust/RadixSingleReclaim.lean) establish exact reference-count accounting, bounded FIFO retirement, and lockstep view preservation across `put`, `remove`, sorted batch publication, root retention/release, and slot recycling.
 The [indexed publication proof](KvRust/IndexedPublication.lean) checks the extracted right-to-left write-set fold against `Kv.Model.publish`, releasing intermediate roots and preserving live pins under numeric bounds on packed keys, path copies, row slots, reference counts, and the retirement queue.
-The [archive relation](KvRust/IndexedHistory.lean) ties active frames at or above the global cut to their live radix views while tracking an immutable ghost native archive for metadata and historical lineage across compaction and rollback.
+The [archive relation](KvRust/IndexedHistory.lean) ties active frames at or above the global cut to their live radix views and live metadata while tracking an immutable ghost native archive for historical lineage across compaction, rollback, and metadata elision.
+[`StoreMetaLive`](KvRust/Relation.lean) maintains that every live transaction snapshot on the active branch retains live metadata and every acquired map view whose stamps match any ghost active frame still matches a live-metadata active frame, preserved across compaction, opportunistic elision on `End`, and rollback via branch stamp monotonicity (`RevisionFlow.stamps_between`).
 The [retained-cut proof](KvRust/RetainedCuts.lean) shows that an older acquisition which remains available can read the compacted map image, or the empty placeholder, without changing its observation.
 It preserves the revision invariant across the modeled apply, compact, and rollback steps.
 On ordinary histories, an available acquisition below the global cut pins the compacted image without changing its local revision or observations, while compaction clears and releases superseded frame roots below the cut.

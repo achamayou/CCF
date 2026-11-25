@@ -83,61 +83,55 @@ theorem revision_matches_model (encode : Spike.engine.Bytes → String)
   rw [← hr]
   cases r <;> simp [Spike.engine.Stamp.zero, modelStamp]
 
-private theorem frame_matches (encode : Spike.engine.Bytes → String)
+/-- Boolean match of a native frame's live metadata against a map's birth and revision stamps. -/
+def frameMatches (encode : Spike.engine.Bytes → String) (f : Spike.engine.Frame)
+    (m : Spike.engine.Bytes) (b : Option Spike.engine.Stamp) (r : Spike.engine.Stamp)
+    : Bool :=
+  f.meta_live
+  && (find (modelMetadata encode f).births (encode m) == b.map modelStamp)
+  && (revision (modelMetadata encode f) (encode m) == modelStamp r)
+
+theorem frame_matches (encode : Spike.engine.Bytes → String)
     (inj : Function.Injective encode) (f : Spike.engine.Frame) (m : Spike.engine.Bytes)
     (b : Option Spike.engine.Stamp) (r : Spike.engine.Stamp)
     : WP.spec (Spike.engine.Frame.matches_lineage f m b r)
-        (fun result =>
-          result
-          = ((find (modelMetadata encode f).births (encode m) == b.map modelStamp)
-              && (revision (modelMetadata encode f) (encode m) == modelStamp r))) := by
-  unfold Spike.engine.Frame.matches_lineage
-  apply WP.spec_bind (stamps_find encode inj f.births m)
-  intro a ha
-  have hb : WP.spec (match a with
-      | none => match b with
-        | none => Result.ok true
-        | some _ => Result.ok false
-      | some x => match b with
-        | none => Result.ok false
-        | some y => Spike.engine.Stamp.same x y)
-      (fun result => result = (a.map modelStamp == b.map modelStamp)) := by
-    cases a <;> cases b <;> simp [stamp_same]
-  apply WP.spec_bind hb
-  intro result hresult
-  have he : find (modelMetadata encode f).births (encode m) = a.map modelStamp := ha.symm
-  cases result with
-  | false => simp [he, ← hresult]
+        (fun result => result = frameMatches encode f m b r) := by
+  unfold Spike.engine.Frame.matches_lineage frameMatches
+  cases hm : f.meta_live with
+  | false => simp
   | true =>
-      simp only [ite_true, he, ← hresult, Bool.true_and]
-      apply WP.spec_bind (revision_matches_model encode inj f m)
-      intro actual hactual
-      simp [stamp_same, hactual]
+      simp only [ite_true, Bool.true_and]
+      apply WP.spec_bind (stamps_find encode inj f.births m)
+      intro a ha
+      have hb : WP.spec (match a with
+          | none => match b with
+            | none => Result.ok true
+            | some _ => Result.ok false
+          | some x => match b with
+            | none => Result.ok false
+            | some y => Spike.engine.Stamp.same x y)
+          (fun result => result = (a.map modelStamp == b.map modelStamp)) := by
+        cases a <;> cases b <;> simp [stamp_same]
+      apply WP.spec_bind hb
+      intro result hresult
+      have he : find (modelMetadata encode f).births (encode m) = a.map modelStamp := ha.symm
+      cases result with
+      | false => simp [he, ← hresult]
+      | true =>
+          simp only [ite_true, he, ← hresult, Bool.true_and]
+          apply WP.spec_bind (revision_matches_model encode inj f m)
+          intro actual hactual
+          simp [stamp_same, hactual]
 
-/-- Search precisely the surviving branch for a frame with both of the captured map identities. -/
-theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
+/-- Exact specification of `History.map_lineage` over live-metadata active frames. -/
+theorem map_lineage_live_spec (encode : Spike.engine.Bytes → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (m : Spike.engine.Bytes)
     (birth : Option Spike.engine.Stamp) (rev : Spike.engine.Stamp)
-    (model : Store) (captured : Frame)
-    (hBirth : find captured.births (encode m) = birth.map modelStamp)
-    (hRev : revision captured (encode m) = modelStamp rev)
-    (hHistory
-      : model.history.map (fun f => (find f.births (encode m), revision f (encode m)))
-        = (modelFrames s (modelMetadata encode)).map
-            (fun f => (find f.births (encode m), revision f (encode m))))
     (valid : BranchValid s.log)
     : WP.spec (Spike.engine.History.map_lineage s m birth rev)
-        (fun result => result = mapLineage model captured (encode m)) := by
-  let matchesFrame := fun f : Spike.engine.Frame =>
-    (find (modelMetadata encode f).births (encode m) == birth.map modelStamp) &&
-      (revision (modelMetadata encode f) (encode m) == modelStamp rev)
-  have hmodel : mapLineage model captured (encode m) = s.activeFrames.any matchesFrame := by
-    let check := fun (p : Option Stamp × Stamp) =>
-      (p.1 == birth.map modelStamp) && (p.2 == modelStamp rev)
-    have h := congrArg (fun fs => List.any fs check) hHistory
-    simpa [mapLineage, modelFrames, hBirth, hRev, Function.comp_def, check, matchesFrame]
-      using h
-  rw [hmodel]
+        (fun result =>
+          result = s.activeFrames.any (fun f => frameMatches encode f m birth rev)) := by
+  let matchesFrame := fun f : Spike.engine.Frame => frameMatches encode f m birth rev
   unfold Spike.engine.History.map_lineage Spike.engine.History.map_lineage_loop
   apply WP.spec_bind (branch_active_len s.log valid)
   intro count hlen
@@ -161,22 +155,64 @@ theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
         (List.getElem?_eq_getElem hi))
       intro frame hf
       apply WP.spec_bind (frame_matches encode inj frame m birth rev)
-      intro result hr
-      change result = matchesFrame frame at hr
-      have hstep := hinv
-      rw [step, List.take_succ_eq_append_getElem hi, ← hf, List.any_append, List.any_cons,
-        List.any_nil, Bool.or_false, ← hr] at hstep
-      cases result with
-      | true => simpa using hstep
+      intro found hfound
+      have htake : s.activeFrames.take i.val =
+          s.activeFrames.take j.val ++ [s.activeFrames[j.val]] := by
+        rw [step, List.take_succ_eq_append_getElem hi]
+      rw [htake, List.any_append, List.any_cons, List.any_nil, Bool.or_false] at hinv
+      have hmatch : found = matchesFrame s.activeFrames[j.val] := by
+        simpa [matchesFrame, hf] using hfound
+      cases found with
+      | true =>
+          simp only [ite_true, WP.spec_ok]
+          simpa [← hmatch] using hinv.symm
       | false =>
           simp only [Bool.false_eq_true, ite_false, WP.spec_ok]
-          exact ⟨⟨by omega, by simpa using hstep⟩, by omega⟩
-    · have hi : i.val = 0 := by
+          refine ⟨⟨by omega, ?_⟩, by omega⟩
+          simpa [← hmatch] using hinv
+    · have zero : i.val = 0 := by
         have no : ¬ 0 < i.val := h
         omega
       rw [ite_eq_right h, WP.spec_ok]
-      simpa [hi] using hinv
-  · simp [hlen]
+      simpa [zero] using hinv.symm
+  · exact ⟨Nat.le_of_eq hlen, by rw [hlen, List.take_length]⟩
+
+/-- Search precisely the surviving branch for a frame with both of the captured map identities,
+when all active frames retain live metadata. -/
+theorem map_lineage_matches_model (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode) (s : Spike.engine.History) (m : Spike.engine.Bytes)
+    (birth : Option Spike.engine.Stamp) (rev : Spike.engine.Stamp)
+    (model : Store) (captured : Frame)
+    (hBirth : find captured.births (encode m) = birth.map modelStamp)
+    (hRev : revision captured (encode m) = modelStamp rev)
+    (hHistory
+      : model.history.map (fun f => (find f.births (encode m), revision f (encode m)))
+        = (modelFrames s (modelMetadata encode)).map
+            (fun f => (find f.births (encode m), revision f (encode m))))
+    (hMetaLive : ∀ f ∈ s.activeFrames, f.meta_live = true)
+    (valid : BranchValid s.log)
+    : WP.spec (Spike.engine.History.map_lineage s m birth rev)
+        (fun result => result = mapLineage model captured (encode m)) := by
+  let matchesFrame := fun f : Spike.engine.Frame =>
+    (find (modelMetadata encode f).births (encode m) == birth.map modelStamp) &&
+      (revision (modelMetadata encode f) (encode m) == modelStamp rev)
+  have hmodel : mapLineage model captured (encode m) = s.activeFrames.any matchesFrame := by
+    let check := fun (p : Option Stamp × Stamp) =>
+      (p.1 == birth.map modelStamp) && (p.2 == modelStamp rev)
+    have h := congrArg (fun fs => List.any fs check) hHistory
+    simpa [mapLineage, modelFrames, hBirth, hRev, Function.comp_def, check, matchesFrame]
+      using h
+  have hliveEq : s.activeFrames.any (fun f => frameMatches encode f m birth rev) =
+      s.activeFrames.any matchesFrame := by
+    apply Bool.eq_iff_iff.mpr
+    simp only [List.any_eq_true]
+    exact ⟨
+      fun ⟨f, hf, h⟩ => ⟨f, hf, by simpa [frameMatches, matchesFrame, hMetaLive f hf] using h⟩,
+      fun ⟨f, hf, h⟩ => ⟨f, hf, by simpa [frameMatches, matchesFrame, hMetaLive f hf] using h⟩
+    ⟩
+  apply WP.spec_mono (map_lineage_live_spec encode inj s m birth rev valid)
+  intro result hr
+  rw [hr, hliveEq, ← hmodel]
 
 /-- Forget a frame's data for a comparison that only depends on its map stamps. -/
 def onlyMetadata (f : Frame) : Frame := { f with data := [] }
@@ -191,41 +227,21 @@ def viewStamps (encode : Spike.engine.Bytes → String)
     : String × Option Stamp × Stamp :=
   (encode view.1, view.2.birth.map modelStamp, modelStamp view.2.revision)
 
-private def stampsOnBranch (model : Store) (stamps : String × Option Stamp × Stamp)
-    : Bool :=
+def stampsOnBranch (model : Store) (stamps : String × Option Stamp × Stamp) : Bool :=
   model.history.any
     fun f =>
       (find f.births stamps.1 == stamps.2.1) && (revision f stamps.1 == stamps.2.2)
 
-private theorem view_on_branch (encode : Spike.engine.Bytes → String)
-    (inj : Function.Injective encode) (s : Spike.engine.History) (model : Store)
-    (view : Spike.engine.Bytes × Spike.engine.View)
-    (hHistory : model.history.map onlyMetadata = modelFrames s (modelMetadata encode))
-    (valid : BranchValid s.log)
-    : WP.spec (Spike.engine.History.map_lineage s view.1 view.2.birth view.2.revision)
-        (fun result => result = stampsOnBranch model (viewStamps encode view)) := by
-  let frame : Frame := {
-    births := match view.2.birth with
-      | none => []
-      | some stamp => [(encode view.1, modelStamp stamp)]
-    revisions := [(encode view.1, modelStamp view.2.revision)]
-  }
-  have hb : find frame.births (encode view.1) = view.2.birth.map modelStamp := by
-    cases h : view.2.birth <;> simp [frame, h, find]
-  have hr : revision frame (encode view.1) = modelStamp view.2.revision := by
-    simp [frame, revision, find]
-  have hs := congrArg
-    (List.map fun (f : Frame) => (find f.births (encode view.1), revision f (encode view.1))) hHistory
-  simp only [List.map_map, Function.comp_def, onlyMetadata, revision] at hs
-  have h := map_lineage_matches_model encode inj s view.1 view.2.birth view.2.revision model frame
-    hb hr (by simpa only [revision] using hs) valid
-  simpa [mapLineage, hb, hr, stampsOnBranch, viewStamps] using h
-
-/-- The extracted lineage check covers every acquired map and distinguishes reused versions. -/
+/-- The extracted lineage check covers every acquired map and distinguishes reused versions,
+provided every acquired view still has a live-metadata match whenever the model branch matches. -/
 theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (t : Spike.engine.Tx)
     (model : Store) (tx : Tx)
-    (hHistory : model.history.map onlyMetadata = modelFrames s (modelMetadata encode))
+    (hViewLive
+      : ∀ row ∈ t.views.val,
+          s.activeFrames.any
+            (fun f => frameMatches encode f row.1 row.2.birth row.2.revision)
+          = stampsOnBranch model (viewStamps encode row))
     (hViews : tx.globalViews.map capturedStamps = t.views.val.map (viewStamps encode))
     (valid : BranchValid s.log)
     : WP.spec (Spike.engine.Tx.valid_lineage t s)
@@ -258,11 +274,15 @@ theorem acquired_lineage_matches_model (encode : Spike.engine.Bytes → String)
           let next ← i + 1#usize
           Result.ok (ControlFlow.cont next)
         else Result.ok (ControlFlow.done false)) _
-      apply WP.spec_bind (view_on_branch encode inj s model (m, view) hHistory valid)
+      have hmem : (m, view) ∈ t.views.val := by
+        rw [hv]; exact List.getElem_mem hi
+      apply WP.spec_bind
+        (map_lineage_live_spec encode inj s m view.birth view.revision valid)
       intro result hr
-      change result = check (m, view) at hr
+      have hr' : result = check (m, view) := by
+        simpa [check, Function.comp_def] using hr.trans (hViewLive (m, view) hmem)
       have hstep := hinv
-      rw [List.drop_eq_getElem_cons hi, ← hv, List.all_cons, ← hr] at hstep
+      rw [List.drop_eq_getElem_cons hi, ← hv, List.all_cons, ← hr'] at hstep
       cases result with
       | false => simpa using hstep
       | true =>
@@ -283,9 +303,13 @@ theorem can_apply_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : Spike.engine.History) (t : Spike.engine.Tx)
     (model : Store) (tx : Tx) (prior : List Spike.engine.Frame)
     (head : Spike.engine.Frame) (hHead : s.activeFrames = prior ++ [head])
-    (hHistory
-      : model.history.map onlyMetadata
-        = modelFrames s (modelMetadata (encode ∘ alloc.vec.Vec.val)))
+    (hViewLive
+      : ∀ row ∈ t.views.val,
+          s.activeFrames.any
+            (fun f =>
+              frameMatches (encode ∘ alloc.vec.Vec.val) f row.1 row.2.birth
+                row.2.revision)
+          = stampsOnBranch model (viewStamps (encode ∘ alloc.vec.Vec.val) row))
     (hViews
       : tx.globalViews.map capturedStamps
         = t.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)))
@@ -306,7 +330,7 @@ theorem can_apply_matches_model (encode : List U8 → String)
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
   have hl := acquired_lineage_matches_model (encode ∘ alloc.vec.Vec.val) hinj
-    s t model tx hHistory hViews valid
+    s t model tx hViewLive hViews valid
   have hd : WP.spec (Spike.engine.Tx.valid_dependencies t s)
       (fun r => r = validates model.head.data tx.normal.deps) := by
     have hv := validates_encoding encode inj (indexedCellData rows)
@@ -352,5 +376,275 @@ theorem can_apply_matches_model (encode : List U8 → String)
                 using hcheck
             · have ht' : s.term.val ≠ snap.term.val := fun h => ht (htermEq.mp h)
               simp [ht, ht', hu', canApply, hUnavailable, validLineage, hms, hTerm, hst]
+
+private theorem view_needs_frame_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode) (row : Spike.engine.Bytes × Spike.engine.View)
+    (frame globalFrame : Spike.engine.Frame)
+    : WP.spec (Spike.engine.view_needs_frame row frame globalFrame)
+        (fun r =>
+          r
+          = (frameMatches encode frame row.1 row.2.birth row.2.revision
+              && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision)) := by
+  unfold Spike.engine.view_needs_frame
+  rcases row with ⟨m, v⟩
+  apply WP.spec_bind (frame_matches encode inj frame m v.birth v.revision)
+  intro b hb
+  cases b with
+  | false => simp [← hb]
+  | true =>
+      simp only [ite_true]
+      apply WP.spec_bind (frame_matches encode inj globalFrame m v.birth v.revision)
+      intro b1 hb1
+      simp [← hb, ← hb1]
+
+private theorem tx_needs_frame_loop0_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode)
+    (views : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (frame globalFrame : Spike.engine.Frame)
+    : WP.spec (Spike.engine.tx_needs_frame_loop0 views frame globalFrame 0#usize)
+        (fun r =>
+          r
+          = views.val.any
+              (fun row =>
+                frameMatches encode frame row.1 row.2.birth row.2.revision
+                && !frameMatches encode globalFrame row.1 row.2.birth
+                      row.2.revision)) := by
+  let pred := fun row : Spike.engine.Bytes × Spike.engine.View =>
+    frameMatches encode frame row.1 row.2.birth row.2.revision
+      && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision
+  unfold Spike.engine.tx_needs_frame_loop0
+  apply loop.spec_decr_nat
+    (fun s : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View × Usize =>
+      views.val.length - s.2.val)
+    (fun s => s.1 = views ∧ (views.val.drop s.2.val).any pred = views.val.any pred) _ _ _
+  · rintro ⟨a, i⟩ ⟨ha, hinv⟩
+    subst ha
+    unfold Spike.engine.tx_needs_frame_loop0.body
+    dsimp only
+    have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
+    have hbound := alloc.vec.Vec.len_ineq a
+    have hone : (1#usize : Usize).val = 1 := rfl
+    by_cases h : i < alloc.vec.Vec.len a
+    · have hi : i.val < a.val.length := by rw [← hlen]; exact h
+      rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec a i hi)
+      intro row hrow
+      apply WP.spec_bind (view_needs_frame_spec encode inj row frame globalFrame)
+      intro b hb
+      have hstep := hinv
+      rw [List.drop_eq_getElem_cons hi, ← hrow, List.any_cons] at hstep
+      cases b with
+      | true =>
+          simp only [ite_true, WP.spec_ok]
+          change true = pred row at hb
+          rw [← hb, Bool.true_or] at hstep
+          exact hstep
+      | false =>
+          simp only [Bool.false_eq_true, ite_false]
+          apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+          intro j hj
+          rw [WP.spec_ok]
+          dsimp only
+          change false = pred row at hb
+          rw [← hb, Bool.false_or] at hstep
+          have hj' : j.val = i.val + 1 := by omega
+          exact ⟨⟨rfl, by simpa [hj'] using hstep⟩, by omega⟩
+    · have hi : a.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+      rw [ite_eq_right h, WP.spec_ok]
+      simpa [pred, List.drop_eq_nil_of_le hi] using hinv
+  · exact ⟨rfl, by simp⟩
+
+private theorem tx_needs_frame_loop1_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode)
+    (views : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View)
+    (frame globalFrame : Spike.engine.Frame)
+    : WP.spec
+        (Spike.engine.tx_needs_frame_loop1 views frame.version frame.data frame.revisions
+          frame.births frame.meta_live globalFrame 0#usize)
+        (fun r =>
+          r
+          = views.val.any
+              (fun row =>
+                frameMatches encode frame row.1 row.2.birth row.2.revision
+                && !frameMatches encode globalFrame row.1 row.2.birth
+                      row.2.revision)) := by
+  let pred := fun row : Spike.engine.Bytes × Spike.engine.View =>
+    frameMatches encode frame row.1 row.2.birth row.2.revision
+      && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision
+  unfold Spike.engine.tx_needs_frame_loop1
+  apply loop.spec_decr_nat
+    (fun s : Spike.engine.Assoc Spike.engine.Bytes Spike.engine.View × Usize =>
+      views.val.length - s.2.val)
+    (fun s => s.1 = views ∧ (views.val.drop s.2.val).any pred = views.val.any pred) _ _ _
+  · rintro ⟨a, i⟩ ⟨ha, hinv⟩
+    subst ha
+    unfold Spike.engine.tx_needs_frame_loop1.body
+    dsimp only
+    have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
+    have hbound := alloc.vec.Vec.len_ineq a
+    have hone : (1#usize : Usize).val = 1 := rfl
+    by_cases h : i < alloc.vec.Vec.len a
+    · have hi : i.val < a.val.length := by rw [← hlen]; exact h
+      rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec a i hi)
+      intro row hrow
+      have hframeEq :
+          ({ version := frame.version, data := frame.data, revisions := frame.revisions,
+             births := frame.births, meta_live := frame.meta_live } : Spike.engine.Frame) = frame := by
+        cases frame; rfl
+      rw [hframeEq]
+      apply WP.spec_bind (view_needs_frame_spec encode inj row frame globalFrame)
+      intro b hb
+      have hstep := hinv
+      rw [List.drop_eq_getElem_cons hi, ← hrow, List.any_cons] at hstep
+      cases b with
+      | true =>
+          simp only [ite_true, WP.spec_ok]
+          change true = pred row at hb
+          rw [← hb, Bool.true_or] at hstep
+          exact hstep
+      | false =>
+          simp only [Bool.false_eq_true, ite_false]
+          apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+          intro j hj
+          rw [WP.spec_ok]
+          dsimp only
+          change false = pred row at hb
+          rw [← hb, Bool.false_or] at hstep
+          have hj' : j.val = i.val + 1 := by omega
+          exact ⟨⟨rfl, by simpa [hj'] using hstep⟩, by omega⟩
+    · have hi : a.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+      rw [ite_eq_right h, WP.spec_ok]
+      simpa [pred, List.drop_eq_nil_of_le hi] using hinv
+  · exact ⟨rfl, by simp⟩
+
+theorem tx_needs_frame_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode) (tx : Spike.engine.Tx)
+    (frame globalFrame : Spike.engine.Frame)
+    : WP.spec (Spike.engine.tx_needs_frame tx frame globalFrame)
+        (fun r =>
+          r
+          = ((match tx.snapshot with
+              | none => false
+              | some snap => decide (snap.version = frame.version))
+              || tx.views.val.any
+                  (fun row =>
+                    frameMatches encode frame row.1 row.2.birth row.2.revision
+                    && !frameMatches encode globalFrame row.1 row.2.birth
+                          row.2.revision))) := by
+  unfold Spike.engine.tx_needs_frame
+  cases hs : tx.snapshot with
+  | none =>
+      simpa using tx_needs_frame_loop0_spec encode inj tx.views frame globalFrame
+  | some snap =>
+      by_cases hv : snap.version = frame.version
+      · simp [hv]
+      · simp only [hv, ite_false, decide_false, Bool.false_or]
+        exact tx_needs_frame_loop1_spec encode inj tx.views frame globalFrame
+
+theorem txs_need_frame_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode)
+    (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
+    (frame globalFrame : Spike.engine.Frame)
+    : WP.spec (Spike.engine.txs_need_frame txs frame globalFrame)
+        (fun r =>
+          r
+          = txs.val.any
+              (fun entry =>
+                (match entry.2.snapshot with
+                  | none => false
+                  | some snap => decide (snap.version = frame.version))
+                || entry.2.views.val.any
+                    (fun row =>
+                      frameMatches encode frame row.1 row.2.birth row.2.revision
+                      && !frameMatches encode globalFrame row.1 row.2.birth
+                            row.2.revision))) := by
+  let pred := fun entry : U64 × Spike.engine.Tx =>
+    (match entry.2.snapshot with
+      | none => false
+      | some snap => decide (snap.version = frame.version))
+    || entry.2.views.val.any
+        (fun row =>
+          frameMatches encode frame row.1 row.2.birth row.2.revision
+          && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision)
+  unfold Spike.engine.txs_need_frame Spike.engine.txs_need_frame_loop
+  apply loop.spec_decr_nat
+    (fun s : Spike.engine.Assoc U64 Spike.engine.Tx × Usize => txs.val.length - s.2.val)
+    (fun s => s.1 = txs ∧ (txs.val.drop s.2.val).any pred = txs.val.any pred) _ _ _
+  · rintro ⟨a, i⟩ ⟨ha, hinv⟩
+    subst ha
+    unfold Spike.engine.txs_need_frame_loop.body
+    dsimp only
+    have hlen : (alloc.vec.Vec.len a).val = a.val.length := alloc.vec.Vec.len_val _
+    have hbound := alloc.vec.Vec.len_ineq a
+    have hone : (1#usize : Usize).val = 1 := rfl
+    by_cases h : i < alloc.vec.Vec.len a
+    · have hi : i.val < a.val.length := by rw [← hlen]; exact h
+      rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec a i hi)
+      rintro ⟨tid, tx⟩ hrow
+      apply WP.spec_bind (tx_needs_frame_spec encode inj tx frame globalFrame)
+      intro b hb
+      have hstep := hinv
+      rw [List.drop_eq_getElem_cons hi, ← hrow, List.any_cons] at hstep
+      cases b with
+      | true =>
+          simp only [ite_true, WP.spec_ok]
+          change true = pred (tid, tx) at hb
+          rw [← hb, Bool.true_or] at hstep
+          exact hstep
+      | false =>
+          simp only [Bool.false_eq_true, ite_false]
+          apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+          intro j hj
+          rw [WP.spec_ok]
+          dsimp only
+          change false = pred (tid, tx) at hb
+          rw [← hb, Bool.false_or] at hstep
+          have hj' : j.val = i.val + 1 := by omega
+          exact ⟨⟨rfl, by simpa [hj'] using hstep⟩, by omega⟩
+    · have hi : a.val.length ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+      rw [ite_eq_right h, WP.spec_ok]
+      simpa [pred, List.drop_eq_nil_of_le hi] using hinv
+  · exact ⟨rfl, by simp⟩
+
+/-- When `txs_need_frame` returns `false`, no live transaction snapshots `frame.version`
+or depends exclusively on `frame` (without `globalFrame` also matching) for lineage. -/
+theorem txs_need_frame_false_spec (encode : Spike.engine.Bytes → String)
+    (inj : Function.Injective encode)
+    (txs : Spike.engine.Assoc U64 Spike.engine.Tx)
+    (frame globalFrame : Spike.engine.Frame)
+    (hFalse : Spike.engine.txs_need_frame txs frame globalFrame = .ok false)
+    : ∀ (id : U64) (t : Spike.engine.Tx),
+        (id, t) ∈ txs.val
+        → (∀ snap, t.snapshot = some snap → snap.version ≠ frame.version)
+          ∧ (∀ bm bv,
+              (bm, bv) ∈ t.views.val
+              → frameMatches encode frame bm bv.birth bv.revision = true
+              → frameMatches encode globalFrame bm bv.birth bv.revision = true) := by
+  have hspec := txs_need_frame_spec encode inj txs frame globalFrame
+  rw [hFalse, WP.spec_ok] at hspec
+  have hnone : ∀ entry ∈ txs.val,
+      ((match entry.2.snapshot with
+        | none => false
+        | some snap => decide (snap.version = frame.version))
+      || entry.2.views.val.any
+          (fun row =>
+            frameMatches encode frame row.1 row.2.birth row.2.revision
+            && !frameMatches encode globalFrame row.1 row.2.birth row.2.revision)) = false := by
+    intro entry hmem
+    have := List.any_eq_false.mp hspec.symm entry hmem
+    simpa using this
+  intro id t hmem
+  have ht := hnone (id, t) hmem
+  have hparts := Bool.or_eq_false_iff.mp ht
+  refine ⟨?_, ?_⟩
+  · intro snap hsnap heq
+    have hs := hparts.1
+    simp [hsnap, heq] at hs
+  · intro bm bv hvm hmf
+    have hv := List.any_eq_false.mp hparts.2 (bm, bv) hvm
+    simp [hmf] at hv
+    exact hv
 
 end KvRust

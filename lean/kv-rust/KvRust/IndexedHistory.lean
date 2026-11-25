@@ -126,16 +126,29 @@ theorem frame_meta_eq_modelFrame (encode : List U8 → String) (index : CellInde
   ⟨rfl, rfl, rfl⟩
 
 /-- Alignment between the native frame archive (whose compacted/rolled-back
-entries may have `data = 0#u32`) and the immutable ghost native archive `natArchive`. -/
+entries may have `data = 0#u32` and elided metadata when `meta_live = false`)
+and the immutable ghost native archive `natArchive`. -/
 structure ArchiveAligned (encode : List U8 → String) (history : Spike.engine.History)
     (natArchive : List Kv.Model.Frame)
     : Prop where
   len : natArchive.length = history.log.frames.val.length
+  versionEq
+    : ∀ (i : Nat) nf gf,
+        history.log.frames.val[i]? = some nf
+        → natArchive[i]? = some gf
+        → gf.version = nf.version.val
   metaEq
     : ∀ (i : Nat) nf gf,
         history.log.frames.val[i]? = some nf
         → natArchive[i]? = some gf
+        → nf.meta_live = true
         → FrameMetaEq encode nf gf
+  globalMetaLive
+    : ∀ (off : Nat) (id : Usize) nf,
+        history.log.branch.val[off]? = some id
+        → history.log.frames.val[id.val]? = some nf
+        → (history.reuse_compacted_images = true → history.global.val ≤ nf.version.val)
+        → nf.meta_live = true
   activeLive
     : ∀ (off : Nat) (id : Usize) nf gf,
         history.log.branch.val[off]? = some id
@@ -286,7 +299,11 @@ theorem ArchiveAligned.of_preserves_pins {encode : List U8 → String}
     : ArchiveAligned encode after natArchive := by
   refine ⟨
     by rw [hframes]; exact aligned.len,
-    fun i nf gf hnf hgf => aligned.metaEq i nf gf (hframes ▸ hnf) hgf,
+    fun i nf gf hnf hgf => aligned.versionEq i nf gf (hframes ▸ hnf) hgf,
+    fun i nf gf hnf hgf hml => aligned.metaEq i nf gf (hframes ▸ hnf) hgf hml,
+    fun off id nf hid hnf hlive =>
+      aligned.globalMetaLive off id nf (hbr ▸ hid) (hframes ▸ hnf)
+        (by rw [← hreuse, ← hglobal]; exact hlive),
     ?_
   ⟩
   intro off id nf gf hid hnf hgf hlive
@@ -317,10 +334,13 @@ theorem ArchiveAligned.append {encode : List U8 → String}
     (hidNew : idNew.val = before.log.frames.val.length)
     (hglobal : after.global = before.global)
     (hreuse : after.reuse_compacted_images = before.reuse_compacted_images)
+    (hmetaNew : nfNew.meta_live = true)
     : ArchiveAligned encode after
         (natArchive ++ [modelFrame encode after.index nfNew]) := by
   refine ⟨
     by rw [hframes, List.length_append, List.length_append, aligned.len]; rfl,
+    ?_,
+    ?_,
     ?_,
     ?_
   ⟩
@@ -329,7 +349,25 @@ theorem ArchiveAligned.append {encode : List U8 → String}
     by_cases hlt : i < before.log.frames.val.length
     · rw [List.getElem?_append_left hlt] at hnf
       rw [List.getElem?_append_left (aligned.len.symm ▸ hlt)] at hgf
-      exact aligned.metaEq i nf gf hnf hgf
+      exact aligned.versionEq i nf gf hnf hgf
+    · have hge := Nat.le_of_not_gt hlt
+      rw [List.getElem?_append_right hge] at hnf
+      rw [List.getElem?_append_right (aligned.len.symm ▸ hge)] at hgf
+      have hsub : i - before.log.frames.val.length = 0 := by
+        have := (List.getElem?_eq_some_iff.mp hnf).1
+        simp at this; omega
+      have hsub' : i - natArchive.length = 0 := aligned.len.symm ▸ hsub
+      rw [hsub] at hnf; rw [hsub'] at hgf
+      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
+      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
+      subst hnfEq hgfEq
+      rfl
+  · intro i nf gf hnf hgf hml
+    rw [hframes] at hnf
+    by_cases hlt : i < before.log.frames.val.length
+    · rw [List.getElem?_append_left hlt] at hnf
+      rw [List.getElem?_append_left (aligned.len.symm ▸ hlt)] at hgf
+      exact aligned.metaEq i nf gf hnf hgf hml
     · have hge := Nat.le_of_not_gt hlt
       rw [List.getElem?_append_right hge] at hnf
       rw [List.getElem?_append_right (aligned.len.symm ▸ hge)] at hgf
@@ -342,6 +380,27 @@ theorem ArchiveAligned.append {encode : List U8 → String}
       have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
       subst hnfEq hgfEq
       exact frame_meta_eq_modelFrame encode after.index nf
+  · intro off id nf hid hnf hlive
+    rw [hbr] at hid
+    by_cases hoff : off < before.log.branch.val.length
+    · rw [List.getElem?_append_left hoff] at hid
+      have hidLt : id.val < before.log.frames.val.length :=
+        validLogBefore.2 id (List.mem_iff_getElem?.mpr ⟨off, hid⟩)
+      have hnf0 : before.log.frames.val[id.val]? = some nf := by
+        rwa [hframes, List.getElem?_append_left hidLt] at hnf
+      exact aligned.globalMetaLive off id nf hid hnf0
+        (by rw [← hreuse, ← hglobal]; exact hlive)
+    · rw [List.getElem?_append_right (Nat.le_of_not_gt hoff)] at hid
+      have hsub : off - before.log.branch.val.length = 0 := by
+        have := (List.getElem?_eq_some_iff.mp hid).1
+        simp at this; omega
+      rw [hsub] at hid
+      have hidEq : id = idNew := Option.some.inj (by simpa using hid.symm)
+      subst hidEq
+      rw [hframes, hidNew, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hnf
+      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
+      subst hnfEq
+      exact hmetaNew
   · intro off id nf gf hid hnf hgf hlive
     rw [hbr] at hid
     by_cases hoff : off < before.log.branch.val.length

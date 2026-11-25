@@ -245,7 +245,11 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ IndexLiveness after.history.index (storePins after)
             ∧ IndexPreservesPins s.history.index after.history.index (storePins after)
             ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
-            ∧ after.history.log.frames.val = s.history.log.frames.val ++ [next]) := by
+            ∧ after.history.log.frames.val = s.history.log.frames.val ++ [next]
+            ∧ (∃ idNew : Usize,
+                idNew.val = s.history.log.frames.val.length
+                ∧ after.history.log.branch.val = s.history.log.branch.val ++ [idNew])
+            ∧ next.meta_live = true) := by
   dsimp only
   unfold Spike.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -290,7 +294,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
           valid hHead indexed hlive0 model t.pending version s.history.next_identity
           hModelHead hv' hIdentity.symm hCap.data hCap.addresses hCap.revisions
           hCap.births)
-      rintro ⟨next, prepared⟩ ⟨arena, same, hnext, view, arenaLive, indexKept, hgrowth⟩
+      rintro ⟨next, prepared⟩ ⟨arena, same, hnext, view, arenaLive, indexKept, hgrowth, hmetaNext⟩
       change prepared = {s.history with index := arena} at same
       subst prepared
       apply WP.spec_bind (optional_report_matches encode t.pending includeReport)
@@ -379,7 +383,7 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
           subst hfkEq
           rwa [hnextRowsEq]
       have halignedAfter : ArchiveAligned encode afterHist (natArchive ++ [modelFrame encode ai next]) :=
-        aligned.append indexed valid hpresFull archive hbrApp slot rfl rfl
+        aligned.append indexed valid hpresFull archive hbrApp slot rfl rfl hmetaNext
       refine ⟨
         version,
         reported,
@@ -405,7 +409,9 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         hstorePinsEq.symm ▸ aiLive,
         hstorePinsEq.symm ▸ hpresFull,
         hf,
-        archive
+        archive,
+        ⟨frameId, slot, hbrApp⟩,
+        hmetaNext
       ⟩
       · rw [natModelFrames_append valid aligned.len slot hbrApp, hFrames]
       · simpa [hone, hIdentity, advance] using hidentity
@@ -642,7 +648,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
         valid hHead indexed live model pending version s.history.next_identity hModelHead
         versionEq hIdentity.symm (hlength.symm ▸ hD) keyRoom (hlength.symm ▸ hR)
         (hlength.symm ▸ hB))
-    rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _⟩
+    rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _, _⟩
     change prepared = {s.history with index := arena} at same
     subst prepared
     let publish (log : Spike.branch_log.BranchLog Spike.engine.Frame) (identity : U64)

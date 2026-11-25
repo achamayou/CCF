@@ -48,9 +48,10 @@ private theorem branch_values_getElem? {T : Type} (log : Spike.branch_log.Branch
           simp only [List.getElem?_cons_succ] at hbr ⊢
           exact ih j (fun y hy => hbd y (List.mem_cons_of_mem _ hy)) hbr
 
-/-- Compaction advances the modeled frontier and may release and retire compacted frame roots. -/
-theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
-    (native : Spike.engine.Store) (w : State) (cut : U64)
+/-- Compaction advances the modeled frontier, may release compacted roots and elide unneeded
+compacted metadata, and runs bounded retirement. -/
+theorem compact_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
+    (sid : Nat) (native : Spike.engine.Store) (w : State) (cut : U64)
     (related : StateMatches encode sid native w)
     (queueRoom
       : 2
@@ -61,14 +62,18 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute native (.Compact cut))
         (StepMatches encode sid (.compact sid cut.val) native
           (execute w (.compact sid cut.val))) := by
-  obtain ⟨s, natArchive, archive, hs, h, hattempts⟩ := related.history
+  obtain ⟨s, natArchive, archive, hs, h, hMeta, hattempts⟩ := related.history
   obtain ⟨prior, head, hframes, hhead⟩ := h.split
+  have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
+    inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
   unfold Spike.engine.Store.execute
   apply WP.spec_bind
-    (history_compact native.history cut s prior head (txsPins native.txs.val) hframes
-      h.global hhead.version.symm h.indexed h.valid h.unique related.liveness queueRoom)
+    (history_compact native.history cut native.txs s prior head (txsPins native.txs.val)
+      hframes h.global h.globalBound hhead.version.symm h.indexed h.valid h.unique
+      related.liveness queueRoom)
   rintro ⟨result, afterHist⟩
-    ⟨hcut, hglobal, hterm, hident, hreuse, hbr, hvalid', hunique', hlive', hpres', _, _, hlenEq, hslot⟩
+    ⟨hcut, hglobal, hterm, hident, hreuse, hbr, hvalid', hunique', hlive', hpres', _, _,
+      hlenEq, globalId, globalFrame, hglBr, hglFr, hslot⟩
   let store := compactStore s cut.val
   let w' := {w with stores := Kv.Model.set w.stores sid store}
   let next := {native with history := afterHist}
@@ -96,7 +101,7 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     have hidLt : id.val < native.history.log.frames.val.length := h.valid.2 id hidMem
     let f := native.history.log.frames.val[id.val]'hidLt
     have hf : native.history.log.frames.val[id.val]? = some f := List.getElem?_eq_getElem hidLt
-    obtain ⟨f', hf', hfv, _, _, _, _⟩ := hslot id.val f hf
+    obtain ⟨f', hf', hfv, _, _, _⟩ := hslot id.val f hf
     have hget0 : native.history.activeFrames[i]? = some f := by
       have := branch_values_getElem? native.history.log h.valid i id f
         (List.getElem?_eq_getElem hbrLen) hf
@@ -118,25 +123,83 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
       have := (List.getElem?_eq_some_iff.mp hf').1
       omega
     let f := native.history.log.frames.val[i]'hiLt
-    obtain ⟨f'', hf'', _, _, _, hdata, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+    obtain ⟨f'', hf'', _, hdata, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
     have heq : f' = f'' := Option.some.inj (hf'.symm.trans hf'')
     subst heq
     rcases hdata with hd | h0
     · exact Or.inr ⟨i, f, List.getElem?_eq_getElem hiLt, hd⟩
     · exact Or.inl h0
+  have hmono : native.history.global.val ≤ result.val := by
+    rw [hcut, ← h.global]
+    unfold compactStore
+    split
+    · exact Nat.le_max_left _ _
+    · exact Nat.le_refl _
   have haligned' : ArchiveAligned encode afterHist natArchive := by
-    refine ⟨by rw [hlenEq]; exact h.aligned.len, ?_, ?_⟩
+    refine ⟨by rw [hlenEq]; exact h.aligned.len, ?_, ?_, ?_, ?_⟩
     · intro i nf' gf hnf' hgf
       have hiLt : i < native.history.log.frames.val.length := by
         have := (List.getElem?_eq_some_iff.mp hnf').1
         omega
       let f := native.history.log.frames.val[i]'hiLt
-      obtain ⟨f'', hf'', hfv, hfr, hfb, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+      obtain ⟨f'', hf'', hfv, _, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
       have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
       subst heq
-      have hmeta := h.aligned.metaEq i f gf (List.getElem?_eq_getElem hiLt) hgf
-      exact ⟨by rw [hfv]; exact hmeta.1, by simp only [modelMetadata, hfr]; exact hmeta.2.1,
-        by simp only [modelMetadata, hfb]; exact hmeta.2.2⟩
+      rw [hfv]
+      exact h.aligned.versionEq i f gf (List.getElem?_eq_getElem hiLt) hgf
+    · intro i nf' gf hnf' hgf hml
+      have hiLt : i < native.history.log.frames.val.length := by
+        have := (List.getElem?_eq_some_iff.mp hnf').1
+        omega
+      let f := native.history.log.frames.val[i]'hiLt
+      obtain ⟨f'', hf'', hfv, _, hmetaCase, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+      have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
+      subst heq
+      rcases hmetaCase with ⟨hmlEq, hfr, hfb⟩ | ⟨hfalse, _⟩
+      · have hmeta := h.aligned.metaEq i f gf (List.getElem?_eq_getElem hiLt) hgf (hmlEq.symm.trans hml)
+        exact ⟨by rw [hfv]; exact hmeta.1, by simp only [modelMetadata, hfr]; exact hmeta.2.1,
+          by simp only [modelMetadata, hfb]; exact hmeta.2.2⟩
+      · simp [hfalse] at hml
+    · intro pos id nf' hpos hnf' hliveCond
+      have hpos0 : native.history.log.branch.val[pos]? = some id := by rwa [← hbr]
+      have hidLt : id.val < native.history.log.frames.val.length := by
+        have := (List.getElem?_eq_some_iff.mp hnf').1
+        omega
+      let f := native.history.log.frames.val[id.val]'hidLt
+      have hf0 : native.history.log.frames.val[id.val]? = some f := List.getElem?_eq_getElem hidLt
+      have hposLt : pos < native.history.log.branch.val.length :=
+        (List.getElem?_eq_some_iff.mp hpos0).1
+      have hposActLt : pos < native.history.activeFrames.length := by
+        rwa [branch_values_length native.history.log h.valid]
+      have hfVer : f.version.val = pos := by
+        have hget : native.history.activeFrames[pos]? = some f := by
+          have := branch_values_getElem? native.history.log h.valid pos id f hpos0 hf0
+          simpa [Spike.engine.History.activeFrames] using this
+        have hfEq : native.history.activeFrames[pos]'hposActLt = f :=
+          Option.some.inj ((List.getElem?_eq_getElem hposActLt).symm.trans hget)
+        rw [← hfEq]
+        exact h.indexed pos hposActLt
+      obtain ⟨f'', hf'', hfv'', _, _, hkept⟩ := hslot id.val f hf0
+      have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
+      subst heq
+      have hsame : nf' = f := by
+        apply hkept
+        cases hrc : afterHist.reuse_compacted_images with
+        | false => exact Or.inl (by rw [← hreuse]; exact hrc)
+        | true =>
+            have hge : afterHist.global.val ≤ nf'.version.val := hliveCond hrc
+            rw [hfv'', hfVer] at hge
+            right
+            intro off id' _ hoffLt hoff
+            have hne : off ≠ pos := by rw [hglobal] at hge; omega
+            exact branch_nodup_ne h.unique hoff hpos0 hne
+      subst hsame
+      have hlive0 : native.history.reuse_compacted_images = true → native.history.global.val ≤ f.version.val := by
+        intro hrc0
+        have hge : afterHist.global.val ≤ f.version.val := hliveCond (by rw [hreuse]; exact hrc0)
+        rw [hglobal] at hge
+        omega
+      exact h.aligned.globalMetaLive pos id f hpos0 hf0 hlive0
     · intro pos id nf' gf hpos hnf' hgf hliveCond
       have hpos0 : native.history.log.branch.val[pos]? = some id := by rwa [← hbr]
       have hidLt : id.val < native.history.log.frames.val.length := by
@@ -156,7 +219,7 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
           Option.some.inj ((List.getElem?_eq_getElem hposActLt).symm.trans hget)
         rw [← hfEq]
         exact h.indexed pos hposActLt
-      obtain ⟨f'', hf'', hfv'', _, _, _, hkept⟩ := hslot id.val f hf0
+      obtain ⟨f'', hf'', hfv'', _, _, hkept⟩ := hslot id.val f hf0
       have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
       subst heq
       have hsame : nf' = f := by
@@ -174,12 +237,6 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
       have hlive0 : native.history.reuse_compacted_images = true → native.history.global.val ≤ f.version.val := by
         intro hrc0
         have hge : afterHist.global.val ≤ f.version.val := hliveCond (by rw [hreuse]; exact hrc0)
-        have hmono : native.history.global.val ≤ result.val := by
-          rw [hcut, ← h.global]
-          unfold compactStore
-          split
-          · exact Nat.le_max_left _ _
-          · exact Nat.le_refl _
         rw [hglobal] at hge
         omega
       have hmf0 := h.aligned.activeLive pos id f gf hpos0 hf0 hgf hlive0
@@ -192,6 +249,38 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
       have hrows : indexRows afterHist.index f.data = indexRows native.history.index f.data :=
         index_rows_eq hview
       simpa only [modelFrame, hrows] using hmf0
+  have hglAfter : afterHist.log.frames.val[globalId.val]? = some globalFrame := by
+    obtain ⟨gf', hgf', _, _, _, hkept⟩ := hslot globalId.val globalFrame hglFr
+    have hsame : gf' = globalFrame := by
+      apply hkept
+      right
+      intro off id' _ hoffLt hoff
+      exact branch_nodup_ne h.unique hoff hglBr (by omega)
+    rwa [← hsame]
+  have hmetaAfter : StoreMetaLive encode next natArchive :=
+    store_meta_live_after_elision inj hMeta h.indexed h.valid hbr (fun _ hm => hm) hglBr
+      hglAfter
+      (fun k f hf => by
+        obtain ⟨f', hf', hfv, _, hmetaCase, _⟩ := hslot k f hf
+        refine ⟨f', hf', hfv, ?_⟩
+        rcases hmetaCase with ⟨hml, hfr, hfb⟩ | ⟨hml, hfalseData⟩
+        · exact Or.inl ⟨hfb, hfr, hml⟩
+        · refine Or.inr ⟨hml, ?_⟩
+          have hs1 := txs_need_frame_spec (encode ∘ alloc.vec.Vec.val) hinj native.txs
+            {f with data := 0#u32} globalFrame
+          rw [hfalseData, WP.spec_ok] at hs1
+          have hs2 := txs_need_frame_spec (encode ∘ alloc.vec.Vec.val) hinj native.txs
+            f globalFrame
+          cases hres : Spike.engine.txs_need_frame native.txs f globalFrame
+            using Result.cases with
+          | vis _ _ => rw [hres] at hs2; simp at hs2
+          | div => rw [hres] at hs2; simp at hs2
+          | ret b =>
+              rw [hres, WP.spec_ok] at hs2
+              have hb : b = false := by
+                rw [hs2]
+                simpa [frameMatches, modelMetadata] using hs1.symm
+              rw [hb])
   have hglobalBound' : afterHist.global.val < afterHist.activeFrames.length := by
     rw [hglobal, hcut, hactLen, hframes, List.length_append, List.length_singleton]
     have hbound := (Kv.Properties.reachable_store_invariants w' sid store hreach hstore).2.2.1
@@ -223,8 +312,8 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     · rw [hident]; exact h.nativeArchive
     · rw [he']; exact h.modelSub
     · rw [he']; exact h.modelArchive
-  have rel := replace_history (n' := next) related.unique hattempts hn hlive' hstore rfl rfl hreach hpres'
-    (fun _ hm => hm) (fun _ hm => hm)
+  have rel := replace_history (n' := next) related.unique hattempts hn hmetaAfter hlive'
+    hstore rfl rfl hreach hpres' (fun _ hm => hm) (fun _ hm => hm)
   change WP.spec (Result.ok (core.result.Result.Ok (Spike.engine.Output.Compacted result), next)) _
   rw [WP.spec_ok, he]
   exact ⟨
@@ -234,8 +323,8 @@ theorem compact_step_matches (encode : List U8 → String) (sid : Nat)
     rel
   ⟩
 
-/-- Rollback preserves the irrevocable prefix, releases and retires rolled-back frame roots,
-and does not rewrite the attempts' captured cuts. -/
+/-- Rollback preserves the irrevocable prefix, releases and retires rolled-back frame roots
+and metadata, and does not rewrite the attempts' captured cuts. -/
 theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
     (native : Spike.engine.Store) (w : State) (requested term : U64)
     (related : StateMatches encode sid native w)
@@ -248,7 +337,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (Spike.engine.Store.execute native (.Rollback requested term))
         (StepMatches encode sid (.rollback sid requested.val term.val) native
           (execute w (.rollback sid requested.val term.val))) := by
-  obtain ⟨s, natArchive, archive, hs, h, hattempts⟩ := related.history
+  obtain ⟨s, natArchive, archive, hs, h, hMeta, hattempts⟩ := related.history
   obtain ⟨prior, head, hframes, hhead⟩ := h.split
   by_cases hLow : requested.val < native.history.global.val
   · have hn := rollback_rejected native requested term hLow
@@ -300,7 +389,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
         have hidLt : id.val < native.history.log.frames.val.length :=
           h.valid.2 id (List.getElem_mem hi)
         let f := native.history.log.frames.val[id.val]'hidLt
-        have hmeta := h.aligned.metaEq id.val f gf (List.getElem?_eq_getElem hidLt) hgf
+        have hmeta := h.aligned.versionEq id.val f gf (List.getElem?_eq_getElem hidLt) hgf
         have hi' : i < native.history.activeFrames.length := by
           rwa [branch_values_length native.history.log h.valid]
         have hget : native.history.activeFrames[i]? = some f := by
@@ -309,7 +398,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           simpa [Spike.engine.History.activeFrames] using this
         have hfEq : native.history.activeFrames[i]'hi' = f :=
           Option.some.inj ((List.getElem?_eq_getElem hi').symm.trans hget)
-        rw [hmeta.1, ← hfEq]
+        rw [hmeta, ← hfEq]
         exact h.indexed i hi'
       have hAfterFrames : natModelFrames afterHist.log natArchive =
           (natModelFrames native.history.log natArchive).filter
@@ -395,25 +484,69 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           have := (List.getElem?_eq_some_iff.mp hf').1
           omega
         let f := native.history.log.frames.val[i]'hiLt
-        obtain ⟨f'', hf'', _, _, _, hdata, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+        obtain ⟨f'', hf'', _, _, hdata, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
         have heq : f' = f'' := Option.some.inj (hf'.symm.trans hf'')
         subst heq
         rcases hdata with hd | h0
         · exact Or.inr ⟨i, f, List.getElem?_eq_getElem hiLt, hd⟩
         · exact Or.inl h0
+      have hsurviving : ∀ (pos : Nat) (id : Usize) (f : Spike.engine.Frame),
+          pos < cut.val + 1
+          → native.history.log.branch.val[pos]? = some id
+          → native.history.log.frames.val[id.val]? = some f
+          → afterHist.log.frames.val[id.val]? = some f := by
+        intro pos id f hposLt hpos0 hf0
+        obtain ⟨f'', hf'', _, _, _, hkept⟩ := hslot id.val f hf0
+        have hsame : f'' = f := by
+          apply hkept
+          intro off id' hoffGe _ hoff
+          exact branch_nodup_ne h.unique hoff hpos0 (by omega)
+        rwa [← hsame]
       have haligned' : ArchiveAligned encode afterHist natArchive := by
-        refine ⟨by rw [hlenEq]; exact h.aligned.len, ?_, ?_⟩
+        refine ⟨by rw [hlenEq]; exact h.aligned.len, ?_, ?_, ?_, ?_⟩
         · intro i nf' gf hnf' hgf
           have hiLt : i < native.history.log.frames.val.length := by
             have := (List.getElem?_eq_some_iff.mp hnf').1
             omega
           let f := native.history.log.frames.val[i]'hiLt
-          obtain ⟨f'', hf'', hfv, hfr, hfb, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+          obtain ⟨f'', hf'', hfv, _, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
           have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
           subst heq
-          have hmeta := h.aligned.metaEq i f gf (List.getElem?_eq_getElem hiLt) hgf
+          rw [hfv]
+          exact h.aligned.versionEq i f gf (List.getElem?_eq_getElem hiLt) hgf
+        · intro i nf' gf hnf' hgf hml
+          have hiLt : i < native.history.log.frames.val.length := by
+            have := (List.getElem?_eq_some_iff.mp hnf').1
+            omega
+          let f := native.history.log.frames.val[i]'hiLt
+          obtain ⟨f'', hf'', hfv, hmetaImpl, _, _⟩ := hslot i f (List.getElem?_eq_getElem hiLt)
+          have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
+          subst heq
+          obtain ⟨hfml, hfr, hfb⟩ := hmetaImpl hml
+          have hmeta := h.aligned.metaEq i f gf (List.getElem?_eq_getElem hiLt) hgf hfml
           exact ⟨by rw [hfv]; exact hmeta.1, by simp only [modelMetadata, hfr]; exact hmeta.2.1,
             by simp only [modelMetadata, hfb]; exact hmeta.2.2⟩
+        · intro pos id nf' hpos hnf' hliveCond
+          have hposLt : pos < cut.val + 1 := by
+            have := (List.getElem?_eq_some_iff.mp hpos).1
+            rw [hbr, List.length_take] at this
+            omega
+          have hpos0 : native.history.log.branch.val[pos]? = some id := by
+            rw [hbr, List.getElem?_take_of_lt hposLt] at hpos
+            exact hpos
+          have hidLt : id.val < native.history.log.frames.val.length := by
+            have := (List.getElem?_eq_some_iff.mp hnf').1
+            omega
+          let f := native.history.log.frames.val[id.val]'hidLt
+          have hf0 : native.history.log.frames.val[id.val]? = some f := List.getElem?_eq_getElem hidLt
+          have hsurv := hsurviving pos id f hposLt hpos0 hf0
+          have hsame : nf' = f := Option.some.inj (hnf'.symm.trans hsurv)
+          subst hsame
+          have hlive0 : native.history.reuse_compacted_images = true → native.history.global.val ≤ f.version.val := by
+            intro hrc0
+            have hge : afterHist.global.val ≤ f.version.val := hliveCond (by rw [hreuse]; exact hrc0)
+            rwa [hglobal] at hge
+          exact h.aligned.globalMetaLive pos id f hpos0 hf0 hlive0
         · intro pos id nf' gf hpos hnf' hgf hliveCond
           have hposLt : pos < cut.val + 1 := by
             have := (List.getElem?_eq_some_iff.mp hpos).1
@@ -427,14 +560,8 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
             omega
           let f := native.history.log.frames.val[id.val]'hidLt
           have hf0 : native.history.log.frames.val[id.val]? = some f := List.getElem?_eq_getElem hidLt
-          obtain ⟨f'', hf'', _, _, _, _, hkept⟩ := hslot id.val f hf0
-          have heq : nf' = f'' := Option.some.inj (hnf'.symm.trans hf'')
-          subst heq
-          have hsame : nf' = f := by
-            apply hkept
-            intro off id' hoffGe _ hoff
-            have hne : off ≠ pos := by omega
-            exact branch_nodup_ne h.unique hoff hpos0 hne
+          have hsurv := hsurviving pos id f hposLt hpos0 hf0
+          have hsame : nf' = f := Option.some.inj (hnf'.symm.trans hsurv)
           subst hsame
           have hlive0 : native.history.reuse_compacted_images = true → native.history.global.val ≤ f.version.val := by
             intro hrc0
@@ -450,6 +577,201 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           have hrows : indexRows afterHist.index f.data = indexRows native.history.index f.data :=
             index_rows_eq hview
           simpa only [modelFrame, hrows] using hmf0
+      have hmetaAfter : StoreMetaLive encode {native with history := afterHist} natArchive := by
+        refine ⟨?_, ?_⟩
+        · intro id' t' snap' fid' nf' hmem hsnap' hfid' hnf'
+          have hposLt : snap'.version.val < cut.val + 1 := by
+            have := (List.getElem?_eq_some_iff.mp hfid').1
+            rw [hbr, List.length_take] at this
+            omega
+          have hfid0 : native.history.log.branch.val[snap'.version.val]? = some fid' := by
+            rw [hbr, List.getElem?_take_of_lt hposLt] at hfid'
+            exact hfid'
+          have hidLt : fid'.val < native.history.log.frames.val.length :=
+            h.valid.2 fid' (List.mem_of_getElem? hfid0)
+          let f := native.history.log.frames.val[fid'.val]'hidLt
+          have hf0 : native.history.log.frames.val[fid'.val]? = some f := List.getElem?_eq_getElem hidLt
+          have hsurv := hsurviving snap'.version.val fid' f hposLt hfid0 hf0
+          have hsame : nf' = f := Option.some.inj (hnf'.symm.trans hsurv)
+          subst hsame
+          exact hMeta.snapLive id' t' snap' fid' f hmem hsnap' hfid0 hf0
+        · intro id' t' bm bv off fid' gf hmem hvm hfid' hgf hb hr'
+          have hoffLt : off < cut.val + 1 := by
+            have := (List.getElem?_eq_some_iff.mp hfid').1
+            rw [hbr, List.length_take] at this
+            omega
+          have hfid0 : native.history.log.branch.val[off]? = some fid' := by
+            rw [hbr, List.getElem?_take_of_lt hoffLt] at hfid'
+            exact hfid'
+          obtain ⟨off', fid'', nf'', hbr'', hnf'', hfm''⟩ :=
+            hMeta.viewLive id' t' bm bv off fid' gf hmem hvm hfid0 hgf hb hr'
+          by_cases hkeep : off' < cut.val + 1
+          · exact ⟨off', fid'', nf'',
+              by rw [hbr, List.getElem?_take_of_lt hkeep]; exact hbr'',
+              hsurviving off' fid'' nf'' hkeep hbr'' hnf'',
+              hfm''⟩
+          · -- `off ≤ cut.val < off'`: by branch stamp monotonicity (`RevisionFlow.stamps_between`),
+            -- the surviving frame at `cut.val` matches `(bv.birth, bv.revision)` and has `meta_live = true`
+            -- since `native.history.global.val ≤ cut.val`.
+            have hcutLt : cut.val < native.history.log.branch.val.length := by omega
+            let fidCut := native.history.log.branch.val[cut.val]'hcutLt
+            have hfidCut0 : native.history.log.branch.val[cut.val]? = some fidCut :=
+              List.getElem?_eq_getElem hcutLt
+            have hfidCutLt : fidCut.val < native.history.log.frames.val.length :=
+              h.valid.2 fidCut (List.getElem_mem hcutLt)
+            let nfCut := native.history.log.frames.val[fidCut.val]'hfidCutLt
+            have hnfCut0 : native.history.log.frames.val[fidCut.val]? = some nfCut :=
+              List.getElem?_eq_getElem hfidCutLt
+            have hgfCutLt : fidCut.val < natArchive.length := h.aligned.len.symm ▸ hfidCutLt
+            let gfCut := natArchive[fidCut.val]'hgfCutLt
+            have hgfCut0 : natArchive[fidCut.val]? = some gfCut := List.getElem?_eq_getElem hgfCutLt
+            have hnfCutAct : native.history.activeFrames[cut.val]? = some nfCut := by
+              have := branch_values_getElem? native.history.log h.valid cut.val fidCut nfCut hfidCut0 hnfCut0
+              simpa [Spike.engine.History.activeFrames] using this
+            have hcutActLt : cut.val < native.history.activeFrames.length := by
+              rwa [branch_values_length native.history.log h.valid]
+            have hnfCutVer : nfCut.version.val = cut.val := by
+              have heq := Option.some.inj ((List.getElem?_eq_getElem hcutActLt).symm.trans hnfCutAct)
+              rw [← heq]; exact h.indexed cut.val hcutActLt
+            have hcutGeGlobal : native.history.global.val ≤ cut.val := by
+              rw [hcut]; exact Nat.le_max_left _ _
+            have hnfCutLive : nfCut.meta_live = true :=
+              h.aligned.globalMetaLive cut.val fidCut nfCut hfidCut0 hnfCut0 (fun _ => by omega)
+            have hmetaCut := h.aligned.metaEq fidCut.val nfCut gfCut hnfCut0 hgfCut0 hnfCutLive
+            have hgf''Lt : fid''.val < natArchive.length :=
+              h.aligned.len.symm ▸ h.valid.2 fid'' (List.mem_of_getElem? hbr'')
+            let gf'' := natArchive[fid''.val]'hgf''Lt
+            have hgf''0 : natArchive[fid''.val]? = some gf'' := List.getElem?_eq_getElem hgf''Lt
+            unfold frameMatches at hfm''
+            simp only [Bool.and_eq_true] at hfm''
+            have hmeta'' := h.aligned.metaEq fid''.val nf'' gf'' hnf'' hgf''0 hfm''.1.1
+            have hstampEq : ∀ (a b : Stamp), (a == b) = true → a = b := by
+              rintro ⟨av, ai⟩ ⟨bv, bi⟩ hab
+              change ((av == bv) && (ai == bi)) = true at hab
+              simp only [Bool.and_eq_true, beq_iff_eq] at hab
+              rw [hab.1, hab.2]
+            have hoptStampEq : ∀ (a b : Option Stamp), (a == b) = true → a = b := by
+              intro a b hab
+              cases a <;> cases b
+              · rfl
+              · cases hab
+              · cases hab
+              · exact congrArg some (hstampEq _ _ hab)
+            have hb'' : find gf''.births (encode bm.val) = bv.birth.map modelStamp := by
+              have h1 := hfm''.1.2
+              rw [← hmeta''.2.2] at h1
+              exact hoptStampEq _ _ h1
+            have hr'' : revision gf'' (encode bm.val) = modelStamp bv.revision := by
+              have h2 := hfm''.2
+              change (revision (modelMetadata (encode ∘ alloc.vec.Vec.val) nf'') (encode bm.val)
+                == modelStamp bv.revision) = true at h2
+              unfold revision at h2 ⊢
+              rw [← hmeta''.2.1] at h2
+              exact hstampEq _ _ h2
+            have hbOld : find gf.births (encode bm.val) = bv.birth.map modelStamp :=
+              hoptStampEq _ _ hb
+            have hrOld : revision gf (encode bm.val) = modelStamp bv.revision :=
+              hstampEq _ _ hr'
+            -- Extract `RevisionFlow gf'' gfCut` and `RevisionFlow gfCut gf` from `h.revisions.flow`
+            have hnatAt : ∀ (p : Nat) (idP : Usize) (gfP : Frame),
+                native.history.log.branch.val[p]? = some idP →
+                natArchive[idP.val]? = some gfP →
+                (natModelFrames native.history.log natArchive)[
+                  native.history.log.branch.val.length - 1 - p]? = some gfP := by
+              intro p idP gfP hp hgp
+              have hpLt : p < native.history.log.branch.val.length :=
+                (List.getElem?_eq_some_iff.mp hp).1
+              have hbd : ∀ x ∈ native.history.log.branch.val, x.val < natArchive.length :=
+                fun x hx => h.aligned.len.symm ▸ h.valid.2 x hx
+              have hrevFm : ∀ (l : List Usize) (k : Nat),
+                  (∀ x ∈ l, x.val < natArchive.length) →
+                  (l.filterMap fun x => natArchive[x.val]?)[k]? =
+                    l[k]?.bind fun x => natArchive[x.val]? := by
+                intro l
+                induction l with
+                | nil => intro k _; simp
+                | cons a tl ih =>
+                    intro k hbd'
+                    have ha' := hbd' a List.mem_cons_self
+                    cases k with
+                    | zero => simp [List.getElem?_eq_getElem ha']
+                    | succ j =>
+                        simp only [List.filterMap_cons, List.getElem?_eq_getElem ha',
+                          List.getElem?_cons_succ]
+                        exact ih j (fun x hx => hbd' x (List.mem_cons_of_mem _ hx))
+              unfold natModelFrames
+              rw [hrevFm native.history.log.branch.val.reverse _ (fun x hx => hbd x (List.mem_reverse.mp hx)),
+                List.getElem?_reverse (by omega)]
+              have hsubEq : native.history.log.branch.val.length - 1
+                  - (native.history.log.branch.val.length - 1 - p) = p := by omega
+              rw [hsubEq, hp]
+              simpa using hgp
+            have hLenNat : (natModelFrames native.history.log natArchive).length
+                = native.history.log.branch.val.length :=
+              natModelFrames_length h.valid h.aligned.len
+            have hoff'Lt : off' < native.history.log.branch.val.length :=
+              (List.getElem?_eq_some_iff.mp hbr'').1
+            have hpw := List.pairwise_iff_getElem.mp h.revisions.flow
+            have hidxNew : native.history.log.branch.val.length - 1 - off'
+                < (natModelFrames native.history.log natArchive).length := by omega
+            have hidxCut : native.history.log.branch.val.length - 1 - cut.val
+                < (natModelFrames native.history.log natArchive).length := by omega
+            have hidxOld : native.history.log.branch.val.length - 1 - off
+                < (natModelFrames native.history.log natArchive).length := by omega
+            have hgetNew : (natModelFrames native.history.log natArchive)[
+                native.history.log.branch.val.length - 1 - off']'hidxNew = gf'' :=
+              Option.some.inj ((List.getElem?_eq_getElem hidxNew).symm.trans (hnatAt off' fid'' gf'' hbr'' hgf''0))
+            have hgetCut : (natModelFrames native.history.log natArchive)[
+                native.history.log.branch.val.length - 1 - cut.val]'hidxCut = gfCut :=
+              Option.some.inj ((List.getElem?_eq_getElem hidxCut).symm.trans (hnatAt cut.val fidCut gfCut hfidCut0 hgfCut0))
+            have hgetOld : (natModelFrames native.history.log natArchive)[
+                native.history.log.branch.val.length - 1 - off]'hidxOld = gf :=
+              Option.some.inj ((List.getElem?_eq_getElem hidxOld).symm.trans (hnatAt off fid' gf hfid0 hgf))
+            have hflowNewCut : RevisionFlow gf'' gfCut := by
+              have h := hpw _ _ hidxNew hidxCut (by omega)
+              rwa [hgetNew, hgetCut] at h
+            have hflowCutOld : RevisionFlow gfCut gf := by
+              by_cases heqOff : off = cut.val
+              · subst heqOff
+                have hfidEq : fid' = fidCut := Option.some.inj (hfid0.symm.trans hfidCut0)
+                have hgfEq : gf = gfCut := Option.some.inj (hgf.symm.trans (hfidEq ▸ hgfCut0))
+                rw [hgfEq]
+                exact RevisionFlow.refl _
+              · have h := hpw _ _ hidxCut hidxOld (by omega)
+                rwa [hgetCut, hgetOld] at h
+            have hbetween := RevisionFlow.stamps_between hflowNewCut hflowCutOld (encode bm.val)
+              (hbOld.trans hb''.symm) (hrOld.trans hr''.symm)
+            refine ⟨cut.val, fidCut, nfCut,
+              by rw [hbr, List.getElem?_take_of_lt (by omega)]; exact hfidCut0,
+              hsurviving cut.val fidCut nfCut (by omega) hfidCut0 hnfCut0, ?_⟩
+            unfold frameMatches
+            have hbCutM : find (modelMetadata (encode ∘ alloc.vec.Vec.val) nfCut).births (encode bm.val)
+                = bv.birth.map modelStamp := by
+              rw [← hmetaCut.2.2, hbetween.1, hbOld]
+            have hrCutM : revision (modelMetadata (encode ∘ alloc.vec.Vec.val) nfCut) (encode bm.val)
+                = modelStamp bv.revision := by
+              have : revision (modelMetadata (encode ∘ alloc.vec.Vec.val) nfCut) (encode bm.val)
+                  = revision gfCut (encode bm.val) := by
+                unfold revision; rw [← hmetaCut.2.1]
+              rw [this, hbetween.2, hrOld]
+            change (nfCut.meta_live
+                && (find (modelMetadata (encode ∘ alloc.vec.Vec.val) nfCut).births (encode bm.val)
+                    == bv.birth.map modelStamp)
+                && (revision (modelMetadata (encode ∘ alloc.vec.Vec.val) nfCut) (encode bm.val)
+                    == modelStamp bv.revision)) = true
+            rw [hnfCutLive, hbCutM, hrCutM]
+            cases bv.birth with
+            | none =>
+                change (true && true
+                  && ((bv.revision.version.val == bv.revision.version.val)
+                    && (bv.revision.identity.val == bv.revision.identity.val))) = true
+                simp
+            | some b =>
+                change (true && ((b.version.val == b.version.val)
+                  && (b.identity.val == b.identity.val))
+                  && ((bv.revision.version.val == bv.revision.version.val)
+                    && (bv.revision.identity.val == bv.revision.identity.val))) = true
+                simp
       have hNatRev' : RevisionHistory (natModelFrames afterHist.log natArchive) := by
         rw [hAfterFrames]
         exact h.revisions.filter _
@@ -463,7 +785,7 @@ theorem rollback_step_matches (encode : List U8 → String) (sid : Nat)
           hvalid' hunique' hidxValid' haligned' hNatRev'
           (by rw [hident]; exact h.nativeArchive) h.natSorted hModSub' h.modelArchive
       have rel := replace_history (n' := {native with history := afterHist})
-        related.unique hattempts hvalid hlive' hstore rfl rfl reach hpres'
+        related.unique hattempts hvalid hmetaAfter hlive' hstore rfl rfl reach hpres'
         (fun _ hm => hm) (fun _ hm => hm)
       change WP.spec (Result.ok (out, ({native with history := afterHist} : Spike.engine.Store))) _
       rw [WP.spec_ok, he, hout]
