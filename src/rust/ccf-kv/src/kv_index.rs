@@ -57,6 +57,39 @@ impl<V> AddressIndex<V> {
         }
     }
 
+    pub fn get_bytes(&self, root: RadixRoot, map: &[u8], key: &[u8]) -> Option<&V> {
+        if map.len() <= 248 && key.len() <= 248 - map.len() {
+            let mut buf = [0u8; 256];
+            let len_bytes = (map.len() as u64).to_le_bytes();
+            let mut i = 0;
+            while i < 8 {
+                buf[i] = len_bytes[i];
+                i += 1;
+            }
+            let mut m = 0;
+            while m < map.len() {
+                buf[8 + m] = map[m];
+                m += 1;
+            }
+            let base = 8 + map.len();
+            let mut k = 0;
+            while k < key.len() {
+                buf[base + k] = key[k];
+                k += 1;
+            }
+            match self.0.get(root, &buf[..base + key.len()]) {
+                Some(binding) => Some(&binding.value),
+                None => None,
+            }
+        } else {
+            let packed = address_key(map, key);
+            match self.0.get(root, &packed) {
+                Some(binding) => Some(&binding.value),
+                None => None,
+            }
+        }
+    }
+
     pub fn put(&mut self, root: RadixRoot, address: Address, value: V) -> RadixRoot {
         self.0.put(root, Self::batch_row(address, value))
     }
@@ -114,9 +147,13 @@ mod tests {
         let replacement = data.put(base, left.clone(), 3);
         let fork = data.remove(replacement, &right);
         assert_eq!(data.get(base, &left), Some(&1));
+        assert_eq!(data.get_bytes(base, b"a", b"\0\xff"), Some(&1));
         assert_eq!(data.get(fork, &left), Some(&3));
+        assert_eq!(data.get_bytes(fork, b"a", b"\0\xff"), Some(&3));
         assert_eq!(data.get(base, &right), Some(&2));
+        assert_eq!(data.get_bytes(base, b"a\0", b"\xff"), Some(&2));
         assert_eq!(data.get(fork, &right), None);
+        assert_eq!(data.get_bytes(fork, b"a\0", b"\xff"), None);
         let ordered = |root| {
             data.scan_links(root)
                 .into_iter()

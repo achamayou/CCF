@@ -863,6 +863,57 @@ namespace ccf::kv::rust_test
       }
     }
 
+    std::optional<Bytes> get_bytes(ByteView key, bool global)
+    {
+      Bytes out;
+      const auto status = ccf_rust_kv_tx_get(
+        store.native.get(),
+        native_tx,
+        committed,
+        global,
+        bytes(name),
+        key,
+        &out,
+        +[](void* ctx, const uint8_t* ptr, size_t len) {
+          auto* dst = static_cast<Bytes*>(ctx);
+          if (len != 0)
+          {
+            *dst = Bytes(ptr, ptr + len);
+          }
+        });
+      if (status == Status::MISSING)
+      {
+        return std::nullopt;
+      }
+      if (status != Status::OK)
+      {
+        throw std::logic_error(
+          "Unexpected Rust KV status " +
+          std::to_string(static_cast<unsigned>(status)));
+      }
+      return out;
+    }
+
+    bool has_bytes(ByteView key, bool global)
+    {
+      auto r = Store::wrap_reply(ccf_rust_kv_tx_has(
+        store.native.get(), native_tx, committed, global, bytes(name), key));
+      r.require();
+      return r.number != 0;
+    }
+
+    std::optional<Version> previous_bytes(ByteView key)
+    {
+      auto r = Store::wrap_reply(ccf_rust_kv_tx_previous(
+        store.native.get(), native_tx, committed, bytes(name), key));
+      if (r.status == Status::MISSING)
+      {
+        return std::nullopt;
+      }
+      r.require();
+      return r.number;
+    }
+
     Response operate(
       Opcode op, ByteView key = {}, ByteView value = {}, bool global = false)
     {
@@ -891,22 +942,17 @@ namespace ccf::kv::rust_test
 
     std::optional<Value> get_at(const Key& key, bool global)
     {
-      auto r = access.operate(
-        Opcode::GET, bytes(Keys::to_serialised(key)), {}, global);
-      if (r.status == Status::MISSING)
+      auto raw = access.get_bytes(bytes(Keys::to_serialised(key)), global);
+      if (!raw.has_value())
       {
         return std::nullopt;
       }
-      r.require();
-      return Values::from_serialised(copy(r.entry(0).value));
+      return Values::from_serialised(*raw);
     }
 
     bool has_at(const Key& key, bool global)
     {
-      auto r = access.operate(
-        Opcode::HAS, bytes(Keys::to_serialised(key)), {}, global);
-      r.require();
-      return r.number != 0;
+      return access.has_bytes(bytes(Keys::to_serialised(key)), global);
     }
 
   public:
@@ -934,14 +980,7 @@ namespace ccf::kv::rust_test
 
     std::optional<Version> get_version_of_previous_write(const Key& key)
     {
-      auto r =
-        access.operate(Opcode::PREVIOUS, bytes(Keys::to_serialised(key)));
-      if (r.status == Status::MISSING)
-      {
-        return std::nullopt;
-      }
-      r.require();
-      return r.number;
+      return access.previous_bytes(bytes(Keys::to_serialised(key)));
     }
 
     size_t size()

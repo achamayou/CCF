@@ -120,8 +120,31 @@ namespace ccf::kv::rust_test
     void ccf_rust_kv_delete(NativeStore* store);
     NativeTx* ccf_rust_kv_tx_new(uint64_t attempt);
     void ccf_rust_kv_tx_delete(const NativeStore* store, NativeTx* tx);
+    using CopyValueFn = void (*)(void*, const uint8_t*, size_t);
     Status ccf_rust_kv_tx_write(
       NativeTx* tx, ByteView map, ByteView key, ByteView value);
+    Status ccf_rust_kv_tx_get(
+      const NativeStore* store,
+      NativeTx* tx,
+      bool inspect_finished,
+      bool global,
+      ByteView map,
+      ByteView key,
+      void* out_ctx,
+      CopyValueFn copy_cb);
+    Reply ccf_rust_kv_tx_has(
+      const NativeStore* store,
+      NativeTx* tx,
+      bool inspect_finished,
+      bool global,
+      ByteView map,
+      ByteView key);
+    Reply ccf_rust_kv_tx_previous(
+      const NativeStore* store,
+      NativeTx* tx,
+      bool inspect_finished,
+      ByteView map,
+      ByteView key);
     Reply ccf_rust_kv_tx_pending_writes(const NativeTx* tx);
     Reply ccf_rust_kv_tx_finish(NativeTx* tx, uint64_t outcome);
     Reply ccf_rust_kv_tx_snapshot_and_acquire(

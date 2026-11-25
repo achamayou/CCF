@@ -1596,6 +1596,18 @@ pub enum CommitPreparation {
     Applied(Version, Term),
 }
 
+pub enum PendingLookup<'a> {
+    Miss,
+    Put(&'a [u8]),
+    Remove,
+}
+
+pub enum ViewLookup<'a> {
+    Empty,
+    Root(RadixRoot),
+    Recovered(Option<(Version, &'a [u8])>),
+}
+
 /// Thread-owned transaction state for concurrent adapters. Staged writes and
 /// pending-write inspection require no store lock, reads borrow `&Store`, and
 /// only snapshot/acquire, apply, and teardown borrow `&mut Store`.
@@ -1603,6 +1615,86 @@ pub struct DetachedTx {
     id: Attempt,
     tx: Tx,
     registered: bool,
+}
+
+fn compare_slices(a: &[u8], b: &[u8]) -> i8 {
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] < b[i] {
+            return -1;
+        }
+        if a[i] > b[i] {
+            return 1;
+        }
+        i += 1;
+    }
+    if a.len() < b.len() {
+        -1
+    } else if a.len() > b.len() {
+        1
+    } else {
+        0
+    }
+}
+
+fn same_slices(a: &[u8], b: &[u8]) -> bool {
+    compare_slices(a, b) == 0
+}
+
+fn pending_key_order_bytes(a: &Address, map: &[u8], key: &[u8]) -> i8 {
+    let order = compare_slices(a.key.as_slice(), key);
+    if order != 0 {
+        return order;
+    }
+    compare_slices(a.map.as_slice(), map)
+}
+
+fn views_index_bytes(views: &Assoc<Bytes, View>, map: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < views.0.len() {
+        if same_slices(views.0[i].0.as_slice(), map) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn pending_find_bytes(pending: &Pending, map: &[u8], key: &[u8]) -> Option<usize> {
+    let mut lo = 0;
+    let mut hi = pending.0.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let order = pending_key_order_bytes(&pending.0[mid].0, map, key);
+        if order == 0 {
+            return Some(mid);
+        }
+        if order > 0 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    None
+}
+
+fn image_get_bytes<'a>(image: &'a Image, key: &[u8]) -> Option<(Version, &'a [u8])> {
+    let mut i = 0;
+    while i < image.0.len() {
+        if same_slices(image.0[i].0.as_slice(), key) {
+            return Some((image.0[i].1.version, image.0[i].1.value.as_slice()));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn lookup_image_bytes<'a>(image: &'a PinnedImage, key: &[u8]) -> ViewLookup<'a> {
+    match image {
+        PinnedImage::Empty => ViewLookup::Empty,
+        PinnedImage::Root(root) => ViewLookup::Root(*root),
+        PinnedImage::Recovered(rows) => ViewLookup::Recovered(image_get_bytes(rows, key)),
+    }
 }
 
 impl DetachedTx {
@@ -1633,6 +1725,112 @@ impl DetachedTx {
             Write::from_option(value),
         );
         Ok(())
+    }
+
+    pub fn stage_write_bytes(
+        &mut self,
+        map: &[u8],
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if !matches!(self.tx.phase, Phase::Active)
+            || views_index_bytes(&self.tx.views, map).is_none()
+        {
+            return Err(Error::Disabled);
+        }
+        let mut lo = 0;
+        let mut hi = self.tx.pending.0.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let order = pending_key_order_bytes(&self.tx.pending.0[mid].0, map, key);
+            if order == 0 {
+                self.tx.pending.0[mid].1 = match value {
+                    Some(v) => Write::Put(Bytes::copy_from(v)),
+                    None => Write::Remove,
+                };
+                return Ok(());
+            }
+            if order > 0 {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let address = Address {
+            map: Bytes::copy_from(map),
+            key: Bytes::copy_from(key),
+        };
+        let write = match value {
+            Some(v) => Write::Put(Bytes::copy_from(v)),
+            None => Write::Remove,
+        };
+        if lo == self.tx.pending.0.len() {
+            self.tx.pending.0.push((address, write));
+        } else {
+            self.tx.pending.0.insert(lo, (address, write));
+        }
+        Ok(())
+    }
+
+    pub fn lookup_pending_bytes(
+        &self,
+        map: &[u8],
+        key: &[u8],
+        inspect_finished: bool,
+    ) -> Result<PendingLookup<'_>, Error> {
+        let phase_ok = if inspect_finished {
+            matches!(self.tx.phase, Phase::Finished)
+        } else {
+            matches!(self.tx.phase, Phase::Active)
+        };
+        if !phase_ok || views_index_bytes(&self.tx.views, map).is_none() {
+            return Err(Error::Disabled);
+        }
+        match pending_find_bytes(&self.tx.pending, map, key) {
+            Some(i) => match &self.tx.pending.0[i].1 {
+                Write::Put(v) => Ok(PendingLookup::Put(v.as_slice())),
+                Write::Remove => Ok(PendingLookup::Remove),
+            },
+            None => Ok(PendingLookup::Miss),
+        }
+    }
+
+    pub fn lookup_view_bytes(
+        &self,
+        map: &[u8],
+        key: &[u8],
+        global: bool,
+        inspect_finished: bool,
+    ) -> Result<ViewLookup<'_>, Error> {
+        let phase_ok = if inspect_finished {
+            matches!(self.tx.phase, Phase::Finished)
+        } else {
+            matches!(self.tx.phase, Phase::Active)
+        };
+        if !phase_ok {
+            return Err(Error::Disabled);
+        }
+        let Some(i) = views_index_bytes(&self.tx.views, map) else {
+            return Err(Error::Disabled);
+        };
+        let view = &self.tx.views.0[i].1;
+        if global {
+            Ok(lookup_image_bytes(view.global_image(), key))
+        } else {
+            Ok(lookup_image_bytes(&view.local, key))
+        }
+    }
+
+    pub fn record_key_dep_bytes(&mut self, map: &[u8], key: &[u8], cell: Option<(Version, Bytes)>) {
+        let address = Address {
+            map: Bytes::copy_from(map),
+            key: Bytes::copy_from(key),
+        };
+        let cell = match cell {
+            Some((version, value)) => Some(Cell { version, value }),
+            None => None,
+        };
+        self.tx.deps.push(Dependency::Key(address, cell));
     }
 
     pub fn pending_writes(&self) -> Result<WriteSet, Error> {
@@ -1959,6 +2157,18 @@ impl Store {
             return Err(Error::Disabled);
         }
         Ok(reported_writes(&t.pending))
+    }
+
+    pub fn get_cell_bytes(
+        &self,
+        root: RadixRoot,
+        map: &[u8],
+        key: &[u8],
+    ) -> Option<(Version, &[u8])> {
+        match self.history.index.get_bytes(root, map, key) {
+            Some(cell) => Some((cell.version, cell.value.as_slice())),
+            None => None,
+        }
     }
 
     pub fn map_revision_at(&self, version: Version, map: &Bytes) -> Option<Version> {

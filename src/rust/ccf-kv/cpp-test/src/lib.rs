@@ -5,9 +5,10 @@
 
 use ccf_kv::engine::{
     Action, Address, Bytes, CommitPreparation, DetachedTx, Error, Operation, Outcome, Output,
-    SnapshotMap, Store, WriteSet,
+    PendingLookup, SnapshotMap, Store, ViewLookup, WriteSet,
 };
 use std::{
+    ffi::c_void,
     ptr, slice,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
@@ -45,17 +46,19 @@ struct ByteView {
 }
 
 impl ByteView {
-    unsafe fn optional(self) -> Result<Option<Bytes>, ()> {
+    unsafe fn as_opt_slice<'a>(self) -> Result<Option<&'a [u8]>, ()> {
         if self.data.is_null() {
             return if self.size == 0 { Ok(None) } else { Err(()) };
         }
         if self.size > isize::MAX as usize {
             return Err(());
         }
-        // The caller retains readable storage for the duration of execute.
-        Ok(Some(Bytes::copy_from(unsafe {
-            slice::from_raw_parts(self.data, self.size)
-        })))
+        // The caller retains readable storage for the duration of the FFI call.
+        Ok(Some(unsafe { slice::from_raw_parts(self.data, self.size) }))
+    }
+
+    unsafe fn optional(self) -> Result<Option<Bytes>, ()> {
+        Ok(unsafe { self.as_opt_slice()? }.map(Bytes::copy_from))
     }
 }
 
@@ -241,16 +244,181 @@ unsafe extern "C" fn ccf_rust_kv_tx_write(
 ) -> Status {
     let tx = unsafe { &mut *tx };
     let (Ok(Some(map)), Ok(Some(key)), Ok(value)) = (
-        unsafe { map.optional() },
-        unsafe { key.optional() },
-        unsafe { value.optional() },
+        unsafe { map.as_opt_slice() },
+        unsafe { key.as_opt_slice() },
+        unsafe { value.as_opt_slice() },
     ) else {
         return Status::InvalidRequest;
     };
-    match tx.stage_write(map, key, value) {
+    match tx.stage_write_bytes(map, key, value) {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,
+    }
+}
+
+type CopyValueFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_get(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    inspect_finished: bool,
+    global: bool,
+    map: ByteView,
+    key: ByteView,
+    out_ctx: *mut c_void,
+    copy_cb: CopyValueFn,
+) -> Status {
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Status::InvalidRequest;
+    };
+    if !global {
+        match tx.lookup_pending_bytes(map, key, inspect_finished) {
+            Ok(PendingLookup::Put(val)) => {
+                unsafe { copy_cb(out_ctx, val.as_ptr(), val.len()) };
+                return Status::Ok;
+            }
+            Ok(PendingLookup::Remove) => return Status::Missing,
+            Ok(PendingLookup::Miss) => {}
+            Err(Error::Disabled) => return Status::Disabled,
+            Err(Error::Exhausted) => return Status::Exhausted,
+        }
+    }
+    let store = unsafe { &*store };
+    let (status, dep) = {
+        let guard = store.read();
+        let view = match tx.lookup_view_bytes(map, key, global, inspect_finished) {
+            Ok(v) => v,
+            Err(Error::Disabled) => return Status::Disabled,
+            Err(Error::Exhausted) => return Status::Exhausted,
+        };
+        let cell = match view {
+            ViewLookup::Empty => None,
+            ViewLookup::Root(root) => guard.get_cell_bytes(root, map, key),
+            ViewLookup::Recovered(c) => c,
+        };
+        let status = match cell {
+            Some((_, val)) => {
+                unsafe { copy_cb(out_ctx, val.as_ptr(), val.len()) };
+                Status::Ok
+            }
+            None => Status::Missing,
+        };
+        let dep = if !global && !inspect_finished {
+            Some(cell.map(|(v, b)| (v, Bytes::copy_from(b))))
+        } else {
+            None
+        };
+        (status, dep)
+    };
+    if let Some(cell) = dep {
+        tx.record_key_dep_bytes(map, key, cell);
+    }
+    status
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_has(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    inspect_finished: bool,
+    global: bool,
+    map: ByteView,
+    key: ByteView,
+) -> Reply {
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    if !global {
+        match tx.lookup_pending_bytes(map, key, inspect_finished) {
+            Ok(PendingLookup::Put(_)) => {
+                let mut r = Reply::status(Status::Ok);
+                r.number = 1;
+                return r;
+            }
+            Ok(PendingLookup::Remove) => return Reply::status(Status::Ok),
+            Ok(PendingLookup::Miss) => {}
+            Err(error) => return Reply::output(Err(error)),
+        }
+    }
+    let store = unsafe { &*store };
+    let (present, dep) = {
+        let guard = store.read();
+        let view = match tx.lookup_view_bytes(map, key, global, inspect_finished) {
+            Ok(v) => v,
+            Err(error) => return Reply::output(Err(error)),
+        };
+        let cell = match view {
+            ViewLookup::Empty => None,
+            ViewLookup::Root(root) => guard.get_cell_bytes(root, map, key),
+            ViewLookup::Recovered(c) => c,
+        };
+        let dep = if !global && !inspect_finished {
+            Some(cell.map(|(v, b)| (v, Bytes::copy_from(b))))
+        } else {
+            None
+        };
+        (cell.is_some(), dep)
+    };
+    if let Some(cell) = dep {
+        tx.record_key_dep_bytes(map, key, cell);
+    }
+    let mut r = Reply::status(Status::Ok);
+    r.number = u64::from(present);
+    r
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_previous(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    inspect_finished: bool,
+    map: ByteView,
+    key: ByteView,
+) -> Reply {
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    let store = unsafe { &*store };
+    let (version, dep) = {
+        let guard = store.read();
+        let view = match tx.lookup_view_bytes(map, key, false, inspect_finished) {
+            Ok(v) => v,
+            Err(error) => return Reply::output(Err(error)),
+        };
+        let cell = match view {
+            ViewLookup::Empty => None,
+            ViewLookup::Root(root) => guard.get_cell_bytes(root, map, key),
+            ViewLookup::Recovered(c) => c,
+        };
+        let version = cell.map(|(v, _)| v);
+        let dep = if !inspect_finished {
+            Some(cell.map(|(v, b)| (v, Bytes::copy_from(b))))
+        } else {
+            None
+        };
+        (version, dep)
+    };
+    if let Some(cell) = dep {
+        tx.record_key_dep_bytes(map, key, cell);
+    }
+    match version {
+        Some(v) => {
+            let mut r = Reply::status(Status::Ok);
+            r.number = v;
+            r
+        }
+        None => Reply::status(Status::Missing),
     }
 }
 
