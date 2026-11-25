@@ -83,12 +83,11 @@ theorem revision_matches_model (encode : CcfKv.engine.Bytes → String)
   rw [← hr]
   cases r <;> simp [CcfKv.engine.Stamp.zero, modelStamp]
 
-/-- Boolean match of a native frame's live metadata against a map's birth and revision stamps. -/
+/-- Boolean match of a native frame's metadata against a map's birth and revision stamps. -/
 def frameMatches (encode : CcfKv.engine.Bytes → String) (f : CcfKv.engine.Frame)
     (m : CcfKv.engine.Bytes) (b : Option CcfKv.engine.Stamp) (r : CcfKv.engine.Stamp)
     : Bool :=
-  f.meta_live
-  && (find (modelMetadata encode f).births (encode m) == b.map modelStamp)
+  (find (modelMetadata encode f).births (encode m) == b.map modelStamp)
   && (revision (modelMetadata encode f) (encode m) == modelStamp r)
 
 theorem frame_matches (encode : CcfKv.engine.Bytes → String)
@@ -97,42 +96,38 @@ theorem frame_matches (encode : CcfKv.engine.Bytes → String)
     : WP.spec (CcfKv.engine.Frame.matches_lineage f m b r)
         (fun result => result = frameMatches encode f m b r) := by
   unfold CcfKv.engine.Frame.matches_lineage frameMatches
-  cases hm : f.meta_live with
-  | false => simp
+  apply WP.spec_bind (stamps_find encode inj f.births m)
+  intro a ha
+  have hb : WP.spec (match a with
+      | none => match b with
+        | none => Result.ok true
+        | some _ => Result.ok false
+      | some x => match b with
+        | none => Result.ok false
+        | some y => CcfKv.engine.Stamp.same x y)
+      (fun result => result = (a.map modelStamp == b.map modelStamp)) := by
+    cases a <;> cases b <;> simp [stamp_same]
+  apply WP.spec_bind hb
+  intro result hresult
+  have he : find (modelMetadata encode f).births (encode m) = a.map modelStamp := ha.symm
+  cases result with
+  | false => simp [he, ← hresult]
   | true =>
-      simp only [ite_true, Bool.true_and]
-      apply WP.spec_bind (stamps_find encode inj f.births m)
-      intro a ha
-      have hb : WP.spec (match a with
-          | none => match b with
-            | none => Result.ok true
-            | some _ => Result.ok false
-          | some x => match b with
-            | none => Result.ok false
-            | some y => CcfKv.engine.Stamp.same x y)
-          (fun result => result = (a.map modelStamp == b.map modelStamp)) := by
-        cases a <;> cases b <;> simp [stamp_same]
-      apply WP.spec_bind hb
-      intro result hresult
-      have he : find (modelMetadata encode f).births (encode m) = a.map modelStamp := ha.symm
-      cases result with
-      | false => simp [he, ← hresult]
-      | true =>
-          simp only [ite_true, he, ← hresult, Bool.true_and]
-          apply WP.spec_bind (revision_matches_model encode inj f m)
-          intro actual hactual
-          simp [stamp_same, hactual]
+      simp only [ite_true, he, ← hresult, Bool.true_and]
+      apply WP.spec_bind (revision_matches_model encode inj f m)
+      intro actual hactual
+      simp [stamp_same, hactual]
 
-/-- Exact specification of `History.map_lineage` over live-metadata active frames. -/
-theorem map_lineage_live_spec (encode : CcfKv.engine.Bytes → String)
+private theorem active_matches_lineage_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.History) (m : CcfKv.engine.Bytes)
     (birth : Option CcfKv.engine.Stamp) (rev : CcfKv.engine.Stamp)
     (valid : BranchValid s.log)
-    : WP.spec (CcfKv.engine.History.map_lineage s m birth rev)
+    : WP.spec (CcfKv.engine.History.active_matches_lineage s m birth rev)
         (fun result =>
           result = s.activeFrames.any (fun f => frameMatches encode f m birth rev)) := by
   let matchesFrame := fun f : CcfKv.engine.Frame => frameMatches encode f m birth rev
-  unfold CcfKv.engine.History.map_lineage CcfKv.engine.History.map_lineage_loop
+  unfold CcfKv.engine.History.active_matches_lineage
+    CcfKv.engine.History.active_matches_lineage_loop
   apply WP.spec_bind (branch_active_len s.log valid)
   intro count hlen
   change count.val = s.activeFrames.length at hlen
@@ -142,9 +137,9 @@ theorem map_lineage_live_spec (encode : CcfKv.engine.Bytes → String)
       ∧ (s.activeFrames.take i.val).any matchesFrame = s.activeFrames.any matchesFrame)
     _ _ _
   · intro i ⟨bound, hinv⟩
-    unfold CcfKv.engine.History.map_lineage_loop.body
+    unfold CcfKv.engine.History.active_matches_lineage_loop.body
     have hone : (1#usize : Usize).val = 1 := rfl
-    by_cases h : (0#usize : Usize) < i
+    by_cases h : i > (0#usize : Usize)
     · have pos : 0 < i.val := h
       rw [ite_eq_left h]
       apply WP.spec_bind (Usize.sub_spec (x := i) (y := 1#usize) (by omega))
@@ -177,42 +172,76 @@ theorem map_lineage_live_spec (encode : CcfKv.engine.Bytes → String)
       simpa [zero] using hinv.symm
   · exact ⟨Nat.le_of_eq hlen, by rw [hlen, List.take_length]⟩
 
-/-- Search precisely the surviving branch for a frame with both of the captured map identities,
-when all active frames retain live metadata. -/
-theorem map_lineage_matches_model (encode : CcfKv.engine.Bytes → String)
+private theorem retained_matches_lineage_spec (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.History) (m : CcfKv.engine.Bytes)
     (birth : Option CcfKv.engine.Stamp) (rev : CcfKv.engine.Stamp)
-    (model : Store) (captured : Frame)
-    (hBirth : find captured.births (encode m) = birth.map modelStamp)
-    (hRev : revision captured (encode m) = modelStamp rev)
-    (hHistory
-      : model.history.map (fun f => (find f.births (encode m), revision f (encode m)))
-        = (modelFrames s (modelMetadata encode)).map
-            (fun f => (find f.births (encode m), revision f (encode m))))
-    (hMetaLive : ∀ f ∈ s.activeFrames, f.meta_live = true)
+    : WP.spec (CcfKv.engine.History.retained_matches_lineage s m birth rev)
+        (fun result =>
+          result = s.retained.val.any (fun f => frameMatches encode f m birth rev)) := by
+  let matchesFrame := fun f : CcfKv.engine.Frame => frameMatches encode f m birth rev
+  unfold CcfKv.engine.History.retained_matches_lineage
+    CcfKv.engine.History.retained_matches_lineage_loop
+  apply loop.spec_decr_nat (fun (j : Usize) => s.retained.val.length - j.val)
+    (fun j =>
+      j.val ≤ s.retained.val.length
+      ∧ (s.retained.val.drop j.val).any matchesFrame = s.retained.val.any matchesFrame)
+    _ _ _
+  · intro j ⟨bound, hinv⟩
+    unfold CcfKv.engine.History.retained_matches_lineage_loop.body
+    dsimp only
+    have hlen : (alloc.vec.Vec.len s.retained).val = s.retained.val.length := alloc.vec.Vec.len_val _
+    have hcap := alloc.vec.Vec.len_ineq s.retained
+    by_cases h : j < alloc.vec.Vec.len s.retained
+    · have hj : j.val < s.retained.val.length := by rwa [← hlen]
+      rw [ite_eq_left h, alloc.vec.Vec.index_slice_index]
+      apply WP.spec_bind (alloc.vec.Vec.index_usize_spec s.retained j hj)
+      intro frame hf
+      apply WP.spec_bind (frame_matches encode inj frame m birth rev)
+      intro found hfound
+      have hstep := hinv
+      rw [List.drop_eq_getElem_cons hj, ← hf, List.any_cons] at hstep
+      cases found with
+      | true =>
+          simp only [ite_true, WP.spec_ok]
+          change true = matchesFrame frame at hfound
+          rw [← hfound, Bool.true_or] at hstep
+          exact hstep
+      | false =>
+          simp only [Bool.false_eq_true, ite_false]
+          have hone : (1#usize : Usize).val = 1 := rfl
+          apply WP.spec_bind (Usize.add_spec (x := j) (y := 1#usize) (by omega))
+          intro j1 hj1
+          rw [WP.spec_ok]
+          change false = matchesFrame frame at hfound
+          rw [← hfound, Bool.false_or] at hstep
+          have hj1' : j1.val = j.val + 1 := by omega
+          exact ⟨⟨by omega, by simpa [hj1'] using hstep⟩, by omega⟩
+    · have hj : s.retained.val.length ≤ j.val := by rw [← hlen]; exact Nat.le_of_not_gt h
+      rw [ite_eq_right h, WP.spec_ok]
+      simpa [List.drop_eq_nil_of_le hj] using hinv
+  · exact ⟨Nat.zero_le _, by simp⟩
+
+/-- Exact specification of `History.map_lineage` over active and retained frames. -/
+theorem map_lineage_live_spec (encode : CcfKv.engine.Bytes → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.History) (m : CcfKv.engine.Bytes)
+    (birth : Option CcfKv.engine.Stamp) (rev : CcfKv.engine.Stamp)
     (valid : BranchValid s.log)
     : WP.spec (CcfKv.engine.History.map_lineage s m birth rev)
-        (fun result => result = mapLineage model captured (encode m)) := by
-  let matchesFrame := fun f : CcfKv.engine.Frame =>
-    (find (modelMetadata encode f).births (encode m) == birth.map modelStamp) &&
-      (revision (modelMetadata encode f) (encode m) == modelStamp rev)
-  have hmodel : mapLineage model captured (encode m) = s.activeFrames.any matchesFrame := by
-    let check := fun (p : Option Stamp × Stamp) =>
-      (p.1 == birth.map modelStamp) && (p.2 == modelStamp rev)
-    have h := congrArg (fun fs => List.any fs check) hHistory
-    simpa [mapLineage, modelFrames, hBirth, hRev, Function.comp_def, check, matchesFrame]
-      using h
-  have hliveEq : s.activeFrames.any (fun f => frameMatches encode f m birth rev) =
-      s.activeFrames.any matchesFrame := by
-    apply Bool.eq_iff_iff.mpr
-    simp only [List.any_eq_true]
-    exact ⟨
-      fun ⟨f, hf, h⟩ => ⟨f, hf, by simpa [frameMatches, matchesFrame, hMetaLive f hf] using h⟩,
-      fun ⟨f, hf, h⟩ => ⟨f, hf, by simpa [frameMatches, matchesFrame, hMetaLive f hf] using h⟩
-    ⟩
-  apply WP.spec_mono (map_lineage_live_spec encode inj s m birth rev valid)
-  intro result hr
-  rw [hr, hliveEq, ← hmodel]
+        (fun result =>
+          result
+          = (s.activeFrames ++ s.retained.val).any
+              (fun f => frameMatches encode f m birth rev)) := by
+  unfold CcfKv.engine.History.map_lineage
+  apply WP.spec_bind (active_matches_lineage_spec encode inj s m birth rev valid)
+  intro b hb
+  cases b with
+  | true =>
+      rw [ite_eq_left rfl, WP.spec_ok, List.any_append, ← hb, Bool.true_or]
+  | false =>
+      rw [ite_eq_right (by decide)]
+      apply WP.spec_mono (retained_matches_lineage_spec encode inj s m birth rev)
+      intro r hr
+      rw [hr, List.any_append, ← hb, Bool.false_or]
 
 /-- Forget a frame's data for a comparison that only depends on its map stamps. -/
 def onlyMetadata (f : Frame) : Frame := { f with data := [] }
@@ -233,13 +262,13 @@ def stampsOnBranch (model : Store) (stamps : String × Option Stamp × Stamp) : 
       (find f.births stamps.1 == stamps.2.1) && (revision f stamps.1 == stamps.2.2)
 
 /-- The extracted lineage check covers every acquired map and distinguishes reused versions,
-provided every acquired view still has a live-metadata match whenever the model branch matches. -/
+provided every acquired view still has an active or retained match whenever the model branch matches. -/
 theorem acquired_lineage_matches_model (encode : CcfKv.engine.Bytes → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.History) (t : CcfKv.engine.Tx)
     (model : Store) (tx : Tx)
     (hViewLive
       : ∀ row ∈ t.views.val,
-          s.activeFrames.any
+          (s.activeFrames ++ s.retained.val).any
             (fun f => frameMatches encode f row.1 row.2.birth row.2.revision)
           = stampsOnBranch model (viewStamps encode row))
     (hViews : tx.globalViews.map capturedStamps = t.views.val.map (viewStamps encode))
@@ -305,7 +334,7 @@ theorem can_apply_matches_model (encode : List U8 → String)
     (head : CcfKv.engine.Frame) (hHead : s.activeFrames = prior ++ [head])
     (hViewLive
       : ∀ row ∈ t.views.val,
-          s.activeFrames.any
+          (s.activeFrames ++ s.retained.val).any
             (fun f =>
               frameMatches (encode ∘ alloc.vec.Vec.val) f row.1 row.2.birth
                 row.2.revision)
@@ -463,7 +492,7 @@ private theorem tx_needs_frame_loop1_spec (encode : CcfKv.engine.Bytes → Strin
     (frame globalFrame : CcfKv.engine.Frame)
     : WP.spec
         (CcfKv.engine.tx_needs_frame_loop1 views frame.version frame.data frame.revisions
-          frame.births frame.meta_live globalFrame 0#usize)
+          frame.births globalFrame 0#usize)
         (fun r =>
           r
           = views.val.any
@@ -493,7 +522,7 @@ private theorem tx_needs_frame_loop1_spec (encode : CcfKv.engine.Bytes → Strin
       intro row hrow
       have hframeEq :
           ({ version := frame.version, data := frame.data, revisions := frame.revisions,
-             births := frame.births, meta_live := frame.meta_live } : CcfKv.engine.Frame) = frame := by
+             births := frame.births } : CcfKv.engine.Frame) = frame := by
         cases frame; rfl
       rw [hframeEq]
       apply WP.spec_bind (view_needs_frame_spec encode inj row frame globalFrame)

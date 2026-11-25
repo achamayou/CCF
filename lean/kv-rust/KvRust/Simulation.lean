@@ -45,7 +45,9 @@ def FitsAction (encode : List U8 → String) (sid : Nat)
   | .Acquire id _ => FitsAcquire n id
   | .Operate id m op => FitsOperate encode sid n w id m (operationCase op)
   | .Apply id => FitsApply n id
-  | .Compact _ => QueueRoom n
+  | .Compact _ =>
+      QueueRoom n
+      ∧ n.history.retained.val.length + n.history.activeFrames.length ≤ Usize.max
   | .Rollback _ _ => QueueRoom n
   | _ => True
 
@@ -74,7 +76,7 @@ theorem execute_matches (encode : List U8 → String) (inj : Function.Injective 
   | Apply id => exact apply_step_matches encode inj sid n w id rel room
   | CommitResult id result =>
       exact commit_result_step_matches encode sid n w id result rel
-  | Compact cut => exact compact_step_matches encode inj sid n w cut rel room
+  | Compact cut => exact compact_step_matches encode inj sid n w cut rel room.1 room.2
   | Rollback cut term => exact rollback_step_matches encode sid n w cut term rel room
 
 /-- Relate an optional action result modulo relaxed scan/apply ordering. -/

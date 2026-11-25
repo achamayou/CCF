@@ -24,7 +24,6 @@ private def emptyFrame (root : CcfKv.radix.RadixRoot) : CcfKv.engine.Frame :=
     data := root
     revisions := alloc.vec.Vec.new _
     births := alloc.vec.Vec.new _
-    meta_live := true
   }
 
 /-- The extracted constructor creates the model's empty version-zero history. -/
@@ -33,17 +32,13 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
         (fun s =>
           ∃ head,
             s.history.activeFrames = [head]
-            ∧ s.history.log.frames.val = [head]
-            ∧ s.history.log.branch.val = [0#usize]
+            ∧ s.history.retained.val = []
             ∧ modelFrame encode s.history.index head = ({term := term.val} : Store).head
-            ∧ natModelFrames s.history.log [({term := term.val} : Store).head]
-              = ({term := term.val} : Store).history
             ∧ s.history.global.val = 0
             ∧ s.history.term = term
             ∧ s.history.next_identity.val = 1
             ∧ s.txs.val = []
             ∧ BranchValid s.history.log
-            ∧ BranchUnique s.history.log
             ∧ HistoryIndexValid s.history
             ∧ ArchiveAligned encode s.history [({term := term.val} : Store).head]
             ∧ IndexLiveness s.history.index (storePins s)) := by
@@ -54,11 +49,7 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
   apply WP.spec_bind empty
   intro root ⟨hrootZero, view⟩
   apply WP.spec_bind (branch_new_refines (emptyFrame root))
-  intro log ⟨valid, hframes, saved, hbr⟩
-  have huniq : BranchUnique log := by
-    unfold BranchUnique
-    rw [hbr]
-    simp
+  intro log ⟨valid, hframes, _⟩
   simp only [WP.spec_ok]
   have zero : modelFrame encode index (emptyFrame root) = ({term := term.val} : Store).head := by
     change {modelMetadata (encode ∘ alloc.vec.Vec.val) (emptyFrame root) with
@@ -68,80 +59,52 @@ theorem store_new_lifecycle (encode : List U8 → String) (term : U64)
   refine ⟨
     emptyFrame root,
     hframes,
-    saved,
-    hbr,
+    rfl,
     zero,
-    ?_,
     by simp,
     by simp,
     by simp,
     by simp,
     valid,
-    huniq,
-    ⟨indexLive.valid, ?_⟩,
+    ⟨indexLive.valid, ?_, ?_⟩,
     ?_,
     ?_
   ⟩
-  · simp [natModelFrames, hbr]
-  · intro i frame h
-    change log.frames.val[i]? = some frame at h
-    rw [saved] at h
-    have same := List.mem_singleton.mp (List.mem_iff_getElem?.mpr ⟨i, h⟩)
+  · intro frame hmem
+    change frame ∈ branchValues log at hmem
+    rw [hframes] at hmem
+    have same := List.mem_singleton.mp hmem
     subst frame
     change IndexView index root (indexRows index root)
     rwa [index_rows_eq view]
-  · refine ⟨by simp [saved], ?_, ?_, ?_, ?_⟩
-    · intro i nf gf hnf hgf
-      change log.frames.val[i]? = some nf at hnf
-      rw [saved] at hnf
-      cases i with
+  · intro rf hrf
+    simp [alloc.vec.Vec.new] at hrf
+  · refine ⟨by simp, ?_, ?_, ?_, ?_, ?_⟩
+    · refine ⟨emptyFrame root, ?_, by simp [emptyFrame], fun _ => rfl, by simp [CcfKv.engine.History.activeFrames, hframes, emptyFrame]⟩
+      change (branchValues log)[0]? = some (emptyFrame root)
+      rw [hframes]; rfl
+    · intro bf hbf i hi
+      change (branchValues log)[0]? = some bf at hbf
+      change i < (branchValues log).length at hi
+      rw [hframes] at hbf hi
+      have hbfEq : bf = emptyFrame root := Option.some.inj hbf.symm
+      subst hbfEq
+      have hi0 : i = 0 := by simp at hi; omega
+      subst hi0
+      simpa [CcfKv.engine.History.activeFrames, hframes, emptyFrame] using zero.symm
+    · intro rf hrf
+      simp [alloc.vec.Vec.new] at hrf
+    · intro _; rfl
+    · intro v gf hgv
+      cases v with
       | zero =>
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf hgf
-          subst hnf hgf
-          rfl
-      | succ _ => simp at hnf
-    · intro i nf gf hnf hgf _
-      change log.frames.val[i]? = some nf at hnf
-      rw [saved] at hnf
-      cases i with
-      | zero =>
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf hgf
-          subst hnf hgf
-          exact ⟨rfl, rfl, rfl⟩
-      | succ _ => simp at hnf
-    · intro pos id nf hpos hnf _
-      change log.branch.val[pos]? = some id at hpos
-      change log.frames.val[id.val]? = some nf at hnf
-      rw [hbr] at hpos
-      cases pos with
-      | zero =>
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hpos
-          subst hpos
-          have h0 : (0#usize).val = 0 := rfl
-          rw [h0, saved] at hnf
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf
-          subst hnf
-          rfl
-      | succ _ => simp at hpos
-    · intro pos id nf gf hpos hnf hgf _
-      change log.branch.val[pos]? = some id at hpos
-      change log.frames.val[id.val]? = some nf at hnf
-      rw [hbr] at hpos
-      cases pos with
-      | zero =>
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hpos
-          subst hpos
-          have h0 : (0#usize).val = 0 := rfl
-          rw [h0, saved] at hnf
-          rw [h0] at hgf
-          simp only [List.getElem?_cons_zero, Option.some.injEq] at hnf hgf
-          subst hnf hgf
-          exact zero
-      | succ _ => simp at hpos
-  · have hpins : framePins log.frames.val ++ txsPins (alloc.vec.Vec.new _).val = [] := by
-      rw [saved]
+          simp only [List.reverse_singleton, List.getElem?_cons_zero, Option.some.injEq] at hgv
+          subst hgv; rfl
+      | succ _ => simp at hgv
+  · have hpins : framePins (branchValues log) ++ txsPins (alloc.vec.Vec.new _).val = [] := by
+      rw [hframes]
       simp [framePins, emptyFrame, hrootZero, txsPins, alloc.vec.Vec.new]
-    change IndexLiveness index (framePins log.frames.val ++ txsPins (alloc.vec.Vec.new _).val)
+    change IndexLiveness index (framePins (branchValues log) ++ txsPins (alloc.vec.Vec.new _).val)
     rw [hpins]
     exact indexLive
 
@@ -335,17 +298,13 @@ private theorem erase_eq_eraseIdx {K V : Type} [DecidableEq K] (rows : Assoc K V
             not_false_eq_true, ite_true, List.cons.injEq, true_and]
           exact ih j unique.2 hget
 
-/-- Enabled `End` releases the attempt's pins, erases its row, opportunistically elides
-compacted snapshot metadata when no remaining attempt needs it, and retires freed nodes;
-missing IDs leave the store unchanged. -/
+/-- Enabled `End` releases the attempt's pins, erases its row, prunes unneeded compacted
+retained metadata, and retires freed nodes; missing IDs leave the store unchanged. -/
 theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
     (unique : (s.txs.val.map Prod.fst).Nodup)
-    (hnonempty : s.history.activeFrames ≠ [])
-    (hIndexed
-      : ∀ i (hi : i < s.history.activeFrames.length),
-          s.history.activeFrames[i].version.val = i)
-    (hGlobalBound : s.history.global.val < s.history.activeFrames.length)
-    (valid : BranchValid s.history.log) (branchUnique : BranchUnique s.history.log)
+    (baseFrame : CcfKv.engine.Frame)
+    (hbase0 : s.history.activeFrames[0]? = some baseFrame)
+    (valid : BranchValid s.history.log)
     (live : IndexLiveness s.history.index (storePins s))
     (queueRoom
       : 2
@@ -359,33 +318,18 @@ theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
           | none => (out, after) = (.Err .Disabled, s)
           | some _ =>
               out = .Ok .Unit
-              ∧ after.history.log.branch = s.history.log.branch
+              ∧ after.history.log = s.history.log
               ∧ after.history.global = s.history.global
               ∧ after.history.term = s.history.term
               ∧ after.history.next_identity = s.history.next_identity
               ∧ after.history.reuse_compacted_images = s.history.reuse_compacted_images
-              ∧ BranchValid after.history.log
-              ∧ BranchUnique after.history.log
-              ∧ after.history.log.frames.val.length = s.history.log.frames.val.length
               ∧ after.txs.val = erase s.txs.val id
               ∧ IndexLiveness after.history.index (storePins after)
               ∧ IndexPreservesPins s.history.index after.history.index (storePins after)
-              ∧ ∃ globalId globalFrame,
-                  s.history.log.branch.val[s.history.global.val]? = some globalId
-                  ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
-                  ∧ after.history.log.frames.val[globalId.val]? = some globalFrame
-                  ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
-                      s.history.log.frames.val[k]? = some f
-                      → ∃ f',
-                          after.history.log.frames.val[k]? = some f'
-                          ∧ f'.version = f.version
-                          ∧ f'.data = f.data
-                          ∧ (f' = f
-                              ∨ (f'.meta_live = false
-                                  ∧ f.version.val < s.history.global.val
-                                  ∧ s.history.reuse_compacted_images = true
-                                  ∧ CcfKv.engine.txs_need_frame after.txs f globalFrame
-                                    = .ok false))) := by
+              ∧ (∀ f ∈ after.history.retained.val, f ∈ s.history.retained.val)
+              ∧ (∀ f ∈ s.history.retained.val,
+                  f ∈ after.history.retained.val
+                  ∨ CcfKv.engine.txs_need_frame after.txs f baseFrame = .ok false)) := by
   unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index s id)
   intro index hi
@@ -401,22 +345,22 @@ theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
         simp [alloc.vec.Vec.index_slice_index, alloc.vec.Vec.index_usize,
           alloc.vec.Vec.getElem?_Nat_eq, hrow]
       simp only [ht, core.result.Result.Insts.CoreOpsTry.branch, bind_ok, hidx]
-      let restPins : List U32 := framePins s.history.log.frames.val ++ txsPins (erase s.txs.val id)
+      let restPins : List U32 := framePins s.history.activeFrames ++ txsPins (erase s.txs.val id)
       have herase : erase s.txs.val id = s.txs.val.eraseIdx i.val :=
         erase_eq_eraseIdx s.txs.val i.val id t unique hrow
       have hperm : (storePins s).Perm (txPins t ++ restPins) := by
         unfold storePins restPins
         have hsplit := txsPins_split_at s.txs.val i.val id t hrow
         rw [← herase] at hsplit
-        have h1 := hsplit.append_left (framePins s.history.log.frames.val)
-        have h2 : (framePins s.history.log.frames.val ++ (txPins t ++ txsPins (erase s.txs.val id))).Perm
-            ((framePins s.history.log.frames.val ++ txPins t) ++ txsPins (erase s.txs.val id)) := by
+        have h1 := hsplit.append_left (framePins s.history.activeFrames)
+        have h2 : (framePins s.history.activeFrames ++ (txPins t ++ txsPins (erase s.txs.val id))).Perm
+            ((framePins s.history.activeFrames ++ txPins t) ++ txsPins (erase s.txs.val id)) := by
           rw [List.append_assoc]
-        have h3 : ((framePins s.history.log.frames.val ++ txPins t) ++ txsPins (erase s.txs.val id)).Perm
-            ((txPins t ++ framePins s.history.log.frames.val) ++ txsPins (erase s.txs.val id)) :=
+        have h3 : ((framePins s.history.activeFrames ++ txPins t) ++ txsPins (erase s.txs.val id)).Perm
+            ((txPins t ++ framePins s.history.activeFrames) ++ txsPins (erase s.txs.val id)) :=
           List.perm_append_comm.append_right _
-        have h4 : ((txPins t ++ framePins s.history.log.frames.val) ++ txsPins (erase s.txs.val id)).Perm
-            (txPins t ++ (framePins s.history.log.frames.val ++ txsPins (erase s.txs.val id))) := by
+        have h4 : ((txPins t ++ framePins s.history.activeFrames) ++ txsPins (erase s.txs.val id)).Perm
+            (txPins t ++ (framePins s.history.activeFrames ++ txsPins (erase s.txs.val id))) := by
           rw [List.append_assoc]
         exact h1.trans (h2.trans (h3.trans h4))
       have hliveSplit : IndexLiveness s.history.index (txPins t ++ restPins) :=
@@ -426,81 +370,10 @@ theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
       intro ai ⟨haiVals, haiLive⟩
       apply WP.spec_bind (erase_attempt_matches s.txs id)
       intro next hn
-      have hbrLen : s.history.log.branch.val.length = s.history.activeFrames.length :=
-        (branch_values_length s.history.log valid).symm
-      have hglBrLt : s.history.global.val < s.history.log.branch.val.length := by omega
-      let globalId0 := s.history.log.branch.val[s.history.global.val]'hglBrLt
-      have hglBrAt0 : s.history.log.branch.val[s.history.global.val]? = some globalId0 :=
-        List.getElem?_eq_getElem hglBrLt
-      have hglIdLt0 : globalId0.val < s.history.log.frames.val.length :=
-        valid.2 globalId0 (List.getElem_mem hglBrLt)
-      let globalFrame0 := s.history.log.frames.val[globalId0.val]'hglIdLt0
-      have hglFrAt0 : s.history.log.frames.val[globalId0.val]? = some globalFrame0 :=
-        List.getElem?_eq_getElem hglIdLt0
-      have hElideSpec : WP.spec
-          (match t.snapshot with
-            | none => Result.ok {s.history with index := ai}
-            | some snap =>
-              CcfKv.engine.History.try_elide_compacted_version
-                {s.history with index := ai} snap.version next)
-          (fun h =>
-            h.log.branch = s.history.log.branch
-            ∧ h.index = ai
-            ∧ h.global = s.history.global
-            ∧ h.term = s.history.term
-            ∧ h.next_identity = s.history.next_identity
-            ∧ h.reuse_compacted_images = s.history.reuse_compacted_images
-            ∧ BranchValid h.log
-            ∧ BranchUnique h.log
-            ∧ framePins h.log.frames.val = framePins s.history.log.frames.val
-            ∧ h.log.frames.val.length = s.history.log.frames.val.length
-            ∧ ∃ globalId globalFrame,
-                s.history.log.branch.val[s.history.global.val]? = some globalId
-                ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
-                ∧ h.log.frames.val[globalId.val]? = some globalFrame
-                ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
-                    s.history.log.frames.val[k]? = some f
-                    → ∃ f',
-                        h.log.frames.val[k]? = some f'
-                        ∧ f'.version = f.version
-                        ∧ f'.data = f.data
-                        ∧ (f' = f
-                            ∨ (f'.meta_live = false
-                                ∧ f.version.val < s.history.global.val
-                                ∧ s.history.reuse_compacted_images = true
-                                ∧ CcfKv.engine.txs_need_frame next f globalFrame = .ok false))) := by
-        cases hsnap : t.snapshot with
-        | none =>
-            rw [WP.spec_ok]
-            refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, valid, branchUnique, rfl, rfl,
-              globalId0, globalFrame0, hglBrAt0, hglFrAt0, hglFrAt0, ?_⟩
-            intro k f hf
-            exact ⟨f, hf, rfl, rfl, Or.inl rfl⟩
-        | some snap =>
-            apply WP.spec_mono
-              (history_try_elide_compacted_version_refines {s.history with index := ai}
-                snap.version next hnonempty hIndexed hGlobalBound valid branchUnique)
-            rintro h ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
-              gid, gf, hgidBr, hgidFr, hslots⟩
-            have hgfVer : gf.version.val = s.history.global.val := by
-              have hact : s.history.activeFrames[s.history.global.val]? = some gf := by
-                rw [branch_active_getElem? s.history.log valid s.history.global.val, hgidBr]
-                simpa using hgidFr
-              have heq : s.history.activeFrames[s.history.global.val] = gf :=
-                Option.some.inj ((List.getElem?_eq_getElem hGlobalBound).symm.trans hact)
-              rw [← heq]
-              exact hIndexed s.history.global.val hGlobalBound
-            obtain ⟨gf', hgf', _, _, hgfCase⟩ := hslots gid.val gf hgidFr
-            have hgfEq : gf' = gf := by
-              rcases hgfCase with rfl | ⟨_, hlt, _, _⟩
-              · rfl
-              · exact absurd hlt (by change ¬ gf.version.val < s.history.global.val; omega)
-            rw [hgfEq] at hgf'
-            exact ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
-              gid, gf, hgidBr, hgidFr, hgf', hslots⟩
-      apply WP.spec_bind hElideSpec
-      rintro h ⟨hbr, hidxEq, hgl, htm, hid, hre, hv, hu, hfp, hlen,
-        gid, gf, hgidBr, hgidFr, hgidAfter, hslots⟩
+      apply WP.spec_bind
+        (history_prune_retained_refines {s.history with index := ai} next baseFrame hbase0
+          valid)
+      rintro h ⟨hlogEq, hidxEq, hglEq, htmEq, hidEq, hreEq, hretSub, hretDone⟩
       have haiQueue : 2 * (ai.values.dirs.val.length + ai.values.rows.val.length) + 1 ≤ Usize.max := by
         rw [haiVals]; exact queueRoom
       rw [hidxEq]
@@ -512,9 +385,10 @@ theorem execute_end_lifecycle (s : CcfKv.engine.Store) (id : U64)
         ({s with history := {h with index := ai1}, txs := next} : CcfKv.engine.Store))) _
       rw [WP.spec_ok]
       have hpinsAfter : storePins {s with history := {h with index := ai1}, txs := next} = restPins := by
-        simp [storePins, restPins, hfp, hn]
-      refine ⟨rfl, hbr, hgl, htm, hid, hre, hv, hu, hlen, hn, ?_, ?_,
-        gid, gf, hgidBr, hgidFr, hgidAfter, hslots⟩
+        unfold storePins CcfKv.engine.History.activeFrames restPins
+        dsimp only
+        rw [hlogEq, hn]
+      refine ⟨rfl, hlogEq, hglEq, htmEq, hidEq, hreEq, hn, ?_, ?_, hretSub, hretDone⟩
       · simpa only [hpinsAfter] using hai1Live
       · rw [hpinsAfter]
         have hkeptAi : IndexPreservesPins s.history.index ai restPins := by
@@ -885,12 +759,9 @@ theorem execute_begin_matches_model (encode : List U8 → String) (s : CcfKv.eng
 theorem execute_end_matches_model (s : CcfKv.engine.Store) (w : State) (sid : Nat)
     (id : U64) (hExists : (lookupTx w sid id.val).isSome = (find s.txs.val id).isSome)
     (unique : (s.txs.val.map Prod.fst).Nodup)
-    (hnonempty : s.history.activeFrames ≠ [])
-    (hIndexed
-      : ∀ i (hi : i < s.history.activeFrames.length),
-          s.history.activeFrames[i].version.val = i)
-    (hGlobalBound : s.history.global.val < s.history.activeFrames.length)
-    (valid : BranchValid s.history.log) (branchUnique : BranchUnique s.history.log)
+    (baseFrame : CcfKv.engine.Frame)
+    (hbase0 : s.history.activeFrames[0]? = some baseFrame)
+    (valid : BranchValid s.history.log)
     (live : IndexLiveness s.history.index (storePins s))
     (queueRoom
       : 2
@@ -902,36 +773,20 @@ theorem execute_end_matches_model (s : CcfKv.engine.Store) (w : State) (sid : Na
         (LifecycleModelPost s (execute w (.txEnd sid id.val))
           fun w' s' =>
             w' = {w with txs := erase w.txs id.val}
-            ∧ s'.history.log.branch = s.history.log.branch
+            ∧ s'.history.log = s.history.log
             ∧ s'.history.global = s.history.global
             ∧ s'.history.term = s.history.term
             ∧ s'.history.next_identity = s.history.next_identity
             ∧ s'.history.reuse_compacted_images = s.history.reuse_compacted_images
-            ∧ BranchValid s'.history.log
-            ∧ BranchUnique s'.history.log
-            ∧ s'.history.log.frames.val.length = s.history.log.frames.val.length
             ∧ s'.txs.val = erase s.txs.val id
             ∧ IndexLiveness s'.history.index (storePins s')
             ∧ IndexPreservesPins s.history.index s'.history.index (storePins s')
-            ∧ ∃ globalId globalFrame,
-                s.history.log.branch.val[s.history.global.val]? = some globalId
-                ∧ s.history.log.frames.val[globalId.val]? = some globalFrame
-                ∧ s'.history.log.frames.val[globalId.val]? = some globalFrame
-                ∧ ∀ (k : Nat) (f : CcfKv.engine.Frame),
-                    s.history.log.frames.val[k]? = some f
-                    → ∃ f',
-                        s'.history.log.frames.val[k]? = some f'
-                        ∧ f'.version = f.version
-                        ∧ f'.data = f.data
-                        ∧ (f' = f
-                            ∨ (f'.meta_live = false
-                                ∧ f.version.val < s.history.global.val
-                                ∧ s.history.reuse_compacted_images = true
-                                ∧ CcfKv.engine.txs_need_frame s'.txs f globalFrame
-                                  = .ok false))) := by
+            ∧ (∀ f ∈ s'.history.retained.val, f ∈ s.history.retained.val)
+            ∧ (∀ f ∈ s.history.retained.val,
+                f ∈ s'.history.retained.val
+                ∨ CcfKv.engine.txs_need_frame s'.txs f baseFrame = .ok false)) := by
   apply WP.spec_mono
-    (execute_end_lifecycle s id unique hnonempty hIndexed hGlobalBound valid branchUnique
-      live queueRoom)
+    (execute_end_lifecycle s id unique baseFrame hbase0 valid live queueRoom)
   rintro ⟨out, after⟩ h
   cases hm : lookupTx w sid id.val <;> cases ht : find s.txs.val id <;>
     simp only [hm, ht, Option.isSome_none, Option.isSome_some] at hExists

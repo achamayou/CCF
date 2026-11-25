@@ -443,18 +443,18 @@ private theorem births_meta_eq {encode : List U8 → String} {index : CellIndex}
   rw [hm.2.2]
 
 private theorem frame_root_ref {s : CcfKv.engine.History} {extraPins : List U32}
-    {id : CcfKv.branch_log.FrameId} {f : CcfKv.engine.Frame}
-    (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
-    (saved : s.log.frames.val[id.val]? = some f)
+    {f : CcfKv.engine.Frame}
+    (live : IndexLiveness s.index (framePins s.activeFrames ++ extraPins))
+    (hmemAct : f ∈ s.activeFrames)
     : f.data ≠ 0#u32
       → SingleLinkLive s.index.values.dirs.val s.index.values.rows.val f.data
         ∧ radixReferences s.index.values.dirs.val
-            (framePins s.log.frames.val ++ extraPins) f.data
+            (framePins s.activeFrames ++ extraPins) f.data
           > 0 := by
   intro hnz
-  have hmem : f.data ∈ framePins s.log.frames.val ++ extraPins :=
+  have hmem : f.data ∈ framePins s.activeFrames ++ extraPins :=
     List.mem_append_left extraPins
-      (List.mem_filterMap.mpr ⟨f, List.mem_iff_getElem?.mpr ⟨id.val, saved⟩, by simp [hnz]⟩)
+      (List.mem_filterMap.mpr ⟨f, hmemAct, by simp [hnz]⟩)
   refine ⟨live.pinsLive f.data hmem, ?_⟩
   rw [radixReferences_eq]
   exact List.count_pos_iff.mpr (List.mem_append_left _ hmem)
@@ -463,26 +463,32 @@ private theorem pin_maps_spec (encode : List U8 → String)
     (inj : Function.Injective encode) (history : CcfKv.engine.History)
     (current global : CcfKv.engine.Frame) (gfLocal gfGlobal : Frame)
     (m : CcfKv.engine.Bytes) (extraPins : List U32)
-    (currentId globalId : CcfKv.branch_log.FrameId)
-    (currentSaved : history.log.frames.val[currentId.val]? = some current)
-    (globalSaved : history.log.frames.val[globalId.val]? = some global) (cut : U64)
-    (idxValid : HistoryIndexValid history)
-    (live : IndexLiveness history.index (framePins history.log.frames.val ++ extraPins))
+    (localRef : CcfKv.engine.CutRef) (globalOff : Usize) (cut : U64)
+    (valid : BranchValid history.log) (idxValid : HistoryIndexValid history)
+    (live : IndexLiveness history.index (framePins history.activeFrames ++ extraPins))
+    (globalSaved : history.activeFrames[globalOff.val]? = some global)
+    (localSpec
+      : match localRef with
+        | .Active off =>
+            history.activeFrames[off.val]? = some current
+            ∧ modelFrame encode history.index current = gfLocal
+        | .Retained idx =>
+            history.retained.val[idx.val]? = some current
+            ∧ history.reuse_compacted_images = true
+            ∧ cut < history.global)
     (hglobalLive : modelFrame encode history.index global = gfGlobal)
-    (hlocalLive
-      : ¬ (history.reuse_compacted_images = true ∧ cut < history.global)
-        → modelFrame encode history.index current = gfLocal)
     (share
       : cut.val ≤ history.global.val
         → image gfLocal.data (encode m.val) = image gfGlobal.data (encode m.val))
     (refRoom
-      : (framePins history.log.frames.val ++ extraPins).length
+      : (framePins history.activeFrames ++ extraPins).length
           + 17 * history.index.values.dirs.val.length
           + 2
         ≤ U32.max)
-    : WP.spec (CcfKv.engine.pin_maps history currentId globalId cut)
+    : WP.spec (CcfKv.engine.pin_maps history localRef globalOff cut)
         (fun ((localPin, globalPin), after) =>
           after.log = history.log
+          ∧ after.retained = history.retained
           ∧ after.global = history.global
           ∧ after.term = history.term
           ∧ after.next_identity = history.next_identity
@@ -493,18 +499,17 @@ private theorem pin_maps_spec (encode : List U8 → String)
                 ++ (match globalPin with
                     | none => []
                     | some g => pinPins g)
-                ++ (framePins history.log.frames.val ++ extraPins))
+                ++ (framePins history.activeFrames ++ extraPins))
           ∧ encodeImage encode (pinImage after.index m localPin)
             = image gfLocal.data (encode m.val)
           ∧ encodeImage encode (pinImage after.index m (globalPin.getD localPin))
             = image gfGlobal.data (encode m.val)
           ∧ PinLive after.index localPin
           ∧ PinLive after.index (globalPin.getD localPin)) := by
-  let pins0 := framePins history.log.frames.val ++ extraPins
+  let pins0 := framePins history.activeFrames ++ extraPins
+  have hglobalMem : global ∈ history.activeFrames := List.mem_of_getElem? globalSaved
   have hglobalView : IndexView history.index global.data (indexRows history.index global.data) :=
-    idxValid.archived globalId.val global globalSaved
-  have hlocalView : IndexView history.index current.data (indexRows history.index current.data) :=
-    idxValid.archived currentId.val current currentSaved
+    idxValid.active global hglobalMem
   have hglobalRows : encodeImage encode (pinImage history.index m (.Root global.data)) =
       image gfGlobal.data (encode m.val) := by
     rw [← hglobalLive]
@@ -517,25 +522,20 @@ private theorem pin_maps_spec (encode : List U8 → String)
     have h2 : pins0.length + 17 * history.index.values.dirs.val.length + 2 ≤ U32.max := refRoom
     rw [radixReferences_eq]
     exact Nat.lt_of_le_of_lt h1 (by omega)
-  have hrefLocal : current.data ≠ 0#u32 → radixReferences history.index.values.dirs.val pins0 current.data < U32.max := by
-    intro _
-    have h1 := owners_count_le_bound history.index.values.dirs.val pins0 current.data
-    have h2 : pins0.length + 17 * history.index.values.dirs.val.length + 2 ≤ U32.max := refRoom
-    rw [radixReferences_eq]
-    exact Nat.lt_of_le_of_lt h1 (by omega)
   have hfallback : ¬ (history.reuse_compacted_images = true ∧ cut < history.global) →
       WP.spec (do
-        let f ← CcfKv.branch_log.BranchLog.read history.log currentId
+        let f ← CcfKv.engine.History.read_cut history localRef
         let ai ← CcfKv.kv_index.AddressIndex.retain_root history.index f.data
         if cut = history.global then
           Result.ok ((CcfKv.engine.PinnedImage.Root f.data, none), { history with index := ai })
         else do
-          let f1 ← CcfKv.branch_log.BranchLog.read history.log globalId
+          let f1 ← CcfKv.branch_log.BranchLog.active_at history.log globalOff
           let ai1 ← CcfKv.kv_index.AddressIndex.retain_root ai f1.data
           Result.ok ((CcfKv.engine.PinnedImage.Root f.data, some (CcfKv.engine.PinnedImage.Root f1.data)),
             { history with index := ai1 }))
         (fun ((localPin, globalPin), after) =>
           after.log = history.log
+          ∧ after.retained = history.retained
           ∧ after.global = history.global
           ∧ after.term = history.term
           ∧ after.next_identity = history.next_identity
@@ -549,85 +549,97 @@ private theorem pin_maps_spec (encode : List U8 → String)
           ∧ PinLive after.index localPin
           ∧ PinLive after.index (globalPin.getD localPin)) := by
     intro hnotOld
-    have hcurLive := hlocalLive hnotOld
-    have hlocalRows : encodeImage encode (pinImage history.index m (.Root current.data)) =
-        image gfLocal.data (encode m.val) := by
-      rw [← hcurLive]
-      simpa [pinImage, modelFrame]
-        using (image_encoding encode inj
-                (indexedCellData (indexRows history.index current.data)) m.val).symm
-    apply WP.spec_bind (branch_read_refines history.log currentId current currentSaved)
-    intro fRead hfRead; subst fRead
-    apply WP.spec_bind
-      (index_retain_root_refines history.index pins0 current.data live
-        (frame_root_ref live currentSaved) hrefLocal)
-    intro ai1 ⟨hvals1, hlive1⟩
-    have hk1 : IndexKeeps history.index ai1 := by unfold IndexKeeps; rw [hvals1]; exact .refl _
-    have hlocalPres1 := pin_preserved hk1 m (.Root current.data) hlocalView
-    by_cases hsame : cut = history.global
-    · rw [ite_eq_left hsame, WP.spec_ok]
-      have hlive1' : IndexLiveness ai1 (pinPins (.Root current.data) ++ [] ++ pins0) := by
-        by_cases hz : current.data = 0#u32 <;> simpa [pinPins, hz] using hlive1
-      refine ⟨rfl, rfl, rfl, rfl, rfl, hvals1, hlive1', ?_, ?_, hlocalPres1.1, hlocalPres1.1⟩
-      · rw [hlocalPres1.2]; exact hlocalRows
-      · simp only [Option.getD_none]; rw [hlocalPres1.2, hlocalRows]; exact share (by rw [hsame])
-    · rw [ite_eq_right hsame]
-      apply WP.spec_bind (branch_read_refines history.log globalId global globalSaved)
-      intro fRead2 hfRead2; subst fRead2
-      let pins1 := if current.data = 0#u32 then pins0 else current.data :: pins0
-      have hrefGlobal1 : global.data ≠ 0#u32 →
-          SingleLinkLive ai1.values.dirs.val ai1.values.rows.val global.data
-          ∧ radixReferences ai1.values.dirs.val pins1 global.data > 0 := by
-        intro hnz
-        have hmem0 : global.data ∈ pins0 :=
-          List.mem_append_left extraPins
-            (List.mem_filterMap.mpr ⟨global, List.mem_iff_getElem?.mpr ⟨globalId.val, globalSaved⟩, by simp [hnz]⟩)
-        have hmem1 : global.data ∈ pins1 := by
-          dsimp [pins1]; split
-          · exact hmem0
-          · exact List.mem_cons_of_mem _ hmem0
-        refine ⟨hlive1.pinsLive global.data hmem1, ?_⟩
-        rw [radixReferences_eq]
-        exact List.count_pos_iff.mpr (List.mem_append_left _ hmem1)
-      have hrefRoom1 : global.data ≠ 0#u32 → radixReferences ai1.values.dirs.val pins1 global.data < U32.max := by
-        intro _
-        have h1 := owners_count_le_bound ai1.values.dirs.val pins1 global.data
-        have hlen1 : pins1.length ≤ pins0.length + 1 := by
-          by_cases hcz : current.data = 0#u32 <;> simp [pins1, hcz]
-        have h2 : pins0.length + 17 * history.index.values.dirs.val.length + 2 ≤ U32.max := refRoom
-        rw [hvals1] at h1 ⊢
-        rw [radixReferences_eq]
-        exact Nat.lt_of_le_of_lt h1 (by omega)
-      apply WP.spec_bind
-        (index_retain_root_refines ai1 pins1 global.data hlive1 hrefGlobal1 hrefRoom1)
-      intro ai2 ⟨hvals2, hlive2⟩
-      change WP.spec (Result.ok _) _
-      rw [WP.spec_ok]
-      have hk2 : IndexKeeps history.index ai2 := by
-        unfold IndexKeeps; rw [hvals2, hvals1]; exact .refl _
-      have hlocalPres2 := pin_preserved hk2 m (.Root current.data) hlocalView
-      have hglobalPres2 := pin_preserved hk2 m (.Root global.data) hglobalView
-      have hlive2' : IndexLiveness ai2
-          (pinPins (.Root current.data) ++ pinPins (.Root global.data) ++ pins0) := by
-        by_cases hcz : current.data = 0#u32 <;> by_cases hgz : global.data = 0#u32
-        · simpa [pinPins, pins1, hcz, hgz] using hlive2
-        · simpa [pinPins, pins1, hcz, hgz] using hlive2
-        · simpa [pinPins, pins1, hcz, hgz] using hlive2
-        · simp only [pinPins, pins1, hcz, hgz, ite_false, List.cons_append, List.nil_append] at hlive2 ⊢
-          exact hlive2.perm (List.Perm.swap current.data global.data pins0)
-      refine ⟨rfl, rfl, rfl, rfl, rfl, hvals2.trans hvals1, hlive2', ?_, ?_, hlocalPres2.1, hglobalPres2.1⟩
-      · rw [hlocalPres2.2]; exact hlocalRows
-      · simp only [Option.getD_some]; rw [hglobalPres2.2]; exact hglobalRows
+    cases localRef with
+    | Retained idx =>
+        exact (hnotOld ⟨localSpec.2.1, localSpec.2.2⟩).elim
+    | Active off =>
+        obtain ⟨hcurSaved, hcurLive⟩ := localSpec
+        have hcurMem : current ∈ history.activeFrames := List.mem_of_getElem? hcurSaved
+        have hlocalView : IndexView history.index current.data (indexRows history.index current.data) :=
+          idxValid.active current hcurMem
+        have hlocalRows : encodeImage encode (pinImage history.index m (.Root current.data)) =
+            image gfLocal.data (encode m.val) := by
+          rw [← hcurLive]
+          simpa [pinImage, modelFrame]
+            using (image_encoding encode inj
+                    (indexedCellData (indexRows history.index current.data)) m.val).symm
+        have hrefLocal : current.data ≠ 0#u32 → radixReferences history.index.values.dirs.val pins0 current.data < U32.max := by
+          intro _
+          have h1 := owners_count_le_bound history.index.values.dirs.val pins0 current.data
+          have h2 : pins0.length + 17 * history.index.values.dirs.val.length + 2 ≤ U32.max := refRoom
+          rw [radixReferences_eq]
+          exact Nat.lt_of_le_of_lt h1 (by omega)
+        apply WP.spec_bind (history_read_cut_active history off current valid hcurSaved)
+        intro fRead hfRead; subst fRead
+        apply WP.spec_bind
+          (index_retain_root_refines history.index pins0 current.data live
+            (frame_root_ref live hcurMem) hrefLocal)
+        intro ai1 ⟨hvals1, hlive1⟩
+        have hk1 : IndexKeeps history.index ai1 := by unfold IndexKeeps; rw [hvals1]; exact .refl _
+        have hlocalPres1 := pin_preserved hk1 m (.Root current.data) hlocalView
+        by_cases hsame : cut = history.global
+        · rw [ite_eq_left hsame, WP.spec_ok]
+          have hlive1' : IndexLiveness ai1 (pinPins (.Root current.data) ++ [] ++ pins0) := by
+            by_cases hz : current.data = 0#u32 <;> simpa [pinPins, hz] using hlive1
+          refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, hvals1, hlive1', ?_, ?_, hlocalPres1.1, hlocalPres1.1⟩
+          · rw [hlocalPres1.2]; exact hlocalRows
+          · simp only [Option.getD_none]; rw [hlocalPres1.2, hlocalRows]; exact share (by rw [hsame])
+        · rw [ite_eq_right hsame]
+          apply WP.spec_bind (branch_active_at history.log valid globalOff global globalSaved)
+          intro fRead2 hfRead2; subst fRead2
+          let pins1 := if current.data = 0#u32 then pins0 else current.data :: pins0
+          have hrefGlobal1 : global.data ≠ 0#u32 →
+              SingleLinkLive ai1.values.dirs.val ai1.values.rows.val global.data
+              ∧ radixReferences ai1.values.dirs.val pins1 global.data > 0 := by
+            intro hnz
+            have hmem0 : global.data ∈ pins0 :=
+              List.mem_append_left extraPins (List.mem_filterMap.mpr ⟨global, hglobalMem, by simp [hnz]⟩)
+            have hmem1 : global.data ∈ pins1 := by
+              dsimp [pins1]; split
+              · exact hmem0
+              · exact List.mem_cons_of_mem _ hmem0
+            refine ⟨hlive1.pinsLive global.data hmem1, ?_⟩
+            rw [radixReferences_eq]
+            exact List.count_pos_iff.mpr (List.mem_append_left _ hmem1)
+          have hrefRoom1 : global.data ≠ 0#u32 → radixReferences ai1.values.dirs.val pins1 global.data < U32.max := by
+            intro _
+            have h1 := owners_count_le_bound ai1.values.dirs.val pins1 global.data
+            have hlen1 : pins1.length ≤ pins0.length + 1 := by
+              by_cases hcz : current.data = 0#u32 <;> simp [pins1, hcz]
+            have h2 : pins0.length + 17 * history.index.values.dirs.val.length + 2 ≤ U32.max := refRoom
+            rw [hvals1] at h1 ⊢
+            rw [radixReferences_eq]
+            exact Nat.lt_of_le_of_lt h1 (by omega)
+          apply WP.spec_bind
+            (index_retain_root_refines ai1 pins1 global.data hlive1 hrefGlobal1 hrefRoom1)
+          intro ai2 ⟨hvals2, hlive2⟩
+          change WP.spec (Result.ok _) _
+          rw [WP.spec_ok]
+          have hk2 : IndexKeeps history.index ai2 := by
+            unfold IndexKeeps; rw [hvals2, hvals1]; exact .refl _
+          have hlocalPres2 := pin_preserved hk2 m (.Root current.data) hlocalView
+          have hglobalPres2 := pin_preserved hk2 m (.Root global.data) hglobalView
+          have hlive2' : IndexLiveness ai2
+              (pinPins (.Root current.data) ++ pinPins (.Root global.data) ++ pins0) := by
+            by_cases hcz : current.data = 0#u32 <;> by_cases hgz : global.data = 0#u32
+            · simpa [pinPins, pins1, hcz, hgz] using hlive2
+            · simpa [pinPins, pins1, hcz, hgz] using hlive2
+            · simpa [pinPins, pins1, hcz, hgz] using hlive2
+            · simp only [pinPins, pins1, hcz, hgz, ite_false, List.cons_append, List.nil_append] at hlive2 ⊢
+              exact hlive2.perm (List.Perm.swap current.data global.data pins0)
+          refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, hvals2.trans hvals1, hlive2', ?_, ?_, hlocalPres2.1, hglobalPres2.1⟩
+          · rw [hlocalPres2.2]; exact hlocalRows
+          · simp only [Option.getD_some]; rw [hglobalPres2.2]; exact hglobalRows
   unfold CcfKv.engine.pin_maps
   by_cases reusable : history.reuse_compacted_images = true
   · rw [ite_eq_left reusable]
     by_cases older : cut < history.global
     · rw [ite_eq_left older]
-      apply WP.spec_bind (branch_read_refines history.log globalId global globalSaved)
+      apply WP.spec_bind (branch_active_at history.log valid globalOff global globalSaved)
       intro fRead hfRead; subst fRead
       apply WP.spec_bind
         (index_retain_root_refines history.index pins0 global.data live
-          (frame_root_ref live globalSaved) hrefGlobal)
+          (frame_root_ref live hglobalMem) hrefGlobal)
       intro ai1 ⟨hvals1, hlive1⟩
       change WP.spec (Result.ok _) _
       rw [WP.spec_ok]
@@ -636,7 +648,7 @@ private theorem pin_maps_spec (encode : List U8 → String)
       have hlive1' : IndexLiveness ai1 (pinPins (.Root global.data) ++ [] ++ pins0) := by
         by_cases hz : global.data = 0#u32 <;> simpa [pinPins, hz] using hlive1
       have past : cut.val ≤ history.global.val := Nat.le_of_lt older
-      refine ⟨rfl, rfl, rfl, rfl, rfl, hvals1, hlive1', ?_, ?_, hglobalPres1.1, hglobalPres1.1⟩
+      refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, hvals1, hlive1', ?_, ?_, hglobalPres1.1, hglobalPres1.1⟩
       · rw [hglobalPres1.2]; exact hglobalRows.trans (share past).symm
       · simp only [Option.getD_none]; rw [hglobalPres1.2]; exact hglobalRows
     · rw [ite_eq_right older]
@@ -644,197 +656,125 @@ private theorem pin_maps_spec (encode : List U8 → String)
   · rw [ite_eq_right reusable]
     exact hfallback (fun h => reusable h.1)
 
-private theorem history_pin_cut_matches_nat (s : CcfKv.engine.History) (cut : U64)
-    (model : Store) (encode : List U8 → String) (natArchive : List Frame)
-    (hmodel : model.history = natModelFrames s.log natArchive)
-    (hzero : CcfKv.engine.History.relative_cut s cut = .ok cut)
-    (hversions : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
-    (valid : BranchValid s.log) (aligned : ArchiveAligned encode s natArchive)
-    : WP.spec (CcfKv.engine.History.pin_cut s cut)
-        (fun id =>
-          ∃ nf gf,
-            s.log.frames.val[id.val]? = some nf
-            ∧ natArchive[id.val]? = some gf
-            ∧ s.log.branch.val[min cut.val (s.log.branch.val.length - 1)]? = some id
-            ∧ nf.version.val = min cut.val (s.log.branch.val.length - 1)
-            ∧ gf = atCut model cut.val
-            ∧ gf ∈ model.history) := by
-  unfold CcfKv.engine.History.pin_cut
-  simp only [hzero, bind_ok]
-  have hlenBr : s.log.branch.val.length = s.activeFrames.length :=
-    (branch_values_length s.log valid).symm
-  have hpos : 0 < s.log.branch.val.length := List.length_pos_iff.mpr valid.1
-  let off := min cut.val (s.log.branch.val.length - 1)
-  have hoffLt : off < s.log.branch.val.length := by dsimp [off]; omega
-  -- Reuse `branch_cut_refines`
-  have hbrRef := branch_cut_refines s.log valid cut
-  -- Also know `at_cut` reads `s.log.branch.val[off]` directly:
-  unfold CcfKv.branch_log.BranchLog.at_cut
-  have hlen : (alloc.vec.Vec.len s.log.branch).val = s.log.branch.val.length := alloc.vec.Vec.len_val _
-  have hcap := alloc.vec.Vec.len_ineq s.log.branch
-  have hone : (1#usize : Usize).val = 1 := rfl
-  apply WP.spec_bind
-    (Usize.sub_spec (x := alloc.vec.Vec.len s.log.branch) (y := 1#usize) (by omega))
-  intro head hhead
-  have headVal : head.val = s.log.branch.val.length - 1 := by omega
-  let head64 := UScalar.cast .U64 head
-  have castHead : head64.val = s.log.branch.val.length - 1 := by
-    rw [show head64.val = head.val from UScalar.cast_val_mod_pow_greater_numBits_eq .U64 head
-      (by simp only [UScalarTy.Usize_numBits_eq, UScalarTy.U64_numBits_eq]
-          rcases System.Platform.numBits_eq with h | h <;> simp [h]), headVal]
-  simp only [lift, bind_ok, alloc.vec.Vec.index_slice_index]
-  have selected : WP.spec
-      (if cut < head64 then Result.ok (UScalar.cast .Usize cut) else Result.ok head)
-      (fun i => i.val = off) := by
-    by_cases earlier : cut < head64
-    · have hlt : cut.val < s.log.branch.val.length - 1 := by change cut.val < head64.val at earlier; omega
-      rw [ite_eq_left earlier, WP.spec_ok]
-      dsimp [off]; rw [Nat.min_eq_left hlt.le]
-      apply UScalar.cast_val_mod_pow_of_inBounds_eq
-      rw [← UScalar.max_USize_eq, UScalar.max] at hcap
-      have := Nat.two_pow_pos UScalarTy.Usize.numBits
-      omega
-    · have hle : s.log.branch.val.length - 1 ≤ cut.val := by change ¬cut.val < head64.val at earlier; omega
-      rw [ite_eq_right earlier, WP.spec_ok]
-      dsimp [off]; rw [Nat.min_eq_right hle, headVal]
-  apply WP.spec_bind selected
-  intro index hi
-  have bound : index.val < s.log.branch.val.length := hi ▸ hoffLt
-  apply WP.spec_bind (alloc.vec.Vec.index_usize_spec s.log.branch index bound)
-  intro id hid
-  rw [WP.spec_ok]
-  have hidAt : s.log.branch.val[off]? = some id := by
-    rw [← hi, List.getElem?_eq_getElem bound, ← hid]
-  have hidMem : id ∈ s.log.branch.val := List.mem_iff_getElem?.mpr ⟨off, hidAt⟩
-  have hidLt : id.val < s.log.frames.val.length := valid.2 id hidMem
-  have hidLtG : id.val < natArchive.length := aligned.len.symm ▸ hidLt
-  refine ⟨s.log.frames.val[id.val], natArchive[id.val],
-    List.getElem?_eq_getElem hidLt, List.getElem?_eq_getElem hidLtG, hidAt, ?_, ?_, ?_⟩
-  · have hact : s.activeFrames[off]? = some s.log.frames.val[id.val] := by
-      unfold CcfKv.engine.History.activeFrames branchValues
-      have hfm : ∀ (ids : List Usize) (k : Nat),
-          (∀ j ∈ ids, j.val < s.log.frames.val.length) →
-          (ids.filterMap fun j => s.log.frames.val[j.val]?)[k]? =
-            ids[k]?.bind fun j => s.log.frames.val[j.val]? := by
-        intro ids
-        induction ids with
-        | nil => intro k _; cases k <;> rfl
-        | cons a t ih =>
-            intro k hbd
-            have hb := hbd a List.mem_cons_self
-            cases k with
-            | zero => simp [List.getElem?_eq_getElem hb]
-            | succ k' =>
-                simp only [List.filterMap_cons, List.getElem?_eq_getElem hb, List.getElem?_cons_succ]
-                exact ih k' (fun x hx => hbd x (List.mem_cons_of_mem _ hx))
-      rw [hfm s.log.branch.val off valid.2, hidAt, Option.bind_some, List.getElem?_eq_getElem hidLt]
-    have hoffAct : off < s.activeFrames.length := hlenBr ▸ hoffLt
-    have hEq : s.activeFrames[off] = s.log.frames.val[id.val] := by
-      apply Option.some.inj
-      rw [← List.getElem?_eq_getElem hoffAct, hact]
-    rw [← hEq]
-    exact hversions off hoffAct
-  · have hnatAct : (natModelFrames s.log natArchive).find? (fun f => decide (f.version ≤ cut.val))
-        = some natArchive[id.val] := by
-      let xs := s.log.branch.val.filterMap fun j => natArchive[j.val]?
-      have hfm_rev : ∀ (ids : List Usize),
-          ids.reverse.filterMap (fun j => natArchive[j.val]?)
-          = (ids.filterMap fun j => natArchive[j.val]?).reverse := by
-        intro ids
-        induction ids with
-        | nil => rfl
-        | cons a t ih =>
-            simp [List.reverse_cons, List.filterMap_append, List.filterMap_cons, ih]
-            cases natArchive[a.val]? <;> simp
-      have hxsEq : natModelFrames s.log natArchive = xs.reverse := hfm_rev s.log.branch.val
-      have hxsLen : xs.length = s.log.branch.val.length := by
-        have := natModelFrames_length valid aligned.len
-        rw [hxsEq, List.length_reverse] at this; exact this
-      have hxsAt : ∀ (k : Nat) (hk : k < s.log.branch.val.length),
-          xs[k]? = natArchive[s.log.branch.val[k].val]? := by
-        have hbd : ∀ j ∈ s.log.branch.val, j.val < natArchive.length :=
-          fun j hj => aligned.len.symm ▸ valid.2 j hj
-        dsimp [xs]
-        generalize s.log.branch.val = ids at hbd
-        induction ids with
-        | nil => intro k hk; simp at hk
-        | cons a t ih =>
-            intro k hk
-            have hb := hbd a List.mem_cons_self
-            cases k with
-            | zero => simp [List.getElem?_eq_getElem hb]
-            | succ k' =>
-                simp only [List.filterMap_cons, List.getElem?_eq_getElem hb, List.getElem?_cons_succ,
-                  List.getElem_cons_succ]
-                exact ih (fun x hx => hbd x (List.mem_cons_of_mem _ hx)) k'
-                  (by simpa using hk)
-      have hxsVer : ∀ k (hk : k < xs.length), xs[k].version = k := by
-        intro k hk
-        have hkBr : k < s.log.branch.val.length := hxsLen ▸ hk
-        have hkAct : k < s.activeFrames.length := hlenBr ▸ hkBr
-        have hjk : s.log.branch.val[k].val < s.log.frames.val.length :=
-          valid.2 _ (List.getElem_mem hkBr)
-        have hmeta := aligned.versionEq _ s.log.frames.val[s.log.branch.val[k].val] xs[k]
-          (List.getElem?_eq_getElem hjk)
-          (by rw [← hxsAt k hkBr, List.getElem?_eq_getElem hk])
-        rw [hmeta]
-        have hactK : s.activeFrames[k] = s.log.frames.val[s.log.branch.val[k].val] := by
-          apply Option.some.inj
-          rw [← List.getElem?_eq_getElem hkAct]
-          unfold CcfKv.engine.History.activeFrames branchValues
-          have hfm : ∀ (ids : List Usize) (j : Nat),
-              (∀ x ∈ ids, x.val < s.log.frames.val.length) →
-              (ids.filterMap fun x => s.log.frames.val[x.val]?)[j]? =
-                ids[j]?.bind fun x => s.log.frames.val[x.val]? := by
-            intro ids
-            induction ids with
-            | nil => intro j _; cases j <;> rfl
-            | cons a t ih =>
-                intro j hbd
-                have hb := hbd a List.mem_cons_self
-                cases j with
-                | zero => simp [List.getElem?_eq_getElem hb]
-                | succ j' =>
-                    simp only [List.filterMap_cons, List.getElem?_eq_getElem hb, List.getElem?_cons_succ]
-                    exact ih j' (fun x hx => hbd x (List.mem_cons_of_mem _ hx))
-          rw [hfm s.log.branch.val k valid.2, List.getElem?_eq_getElem hkBr, Option.bind_some,
-            List.getElem?_eq_getElem hjk]
-        rw [← hactK]
-        exact hversions k hkAct
-      have hfindRev : ∀ (l : List Frame),
-          (∀ k (hk : k < l.length), l[k].version = k) →
-          l.reverse.find? (fun f => decide (f.version ≤ cut.val)) = l[min cut.val (l.length - 1)]? := by
-        intro l
-        induction l using List.reverseRecOn with
-        | nil => intro _; simp
-        | append_singleton p last ih =>
-            intro hv
-            have hlast : last.version = p.length := by
-              have := hv p.length (by simp)
-              rw [List.getElem_append_right (Nat.le_refl _)] at this
-              simpa using this
-            have hp : ∀ k (hk : k < p.length), p[k].version = k := by
-              intro k hk
-              have := hv k (by simp; omega)
-              rwa [List.getElem_append_left hk] at this
-            simp only [List.reverse_append, List.reverse_singleton, List.singleton_append,
-              List.find?_cons, hlast, List.length_append, List.length_singleton, Nat.add_sub_cancel]
-            by_cases hc : p.length ≤ cut.val
-            · simp [hc]
-            · have hlt : cut.val < p.length := Nat.lt_of_not_ge hc
-              simp only [hc, decide_false, Nat.min_eq_left hlt.le, List.getElem?_append_left hlt]
-              have hle : cut.val ≤ p.length - 1 := by omega
-              simpa only [Nat.min_eq_left hle] using ih hp
-      rw [hxsEq, hfindRev xs hxsVer, hxsLen]
-      change xs[off]? = some natArchive[id.val]
-      rw [hxsAt off hoffLt]
-      have hidEq : s.log.branch.val[off] = id := Option.some.inj ((List.getElem?_eq_getElem hoffLt).symm.trans hidAt)
-      rw [hidEq, List.getElem?_eq_getElem hidLtG]
-    rw [atCut, hmodel, hnatAct]
-    rfl
+private theorem find_reverse_ver_indexed (xs : List Frame) (cut : Nat)
+    (hpos : 0 < xs.length)
+    (hver : ∀ (v : Nat) gf, xs[v]? = some gf → gf.version = v)
+    : xs.reverse.find? (fun f => decide (f.version ≤ cut))
+      = xs[min cut (xs.length - 1)]? := by
+  induction xs using List.reverseRecOn with
+  | nil => simp at hpos
+  | append_singleton p last ih =>
+      rw [List.reverse_append, List.reverse_singleton, List.singleton_append, List.find?_cons]
+      have hlast : last.version = p.length :=
+        hver p.length last (by rw [List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]; rfl)
+      have hpver : ∀ (v : Nat) gf, p[v]? = some gf → gf.version = v := fun v gf hgv =>
+        hver v gf (by
+          have hv : v < p.length := (List.getElem?_eq_some_iff.mp hgv).1
+          rw [List.getElem?_append_left hv]; exact hgv)
+      by_cases hc : p.length ≤ cut
+      · simp only [hlast, hc, decide_true, List.length_append, List.length_singleton,
+          Nat.add_sub_cancel, Nat.min_eq_right hc, List.getElem?_append_right (Nat.le_refl _),
+          Nat.sub_self]
+        rfl
+      · have hlt : cut < p.length := Nat.lt_of_not_ge hc
+        have hp : 0 < p.length := by omega
+        simp only [hlast, hc, decide_false, List.length_append, List.length_singleton,
+          Nat.add_sub_cancel, Nat.min_eq_left hlt.le, List.getElem?_append_left hlt]
+        have hle : cut ≤ p.length - 1 := by omega
+        simpa only [Nat.min_eq_left hle] using ih hp hpver
+
+private theorem atCut_natHistory {s : CcfKv.engine.History} {natHistory : List Frame}
+    {model : Store} {encode : List U8 → String}
+    (hmodel : model.history = natHistory)
+    (aligned : ArchiveAligned encode s natHistory) (cut : Nat)
+    : ∃ gf,
+        natHistory.reverse[min cut (natHistory.length - 1)]? = some gf
+        ∧ gf = atCut model cut
+        ∧ gf ∈ model.history := by
+  have hlt : min cut (natHistory.length - 1) < natHistory.reverse.length := by
+    rw [List.length_reverse]; have := aligned.nonempty; omega
+  let gf := natHistory.reverse[min cut (natHistory.length - 1)]'hlt
+  have hgfAt : natHistory.reverse[min cut (natHistory.length - 1)]? = some gf :=
+    List.getElem?_eq_getElem hlt
+  have hfind := find_reverse_ver_indexed natHistory.reverse cut
+    (by rw [List.length_reverse]; exact aligned.nonempty) aligned.verIndexed
+  rw [List.reverse_reverse, List.length_reverse] at hfind
+  refine ⟨gf, hgfAt, ?_, ?_⟩
+  · rw [atCut, hmodel, hfind, hgfAt]; rfl
   · rw [hmodel]
-    unfold natModelFrames
-    exact List.mem_filterMap.mpr ⟨id, List.mem_reverse.mpr hidMem, List.getElem?_eq_getElem hidLtG⟩
+    exact List.mem_reverse.mp (List.mem_of_getElem? hgfAt)
+
+private theorem history_resolve_cut_matches_nat (s : CcfKv.engine.History) (cut : U64)
+    (model : Store) (encode : List U8 → String) (natHistory : List Frame)
+    (hmodel : model.history = natHistory)
+    (valid : BranchValid s.log) (aligned : ArchiveAligned encode s natHistory)
+    (hSnapRetained
+      : ∀ bf,
+          s.activeFrames[0]? = some bf
+          → cut.val < bf.version.val
+          → ∃ rf ∈ s.retained.val, rf.version = cut)
+    : WP.spec (CcfKv.engine.History.resolve_cut s cut)
+        (fun res =>
+          ∃ cutRef nf gf,
+            res = some cutRef
+            ∧ FrameMetaEq encode nf gf
+            ∧ gf = atCut model cut.val
+            ∧ gf ∈ model.history
+            ∧ match cutRef with
+              | .Active off =>
+                  s.activeFrames[off.val]? = some nf ∧ modelFrame encode s.index nf = gf
+              | .Retained idx =>
+                  s.retained.val[idx.val]? = some nf
+                  ∧ s.reuse_compacted_images = true
+                  ∧ cut < s.global) := by
+  obtain ⟨baseFrame, hbaseAt, hbaseLe, hbaseRe, hsum⟩ := aligned.base
+  obtain ⟨gf, hgfAt, hgfCut, hgfMem⟩ := atCut_natHistory hmodel aligned cut.val
+  apply WP.spec_mono (history_resolve_cut s cut baseFrame hbaseAt valid)
+  intro res hres
+  by_cases hlt : cut.val < baseFrame.version.val
+  · rw [ite_eq_left hlt] at hres
+    cases res with
+    | none =>
+        obtain ⟨rf, hrfMem, hrfVer⟩ := hSnapRetained baseFrame hbaseAt hlt
+        exact (hres rf hrfMem hrfVer).elim
+    | some cr =>
+        cases cr with
+        | Active _ => cases hres
+        | Retained idx =>
+            obtain ⟨nf, hnfAt, hnfVer⟩ := hres
+            obtain ⟨hltG, _, gf', hgf'At, hmeta⟩ :=
+              aligned.retainedEq nf (List.mem_of_getElem? hnfAt)
+            have hmin : min cut.val (natHistory.length - 1) = cut.val := by
+              have hlenAct : 0 < s.activeFrames.length := (List.getElem?_eq_some_iff.mp hbaseAt).1
+              omega
+            rw [hmin] at hgfAt
+            have hgfEq : gf' = gf := Option.some.inj (hgf'At.symm.trans (hnfVer.symm ▸ hgfAt))
+            rw [hgfEq] at hmeta
+            have hreTrue : s.reuse_compacted_images = true := by
+              cases hrc : s.reuse_compacted_images with
+              | true => rfl
+              | false =>
+                  have hemp := aligned.retainedReuse hrc
+                  have hmem := List.mem_of_getElem? hnfAt
+                  rw [hemp] at hmem
+                  cases hmem
+            refine ⟨.Retained idx, nf, gf, rfl, hmeta, hgfCut, hgfMem, hnfAt, hreTrue, ?_⟩
+            change cut.val < s.global.val
+            rw [← hnfVer]; exact hltG
+  · have hge : baseFrame.version.val ≤ cut.val := Nat.le_of_not_gt hlt
+    rw [ite_eq_right hlt] at hres
+    obtain ⟨idx, rfl, hidxVal⟩ := hres
+    have hactPos : 0 < s.activeFrames.length := (List.getElem?_eq_some_iff.mp hbaseAt).1
+    have hidxLt : idx.val < s.activeFrames.length := by omega
+    let nf := s.activeFrames[idx.val]'hidxLt
+    have hnfAt : s.activeFrames[idx.val]? = some nf := List.getElem?_eq_getElem hidxLt
+    have hsumIdx : baseFrame.version.val + idx.val = min cut.val (natHistory.length - 1) := by
+      omega
+    have hactEq := aligned.activeEq baseFrame hbaseAt idx.val hidxLt
+    rw [hsumIdx] at hactEq
+    have hmfEq : modelFrame encode s.index nf = gf := Option.some.inj (hactEq.symm.trans hgfAt)
+    exact ⟨.Active idx, nf, gf, rfl, hmfEq ▸ frame_meta_eq_modelFrame encode s.index nf,
+      hgfCut, hgfMem, hnfAt, hmfEq⟩
 
 private theorem stamp_refl (stamp : Stamp) : (stamp == stamp) = true := by
   change (stamp.version == stamp.version && stamp.identity == stamp.identity) = true
@@ -850,14 +790,13 @@ private theorem lineage_of_mem (s : Store) (f : Frame) (m : String) (hf : f ∈ 
 /-- An enabled lazy acquisition pins the model's local and global views or flags unavailability. -/
 theorem acquire_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.History) (model : Store)
-    (natArchive : List Frame) (extraPins : List U32)
+    (natHistory natArchive : List Frame) (extraPins : List U32)
     (t : CcfKv.engine.Tx) (snap : Snapshot) (rustSnap : CcfKv.engine.Snapshot)
-    (m : CcfKv.engine.Bytes) (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
-    (hframes : s.activeFrames = prior ++ [head])
-    (hmodel : model.history = natModelFrames s.log natArchive)
-    (hversions : ∀ i (hi : i < s.activeFrames.length), s.activeFrames[i].version.val = i)
+    (m : CcfKv.engine.Bytes)
+    (hmodel : model.history = natHistory)
+    (hNatSub : ∀ f ∈ natHistory, f ∈ natArchive)
     (hglobal : model.global = s.global.val)
-    (hglobalBound : s.global.val < s.activeFrames.length)
+    (hglobalBound : s.global.val < natHistory.length)
     (hSnapshot : t.snapshot = some rustSnap)
     (stable : RevisionHistory model.history)
     (hCut : snap.current.version = rustSnap.version.val) (hPhase : t.phase = .Active)
@@ -866,16 +805,15 @@ theorem acquire_matches_model (encode : List U8 → String)
         = none)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.log) (idxValid : HistoryIndexValid s)
-    (aligned : ArchiveAligned encode s natArchive)
-    (hSnapMetaLive
-      : ∀ (id : Usize) nf,
-          s.log.branch.val[min rustSnap.version.val (s.log.branch.val.length - 1)]?
-            = some id
-          → s.log.frames.val[id.val]? = some nf
-          → nf.meta_live = true)
-    (live : IndexLiveness s.index (framePins s.log.frames.val ++ extraPins))
+    (aligned : ArchiveAligned encode s natHistory)
+    (hSnapRetained
+      : ∀ bf,
+          s.activeFrames[0]? = some bf
+          → rustSnap.version.val < bf.version.val
+          → ∃ rf ∈ s.retained.val, rf.version = rustSnap.version)
+    (live : IndexLiveness s.index (framePins s.activeFrames ++ extraPins))
     (refRoom
-      : (framePins s.log.frames.val ++ extraPins).length
+      : (framePins s.activeFrames ++ extraPins).length
           + 17 * s.index.values.dirs.val.length
           + 2
         ≤ U32.max)
@@ -886,6 +824,7 @@ theorem acquire_matches_model (encode : List U8 → String)
       WP.spec (CcfKv.engine.Tx.acquire t s m)
         (fun (output, afterTx, afterHist) =>
           afterHist.log = s.log
+          ∧ afterHist.retained = s.retained
           ∧ afterHist.global = s.global
           ∧ afterHist.term = s.term
           ∧ afterHist.next_identity = s.next_identity
@@ -904,7 +843,7 @@ theorem acquire_matches_model (encode : List U8 → String)
                 ∧ ViewsLive afterHist.index views
                 ∧ ViewsOrigin encode afterHist.index natArchive views
                 ∧ IndexLiveness afterHist.index
-                    (viewPins newView ++ (framePins s.log.frames.val ++ extraPins))
+                    (viewPins newView ++ (framePins s.activeFrames ++ extraPins))
             else
               output = .Ok .Unavailable
               ∧ afterTx = {t with unavailable := true}
@@ -912,8 +851,6 @@ theorem acquire_matches_model (encode : List U8 → String)
   let enc := encode ∘ alloc.vec.Vec.val (α := U8)
   let k := enc m
   let v := captureGlobal model snap k
-  have hzero (cut : U64) : CcfKv.engine.History.relative_cut s cut = .ok cut :=
-    history_relative_cut_zero s cut (by simp [hframes]) hversions valid
   have hi := map_encoding_injective encode inj
   change find (rustPinnedViews encode s.index t.views) k = none at hAbsent
   have hn : find t.views.val m = none := by
@@ -935,14 +872,17 @@ theorem acquire_matches_model (encode : List U8 → String)
   | none =>
       simp only [core.option.Option.is_some]
       apply WP.spec_bind
-        (history_pin_cut_matches_nat s rustSnap.version model encode natArchive
-          hmodel (hzero rustSnap.version) hversions valid aligned)
-      rintro currentId ⟨current, gfLocal, currentSaved, gfLocalAt, hcurBrAt, hcurVer, hCurrent, hMem⟩
-      apply WP.spec_bind (branch_read_refines s.log currentId current currentSaved)
+        (history_resolve_cut_matches_nat s rustSnap.version model encode natHistory
+          hmodel valid aligned hSnapRetained)
+      rintro res ⟨localRef, current, gfLocal, rfl, hcurMeta, hCurrent, hMem, hLocalSpec⟩
+      have hreadSpec
+          : WP.spec (CcfKv.engine.History.read_cut s localRef) (· = current) := by
+        cases localRef with
+        | Active off => exact history_read_cut_active s off current valid hLocalSpec.1
+        | Retained idx => exact history_read_cut_retained s idx current hLocalSpec.1
+      apply WP.spec_bind hreadSpec
       intro frame hf
       subst frame
-      have hcurMeta := aligned.metaEq currentId.val current gfLocal currentSaved gfLocalAt
-        (hSnapMetaLive currentId current hcurBrAt currentSaved)
       have hCutFrame : gfLocal = atCut model snap.current.version := by rwa [hCut]
       apply WP.spec_bind (stamps_find enc hi current.births m)
       intro birth hbirth
@@ -971,7 +911,7 @@ theorem acquire_matches_model (encode : List U8 → String)
           have hViews : rustPinnedViews encode s.index views =
               Kv.Model.set (rustPinnedViews encode s.index t.views) k (modelPinnedView k v) :=
             hvers.trans (congrArg (Kv.Model.set (rustPinnedViews encode s.index t.views) k) he)
-          refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+          refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
           have hAv' : available model snap (encode (alloc.vec.Vec.val m)) = true := hAv
           rw [ite_eq_left hAv']
           refine ⟨
@@ -1001,18 +941,35 @@ theorem acquire_matches_model (encode : List U8 → String)
           have hLineage : mapLineage model gfLocal k = true :=
             lineage_of_mem _ _ _ hMem
           simp only [core.option.Option.is_none]
-          apply WP.spec_bind
-            (history_pin_cut_matches_nat s s.global model encode natArchive
-              hmodel (hzero s.global) hversions valid aligned)
-          rintro globalId ⟨global, gfGlobal, globalSaved, gfGlobalAt, hglobBrAt, hglobVer, hGlobalCut, _⟩
-          apply WP.spec_bind (branch_read_refines s.log globalId global globalSaved)
+          obtain ⟨baseFrame, hbaseAt, hbaseLe, _, hsum⟩ := aligned.base
+          apply WP.spec_bind (history_relative_cut s s.global baseFrame hbaseAt valid)
+          intro relG hrelG
+          have hrelGVal : relG.val = s.global.val - baseFrame.version.val := by
+            rw [hrelG, ite_eq_right (Nat.not_lt.mpr hbaseLe)]
+          apply WP.spec_bind (branch_cut_refines s.log valid relG)
+          intro globalOff hglobalOff
+          have hactPos : 0 < s.activeFrames.length := (List.getElem?_eq_some_iff.mp hbaseAt).1
+          have hglobalOffVal : globalOff.val = s.global.val - baseFrame.version.val := by
+            have hlenAct : s.activeFrames.length = s.log.len.val := branch_values_length s.log valid
+            rw [hglobalOff, hrelGVal]
+            omega
+          have hglobalOffLt : globalOff.val < s.activeFrames.length := by omega
+          let global := s.activeFrames[globalOff.val]'hglobalOffLt
+          have globalSaved : s.activeFrames[globalOff.val]? = some global :=
+            List.getElem?_eq_getElem hglobalOffLt
+          obtain ⟨gfGlobal, hgfGlobalAt, hGlobalCut, _⟩ :=
+            atCut_natHistory hmodel aligned s.global.val
+          have hglobalLive : modelFrame encode s.index global = gfGlobal := by
+            have hactEq := aligned.activeEq baseFrame hbaseAt globalOff.val hglobalOffLt
+            have hsumG : baseFrame.version.val + globalOff.val = min s.global.val (natHistory.length - 1) := by
+              omega
+            rw [hsumG] at hactEq
+            exact Option.some.inj (hactEq.symm.trans hgfGlobalAt)
+          have hglobMeta : FrameMetaEq encode global gfGlobal :=
+            hglobalLive ▸ frame_meta_eq_modelFrame encode s.index global
+          apply WP.spec_bind (branch_active_at s.log valid globalOff global globalSaved)
           intro frame hf
           subst frame
-          have hglobMeta := aligned.metaEq globalId.val global gfGlobal globalSaved gfGlobalAt
-            (aligned.globalMetaLive _ globalId global hglobBrAt globalSaved (fun _ => by
-              have hbrLen : s.log.branch.val.length = s.activeFrames.length :=
-                (branch_values_length s.log valid).symm
-              omega))
           have hGlobal : gfGlobal = atCut model model.global := by
             rw [hglobal]; exact hGlobalCut
           have hView : v = { current := gfLocal, frame := gfGlobal } := by
@@ -1032,7 +989,7 @@ theorem acquire_matches_model (encode : List U8 → String)
           by_cases hOld : localRev.version < globalRev.version
           · have hlt : localRev.version.val < globalRev.version.val := hOld
             rw [ite_eq_left hOld, WP.spec_ok]
-            refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+            refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
             have hAvF : ¬ available model snap (encode (alloc.vec.Vec.val m)) = true := by
               change ¬ available model snap k = true
               rw [hAv]
@@ -1050,27 +1007,12 @@ theorem acquire_matches_model (encode : List U8 → String)
                 cases absent
               · rw [hLocal, ← hGlobal] at same
                 exact same
-            have hbrLen : s.log.branch.val.length = s.activeFrames.length :=
-              (branch_values_length s.log valid).symm
-            have hglobalLive : modelFrame encode s.index global = gfGlobal :=
-              aligned.activeLive _ globalId global gfGlobal hglobBrAt globalSaved gfGlobalAt
-                (fun _ => by rw [hglobVer, hbrLen]; omega)
-            have hlocalLive : ¬ (s.reuse_compacted_images = true ∧ rustSnap.version < s.global) →
-                modelFrame encode s.index current = gfLocal := by
-              intro hnotOld
-              apply aligned.activeLive _ currentId current gfLocal hcurBrAt currentSaved gfLocalAt
-              intro hre
-              have hge : s.global.val ≤ rustSnap.version.val := by
-                by_contra hlt'
-                exact hnotOld ⟨hre, Nat.lt_of_not_ge hlt'⟩
-              rw [hcurVer, hbrLen]
-              omega
             apply WP.spec_bind
               (pin_maps_spec encode inj s current global gfLocal gfGlobal m extraPins
-                currentId globalId currentSaved globalSaved rustSnap.version
-                idxValid live hglobalLive hlocalLive hShared refRoom)
+                localRef globalOff rustSnap.version valid idxValid live globalSaved
+                hLocalSpec hglobalLive hShared refRoom)
             rintro ⟨⟨localPin, globalPin⟩, afterHist⟩
-              ⟨hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hliveAfter,
+              ⟨hlogEq, hretEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hliveAfter,
                 hLocalRows, hGlobalRows, localLive, globalLive⟩
             have hkAfter : IndexKeeps s.index afterHist.index := by
               unfold IndexKeeps; rw [hvalsEq]; exact .refl _
@@ -1079,7 +1021,7 @@ theorem acquire_matches_model (encode : List U8 → String)
             let newView : CcfKv.engine.View :=
               { birth := some birth, revision := localRev, «local» := localPin, global := globalPin }
             have newOrig : ViewOrigin encode afterHist.index natArchive m newView := by
-              refine ⟨gfLocal, List.mem_iff_getElem?.mpr ⟨currentId.val, gfLocalAt⟩, ?_, ?_⟩
+              refine ⟨gfLocal, hNatSub gfLocal (hmodel ▸ hMem), ?_, ?_⟩
               · exact hl.symm
               · exact hLocalRows
             apply WP.spec_bind
@@ -1092,7 +1034,7 @@ theorem acquire_matches_model (encode : List U8 → String)
               congr 1
             change WP.spec (Result.ok _) _
             rw [WP.spec_ok]
-            refine ⟨hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, ?_⟩
+            refine ⟨hlogEq, hretEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, ?_⟩
             have hAvT : available model snap (encode (alloc.vec.Vec.val m)) = true := by
               change available model snap k = true
               rw [hAv]
@@ -1211,19 +1153,15 @@ theorem execute_acquire_disabled (encode : List U8 → String)
 /-- The extracted dispatcher and `Kv.Model.execute` agree on an enabled acquisition and the updated attempt. -/
 theorem execute_acquire_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.Store) (id : U64) (w : State)
-    (sid : Nat) (model : Store) (natArchive : List Frame)
+    (sid : Nat) (model : Store) (natHistory natArchive : List Frame)
     (tx : Tx) (t : CcfKv.engine.Tx) (snap : Snapshot)
     (rustSnap : CcfKv.engine.Snapshot) (m : CcfKv.engine.Bytes)
-    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
-    (hframes : s.history.activeFrames = prior ++ [head])
-    (hmodel
-      : List.Forall₂ FrameOrderEq (natModelFrames s.history.log natArchive) model.history)
-    (hversions
-      : ∀ i (hi : i < s.history.activeFrames.length),
-          s.history.activeFrames[i].version.val = i)
+    (head : CcfKv.engine.Frame)
+    (hmodel : List.Forall₂ FrameOrderEq natHistory model.history)
+    (hNatSub : ∀ f ∈ natHistory, f ∈ natArchive)
     (hglobal : model.global = s.history.global.val)
-    (hglobalBound : s.history.global.val < s.history.activeFrames.length)
-    (stable : RevisionHistory (natModelFrames s.history.log natArchive))
+    (hglobalBound : s.history.global.val < natHistory.length)
+    (stable : RevisionHistory natHistory)
     (hNativeTx : find s.txs.val id = some t)
     (hLookup : lookupTx w sid id.val = some (model, tx))
     (hNativeSnap : t.snapshot = some rustSnap) (hModelSnap : tx.snapshot = some snap)
@@ -1237,14 +1175,12 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
     (hLog : tx.normal.log.all (fun op => op.map != encode (alloc.vec.Vec.val m)) = true)
     (hRoom : t.views.val.length < Usize.max)
     (valid : BranchValid s.history.log) (idxValid : HistoryIndexValid s.history)
-    (aligned : ArchiveAligned encode s.history natArchive)
-    (hSnapMetaLive
-      : ∀ (id : Usize) nf,
-          s.history.log.branch.val[min rustSnap.version.val
-                                    (s.history.log.branch.val.length - 1)]?
-            = some id
-          → s.history.log.frames.val[id.val]? = some nf
-          → nf.meta_live = true)
+    (aligned : ArchiveAligned encode s.history natHistory)
+    (hSnapRetained
+      : ∀ bf,
+          s.history.activeFrames[0]? = some bf
+          → rustSnap.version.val < bf.version.val
+          → ∃ rf ∈ s.history.retained.val, rf.version = rustSnap.version)
     (live : IndexLiveness s.history.index (storePins s))
     (refRoom
       : (storePins s).length + 17 * s.history.index.values.dirs.val.length + 2 ≤ U32.max)
@@ -1286,6 +1222,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
                   else
                     image tx.data other)
             ∧ after.history.log = s.history.log
+            ∧ after.history.retained = s.history.retained
             ∧ after.history.global = s.history.global
             ∧ after.history.term = s.history.term
             ∧ after.history.next_identity = s.history.next_identity
@@ -1309,7 +1246,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
   let v := captureGlobal model snap k
   let nativeModel : Store := {
     model with
-      history := natModelFrames s.history.log natArchive
+      history := natHistory
       head := modelFrame encode s.history.index head
   }
   let nv := captureGlobal nativeModel snap k
@@ -1370,11 +1307,11 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         let (out, next, hist) ← CcfKv.engine.Tx.acquire t s.history m
         Result.ok (out, {s with history := hist, txs := back (id, next)})) _
       apply WP.spec_bind
-        (acquire_matches_model encode inj s.history nativeModel natArchive
-          (txsPins s.txs.val) t snap rustSnap m prior head hframes rfl hversions hglobal
+        (acquire_matches_model encode inj s.history nativeModel natHistory natArchive
+          (txsPins s.txs.val) t snap rustSnap m rfl hNatSub hglobal
           hglobalBound hNativeSnap stable hCut hNativePhase hMissing hRoom valid idxValid
-          aligned hSnapMetaLive live refRoom oldLive oldOrig)
-      rintro ⟨out, next, hist⟩ ⟨hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hn⟩
+          aligned hSnapRetained live refRoom oldLive oldOrig)
+      rintro ⟨out, next, hist⟩ ⟨hlogEq, hretEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hn⟩
       rw [hAvailEq] at hn
       have hupdate : (back (id, next)).val = s.txs.val.set i.val (id, next) := by
         rw [hback.2]
@@ -1396,27 +1333,27 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         have htxsPinsPerm : (txsPins (back (id, next)).val).Perm (viewPins newView ++ txsPins s.txs.val) := by
           rw [hupdate]
           exact txsPins_set_add_view s.txs.val i.val id t next m newView hrow (by rw [hNext, hcons])
-        have hstorePinsPerm : (viewPins newView ++ (framePins s.history.log.frames.val ++ txsPins s.txs.val)).Perm
+        have hstorePinsPerm : (viewPins newView ++ (framePins s.history.activeFrames ++ txsPins s.txs.val)).Perm
             (storePins { s with history := hist, txs := back (id, next) }) := by
-          unfold storePins
+          unfold storePins CcfKv.engine.History.activeFrames
           dsimp only
           rw [hlogEq]
-          have h1 : (viewPins newView ++ (framePins s.history.log.frames.val ++ txsPins s.txs.val)).Perm
-              (framePins s.history.log.frames.val ++ (viewPins newView ++ txsPins s.txs.val)) := by
-            have ha1 : (viewPins newView ++ (framePins s.history.log.frames.val ++ txsPins s.txs.val)).Perm
-                ((viewPins newView ++ framePins s.history.log.frames.val) ++ txsPins s.txs.val) := by
+          have h1 : (viewPins newView ++ (framePins (branchValues s.history.log) ++ txsPins s.txs.val)).Perm
+              (framePins (branchValues s.history.log) ++ (viewPins newView ++ txsPins s.txs.val)) := by
+            have ha1 : (viewPins newView ++ (framePins (branchValues s.history.log) ++ txsPins s.txs.val)).Perm
+                ((viewPins newView ++ framePins (branchValues s.history.log)) ++ txsPins s.txs.val) := by
               rw [List.append_assoc]
-            have ha2 : ((viewPins newView ++ framePins s.history.log.frames.val) ++ txsPins s.txs.val).Perm
-                ((framePins s.history.log.frames.val ++ viewPins newView) ++ txsPins s.txs.val) :=
+            have ha2 : ((viewPins newView ++ framePins (branchValues s.history.log)) ++ txsPins s.txs.val).Perm
+                ((framePins (branchValues s.history.log) ++ viewPins newView) ++ txsPins s.txs.val) :=
               List.perm_append_comm.append_right _
-            have ha3 : ((framePins s.history.log.frames.val ++ viewPins newView) ++ txsPins s.txs.val).Perm
-                (framePins s.history.log.frames.val ++ (viewPins newView ++ txsPins s.txs.val)) := by
+            have ha3 : ((framePins (branchValues s.history.log) ++ viewPins newView) ++ txsPins s.txs.val).Perm
+                (framePins (branchValues s.history.log) ++ (viewPins newView ++ txsPins s.txs.val)) := by
               rw [List.append_assoc]
             exact ha1.trans (ha2.trans ha3)
           exact h1.trans (htxsPinsPerm.symm.append_left _)
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
-          hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hLiveAfter.perm hstorePinsPerm,
+          hlogEq, hretEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hLiveAfter.perm hstorePinsPerm,
           hrow, hupdate, ?_, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_left ha, ← hl', ← hg']
@@ -1468,7 +1405,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
           simp [storePins, htxsPinsEq]
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
-          rfl, rfl, rfl, rfl, rfl, rfl, hstorePinsEq.symm ▸ live,
+          rfl, rfl, rfl, rfl, rfl, rfl, rfl, hstorePinsEq.symm ▸ live,
           hrow, hupdate, ?_, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_right ha]

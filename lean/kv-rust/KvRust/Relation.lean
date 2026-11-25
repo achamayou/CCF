@@ -100,77 +100,73 @@ structure AttemptMatches (encode : List U8 → String) (sid : Nat)
   depsPins : DepsPinsInViews native
   modelDeps : ModelDepsFromViews model
 
-/-- The native active offsets project via the ghost archive to frames matching the
-model's newest-first branch modulo order. -/
+/-- The native active ring and compacted `retained` list align with a ghost newest-first
+native-order branch matching the model's history modulo binding order. -/
 structure HistoryMatches (encode : List U8 → String)
-    (native : CcfKv.engine.History) (model : Store) (natArchive archive : List Frame)
+    (native : CcfKv.engine.History) (model : Store)
+    (natHistory natArchive archive : List Frame)
     : Prop where
-  /-- The initial frame is retained. -/
+  /-- The active ring is non-empty. -/
   nonempty : native.activeFrames ≠ []
   /-- The entire surviving branch is represented modulo binding order. -/
-  frames : List.Forall₂ FrameOrderEq (natModelFrames native.log natArchive) model.history
+  frames : List.Forall₂ FrameOrderEq natHistory model.history
   /-- The selected model head is the first projected frame. -/
   head : model.history.head? = some model.head
-  /-- Frame versions equal their native indices. -/
-  indexed
-    : ∀ i (h : i < native.activeFrames.length), native.activeFrames[i].version.val = i
   /-- The compacted frontier agrees. -/
   global : model.global = native.global.val
   /-- The compacted frontier lies within the surviving branch. -/
-  globalBound : native.global.val < native.activeFrames.length
+  globalBound : native.global.val < natHistory.length
   /-- The current term agrees. -/
   term : model.term = native.term.val
   /-- The next identity agrees, including after local version reuse. -/
   identity : model.nextIdentity = native.next_identity.val
   valid : BranchValid native.log
-  unique : BranchUnique native.log
   indexValid : HistoryIndexValid native
-  aligned : ArchiveAligned encode native natArchive
-  revisions : RevisionHistory (natModelFrames native.log natArchive)
+  aligned : ArchiveAligned encode native natHistory
+  revisions : RevisionHistory natHistory
+  natSub : ∀ f ∈ natHistory, f ∈ natArchive
   nativeArchive : ArchiveConsistent natArchive native.next_identity.val
   natSorted : ∀ f ∈ natArchive, ∀ m, (image f.data m).Pairwise (encKeyLt encode)
   modelSub : ∀ f ∈ model.history, f ∈ archive
   modelArchive : ArchiveConsistent archive model.nextIdentity
 
-/-- Active-branch metadata liveness for live transactions: every live snapshot frame
-still on the active branch retains live metadata, and every acquired view whose stamps
-match any ghost active frame still matches some active frame with `meta_live = true`. -/
+/-- Active-branch and retained metadata liveness for live transactions: every live snapshot
+version compacted below the active ring base is present in `retained`, and every acquired
+view whose stamps match any ghost active frame still matches some frame in
+`activeFrames ++ retained`. -/
 structure StoreMetaLive (encode : List U8 → String) (native : CcfKv.engine.Store)
-    (natArchive : List Frame)
+    (natHistory : List Frame)
     : Prop where
   snapLive
-    : ∀ (id : U64) (t : CcfKv.engine.Tx) (snap : CcfKv.engine.Snapshot) (fid : Usize)
-        (nf : CcfKv.engine.Frame),
+    : ∀ (id : U64) (t : CcfKv.engine.Tx) (snap : CcfKv.engine.Snapshot)
+        (bf : CcfKv.engine.Frame),
         (id, t) ∈ native.txs.val
         → t.snapshot = some snap
-        → native.history.log.branch.val[snap.version.val]? = some fid
-        → native.history.log.frames.val[fid.val]? = some nf
-        → nf.meta_live = true
+        → native.history.activeFrames[0]? = some bf
+        → snap.version.val < bf.version.val
+        → ∃ rf ∈ native.history.retained.val, rf.version = snap.version
   viewLive
     : ∀ (id : U64) (t : CcfKv.engine.Tx) (bm : CcfKv.engine.Bytes)
-        (bv : CcfKv.engine.View) (off : Nat) (fid : Usize) (gf : Frame),
+        (bv : CcfKv.engine.View) (gf : Frame),
         (id, t) ∈ native.txs.val
         → (bm, bv) ∈ t.views.val
-        → native.history.log.branch.val[off]? = some fid
-        → natArchive[fid.val]? = some gf
+        → gf ∈ natHistory
         → (find gf.births (encode bm.val) == bv.birth.map modelStamp) = true
         → (revision gf (encode bm.val) == modelStamp bv.revision) = true
-        → ∃ (off' : Nat) (fid' : Usize) (nf' : CcfKv.engine.Frame),
-            native.history.log.branch.val[off']? = some fid'
-            ∧ native.history.log.frames.val[fid'.val]? = some nf'
-            ∧ frameMatches (encode ∘ alloc.vec.Vec.val) nf' bm bv.birth bv.revision = true
+        → ∃ nf ∈ native.history.activeFrames ++ native.history.retained.val,
+            frameMatches (encode ∘ alloc.vec.Vec.val) nf bm bv.birth bv.revision = true
 
 /-- The single Rust store represents one live store in the reference transition system,
 with exact refcounted liveness over all active frame and transaction pins. -/
 structure StateMatches (encode : List U8 → String) (sid : Nat)
     (native : CcfKv.engine.Store) (model : State)
     : Prop where
-  /-- Find the represented store, its ghost and model frame archives, and related live attempts. -/
+  /-- Find the represented store, its ghost branch/archives, and related live attempts. -/
   history
-    : ∃ store natArchive archive,
+    : ∃ store natHistory natArchive archive,
         find model.stores sid = some store
-        ∧ HistoryMatches encode native.history store natArchive archive
-        ∧ StoreMetaLive encode native natArchive
+        ∧ HistoryMatches encode native.history store natHistory natArchive archive
+        ∧ StoreMetaLive encode native natHistory
         ∧ ∀ id : U64,
             Option.Rel (AttemptMatches encode sid native.history.index natArchive archive)
               (find native.txs.val id) (find model.txs id.val)
@@ -185,153 +181,127 @@ theorem frameMatches_congr_meta {encode : List U8 → String}
     {f1 f2 : CcfKv.engine.Frame} {m : CcfKv.engine.Bytes}
     {b : Option CcfKv.engine.Stamp} {r : CcfKv.engine.Stamp}
     (hb : f1.births = f2.births) (hr : f1.revisions = f2.revisions)
-    (hm : f1.meta_live = f2.meta_live)
     : frameMatches (encode ∘ alloc.vec.Vec.val) f1 m b r
       = frameMatches (encode ∘ alloc.vec.Vec.val) f2 m b r := by
-  simp only [frameMatches, modelMetadata, revision, hb, hr, hm]
+  simp only [frameMatches, modelMetadata, revision, hb, hr]
 
-/-- Reading the active branch at offset `off` resolves via `branch[off]?` into `frames`. -/
-theorem branch_active_getElem? (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame)
-    (valid : BranchValid log) (off : Nat)
-    : (branchValues log)[off]?
-      = log.branch.val[off]?.bind (fun id => log.frames.val[id.val]?) := by
-  unfold branchValues
-  have hbd : ∀ id ∈ log.branch.val, id.val < log.frames.val.length := valid.2
-  generalize log.branch.val = ids at hbd
-  induction ids generalizing off with
-  | nil => simp
-  | cons a t ih =>
-      have ha : a.val < log.frames.val.length := hbd a List.mem_cons_self
-      cases off with
-      | zero => simp [List.getElem?_eq_getElem ha]
-      | succ k =>
-          simp only [List.filterMap_cons, List.getElem?_eq_getElem ha, List.getElem?_cons_succ]
-          exact ih k (fun x hx => hbd x (List.mem_cons_of_mem _ hx))
+/-- Every active frame at offset `i` has version `base.version + i`. -/
+theorem active_frame_version {encode : List U8 → String} {h : CcfKv.engine.History}
+    {natHistory : List Frame} (aligned : ArchiveAligned encode h natHistory)
+    {bf : CcfKv.engine.Frame} (hbf : h.activeFrames[0]? = some bf)
+    (i : Nat) (hi : i < h.activeFrames.length)
+    : h.activeFrames[i].version.val = bf.version.val + i := by
+  have hact := aligned.activeEq bf hbf i hi
+  have hver := aligned.verIndexed (bf.version.val + i) _ hact
+  simpa [modelFrame, modelMetadata] using hver
 
-/-- Shared preservation lemma for `StoreMetaLive` across metadata elision (`End` and `Compact`). -/
-theorem store_meta_live_after_elision {encode : List U8 → String}
+/-- Shared preservation lemma for `StoreMetaLive` across pruning (`End` and `Compact`). -/
+theorem store_meta_live_after_prune {encode : List U8 → String}
     (inj : Function.Injective encode)
-    {before after : CcfKv.engine.Store} {natArchive : List Frame}
-    {offG : Nat} {globalId : Usize} {globalFrame : CcfKv.engine.Frame}
-    (metaLive : StoreMetaLive encode before natArchive)
-    (hIndexed
-      : ∀ i (hi : i < before.history.activeFrames.length),
-          before.history.activeFrames[i].version.val = i)
-    (valid : BranchValid before.history.log)
-    (hbr : after.history.log.branch = before.history.log.branch)
+    {before after : CcfKv.engine.Store} {natHistory : List Frame}
+    {globalFrame : CcfKv.engine.Frame}
+    (metaLive : StoreMetaLive encode before natHistory)
+    (alignedBefore : ArchiveAligned encode before.history natHistory)
+    (alignedAfter : ArchiveAligned encode after.history natHistory)
     (htxSub : ∀ row ∈ after.txs.val, row ∈ before.txs.val)
-    (hglBr : before.history.log.branch.val[offG]? = some globalId)
-    (hglAfter : after.history.log.frames.val[globalId.val]? = some globalFrame)
-    (hSlots
-      : ∀ (k : Nat) (f : CcfKv.engine.Frame),
-          before.history.log.frames.val[k]? = some f
-          → ∃ f',
-              after.history.log.frames.val[k]? = some f'
+    (hglAfter : globalFrame ∈ after.history.activeFrames)
+    (hKeptOrPruned
+      : ∀ f ∈ before.history.activeFrames ++ before.history.retained.val,
+          f ∈ after.history.activeFrames ++ after.history.retained.val
+          ∨ (∃ f',
+              f' ∈ after.history.retained.val
               ∧ f'.version = f.version
-              ∧ ((f'.births = f.births
-                    ∧ f'.revisions = f.revisions
-                    ∧ f'.meta_live = f.meta_live)
-                  ∨ (f'.meta_live = false
-                      ∧ CcfKv.engine.txs_need_frame after.txs f globalFrame = .ok false)))
-    : StoreMetaLive encode after natArchive := by
+              ∧ f'.births = f.births
+              ∧ f'.revisions = f.revisions)
+          ∨ CcfKv.engine.txs_need_frame after.txs f globalFrame = .ok false)
+    : StoreMetaLive encode after natHistory := by
   have hinj : Function.Injective (encode ∘ alloc.vec.Vec.val (α := U8)) :=
     inj.comp (fun _ _ => alloc.vec.Vec.ext _ _)
-  have hbrLen : before.history.log.branch.val.length = before.history.activeFrames.length :=
-    (branch_values_length before.history.log valid).symm
+  obtain ⟨bfBefore, hbfBefore, _, _, hsumBefore⟩ := alignedBefore.base
+  obtain ⟨bfAfter, hbfAfter, _, _, hsumAfter⟩ := alignedAfter.base
   refine ⟨?_, ?_⟩
-  · intro id t snap fid nf htx hsnap hfid hnf
-    have hfid0 : before.history.log.branch.val[snap.version.val]? = some fid := hbr ▸ hfid
-    have hfidLt : fid.val < before.history.log.frames.val.length :=
-      valid.2 fid (List.mem_of_getElem? hfid0)
-    let fOld := before.history.log.frames.val[fid.val]'hfidLt
-    have hfOld : before.history.log.frames.val[fid.val]? = some fOld :=
-      List.getElem?_eq_getElem hfidLt
-    obtain ⟨f', hf', _, hcase⟩ := hSlots fid.val fOld hfOld
-    have hnfEq : nf = f' := Option.some.inj (hnf.symm.trans hf')
-    subst hnfEq
-    rcases hcase with ⟨_, _, hml⟩ | ⟨_, hfalse⟩
-    · rw [hml]
-      exact metaLive.snapLive id t snap fid fOld (htxSub _ htx) hsnap hfid0 hfOld
+  · intro id t snap bf htx hsnap hbf hlt
+    have hbfEq : bf = bfAfter := Option.some.inj (hbf.symm.trans hbfAfter)
+    have hlt' : snap.version.val < bfAfter.version.val := hbfEq ▸ hlt
+    have hexBefore : ∃ f ∈ before.history.activeFrames ++ before.history.retained.val,
+        f.version = snap.version := by
+      by_cases hlt0 : snap.version.val < bfBefore.version.val
+      · obtain ⟨rf, hrfMem, hrfVer⟩ :=
+          metaLive.snapLive id t snap bfBefore (htxSub _ htx) hsnap hbfBefore hlt0
+        exact ⟨rf, List.mem_append_right _ hrfMem, hrfVer⟩
+      · have hge0 : bfBefore.version.val ≤ snap.version.val := Nat.le_of_not_gt hlt0
+        have hoffLt : snap.version.val - bfBefore.version.val < before.history.activeFrames.length := by
+          omega
+        let f := before.history.activeFrames[snap.version.val - bfBefore.version.val]'hoffLt
+        have hfVer : f.version.val = snap.version.val := by
+          have hv : f.version.val = bfBefore.version.val + (snap.version.val - bfBefore.version.val) :=
+            active_frame_version alignedBefore hbfBefore
+              (snap.version.val - bfBefore.version.val) hoffLt
+          omega
+        exact ⟨f, List.mem_append_left _ (List.getElem_mem hoffLt), UScalar.eq_of_val_eq hfVer⟩
+    obtain ⟨f, hfMem, hfVer⟩ := hexBefore
+    rcases hKeptOrPruned f hfMem with hmemAfter | ⟨f', hf'Ret, hf'Ver, _, _⟩ | hfalse
+    · rcases List.mem_append.mp hmemAfter with hact | hret
+      · obtain ⟨j, hjLt, rfl⟩ := List.getElem_of_mem hact
+        have hjVer := active_frame_version alignedAfter hbfAfter j hjLt
+        have : snap.version.val = bfAfter.version.val + j := by
+          rw [← hfVer]; exact hjVer
+        omega
+      · exact ⟨f, hret, hfVer⟩
+    · exact ⟨f', hf'Ret, hf'Ver.trans hfVer⟩
     · have hspec := txs_need_frame_false_spec (encode ∘ alloc.vec.Vec.val) hinj
-        after.txs fOld globalFrame hfalse id t htx
-      have hoffLt : snap.version.val < before.history.log.branch.val.length :=
-        (List.getElem?_eq_some_iff.mp hfid0).1
-      have hactLt : snap.version.val < before.history.activeFrames.length := hbrLen ▸ hoffLt
-      have hactAt : before.history.activeFrames[snap.version.val]? = some fOld := by
-        rw [branch_active_getElem? before.history.log valid snap.version.val, hfid0]
-        simpa using hfOld
-      have hactEq : before.history.activeFrames[snap.version.val] = fOld :=
-        Option.some.inj ((List.getElem?_eq_getElem hactLt).symm.trans hactAt)
-      have hverEq : fOld.version.val = snap.version.val := by
-        rw [← hactEq]; exact hIndexed snap.version.val hactLt
-      exact absurd (UScalar.eq_of_val_eq hverEq.symm) (hspec.1 snap hsnap)
-  · intro id t bm bv off fid gf htx hvm hfid hgf hb hr
-    have hfid0 : before.history.log.branch.val[off]? = some fid := hbr ▸ hfid
-    obtain ⟨off', fid', nfOld, hbr', hnfOld, hmatch⟩ :=
-      metaLive.viewLive id t bm bv off fid gf (htxSub _ htx) hvm hfid0 hgf hb hr
-    obtain ⟨f', hf', _, hcase⟩ := hSlots fid'.val nfOld hnfOld
-    rcases hcase with ⟨hb', hr', hm'⟩ | ⟨_, hfalse⟩
-    · refine ⟨off', fid', f', hbr.symm ▸ hbr', hf', ?_⟩
-      rwa [frameMatches_congr_meta hb' hr' hm']
+        after.txs f globalFrame hfalse id t htx
+      exact absurd hfVer.symm (hspec.1 snap hsnap)
+  · intro id t bm bv gf htx hvm hgf hb hr
+    obtain ⟨nf, hnfMem, hmatch⟩ := metaLive.viewLive id t bm bv gf (htxSub _ htx) hvm hgf hb hr
+    rcases hKeptOrPruned nf hnfMem with hmemAfter | ⟨f', hf'Ret, _, hb', hr'⟩ | hfalse
+    · exact ⟨nf, hmemAfter, hmatch⟩
+    · refine ⟨f', List.mem_append_right _ hf'Ret, ?_⟩
+      rwa [frameMatches_congr_meta hb' hr']
     · have hspec := txs_need_frame_false_spec (encode ∘ alloc.vec.Vec.val) hinj
-        after.txs nfOld globalFrame hfalse id t htx
-      exact ⟨offG, globalId, globalFrame, hbr.symm ▸ hglBr, hglAfter,
-        hspec.2 bm bv hvm hmatch⟩
+        after.txs nf globalFrame hfalse id t htx
+      exact ⟨globalFrame, List.mem_append_left _ hglAfter, hspec.2 bm bv hvm hmatch⟩
 
 /-- Retrieve the exact split used by the extracted history proofs. -/
 theorem HistoryMatches.split {encode : List U8 → String} {n : CcfKv.engine.History}
-    {s : Store} {natArchive archive : List Frame}
-    (h : HistoryMatches encode n s natArchive archive)
+    {s : Store} {natHistory natArchive archive : List Frame}
+    (h : HistoryMatches encode n s natHistory natArchive archive)
     : ∃ prior head,
         n.activeFrames = prior ++ [head]
         ∧ FrameOrderEq (modelFrame encode n.index head) s.head := by
-  obtain he | ⟨priorIds, headId, hbr⟩ := List.eq_nil_or_concat n.log.branch.val
-  · exact (h.valid.1 he).elim
-  · have hbr' : n.log.branch.val = priorIds ++ [headId] := by simpa using hbr
-    have hheadIdLt : headId.val < n.log.frames.val.length :=
-      h.valid.2 headId (by rw [hbr']; simp)
-    have hheadIdLtG : headId.val < natArchive.length := h.aligned.len.symm ▸ hheadIdLt
-    let head := n.log.frames.val[headId.val]
-    let gfHead := natArchive[headId.val]
-    have hheadSaved : n.log.frames.val[headId.val]? = some head := List.getElem?_eq_getElem hheadIdLt
-    have hgfSaved : natArchive[headId.val]? = some gfHead := List.getElem?_eq_getElem hheadIdLtG
-    have hactSplit : n.activeFrames =
-        (priorIds.filterMap fun id => n.log.frames.val[id.val]?) ++ [head] := by
-      unfold CcfKv.engine.History.activeFrames branchValues
-      rw [hbr', List.filterMap_append, List.filterMap_cons, List.filterMap_nil, hheadSaved]
-    have hactLen : n.activeFrames.length = priorIds.length + 1 := by
-      rw [branch_values_length n.log h.valid, hbr', List.length_append, List.length_singleton]
-    have hheadAt : n.activeFrames[priorIds.length]'(by omega) = head := by
-      have hlenPrior : (priorIds.filterMap fun id => n.log.frames.val[id.val]?).length = priorIds.length := by
-        have := congrArg List.length hactSplit
-        rw [List.length_append, List.length_singleton, hactLen] at this
-        omega
-      apply Option.some.inj
-      rw [← List.getElem?_eq_getElem (by omega), hactSplit,
-        List.getElem?_append_right (by omega), hlenPrior, Nat.sub_self]
-      rfl
-    have hheadVer : head.version.val = priorIds.length := by
-      rw [← hheadAt]
-      exact h.indexed priorIds.length (by omega)
-    have hheadLive : modelFrame encode n.index head = gfHead :=
-      h.aligned.activeLive priorIds.length headId head gfHead
-        (by rw [hbr', List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]; rfl)
-        hheadSaved hgfSaved (fun _ => by have := h.globalBound; omega)
-    refine ⟨priorIds.filterMap (fun id => n.log.frames.val[id.val]?), head, hactSplit, ?_⟩
-    rw [hheadLive]
-    have hh := h.head
-    have hf := h.frames
-    unfold natModelFrames at hf
-    rw [hbr', List.reverse_append, List.reverse_singleton, List.singleton_append,
-      List.filterMap_cons, hgfSaved] at hf
-    dsimp only at hf
-    cases hs : s.history with
-    | nil => simp [hs] at hh
-    | cons mh rest =>
-        rw [hs] at hh hf
-        have hm : mh = s.head := Option.some.inj hh
-        subst mh
-        exact (List.forall₂_cons.mp hf).1
+  obtain he | ⟨prior, head, hsplit⟩ := List.eq_nil_or_concat n.activeFrames
+  · exact (h.nonempty he).elim
+  · have hsplit' : n.activeFrames = prior ++ [head] := by simpa using hsplit
+    obtain ⟨bf, hbf, _, _, hsum⟩ := h.aligned.base
+    have hlen : n.activeFrames.length = prior.length + 1 := by simp [hsplit']
+    have hheadLt : prior.length < n.activeFrames.length := by omega
+    have hheadEq : n.activeFrames[prior.length]'hheadLt = head := by
+      simp [hsplit']
+    have hactEq := h.aligned.activeEq bf hbf prior.length hheadLt
+    rw [hheadEq] at hactEq
+    have hidxRev : bf.version.val + prior.length = natHistory.length - 1 := by omega
+    rw [hidxRev] at hactEq
+    have hnatPos : 0 < natHistory.length := h.aligned.nonempty
+    cases hnh : natHistory with
+    | nil => simp [hnh] at hnatPos
+    | cons nh0 nhRest =>
+        rw [hnh] at hactEq
+        simp only [List.reverse_cons, List.length_cons, Nat.add_sub_cancel] at hactEq
+        rw [List.getElem?_append_right (by rw [List.length_reverse]), List.length_reverse,
+          Nat.sub_self, List.getElem?_cons_zero] at hactEq
+        have hnh0Eq : nh0 = modelFrame encode n.index head := Option.some.inj hactEq
+        have hh := h.head
+        have hf := h.frames
+        rw [hnh] at hf
+        cases hs : s.history with
+        | nil => simp [hs] at hh
+        | cons mh rest =>
+            rw [hs] at hh hf
+            have hm : mh = s.head := Option.some.inj hh
+            subst mh
+            refine ⟨prior, head, hsplit', ?_⟩
+            rw [← hnh0Eq]
+            exact (List.forall₂_cons.mp hf).1
 
 /-- A native attempt and its reference counterpart are found together by the real lookup. -/
 theorem lookup_of_attempts {encode : List U8 → String} {sid : Nat}
@@ -653,7 +623,7 @@ theorem reachable_execute {w w' : State} {action : Action} {output : Output}
 /-- A successful attempt update preserves the relation whenever the updated row does. -/
 theorem replace_attempt {encode : List U8 → String} {sid : Nat}
     {n n' : CcfKv.engine.Store} {w w' : State} {s' : Store}
-    {natArchive natArchive' archive archive' : List Frame}
+    {natHistory' natArchive natArchive' archive archive' : List Frame}
     (uniqueBefore : (n.txs.val.map Prod.fst).Nodup)
     (attemptsBefore
       : ∀ id : U64,
@@ -663,9 +633,9 @@ theorem replace_attempt {encode : List U8 → String} {sid : Nat}
     (hidx : n.txs.val[i]? = some (id, old))
     (hn : n'.txs.val = n.txs.val.set i (id, next))
     (hw : w'.txs = Kv.Model.set w.txs id.val tx) (hs' : find w'.stores sid = some s')
-    (hAfter : HistoryMatches encode n'.history s' natArchive' archive')
+    (hAfter : HistoryMatches encode n'.history s' natHistory' natArchive' archive')
     (liveAfter : IndexLiveness n'.history.index (storePins n'))
-    (metaAfter : StoreMetaLive encode n' natArchive')
+    (metaAfter : StoreMetaLive encode n' natHistory')
     (ht : AttemptMatches encode sid n'.history.index natArchive' archive' next tx)
     (reach : transitionSystem.Reachable w')
     (pres : IndexPreservesPins n.history.index n'.history.index (storePins n'))
@@ -676,112 +646,73 @@ theorem replace_attempt {encode : List U8 → String} {sid : Nat}
     replace_attempts uniqueBefore attemptsBefore id i old next tx hidx
       hn hw ht pres natSub sub
   ⟨
-    ⟨s', natArchive', archive', hs', hAfter, metaAfter, attempts⟩,
+    ⟨s', natHistory', natArchive', archive', hs', hAfter, metaAfter, attempts⟩,
     liveAfter,
     unique,
     reach
   ⟩
 
-/-- Frame-order-equivalent reference history forces the native array's versions to equal its indices. -/
+/-- Frame-order-equivalent reference history lifts directly into `HistoryMatches`. -/
 theorem history_related {encode : List U8 → String} {n : CcfKv.engine.History}
-    {w : State} {sid : Nat} {s : Store} {natArchive archive : List Frame}
+    {w : State} {sid : Nat} {s : Store} {natHistory natArchive archive : List Frame}
     (reach : transitionSystem.Reachable w) (hs : find w.stores sid = some s)
-    (frames : List.Forall₂ FrameOrderEq (natModelFrames n.log natArchive) s.history)
+    (frames : List.Forall₂ FrameOrderEq natHistory s.history)
     (global : s.global = n.global.val) (term : s.term = n.term.val)
     (ident : s.nextIdentity = n.next_identity.val)
-    (valid : BranchValid n.log) (unique : BranchUnique n.log)
-    (indexed : HistoryIndexValid n) (aligned : ArchiveAligned encode n natArchive)
-    (revisions : RevisionHistory (natModelFrames n.log natArchive))
+    (valid : BranchValid n.log)
+    (indexed : HistoryIndexValid n) (aligned : ArchiveAligned encode n natHistory)
+    (revisions : RevisionHistory natHistory)
+    (natSub : ∀ f ∈ natHistory, f ∈ natArchive)
     (nativeArchive : ArchiveConsistent natArchive n.next_identity.val)
     (natSorted : ∀ f ∈ natArchive, ∀ m, (image f.data m).Pairwise (encKeyLt encode))
     (modelSub : ∀ f ∈ s.history, f ∈ archive)
     (modelArchive : ArchiveConsistent archive s.nextIdentity)
-    : HistoryMatches encode n s natArchive archive := by
+    : HistoryMatches encode n s natHistory natArchive archive := by
   have h := Kv.Properties.reachable_store_invariants w sid s reach hs
   have versions {rows : List Frame} {v : Nat} (hh : Kv.Properties.History rows v) :
-      rows.reverse.map Frame.version = List.range (v + 1) := by
+      rows.length = v + 1 := by
     induction hh with
     | zero => rfl
-    | succ f k rest hversion _ _ ih =>
-        simp only [List.reverse_cons, List.map_append, List.map_cons, List.map_nil, ih, hversion]
-        exact (List.range_succ (n := k + 1)).symm
-  have sameVersions : (natModelFrames n.log natArchive).map Frame.version =
-      s.history.map Frame.version := by
-    generalize natModelFrames n.log natArchive = nfs at frames
-    generalize s.history = mfs at frames
-    induction frames with
-    | nil => rfl
-    | @cons x y xs ys head _ ih => simp [head.version, ih]
-  have hnatVersions : (natModelFrames n.log natArchive).reverse.map Frame.version =
-      n.activeFrames.map (fun f => f.version.val) := by
-    unfold natModelFrames CcfKv.engine.History.activeFrames branchValues
-    rw [List.filterMap_reverse, List.reverse_reverse]
-    have hbd : ∀ id ∈ n.log.branch.val, id.val < n.log.frames.val.length := valid.2
-    have hmeta := aligned.versionEq
-    have hlen := aligned.len
-    generalize n.log.branch.val = ids at hbd
-    induction ids with
-    | nil => rfl
-    | cons a t ih =>
-        have ha : a.val < n.log.frames.val.length := hbd a List.mem_cons_self
-        have haG : a.val < natArchive.length := hlen.symm ▸ ha
-        simp only [List.filterMap_cons, List.getElem?_eq_getElem ha, List.getElem?_eq_getElem haG,
-          List.map_cons]
-        have hm := hmeta a.val n.log.frames.val[a.val] natArchive[a.val]
-          (List.getElem?_eq_getElem ha) (List.getElem?_eq_getElem haG)
-        exact congrArg₂ List.cons hm (ih (fun x hx => hbd x (List.mem_cons_of_mem _ hx)))
-  have hn : (n.activeFrames.map fun f => f.version.val) =
-      List.range (s.head.version + 1) := by
-    have hrev := congrArg List.reverse sameVersions
-    simp only [← List.map_reverse] at hrev
-    rw [hnatVersions] at hrev
-    exact hrev.trans (versions h.1)
-  have hlenAct : n.activeFrames.length = s.head.version + 1 := by
-    have := congrArg List.length hn
-    simpa only [List.length_map, List.length_range] using this
-  have hgb : n.global.val < n.activeFrames.length := by
+    | succ f k rest _ _ _ ih => simp [ih]
+  have hlenEq : natHistory.length = s.history.length := frames.length_eq
+  have hlenHist : s.history.length = s.head.version + 1 := versions h.1
+  have hgb : n.global.val < natHistory.length := by
     have := h.2.2.1
     omega
+  obtain ⟨bf, hbf, _, _, _⟩ := aligned.base
   refine ⟨
     ?_,
     frames,
     h.2.1,
-    ?_,
     global,
     hgb,
     term,
     ident,
     valid,
-    unique,
     indexed,
     aligned,
     revisions,
+    natSub,
     nativeArchive,
     natSorted,
     modelSub,
     modelArchive
   ⟩
   · intro he
-    simp [he] at hn
-  · intro i hi
-    have hAt := congrArg (fun rows : List Nat => rows[i]?) hn
-    have hir : i < (List.range (s.head.version + 1)).length := by
-      rw [List.length_range]; omega
-    rw [List.getElem?_eq_getElem (by simpa using hi), List.getElem?_eq_getElem hir,
-      List.getElem_map, List.getElem_range] at hAt
-    exact Option.some.inj hAt
+    rw [he] at hbf
+    simp at hbf
 
 /-- The modeled store changes without changing the table of attempts. -/
 theorem replace_history {encode : List U8 → String} {sid : Nat}
     {n n' : CcfKv.engine.Store} {w w' : State} {s' : Store}
-    {natArchive natArchive' archive archive' : List Frame}
+    {natHistory' natArchive natArchive' archive archive' : List Frame}
     (uniqueBefore : (n.txs.val.map Prod.fst).Nodup)
     (attemptsBefore
       : ∀ id : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
             (find n.txs.val id) (find w.txs id.val))
-    (history : HistoryMatches encode n'.history s' natArchive' archive')
-    (metaAfter : StoreMetaLive encode n' natArchive')
+    (history : HistoryMatches encode n'.history s' natHistory' natArchive' archive')
+    (metaAfter : StoreMetaLive encode n' natHistory')
     (liveAfter : IndexLiveness n'.history.index (storePins n'))
     (hs : find w'.stores sid = some s') (hn : n'.txs = n.txs) (hw : w'.txs = w.txs)
     (reach : transitionSystem.Reachable w')
@@ -789,7 +720,12 @@ theorem replace_history {encode : List U8 → String} {sid : Nat}
     (natSub : ∀ f ∈ natArchive, f ∈ natArchive')
     (sub : ∀ f ∈ archive, f ∈ archive')
     : StateMatches encode sid n' w' := by
-  refine ⟨⟨s', natArchive', archive', hs, history, metaAfter, ?_⟩, liveAfter, ?_, reach⟩
+  refine ⟨
+    ⟨s', natHistory', natArchive', archive', hs, history, metaAfter, ?_⟩,
+    liveAfter,
+    ?_,
+    reach
+  ⟩
   · intro id
     rw [hn, hw]
     have hprev := attemptsBefore id

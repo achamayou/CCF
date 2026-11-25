@@ -650,7 +650,6 @@ private theorem pin_range_refines {encode : List U8 → String}
             data := root
             revisions := alloc.vec.Vec.new _
             births := alloc.vec.Vec.new _
-            meta_live := true
           }
           have hms := modelFrame_image_sorted inj history.index dummyFrame live (encode m.val)
           have himgEq : image (modelFrame encode history.index dummyFrame).data (encode m.val) =

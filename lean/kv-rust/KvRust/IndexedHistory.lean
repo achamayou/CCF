@@ -11,20 +11,14 @@ namespace KvRust
 
 open Aeneas.Std
 
-/-- Every archived slot has a valid view, not just the slots on the current branch. -/
+/-- Every active ring frame has a valid radix view and every retained compacted
+frame has an empty radix root. -/
 structure HistoryIndexValid (history : CcfKv.engine.History) : Prop where
   index : IndexValid history.index
-  archived
-    : ∀ (i : Nat) (frame : CcfKv.engine.Frame),
-        history.log.frames.val[i]? = some frame
-        → IndexView history.index frame.data (indexRows history.index frame.data)
-
-theorem HistoryIndexValid.active {history : CcfKv.engine.History}
-    (valid : HistoryIndexValid history) (frame : CcfKv.engine.Frame)
-    (active : frame ∈ history.activeFrames)
-    : IndexView history.index frame.data (indexRows history.index frame.data) := by
-  obtain ⟨id, _, saved⟩ := List.mem_filterMap.mp active
-  exact valid.archived id.val frame saved
+  active
+    : ∀ frame ∈ history.activeFrames,
+        IndexView history.index frame.data (indexRows history.index frame.data)
+  retainedEmpty : ∀ frame ∈ history.retained.val, frame.data = 0#u32
 
 theorem HistoryIndexValid.head {history : CcfKv.engine.History}
     (valid : HistoryIndexValid history) (prior : List CcfKv.engine.Frame)
@@ -34,29 +28,15 @@ theorem HistoryIndexValid.head {history : CcfKv.engine.History}
 
 theorem HistoryIndexValid.congr {before after : CcfKv.engine.History}
     (valid : HistoryIndexValid before) (sameIndex : after.index = before.index)
-    (sameArchive : after.log.frames = before.log.frames)
+    (sameActive : after.activeFrames = before.activeFrames)
+    (sameRetained : after.retained = before.retained)
     : HistoryIndexValid after := by
-  refine ⟨sameIndex.symm ▸ valid.index, ?_⟩
-  intro i frame saved
-  rw [sameIndex]
-  exact valid.archived i frame (by simpa only [sameArchive] using saved)
-
-/-- A persistent history update preserves both the frame slots and their storage roots. -/
-structure HistoryKeeps (before after : CcfKv.engine.History) : Prop where
-  slots : FrameSlotsPreserved before after
-  index : IndexKeeps before.index after.index
-
-theorem HistoryKeeps.of_same {before after : CcfKv.engine.History}
-    (sameSlots : after.log.frames = before.log.frames)
-    (sameIndex : after.index = before.index)
-    : HistoryKeeps before after :=
-  ⟨FrameSlotsPreserved.of_same before after sameSlots, sameIndex.symm ▸ .refl _⟩
-
-theorem HistoryKeeps.rows {before after : CcfKv.engine.History}
-    (kept : HistoryKeeps before after) (valid : HistoryIndexValid before) (i : Nat)
-    (frame : CcfKv.engine.Frame) (saved : before.log.frames.val[i]? = some frame)
-    : indexRows after.index frame.data = indexRows before.index frame.data :=
-  index_rows_eq (index_keeps_view kept.index _ _ (valid.archived i frame saved))
+  refine ⟨sameIndex.symm ▸ valid.index, ?_, ?_⟩
+  · intro frame hmem
+    rw [sameIndex]
+    exact valid.active frame (sameActive ▸ hmem)
+  · intro frame hmem
+    exact valid.retainedEmpty frame (sameRetained ▸ hmem)
 
 theorem HistoryIndexValid.of_preserves_pins {before after : CcfKv.engine.History}
     {extraPins : List U32}
@@ -64,17 +44,15 @@ theorem HistoryIndexValid.of_preserves_pins {before after : CcfKv.engine.History
     (liveAfter : IndexValid after.index)
     (pres
       : IndexPreservesPins before.index after.index
-          (framePins after.log.frames.val ++ extraPins))
-    (slots
-      : ∀ (i : Nat) (f' : CcfKv.engine.Frame),
-          after.log.frames.val[i]? = some f'
-          → f'.data = 0#u32
-            ∨ ∃ (j : Nat) (f : CcfKv.engine.Frame),
-                before.log.frames.val[j]? = some f ∧ f'.data = f.data)
+          (framePins after.activeFrames ++ extraPins))
+    (activeFrom
+      : ∀ f' ∈ after.activeFrames,
+          f'.data = 0#u32 ∨ ∃ f ∈ before.activeFrames, f'.data = f.data)
+    (retainedEmpty : ∀ f' ∈ after.retained.val, f'.data = 0#u32)
     : HistoryIndexValid after := by
-  refine ⟨liveAfter, ?_⟩
-  intro i f' hf'
-  rcases slots i f' hf' with h0 | ⟨j, f, hf, hdata⟩
+  refine ⟨liveAfter, ?_, retainedEmpty⟩
+  intro f' hf'
+  rcases activeFrom f' hf' with h0 | ⟨f, hf, hdata⟩
   · have hemp : IndexView after.index 0#u32 [] := by
       have h := index_empty_root_refines after.index
       unfold CcfKv.kv_index.AddressIndex.empty_root CcfKv.radix.SingleRadix.empty_root at h
@@ -90,11 +68,13 @@ theorem HistoryIndexValid.of_preserves_pins {before after : CcfKv.engine.History
         exact h.2
       rw [hzero, index_rows_eq hemp]
       exact hemp
-    · have hmem : f'.data ∈ framePins after.log.frames.val :=
-        List.mem_filterMap.mpr ⟨f', List.mem_iff_getElem?.mpr ⟨i, hf'⟩, by simp [hzero]⟩
-      have hvOld := valid.archived j f hf
+    · have hmem : f'.data ∈ framePins after.activeFrames :=
+        List.mem_filterMap.mpr ⟨f', hf', by simp [hzero]⟩
+      have hvOld := valid.active f hf
       rw [← hdata] at hvOld
-      have hvNew := index_preserves_pins_view pres f'.data _ (Or.inr (List.mem_append_left extraPins hmem)) hvOld
+      have hvNew :=
+        index_preserves_pins_view pres f'.data _
+          (Or.inr (List.mem_append_left extraPins hmem)) hvOld
       rwa [index_rows_eq hvNew]
 
 /-- Project the entire extracted frame into the executable model. -/
@@ -105,12 +85,6 @@ noncomputable def modelFrame (encode : List U8 → String) (index : CellIndex)
     modelMetadata (encode ∘ alloc.vec.Vec.val) frame with
       data := encodeData encode (indexedCellData (indexRows index frame.data))
   }
-
-/-- Ghost active branch frames derived from the immutable ghost native archive. -/
-def natModelFrames (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame)
-    (natArchive : List Kv.Model.Frame)
-    : List Kv.Model.Frame :=
-  log.branch.val.reverse.filterMap fun id => natArchive[id.val]?
 
 /-- A native frame agrees on all metadata fields with its ghost archive entry. -/
 def FrameMetaEq (encode : List U8 → String) (nf : CcfKv.engine.Frame)
@@ -125,316 +99,210 @@ theorem frame_meta_eq_modelFrame (encode : List U8 → String) (index : CellInde
     : FrameMetaEq encode nf (modelFrame encode index nf) :=
   ⟨rfl, rfl, rfl⟩
 
-/-- Alignment between the native frame archive (whose compacted/rolled-back
-entries may have `data = 0#u32` and elided metadata when `meta_live = false`)
-and the immutable ghost native archive `natArchive`. -/
+/-- Alignment between the ring-buffered active suffix + metadata-only `retained`
+frames and the full newest-first ghost native branch `natHistory`. -/
 structure ArchiveAligned (encode : List U8 → String) (history : CcfKv.engine.History)
-    (natArchive : List Kv.Model.Frame)
+    (natHistory : List Kv.Model.Frame)
     : Prop where
-  len : natArchive.length = history.log.frames.val.length
-  versionEq
-    : ∀ (i : Nat) nf gf,
-        history.log.frames.val[i]? = some nf
-        → natArchive[i]? = some gf
-        → gf.version = nf.version.val
-  metaEq
-    : ∀ (i : Nat) nf gf,
-        history.log.frames.val[i]? = some nf
-        → natArchive[i]? = some gf
-        → nf.meta_live = true
-        → FrameMetaEq encode nf gf
-  globalMetaLive
-    : ∀ (off : Nat) (id : Usize) nf,
-        history.log.branch.val[off]? = some id
-        → history.log.frames.val[id.val]? = some nf
-        → (history.reuse_compacted_images = true → history.global.val ≤ nf.version.val)
-        → nf.meta_live = true
-  activeLive
-    : ∀ (off : Nat) (id : Usize) nf gf,
-        history.log.branch.val[off]? = some id
-        → history.log.frames.val[id.val]? = some nf
-        → natArchive[id.val]? = some gf
-        → (history.reuse_compacted_images = true → history.global.val ≤ nf.version.val)
-        → modelFrame encode history.index nf = gf
+  nonempty : 0 < natHistory.length
+  base
+    : ∃ baseFrame,
+        history.activeFrames[0]? = some baseFrame
+        ∧ baseFrame.version.val ≤ history.global.val
+        ∧ (history.reuse_compacted_images = true → baseFrame.version = history.global)
+        ∧ baseFrame.version.val + history.activeFrames.length = natHistory.length
+  activeEq
+    : ∀ (baseFrame : CcfKv.engine.Frame),
+        history.activeFrames[0]? = some baseFrame
+        → ∀ (i : Nat) (hi : i < history.activeFrames.length),
+            natHistory.reverse[baseFrame.version.val + i]?
+            = some (modelFrame encode history.index (history.activeFrames[i]'hi))
+  retainedEq
+    : ∀ rf ∈ history.retained.val,
+        rf.version.val < history.global.val
+        ∧ rf.data = 0#u32
+        ∧ ∃ gf, natHistory.reverse[rf.version.val]? = some gf ∧ FrameMetaEq encode rf gf
+  retainedReuse : history.reuse_compacted_images = false → history.retained.val = []
+  verIndexed : ∀ (v : Nat) gf, natHistory.reverse[v]? = some gf → gf.version = v
 
-theorem natModelFrames_length {log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
-    {natArchive : List Kv.Model.Frame} (valid : BranchValid log)
-    (hlen : natArchive.length = log.frames.val.length)
-    : (natModelFrames log natArchive).length = log.branch.val.length := by
-  have hl (ids : List Usize) (h : ∀ id ∈ ids, id.val < natArchive.length) :
-      (ids.filterMap fun id => natArchive[id.val]?).length = ids.length := by
-    induction ids with
-    | nil => rfl
-    | cons a t ih =>
-        simp [List.getElem?_eq_getElem (h a List.mem_cons_self),
-          ih (fun x hx => h x (List.mem_cons_of_mem _ hx))]
-  unfold natModelFrames
-  rw [hl _ (fun id hid => hlen.symm ▸ valid.2 id (List.mem_reverse.mp hid)), List.length_reverse]
+theorem ArchiveAligned.active_version {encode : List U8 → String}
+    {history : CcfKv.engine.History} {natHistory : List Kv.Model.Frame}
+    (aligned : ArchiveAligned encode history natHistory)
+    (baseFrame : CcfKv.engine.Frame) (hbase : history.activeFrames[0]? = some baseFrame)
+    (i : Nat) (hi : i < history.activeFrames.length)
+    : (history.activeFrames[i]'hi).version.val = baseFrame.version.val + i := by
+  have heq := aligned.activeEq baseFrame hbase i hi
+  have hv := aligned.verIndexed (baseFrame.version.val + i) _ heq
+  simpa [modelFrame, modelMetadata] using hv
 
-theorem natModelFrames_append
-    {before after : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
-    {natArchive : List Kv.Model.Frame} {gf : Kv.Model.Frame} {id : Usize}
-    (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
-    (hid : id.val = before.frames.val.length)
-    (hbr : after.branch.val = before.branch.val ++ [id])
-    : natModelFrames after (natArchive ++ [gf])
-      = gf :: natModelFrames before natArchive := by
-  unfold natModelFrames
-  rw [hbr, List.reverse_append, List.reverse_singleton, List.singleton_append, List.filterMap_cons]
-  have hnew : (natArchive ++ [gf])[id.val]? = some gf := by
-    rw [hid, ← hlen, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self]; rfl
-  rw [hnew]
-  dsimp only
-  congr 1
-  apply List.filterMap_congr
-  intro x hx
-  have hlt : x.val < natArchive.length := hlen.symm ▸ valid.2 x (List.mem_reverse.mp hx)
-  exact List.getElem?_append_left hlt
+theorem ArchiveAligned.active_mem_nat {encode : List U8 → String}
+    {history : CcfKv.engine.History} {natHistory : List Kv.Model.Frame}
+    (aligned : ArchiveAligned encode history natHistory)
+    (f : CcfKv.engine.Frame) (hf : f ∈ history.activeFrames)
+    : modelFrame encode history.index f ∈ natHistory := by
+  obtain ⟨baseFrame, hbase, _, _, _⟩ := aligned.base
+  obtain ⟨i, hi, rfl⟩ := List.mem_iff_getElem.mp hf
+  have hmemRev : modelFrame encode history.index (history.activeFrames[i]'hi) ∈ natHistory.reverse :=
+    List.mem_of_getElem? (aligned.activeEq baseFrame hbase i hi)
+  exact List.mem_reverse.mp hmemRev
 
-private theorem list_filter_is_take {α : Type} (xs : List α) (p : α → Bool) (n : Nat)
-    (h : ∀ i (hi : i < xs.length), p xs[i] = decide (i < n))
-    : xs.filter p = xs.take n := by
-  induction xs generalizing n with
-  | nil => simp
-  | cons x xs ih =>
-      have hhead := h 0 (by simp)
-      change p x = decide (0 < n) at hhead
-      cases n with
-      | zero =>
-          have htail : ∀ i (hi : i < xs.length), p xs[i] = decide (i < 0) := by
-            intro i hi
-            have he := h (i + 1) (by simp; omega)
-            change p xs[i] = decide (i + 1 < 0) at he
-            simpa using he
-          simp [hhead, ih 0 htail]
-      | succ n =>
-          have htail : ∀ i (hi : i < xs.length), p xs[i] = decide (i < n) := by
-            intro i hi
-            have he := h (i + 1) (by simp; omega)
-            change p xs[i] = decide (i + 1 < n + 1) at he
-            simpa using he
-          simp [hhead, ih n htail]
-
-theorem natModelFrames_take {before after : CcfKv.branch_log.BranchLog CcfKv.engine.Frame}
-    {natArchive : List Kv.Model.Frame} {n : Nat}
-    (valid : BranchValid before) (hlen : natArchive.length = before.frames.val.length)
-    (hbr : after.branch.val = before.branch.val.take n)
-    (hver
-      : ∀ (i : Nat) (hi : i < before.branch.val.length) (gf : Kv.Model.Frame),
-          natArchive[before.branch.val[i].val]? = some gf → gf.version = i)
-    (hn : 0 < n)
-    : natModelFrames after natArchive
-      = (natModelFrames before natArchive).filter
-          (fun f => decide (f.version ≤ n - 1)) := by
-  have hfm_rev : ∀ (ids : List Usize),
-      ids.reverse.filterMap (fun id => natArchive[id.val]?)
-      = (ids.filterMap fun id => natArchive[id.val]?).reverse := by
-    intro ids
-    induction ids with
-    | nil => rfl
-    | cons a t ih =>
-        simp [List.reverse_cons, List.filterMap_append, List.filterMap_cons, ih]
-        cases natArchive[a.val]? <;> simp
-  unfold natModelFrames
-  rw [hbr, hfm_rev, hfm_rev, List.filter_reverse]
-  congr 1
-  have hbd : ∀ id ∈ before.branch.val, id.val < natArchive.length :=
-    fun id hid => hlen.symm ▸ valid.2 id hid
-  have htake : ∀ (ids : List Usize) (m : Nat),
-      (∀ id ∈ ids, id.val < natArchive.length) →
-      (ids.take m).filterMap (fun id => natArchive[id.val]?) =
-      (ids.filterMap (fun id => natArchive[id.val]?)).take m := by
-    intro ids
-    induction ids with
-    | nil => intro m _; simp
-    | cons a t ih =>
-        intro m hbd'
-        have hb := hbd' a List.mem_cons_self
-        have hr := fun k => ih k (fun x hx => hbd' x (List.mem_cons_of_mem _ hx))
-        cases m <;> simp [List.getElem?_eq_getElem hb, hr]
-  rw [htake _ _ hbd]
-  symm
-  apply list_filter_is_take
-  intro i hi
-  have hlenF : (before.branch.val.filterMap fun id => natArchive[id.val]?).length =
-      before.branch.val.length := by
-    have := natModelFrames_length valid hlen
-    unfold natModelFrames at this
-    rw [hfm_rev, List.length_reverse] at this
-    exact this
-  have hi' : i < before.branch.val.length := hlenF ▸ hi
-  have hget : ∀ (ids : List Usize) (k : Nat) (hk : k < ids.length),
-      (∀ id ∈ ids, id.val < natArchive.length) →
-      (ids.filterMap fun id => natArchive[id.val]?)[k]? = natArchive[ids[k].val]? := by
-    intro ids
-    induction ids with
-    | nil => intro k hk _; simp at hk
-    | cons a t ih =>
-        intro k hk hbd'
-        have hb := hbd' a List.mem_cons_self
-        cases k with
-        | zero => simp [List.getElem?_eq_getElem hb]
-        | succ j =>
-            simp only [List.filterMap_cons, List.getElem?_eq_getElem hb, List.getElem?_cons_succ,
-              List.getElem_cons_succ]
-            exact ih j (by simpa using hk)
-              (fun x hx => hbd' x (List.mem_cons_of_mem _ hx))
-  have hv := hver i hi' ((before.branch.val.filterMap fun id => natArchive[id.val]?)[i])
-    (by rw [← hget _ i hi' hbd, List.getElem?_eq_getElem hi])
-  rw [hv]
-  exact decide_eq_decide.mpr (by omega)
+theorem ArchiveAligned.head_eq {encode : List U8 → String}
+    {history : CcfKv.engine.History} {natHistory : List Kv.Model.Frame}
+    (aligned : ArchiveAligned encode history natHistory)
+    {prior : List CcfKv.engine.Frame} {head : CcfKv.engine.Frame}
+    (hsplit : history.activeFrames = prior ++ [head])
+    : natHistory.head? = some (modelFrame encode history.index head) := by
+  obtain ⟨baseFrame, hbase, _, _, hsum⟩ := aligned.base
+  have hidx : prior.length < history.activeFrames.length := by simp [hsplit]
+  have hheadAt : history.activeFrames[prior.length]'hidx = head := by
+    apply Option.some.inj
+    rw [← List.getElem?_eq_getElem hidx, hsplit]
+    simp
+  have heq := aligned.activeEq baseFrame hbase prior.length hidx
+  rw [hheadAt] at heq
+  have hlen : baseFrame.version.val + prior.length = natHistory.length - 1 := by
+    rw [hsplit, List.length_append, List.length_singleton] at hsum; omega
+  rw [hlen, List.getElem?_reverse (by have := aligned.nonempty; omega)] at heq
+  have hsub : natHistory.length - 1 - (natHistory.length - 1) = 0 := Nat.sub_self _
+  rw [hsub] at heq
+  simpa [List.head?_eq_getElem?] using heq
 
 theorem ArchiveAligned.of_preserves_pins {encode : List U8 → String}
-    {before after : CcfKv.engine.History} {natArchive : List Kv.Model.Frame}
+    {before after : CcfKv.engine.History} {natHistory : List Kv.Model.Frame}
     {extraPins : List U32}
-    (aligned : ArchiveAligned encode before natArchive)
+    (aligned : ArchiveAligned encode before natHistory)
     (validBefore : HistoryIndexValid before)
     (pres
       : IndexPreservesPins before.index after.index
-          (framePins after.log.frames.val ++ extraPins))
-    (hbr : after.log.branch = before.log.branch)
-    (hframes : after.log.frames = before.log.frames)
+          (framePins after.activeFrames ++ extraPins))
+    (hact : after.activeFrames = before.activeFrames)
+    (hret : ∀ rf ∈ after.retained.val, rf ∈ before.retained.val)
     (hglobal : after.global = before.global)
     (hreuse : after.reuse_compacted_images = before.reuse_compacted_images)
-    : ArchiveAligned encode after natArchive := by
-  refine ⟨
-    by rw [hframes]; exact aligned.len,
-    fun i nf gf hnf hgf => aligned.versionEq i nf gf (hframes ▸ hnf) hgf,
-    fun i nf gf hnf hgf hml => aligned.metaEq i nf gf (hframes ▸ hnf) hgf hml,
-    fun off id nf hid hnf hlive =>
-      aligned.globalMetaLive off id nf (hbr ▸ hid) (hframes ▸ hnf)
-        (by rw [← hreuse, ← hglobal]; exact hlive),
-    ?_
-  ⟩
-  intro off id nf gf hid hnf hgf hlive
-  have hnf0 : before.log.frames.val[id.val]? = some nf := hframes ▸ hnf
-  have hmf0 := aligned.activeLive off id nf gf (hbr ▸ hid) hnf0 hgf
-    (by rw [← hreuse, ← hglobal]; exact hlive)
-  have hpin : nf.data = 0#u32 ∨ nf.data ∈ framePins after.log.frames.val ++ extraPins := by
-    by_cases hz : nf.data = 0#u32
-    · exact Or.inl hz
-    · exact Or.inr (List.mem_append_left extraPins
-        (List.mem_filterMap.mpr ⟨nf, List.mem_iff_getElem?.mpr ⟨id.val, hnf⟩, by simp [hz]⟩))
-  have hview := index_preserves_pins_view pres nf.data _ hpin (validBefore.archived id.val nf hnf0)
-  have hrows : indexRows after.index nf.data = indexRows before.index nf.data :=
-    index_rows_eq hview
-  simpa only [modelFrame, hrows] using hmf0
+    : ArchiveAligned encode after natHistory := by
+  refine ⟨aligned.nonempty, ?_, ?_, ?_, ?_, aligned.verIndexed⟩
+  · obtain ⟨bf, hbf, hle, hre, hsum⟩ := aligned.base
+    exact ⟨bf, hact.symm ▸ hbf, hglobal.symm ▸ hle,
+      fun h => hglobal.symm ▸ hre (hreuse ▸ h), hact.symm ▸ hsum⟩
+  · intro bf hbf i hi
+    have hbf0 : before.activeFrames[0]? = some bf := hact ▸ hbf
+    have hi0 : i < before.activeFrames.length := hact ▸ hi
+    have hprev := aligned.activeEq bf hbf0 i hi0
+    have hgetEq : after.activeFrames[i]'hi = before.activeFrames[i]'hi0 := by
+      apply Option.some.inj
+      rw [← List.getElem?_eq_getElem hi, ← List.getElem?_eq_getElem hi0, hact]
+    rw [hgetEq]
+    let f := before.activeFrames[i]'hi0
+    have hfMem : f ∈ after.activeFrames := by rw [hact]; exact List.getElem_mem hi0
+    have hpin : f.data = 0#u32 ∨ f.data ∈ framePins after.activeFrames ++ extraPins := by
+      by_cases hz : f.data = 0#u32
+      · exact Or.inl hz
+      · exact Or.inr (List.mem_append_left extraPins (List.mem_filterMap.mpr ⟨f, hfMem, by simp [hz]⟩))
+    have hview := index_preserves_pins_view pres f.data _ hpin
+      (validBefore.active f (List.getElem_mem hi0))
+    have hrows : indexRows after.index (before.activeFrames[i]'hi0).data =
+        indexRows before.index (before.activeFrames[i]'hi0).data :=
+      index_rows_eq hview
+    simpa only [modelFrame, hrows] using hprev
+  · intro rf hrf
+    rw [hglobal]
+    exact aligned.retainedEq rf (hret rf hrf)
+  · intro hf
+    have hemp := aligned.retainedReuse (hreuse ▸ hf)
+    cases h : after.retained.val with
+    | nil => rfl
+    | cons x _ =>
+        have hx := hret x (by rw [h]; exact List.mem_cons_self)
+        rw [hemp] at hx
+        cases hx
 
 theorem ArchiveAligned.append {encode : List U8 → String}
-    {before after : CcfKv.engine.History} {natArchive : List Kv.Model.Frame}
-    {nfNew : CcfKv.engine.Frame} {idNew : Usize} {extraPins : List U32}
-    (aligned : ArchiveAligned encode before natArchive)
+    {before after : CcfKv.engine.History} {natHistory : List Kv.Model.Frame}
+    {nfNew : CcfKv.engine.Frame} {extraPins : List U32}
+    (aligned : ArchiveAligned encode before natHistory)
     (validBefore : HistoryIndexValid before)
-    (validLogBefore : BranchValid before.log)
     (pres
       : IndexPreservesPins before.index after.index
-          (framePins after.log.frames.val ++ extraPins))
-    (hframes : after.log.frames.val = before.log.frames.val ++ [nfNew])
-    (hbr : after.log.branch.val = before.log.branch.val ++ [idNew])
-    (hidNew : idNew.val = before.log.frames.val.length)
+          (framePins after.activeFrames ++ extraPins))
+    (hact : after.activeFrames = before.activeFrames ++ [nfNew])
+    (hret : after.retained = before.retained)
     (hglobal : after.global = before.global)
     (hreuse : after.reuse_compacted_images = before.reuse_compacted_images)
-    (hmetaNew : nfNew.meta_live = true)
+    (hverNew : nfNew.version.val = natHistory.length)
     : ArchiveAligned encode after
-        (natArchive ++ [modelFrame encode after.index nfNew]) := by
-  refine ⟨
-    by rw [hframes, List.length_append, List.length_append, aligned.len]; rfl,
-    ?_,
-    ?_,
-    ?_,
-    ?_
-  ⟩
-  · intro i nf gf hnf hgf
-    rw [hframes] at hnf
-    by_cases hlt : i < before.log.frames.val.length
-    · rw [List.getElem?_append_left hlt] at hnf
-      rw [List.getElem?_append_left (aligned.len.symm ▸ hlt)] at hgf
-      exact aligned.versionEq i nf gf hnf hgf
-    · have hge := Nat.le_of_not_gt hlt
-      rw [List.getElem?_append_right hge] at hnf
-      rw [List.getElem?_append_right (aligned.len.symm ▸ hge)] at hgf
-      have hsub : i - before.log.frames.val.length = 0 := by
-        have := (List.getElem?_eq_some_iff.mp hnf).1
-        simp at this; omega
-      have hsub' : i - natArchive.length = 0 := aligned.len.symm ▸ hsub
-      rw [hsub] at hnf; rw [hsub'] at hgf
-      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
-      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
-      subst hnfEq hgfEq
-      rfl
-  · intro i nf gf hnf hgf hml
-    rw [hframes] at hnf
-    by_cases hlt : i < before.log.frames.val.length
-    · rw [List.getElem?_append_left hlt] at hnf
-      rw [List.getElem?_append_left (aligned.len.symm ▸ hlt)] at hgf
-      exact aligned.metaEq i nf gf hnf hgf hml
-    · have hge := Nat.le_of_not_gt hlt
-      rw [List.getElem?_append_right hge] at hnf
-      rw [List.getElem?_append_right (aligned.len.symm ▸ hge)] at hgf
-      have hsub : i - before.log.frames.val.length = 0 := by
-        have := (List.getElem?_eq_some_iff.mp hnf).1
-        simp at this; omega
-      have hsub' : i - natArchive.length = 0 := aligned.len.symm ▸ hsub
-      rw [hsub] at hnf; rw [hsub'] at hgf
-      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
-      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
-      subst hnfEq hgfEq
-      exact frame_meta_eq_modelFrame encode after.index nf
-  · intro off id nf hid hnf hlive
-    rw [hbr] at hid
-    by_cases hoff : off < before.log.branch.val.length
-    · rw [List.getElem?_append_left hoff] at hid
-      have hidLt : id.val < before.log.frames.val.length :=
-        validLogBefore.2 id (List.mem_iff_getElem?.mpr ⟨off, hid⟩)
-      have hnf0 : before.log.frames.val[id.val]? = some nf := by
-        rwa [hframes, List.getElem?_append_left hidLt] at hnf
-      exact aligned.globalMetaLive off id nf hid hnf0
-        (by rw [← hreuse, ← hglobal]; exact hlive)
-    · rw [List.getElem?_append_right (Nat.le_of_not_gt hoff)] at hid
-      have hsub : off - before.log.branch.val.length = 0 := by
-        have := (List.getElem?_eq_some_iff.mp hid).1
-        simp at this; omega
-      rw [hsub] at hid
-      have hidEq : id = idNew := Option.some.inj (by simpa using hid.symm)
-      subst hidEq
-      rw [hframes, hidNew, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hnf
-      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
-      subst hnfEq
-      exact hmetaNew
-  · intro off id nf gf hid hnf hgf hlive
-    rw [hbr] at hid
-    by_cases hoff : off < before.log.branch.val.length
-    · rw [List.getElem?_append_left hoff] at hid
-      have hidLt : id.val < before.log.frames.val.length :=
-        validLogBefore.2 id (List.mem_iff_getElem?.mpr ⟨off, hid⟩)
-      have hnf0 : before.log.frames.val[id.val]? = some nf := by
-        rwa [hframes, List.getElem?_append_left hidLt] at hnf
-      have hgf0 : natArchive[id.val]? = some gf := by
-        rwa [List.getElem?_append_left (aligned.len.symm ▸ hidLt)] at hgf
-      have hmf0 := aligned.activeLive off id nf gf hid hnf0 hgf0
-        (by rw [← hreuse, ← hglobal]; exact hlive)
-      have hpin : nf.data = 0#u32 ∨ nf.data ∈ framePins after.log.frames.val ++ extraPins := by
-        by_cases hz : nf.data = 0#u32
+        (modelFrame encode after.index nfNew :: natHistory) := by
+  refine ⟨by simp, ?_, ?_, ?_, ?_, ?_⟩
+  · obtain ⟨bf, hbf, hle, hre, hsum⟩ := aligned.base
+    have hpos0 : 0 < before.activeFrames.length := (List.getElem?_eq_some_iff.mp hbf).1
+    refine ⟨bf, by rw [hact, List.getElem?_append_left hpos0]; exact hbf,
+      hglobal.symm ▸ hle, fun h => hglobal.symm ▸ hre (hreuse ▸ h), ?_⟩
+    rw [hact, List.length_append, List.length_singleton, List.length_cons]
+    omega
+  · intro bf hbf i hi
+    obtain ⟨bf0, hbf0, _, _, hsum⟩ := aligned.base
+    have hpos0 : 0 < before.activeFrames.length := (List.getElem?_eq_some_iff.mp hbf0).1
+    have hbfEq : bf = bf0 := by
+      have : after.activeFrames[0]? = some bf0 := by
+        rw [hact, List.getElem?_append_left hpos0]; exact hbf0
+      exact Option.some.inj (hbf.symm.trans this)
+    subst hbfEq
+    rw [List.reverse_cons]
+    by_cases hlt : i < before.activeFrames.length
+    · have hgetEq : after.activeFrames[i]'hi = before.activeFrames[i]'hlt := by
+        apply Option.some.inj
+        rw [← List.getElem?_eq_getElem hi, ← List.getElem?_eq_getElem hlt, hact,
+          List.getElem?_append_left hlt]
+      rw [hgetEq, List.getElem?_append_left (by rw [List.length_reverse]; omega)]
+      let f := before.activeFrames[i]'hlt
+      have hfMem : f ∈ after.activeFrames := by
+        rw [hact]; exact List.mem_append_left _ (List.getElem_mem hlt)
+      have hpin : f.data = 0#u32 ∨ f.data ∈ framePins after.activeFrames ++ extraPins := by
+        by_cases hz : f.data = 0#u32
         · exact Or.inl hz
-        · exact Or.inr (List.mem_append_left extraPins
-            (List.mem_filterMap.mpr ⟨nf, List.mem_iff_getElem?.mpr ⟨id.val, hnf⟩, by simp [hz]⟩))
-      have hview := index_preserves_pins_view pres nf.data _ hpin (validBefore.archived id.val nf hnf0)
-      have hrows : indexRows after.index nf.data = indexRows before.index nf.data :=
+        · exact Or.inr (List.mem_append_left extraPins (List.mem_filterMap.mpr ⟨f, hfMem, by simp [hz]⟩))
+      have hview := index_preserves_pins_view pres f.data _ hpin
+        (validBefore.active f (List.getElem_mem hlt))
+      have hrows : indexRows after.index (before.activeFrames[i]'hlt).data =
+          indexRows before.index (before.activeFrames[i]'hlt).data :=
         index_rows_eq hview
-      simpa only [modelFrame, hrows] using hmf0
-    · rw [List.getElem?_append_right (Nat.le_of_not_gt hoff)] at hid
-      have hsub : off - before.log.branch.val.length = 0 := by
-        have := (List.getElem?_eq_some_iff.mp hid).1
-        simp at this; omega
-      rw [hsub] at hid
-      have hidEq : id = idNew := Option.some.inj (by simpa using hid.symm)
-      subst hidEq
-      rw [hframes, hidNew, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hnf
-      rw [hidNew, ← aligned.len, List.getElem?_append_right (Nat.le_refl _), Nat.sub_self] at hgf
-      have hnfEq : nf = nfNew := Option.some.inj (by simpa using hnf.symm)
-      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
-      subst hnfEq hgfEq
+      have hprev := aligned.activeEq bf hbf0 i hlt
+      simpa only [modelFrame, hrows] using hprev
+    · have hiEq : i = before.activeFrames.length := by
+        rw [hact, List.length_append, List.length_singleton] at hi; omega
+      have hgetEq : after.activeFrames[i]'hi = nfNew := by
+        apply Option.some.inj
+        rw [← List.getElem?_eq_getElem hi, hact, hiEq, List.getElem?_append_right (Nat.le_refl _),
+          Nat.sub_self]
+        rfl
+      rw [hgetEq, hiEq, hsum, List.getElem?_append_right (by rw [List.length_reverse]),
+        List.length_reverse, Nat.sub_self]
       rfl
+  · intro rf hrf
+    rw [hret] at hrf
+    obtain ⟨hltG, h0, gf, hgf, hmeta⟩ := aligned.retainedEq rf hrf
+    have hltLen : rf.version.val < natHistory.length := by
+      have := (List.getElem?_eq_some_iff.mp hgf).1
+      rwa [List.length_reverse] at this
+    refine ⟨hglobal.symm ▸ hltG, h0, gf, ?_, hmeta⟩
+    rw [List.reverse_cons, List.getElem?_append_left (by rw [List.length_reverse]; exact hltLen)]
+    exact hgf
+  · intro hf
+    rw [hret]
+    exact aligned.retainedReuse (hreuse ▸ hf)
+  · intro v gf hgf
+    rw [List.reverse_cons] at hgf
+    by_cases hlt : v < natHistory.length
+    · rw [List.getElem?_append_left (by rw [List.length_reverse]; exact hlt)] at hgf
+      exact aligned.verIndexed v gf hgf
+    · rw [List.getElem?_append_right (by rw [List.length_reverse]; exact Nat.le_of_not_gt hlt)] at hgf
+      have hveq : v = natHistory.length := by
+        have := (List.getElem?_eq_some_iff.mp hgf).1
+        simp at this; omega
+      subst hveq
+      rw [List.length_reverse, Nat.sub_self] at hgf
+      have hgfEq : gf = modelFrame encode after.index nfNew := Option.some.inj (by simpa using hgf.symm)
+      subst hgfEq
+      exact hverNew
 
 theorem model_frame_retained (encode : List U8 → String) {before after : CellIndex}
     (kept : IndexKeeps before after) (frame : CcfKv.engine.Frame)
@@ -456,18 +324,17 @@ theorem HistoryIndexValid.append {before after : CcfKv.engine.History}
     (valid : HistoryIndexValid before) (kept : IndexKeeps before.index after.index)
     (live : IndexValid after.index) (frame : CcfKv.engine.Frame)
     (view : IndexView after.index frame.data (indexRows after.index frame.data))
-    (archive : after.log.frames.val = before.log.frames.val ++ [frame])
+    (hact : after.activeFrames = before.activeFrames ++ [frame])
+    (hret : after.retained = before.retained)
     : HistoryIndexValid after := by
-  refine ⟨live, ?_⟩
-  intro i f entry
-  rw [archive] at entry
-  by_cases old : i < before.log.frames.val.length
-  · rw [List.getElem?_append_left old] at entry
-    have preserved := index_keeps_view kept _ _ (valid.archived i f entry)
+  refine ⟨live, ?_, fun f hf => valid.retainedEmpty f (hret ▸ hf)⟩
+  intro f hmem
+  rw [hact] at hmem
+  rcases List.mem_append.mp hmem with old | hnew
+  · have preserved := index_keeps_view kept _ _ (valid.active f old)
     rwa [index_rows_eq preserved]
-  · rw [List.getElem?_append_right (Nat.le_of_not_gt old)] at entry
-    have member := List.mem_iff_getElem?.mpr ⟨_, entry⟩
-    simpa using List.mem_singleton.mp member ▸ view
+  · rw [List.mem_singleton.mp hnew]
+    exact view
 
 /-- Encoded raw-byte order on projected map images, independent of any ordering
 on `String` itself. -/

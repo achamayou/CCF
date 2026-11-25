@@ -806,63 +806,22 @@ fn rollback_restores_prefix_and_stale_term_cannot_publish() {
 }
 
 #[test]
-fn history_retains_frame_ids_across_version_reuse_and_snapshot_install() {
+fn ring_branch_and_retained_stay_bounded_across_pinned_churn() {
     let mut store = Store::new(0);
-    put(&mut store, 0, b"a", b"k", b"first", 1);
-    put(&mut store, 0, b"a", b"k", b"discarded", 2);
-    let pinned = store.history.log.at_cut(2);
-    let pinned_root = store.history.log.read(pinned).data;
-    store.history.index.retain_root(pinned_root);
-    assert!(matches!(
-        run(&mut store, Action::Rollback(1, 1)),
-        Output::RolledBack(1)
-    ));
-    put(&mut store, 0, b"a", b"k", b"replacement", 2);
-    let key = Address {
-        map: Bytes::copy_from(b"a"),
-        key: Bytes::copy_from(b"k"),
-    };
-    let saved = store.history.log.read(pinned);
-    assert_eq!(saved.version, 2);
-    assert!(saved.data.is_empty());
-    assert_eq!(
-        store
-            .history
-            .index
-            .get(pinned_root, &key)
-            .unwrap()
-            .value
-            .as_slice(),
-        b"discarded"
-    );
-    let head = store.history.head();
-    assert_eq!(head.version, 2);
-    assert_eq!(
-        store
-            .history
-            .index
-            .get(head.data, &key)
-            .unwrap()
-            .value
-            .as_slice(),
-        b"replacement"
-    );
-    store.install_snapshot(3, Vec::new()).unwrap();
+    put(&mut store, 0, b"a", b"k", b"v1", 1);
+    begin(&mut store, 1);
+    acquire(&mut store, 1, b"a");
+    for v in 2..=200u64 {
+        put(&mut store, 0, b"a", b"k", format!("v{v}").as_bytes(), v);
+        run(&mut store, Action::Compact(v));
+    }
     assert_eq!(store.history.log.active_len(), 1);
-    assert_eq!(store.history.head().version, 3);
-    let saved = store.history.log.read(pinned);
-    assert_eq!(saved.version, 2);
-    assert_eq!(
-        store
-            .history
-            .index
-            .get(pinned_root, &key)
-            .unwrap()
-            .value
-            .as_slice(),
-        b"discarded"
-    );
-    store.history.index.release_root(pinned_root);
+    assert!(store.history.log.slot_capacity() <= 3);
+    assert_eq!(store.history.retained.len(), 1);
+    assert_eq!(store.history.retained[0].version, 1);
+    assert_read(&mut store, 1, b"a", b"k", false, Some(b"v1"));
+    run(&mut store, Action::End(1));
+    assert!(store.history.retained.is_empty());
 }
 
 #[test]
@@ -908,13 +867,13 @@ fn compacted_metadata_elides_when_unneeded_and_preserves_rollback_lineage() {
     // v1 writes map "m"; v2 writes "other" so v2 still carries v1's lineage for "m".
     put(&mut s, 0, b"m", b"k1", b"v1", 1);
     put(&mut s, 0, b"other", b"o2", b"v2", 2);
-    // Compact to v2 with no live transactions: v0 and v1 metadata must be elided.
+    // Compact to v2 with no live transactions: v0 and v1 are trimmed completely.
     run(&mut s, Action::Compact(2));
-    assert!(!s.history.log.read(s.history.log.resolve(0).unwrap()).meta_live);
-    assert!(!s.history.log.read(s.history.log.resolve(1).unwrap()).meta_live);
-    assert!(s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
+    assert_eq!(s.history.log.active_len(), 1);
+    assert_eq!(s.history.log.active_at(0).version, 2);
+    assert!(s.history.retained.is_empty());
 
-    // Hold a snapshot at v2 so compaction past v2 must retain v2's metadata until End.
+    // Hold a snapshot at v2 so compaction past v2 must retain v2 until End.
     begin(&mut s, 10);
 
     // Advance to v3 and v4 touching only "other", and have tx 11 acquire "m" at v4.
@@ -931,22 +890,24 @@ fn compacted_metadata_elides_when_unneeded_and_preserves_rollback_lineage() {
     put(&mut s, 0, b"m", b"k2", b"v4b", 4);
     put(&mut s, 0, b"m", b"k3", b"v5b", 5);
 
-    // Compact to v5: v2/v3 are below global, and v5 no longer matches tx 11's view of "m",
-    // so v2 and v3 must stay meta_live for tx 11's lineage check (and v2 for tx 10's snapshot),
-    // while v4' stays meta_live because tx 11's snapshot version is 4.
+    // Compact to v5: active ring trims to [v5]; v2, v3, v4' move to retained
+    // (v2/v3 for tx 11's lineage & tx 10's snapshot; v4' for tx 11's snapshot version 4).
     run(&mut s, Action::Compact(5));
-    assert!(s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
-    assert!(s.history.log.read(s.history.log.resolve(3).unwrap()).meta_live);
-    assert!(s.history.log.read(s.history.log.resolve(4).unwrap()).meta_live);
-    assert!(s.history.log.read(s.history.log.resolve(5).unwrap()).meta_live);
+    assert_eq!(s.history.log.active_len(), 1);
+    assert_eq!(s.history.log.active_at(0).version, 5);
+    assert!(s.history.resolve_cut(2).is_some());
+    assert!(s.history.resolve_cut(3).is_some());
+    assert!(s.history.resolve_cut(4).is_some());
 
     // tx 11 writes a disjoint key on "m" and must still apply cleanly because v2/v3 survive;
-    // ending tx 11 inside applied() opportunistically elides v4' (its compacted snapshot version).
+    // ending tx 11 inside applied() prunes both v3 (lineage-only) and v4' (snapshot).
     write(&mut s, 11, b"m", b"k4", Some(b"ok"));
     applied(&mut s, 11, Outcome::Success, 6);
-    assert!(!s.history.log.read(s.history.log.resolve(4).unwrap()).meta_live);
+    assert!(s.history.resolve_cut(3).is_none());
+    assert!(s.history.resolve_cut(4).is_none());
+    assert!(s.history.resolve_cut(2).is_some());
 
-    // Ending tx 10 now allows v2's compacted metadata to elide immediately on Action::End.
+    // Ending tx 10 prunes v2 immediately, leaving retained empty.
     run(&mut s, Action::End(10));
-    assert!(!s.history.log.read(s.history.log.resolve(2).unwrap()).meta_live);
+    assert!(s.history.retained.is_empty());
 }

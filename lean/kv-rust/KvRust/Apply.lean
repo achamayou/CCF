@@ -181,9 +181,9 @@ structure ApplyCapacity (s : CcfKv.engine.History) (head : CcfKv.engine.Frame)
   version : head.version.val < U64.max
   /-- The next application identity does not overflow. -/
   identity : s.next_identity.val < U64.max
-  /-- A new frame can be appended. -/
-  history : s.activeFrames.length < Usize.max
-  archive : s.log.frames.val.length < Usize.max
+  /-- A new frame can be appended into the ring buffer. -/
+  ring
+    : s.log.len.val = s.log.slots.val.length → 2 * s.log.slots.val.length + 1 ≤ Usize.max
   /-- Capacity for publication. -/
   data
     : IndexBatchRoom s.index pinsCount
@@ -196,25 +196,24 @@ structure ApplyCapacity (s : CcfKv.engine.History) (head : CcfKv.engine.Frame)
   births : head.births.val.length + t.pending.val.length ≤ Usize.max
 
 /-- Accepted local application publishes the frame modulo binding order, preserves
-all surviving pins across bounded retirement, and updates the ghost native archive. -/
+all surviving pins across bounded retirement, and updates the ghost native branch. -/
 theorem apply_accepted_matches_model (encode : List U8 → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.Store) (id : U64)
     (includeReport : Bool) (t : CcfKv.engine.Tx) (model : Store)
     (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
-    (natArchive : List Frame)
+    (natHistory : List Frame)
     (hTx : find s.txs.val id = some t) (hPhase : t.phase = .Committing)
     (hWrites : t.pending.val ≠ [])
     (hEligible : WP.spec (CcfKv.engine.Tx.can_apply t s.history) (fun r => r = true))
     (hHead : s.history.activeFrames = prior ++ [head])
-    (hFrames : model.history = natModelFrames s.history.log natArchive)
     (hModelHead : model.head = modelFrame encode s.history.index head)
     (hTerm : model.term = s.history.term.val)
     (hGlobal : model.global = s.history.global.val)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (hCap : ApplyCapacity s.history head t (storePins s).length)
-    (valid : BranchValid s.history.log) (unique : BranchUnique s.history.log)
+    (valid : BranchValid s.history.log)
     (indexed : HistoryIndexValid s.history)
-    (aligned : ArchiveAligned encode s.history natArchive)
+    (aligned : ArchiveAligned encode s.history natHistory)
     (live : IndexLiveness s.history.index (storePins s))
     : let writes := encodeWrites encode (byteWrites t.pending.val)
       let expected := advance model writes
@@ -228,28 +227,20 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
             ∧ FrameOrderEq (modelFrame encode after.history.index next) expected.head
             ∧ IndexView after.history.index next.data
                 (indexRows after.history.index next.data)
-            ∧ natModelFrames after.history.log
-                (natArchive ++ [modelFrame encode after.history.index next])
-              = modelFrame encode after.history.index next :: model.history
             ∧ after.history.global.val = expected.global
             ∧ after.history.term.val = expected.term
             ∧ after.history.next_identity.val = expected.nextIdentity
             ∧ after.history.reuse_compacted_images = s.history.reuse_compacted_images
+            ∧ after.history.retained = s.history.retained
             ∧ s.txs.val[index]? = some (id, t)
             ∧ after.txs.val = s.txs.val.set index (id, {t with phase := .Applied version})
             ∧ BranchValid after.history.log
-            ∧ BranchUnique after.history.log
             ∧ HistoryIndexValid after.history
             ∧ ArchiveAligned encode after.history
-                (natArchive ++ [modelFrame encode after.history.index next])
+                (modelFrame encode after.history.index next :: natHistory)
             ∧ IndexLiveness after.history.index (storePins after)
             ∧ IndexPreservesPins s.history.index after.history.index (storePins after)
-            ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
-            ∧ after.history.log.frames.val = s.history.log.frames.val ++ [next]
-            ∧ (∃ idNew : Usize,
-                idNew.val = s.history.log.frames.val.length
-                ∧ after.history.log.branch.val = s.history.log.branch.val ++ [idNew])
-            ∧ next.meta_live = true) := by
+            ∧ after.history.activeFrames = s.history.activeFrames ++ [next]) := by
   dsimp only
   unfold CcfKv.engine.Store.apply
   apply WP.spec_bind (tx_index s id)
@@ -287,35 +278,33 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         have he : model.head.version = head.version.val := by
           simp [hModelHead, modelFrame, modelMetadata]
         omega
-      have hlive0 : IndexLiveness s.history.index (framePins s.history.log.frames.val ++ txsPins s.txs.val) :=
+      have hlive0 : IndexLiveness s.history.index (framePins s.history.activeFrames ++ txsPins s.txs.val) :=
         live
       apply WP.spec_bind
         (prepare_frame_matches_model encode inj s.history prior head (txsPins s.txs.val)
           valid hHead indexed hlive0 model t.pending version s.history.next_identity
           hModelHead hv' hIdentity.symm hCap.data hCap.addresses hCap.revisions
           hCap.births)
-      rintro ⟨next, prepared⟩ ⟨arena, same, hnext, view, arenaLive, indexKept, hgrowth, hmetaNext⟩
+      rintro ⟨next, prepared⟩ ⟨arena, same, hnext, view, arenaLive, indexKept, hgrowth⟩
       change prepared = {s.history with index := arena} at same
       subst prepared
       apply WP.spec_bind (optional_report_matches encode t.pending includeReport)
       intro reported hreported
-      have branchRoom : s.history.log.branch.val.length < Usize.max :=
-        (branch_values_length s.history.log valid) ▸ hCap.history
       apply WP.spec_bind
-        (branch_append_refines s.history.log next valid hCap.archive branchRoom)
-      rintro ⟨frameId, log⟩ ⟨logValid, hf, slot, _, kept, archive, hbrApp⟩
+        (branch_append_refines s.history.log next valid hCap.ring)
+      rintro log ⟨logValid, hf⟩
       have hibound : s.history.next_identity.val + (1#u64 : U64).val ≤ U64.max := by
         have := hCap.identity
         omega
       apply WP.spec_bind (U64.add_spec hibound)
       intro identity hidentity
-      have hpinsPerm : (if next.data = 0#u32 then framePins s.history.log.frames.val ++ txsPins s.txs.val
-          else next.data :: (framePins s.history.log.frames.val ++ txsPins s.txs.val)).Perm
-          (framePins log.frames.val ++ txsPins s.txs.val) := by
-        rw [archive]
-        have hp := (framePins_append s.history.log.frames.val next).symm.append_right (txsPins s.txs.val)
+      have hpinsPerm : (if next.data = 0#u32 then framePins s.history.activeFrames ++ txsPins s.txs.val
+          else next.data :: (framePins s.history.activeFrames ++ txsPins s.txs.val)).Perm
+          (framePins (branchValues log) ++ txsPins s.txs.val) := by
+        rw [hf]
+        have hp := (framePins_append s.history.activeFrames next).symm.append_right (txsPins s.txs.val)
         by_cases hz : next.data = 0#u32 <;> simpa [hz] using hp
-      have harenaLive2 : IndexLiveness arena (framePins log.frames.val ++ txsPins s.txs.val) :=
+      have harenaLive2 : IndexLiveness arena (framePins (branchValues log) ++ txsPins s.txs.val) :=
         arenaLive.perm hpinsPerm
       have hqArena : 2 * (arena.values.dirs.val.length + arena.values.rows.val.length) + 1 ≤ Usize.max := by
         have h1 := hgrowth.1
@@ -323,8 +312,9 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         have h3 := hCap.data.queue
         omega
       apply WP.spec_bind
-        (index_retire_budget_refines arena (framePins log.frames.val ++ txsPins s.txs.val)
-          CcfKv.engine.RETIRE_BUDGET harenaLive2 hqArena)
+        (index_retire_budget_refines arena
+          (framePins (branchValues log) ++ txsPins s.txs.val) CcfKv.engine.RETIRE_BUDGET
+          harenaLive2 hqArena)
       rintro ⟨_, ai⟩ ⟨aiLive, aiPres, _, _⟩
       obtain ⟨idx, hget⟩ := List.getElem?_eq_some_iff.mp hrow
       apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec s.txs i idx)
@@ -346,44 +336,53 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
       have htxsPinsEq : txsPins afterTxs.val = txsPins s.txs.val := by
         rw [htxsSet]
         exact txsPins_set_same_views s.txs.val i.val id t { t with phase := .Applied version } hrow rfl
-      have hstorePinsEq : storePins afterStore = framePins log.frames.val ++ txsPins s.txs.val := by
-        simp [storePins, afterStore, afterHist, htxsPinsEq]
-      have hnextPin : next.data = 0#u32 ∨ next.data ∈ framePins log.frames.val ++ txsPins s.txs.val := by
+      have hstorePinsEq : storePins afterStore = framePins (branchValues log) ++ txsPins s.txs.val := by
+        simp [storePins, afterStore, afterHist, CcfKv.engine.History.activeFrames, htxsPinsEq]
+      have hnextPin : next.data = 0#u32 ∨ next.data ∈ framePins (branchValues log) ++ txsPins s.txs.val := by
         by_cases hz : next.data = 0#u32
         · exact Or.inl hz
         · exact Or.inr (List.mem_append_left _
-            (List.mem_filterMap.mpr ⟨next, by rw [archive]; simp, by simp [hz]⟩))
+            (List.mem_filterMap.mpr ⟨next, by rw [hf]; simp, by simp [hz]⟩))
       have hnextViewAi : IndexView ai next.data (indexRows arena next.data) :=
         index_preserves_pins_view aiPres next.data _ hnextPin view
       have hnextRowsEq : indexRows ai next.data = indexRows arena next.data :=
         index_rows_eq hnextViewAi
       have hnextModelEq : modelFrame encode ai next = modelFrame encode arena next := by
         simp only [modelFrame, hnextRowsEq]
-      have hpresFull : IndexPreservesPins s.history.index ai (framePins log.frames.val ++ txsPins s.txs.val) :=
+      have hpresFull : IndexPreservesPins s.history.index ai (framePins (branchValues log) ++ txsPins s.txs.val) :=
         (index_preserves_pins_of_keeps indexKept).trans aiPres
       have hidxValidAfter : HistoryIndexValid afterHist := by
-        refine ⟨aiLive.valid, ?_⟩
-        intro k fk hfk
-        change log.frames.val[k]? = some fk at hfk
-        rw [archive] at hfk
-        by_cases hlt : k < s.history.log.frames.val.length
-        · rw [List.getElem?_append_left hlt] at hfk
-          have hpk : fk.data = 0#u32 ∨ fk.data ∈ framePins log.frames.val ++ txsPins s.txs.val := by
+        refine ⟨aiLive.valid, ?_, indexed.retainedEmpty⟩
+        intro fk hfk
+        change fk ∈ branchValues log at hfk
+        rw [hf] at hfk
+        rcases List.mem_append.mp hfk with hold | hnew
+        · have hpk : fk.data = 0#u32 ∨ fk.data ∈ framePins (branchValues log) ++ txsPins s.txs.val := by
             by_cases hz : fk.data = 0#u32
             · exact Or.inl hz
             · exact Or.inr (List.mem_append_left _
-                (List.mem_filterMap.mpr ⟨fk, by
-                  rw [archive]; exact List.mem_append_left _ (List.mem_iff_getElem?.mpr ⟨k, hfk⟩),
-                  by simp [hz]⟩))
-          have hv := index_preserves_pins_view hpresFull fk.data _ hpk (indexed.archived k fk hfk)
+                (List.mem_filterMap.mpr ⟨fk, by rw [hf]; exact List.mem_append_left _ hold, by simp [hz]⟩))
+          have hv := index_preserves_pins_view hpresFull fk.data _ hpk (indexed.active fk hold)
           rwa [index_rows_eq hv]
-        · rw [List.getElem?_append_right (Nat.le_of_not_gt hlt)] at hfk
-          have hmem := List.mem_iff_getElem?.mpr ⟨_, hfk⟩
-          have hfkEq : fk = next := List.mem_singleton.mp hmem
+        · have hfkEq : fk = next := List.mem_singleton.mp hnew
           subst hfkEq
           rwa [hnextRowsEq]
-      have halignedAfter : ArchiveAligned encode afterHist (natArchive ++ [modelFrame encode ai next]) :=
-        aligned.append indexed valid hpresFull archive hbrApp slot rfl rfl hmetaNext
+      have hheadNatVer : head.version.val + 1 = natHistory.length := by
+        obtain ⟨bf, hbf, _, _, hsum⟩ := aligned.base
+        have hidx : prior.length < s.history.activeFrames.length := by simp [hHead]
+        have hgetH : s.history.activeFrames[prior.length]'hidx = head := by
+          apply Option.some.inj
+          rw [← List.getElem?_eq_getElem hidx, hHead]; simp
+        have hver := aligned.active_version bf hbf prior.length hidx
+        rw [hgetH] at hver
+        rw [hHead, List.length_append, List.length_singleton] at hsum
+        omega
+      have hnextVer : next.version.val = natHistory.length := by
+        have h1 : (modelFrame encode arena next).version = model.head.version + 1 := hnext.version
+        have h2 : model.head.version = head.version.val := by simp [hModelHead, modelFrame, modelMetadata]
+        simpa [modelFrame, modelMetadata, h2, hheadNatVer] using h1
+      have halignedAfter : ArchiveAligned encode afterHist (modelFrame encode ai next :: natHistory) :=
+        aligned.append indexed hpresFull hf rfl rfl rfl hnextVer
       refine ⟨
         version,
         reported,
@@ -395,26 +394,20 @@ theorem apply_accepted_matches_model (encode : List U8 → String)
         next,
         hnextModelEq.symm ▸ hnext,
         hnextRowsEq.symm ▸ hnextViewAi,
-        ?_,
         hGlobal.symm,
         hTerm.symm,
-        ?_,
+        by simpa [hone, hIdentity, advance] using hidentity,
+        rfl,
         rfl,
         hrow,
         htxsSet,
         logValid,
-        branch_append_unique valid unique slot hbrApp,
         hidxValidAfter,
         halignedAfter,
         hstorePinsEq.symm ▸ aiLive,
         hstorePinsEq.symm ▸ hpresFull,
-        hf,
-        archive,
-        ⟨frameId, slot, hbrApp⟩,
-        hmetaNext
+        hf
       ⟩
-      · rw [natModelFrames_append valid aligned.len slot hbrApp, hFrames]
-      · simpa [hone, hIdentity, advance] using hidentity
 
 /-- The wire-size preflight reads exactly the write set used by the KV model. -/
 theorem pending_writes_match (encode : List U8 → String)
@@ -593,7 +586,6 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (version : U64) (hVersion : version.val = head.version.val + 1)
     (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
-    (hF : s.history.activeFrames.length < Usize.max)
     (hI : s.history.next_identity.val < U64.max)
     (hD
       : IndexBatchRoom s.history.index (storePins s).length
@@ -604,7 +596,9 @@ theorem replay_next_matches_advance (encode : List U8 → String)
     (hB : head.births.val.length + writes.val.length ≤ Usize.max)
     (valid : BranchValid s.history.log) (indexed : HistoryIndexValid s.history)
     (live : IndexLiveness s.history.index (storePins s))
-    (archiveRoom : s.history.log.frames.val.length < Usize.max)
+    (ringRoom
+      : s.history.log.len.val = s.history.log.slots.val.length
+        → 2 * s.history.log.slots.val.length + 1 ≤ Usize.max)
     : WP.spec (CcfKv.engine.Store.replay_next s version writes)
         (fun (result, after) =>
           (result = .Err .Disabled ∧ after = s)
@@ -620,7 +614,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
                   ∧ BranchValid after.history.log
                   ∧ HistoryIndexValid after.history
                   ∧ IndexLiveness after.history.index (storePins after)
-                  ∧ HistoryKeeps s.history after.history)) := by
+                  ∧ IndexKeeps s.history.index after.history.index)) := by
   unfold CcfKv.engine.Store.replay_next CcfKv.engine.Store.replay_indexed
   simp only [history_head s.history prior head hHead valid, bind_ok]
   apply WP.spec_bind (prepare_replay_matches head.version s.history.next_identity
@@ -648,7 +642,7 @@ theorem replay_next_matches_advance (encode : List U8 → String)
         valid hHead indexed live model pending version s.history.next_identity hModelHead
         versionEq hIdentity.symm (hlength.symm ▸ hD) keyRoom (hlength.symm ▸ hR)
         (hlength.symm ▸ hB))
-    rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _, _⟩
+    rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _⟩
     change prepared = {s.history with index := arena} at same
     subst prepared
     let publish (log : CcfKv.branch_log.BranchLog CcfKv.engine.Frame) (identity : U64)
@@ -661,34 +655,26 @@ theorem replay_next_matches_advance (encode : List U8 → String)
           reuse_compacted_images := false } }
     change WP.spec (Aeneas.Std.bind
       (do
-        let (_, log) ← CcfKv.branch_log.BranchLog.append s.history.log next
+        let log ← CcfKv.branch_log.BranchLog.append s.history.log next
         let identity ← s.history.next_identity + 1#u64
         Result.ok (publish log identity))
       (fun updated => Result.ok (core.result.Result.Ok (), updated))) _
     rw [Aeneas.Std.bind_assoc]
-    have branchRoom : s.history.log.branch.val.length < Usize.max :=
-      (branch_values_length s.history.log valid) ▸ hF
-    apply WP.spec_bind
-      (branch_append_refines s.history.log next valid archiveRoom branchRoom)
-    rintro ⟨id, log⟩ ⟨logValid, hf, slot, saved, kept, archive, _⟩
-    change WP.spec (Aeneas.Std.bind
-      (do
-        let identity ← s.history.next_identity + 1#u64
-        Result.ok (publish log identity))
-      (fun updated => Result.ok (core.result.Result.Ok (), updated))) _
+    apply WP.spec_bind (branch_append_refines s.history.log next valid ringRoom)
+    rintro log ⟨logValid, hf⟩
     rw [Aeneas.Std.bind_assoc]
     have one : (1#u64 : U64).val = 1 := rfl
     apply WP.spec_bind
       (U64.add_spec (x := s.history.next_identity) (y := 1#u64) (by omega))
     intro ident hident
     simp only [bind_ok, WP.spec_ok, publish]
-    have hpinsPerm : (if next.data = 0#u32 then framePins s.history.log.frames.val ++ txsPins s.txs.val
-        else next.data :: (framePins s.history.log.frames.val ++ txsPins s.txs.val)).Perm
-        (framePins log.frames.val ++ txsPins s.txs.val) := by
-      rw [archive]
-      have hp := (framePins_append s.history.log.frames.val next).symm.append_right (txsPins s.txs.val)
+    have hpinsPerm : (if next.data = 0#u32 then framePins s.history.activeFrames ++ txsPins s.txs.val
+        else next.data :: (framePins s.history.activeFrames ++ txsPins s.txs.val)).Perm
+        (framePins (branchValues log) ++ txsPins s.txs.val) := by
+      rw [hf]
+      have hp := (framePins_append s.history.activeFrames next).symm.append_right (txsPins s.txs.val)
       by_cases hz : next.data = 0#u32 <;> simpa [hz] using hp
-    refine Or.inr
+    exact Or.inr
       ⟨
         True.intro,
         next,
@@ -699,16 +685,9 @@ theorem replay_next_matches_advance (encode : List U8 → String)
         True.intro,
         True.intro,
         logValid,
-        indexed.append preserved arenaLive.valid next view archive,
+        indexed.append preserved arenaLive.valid next view hf rfl,
         arenaLive.perm hpinsPerm,
-        ⟨?_, preserved⟩
+        preserved
       ⟩
-    intro j f entry
-    have inside : j < id.val := by
-      rw [slot]
-      by_contra no
-      rw [List.getElem?_eq_none (Nat.le_of_not_gt no)] at entry
-      cases entry
-    exact (kept j inside).trans entry
 
 end KvRust

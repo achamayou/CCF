@@ -20,20 +20,16 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
             execute {} (.storeCreate sid term.val) = some (w, .unit)
             ∧ StateMatches encode sid n w) := by
   apply WP.spec_mono (store_new_lifecycle encode term)
-  intro n ⟨head, _, _, _, _, hnat, hg, ht, hi, htx, valid, unique, indexed, aligned, hlive⟩
+  intro n ⟨head, _, _, _, hg, ht, hi, htx, valid, indexed, aligned, hlive⟩
   let s : Store := {term := term.val}
   let w : State := {stores := [(sid, s)]}
   have hs : find w.stores sid = some s := by simp [w, find]
   have he : execute {} (.storeCreate sid term.val) = some (w, .unit) := by
     simp [execute, find, Kv.Model.set, erase, s, w]
   have hReach := reachable_execute (CCF.TransitionSystem.Reachable.initial rfl) he
-  have hFrames : List.Forall₂ FrameOrderEq
-      (natModelFrames n.history.log [s.head]) s.history := by
-    rw [hnat]
-    exact .cons (.refl _) .nil
-  have hRev : RevisionHistory (natModelFrames n.history.log [s.head]) := by
-    rw [hnat]
-    exact revision_history_new
+  have hFrames : List.Forall₂ FrameOrderEq [s.head] s.history :=
+    .cons (.refl _) .nil
+  have hRev : RevisionHistory [s.head] := revision_history_new
   have hNatArch : ArchiveConsistent [s.head] n.history.next_identity.val := by
     rw [hi]
     simpa [s] using archive_consistent_new
@@ -41,14 +37,19 @@ theorem new_matches (encode : List U8 → String) (sid : Nat) (term : U64)
     intro f hf m
     rw [List.mem_singleton.mp hf]
     exact List.Pairwise.nil
-  have hr := history_related (encode := encode) (n := n.history) (natArchive := [s.head])
-    (archive := [{}]) hReach hs hFrames hg.symm (by change term.val = n.history.term.val; rw [ht])
-    hi.symm valid unique indexed aligned hRev hNatArch hNatSorted (fun f hm => hm)
-    archive_consistent_new
+  have hr := history_related (encode := encode) (n := n.history) (natHistory := [s.head])
+    (natArchive := [s.head]) (archive := [{}]) hReach hs hFrames hg.symm
+    (by change term.val = n.history.term.val; rw [ht])
+    hi.symm valid indexed aligned hRev (fun _ hm => hm) hNatArch hNatSorted
+    (fun f hm => hm) archive_consistent_new
   have hMetaInit : StoreMetaLive encode n [s.head] :=
-    ⟨fun _ _ _ _ _ hmem => by simp [htx] at hmem,
-      fun _ _ _ _ _ _ _ hmem => by simp [htx] at hmem⟩
-  refine ⟨w, he, ⟨⟨s, [s.head], [{}], hs, hr, hMetaInit, ?_⟩, hlive, ?_, hReach⟩⟩
+    ⟨fun _ _ _ _ hmem => by simp [htx] at hmem,
+      fun _ _ _ _ _ hmem => by simp [htx] at hmem⟩
+  refine ⟨
+    w,
+    he,
+    ⟨⟨s, [s.head], [s.head], [{}], hs, hr, hMetaInit, ?_⟩, hlive, ?_, hReach⟩
+  ⟩
   · intro id
     simp [htx, find, w]
   · simp [htx]
@@ -100,10 +101,10 @@ private theorem assoc_find_mem {K V : Type} [DecidableEq K] {rows : Assoc K V} {
 
 private theorem related_row (encode : List U8 → String) (sid : Nat)
     (n : CcfKv.engine.Store) (w : State) (id : U64) (action : Action)
-    {s : Store} {natArchive archive : List Frame}
+    {s : Store} {natHistory natArchive archive : List Frame}
     (hs : find w.stores sid = some s)
-    (hhist : HistoryMatches encode n.history s natArchive archive)
-    (hMeta : StoreMetaLive encode n natArchive)
+    (hhist : HistoryMatches encode n.history s natHistory natArchive archive)
+    (hMeta : StoreMetaLive encode n natHistory)
     (hattempts
       : ∀ q : U64,
           Option.Rel (AttemptMatches encode sid n.history.index natArchive archive)
@@ -118,15 +119,15 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
           (LifecycleModelPost n (execute w action)
             (LifecycleModelRow encode n w sid id natArchive archive)))
     (hSnapMeta
-      : ∀ w' out old next modelTx snap fid nf,
+      : ∀ w' out old next modelTx snap bf,
           execute w action = some (w', out)
           → find n.txs.val id = some old
           → w' = {w with txs := Kv.Model.set w.txs id.val modelTx}
           → AttemptMatches encode sid n.history.index natArchive archive next modelTx
           → next.snapshot = some snap
-          → n.history.log.branch.val[snap.version.val]? = some fid
-          → n.history.log.frames.val[fid.val]? = some nf
-          → nf.meta_live = true)
+          → n.history.activeFrames[0]? = some bf
+          → snap.version.val < bf.version.val
+          → ∃ rf ∈ n.history.retained.val, rf.version = snap.version)
     : WP.spec op (StepMatches encode sid action n (execute w action)) := by
   apply WP.spec_mono before
   intro r hr
@@ -138,24 +139,24 @@ private theorem related_row (encode : List U8 → String) (sid : Nat)
   have hlive' : IndexLiveness r.2.history.index (storePins r.2) := by
     rw [hh, hpins]
     exact h.liveness
-  have hmeta' : StoreMetaLive encode r.2 natArchive := by
+  have hmeta' : StoreMetaLive encode r.2 natHistory := by
     refine ⟨?_, ?_⟩
-    · intro id' t' snap' fid' nf' hmem hsnap' hfid' hnf'
-      rw [hh] at hfid' hnf'
+    · intro id' t' snap' bf hmem hsnap' hbf hlt
+      rw [hh] at hbf ⊢
       rw [hn] at hmem
       rcases List.mem_or_eq_of_mem_set hmem with hold | heq
-      · exact hMeta.snapLive id' t' snap' fid' nf' hold hsnap' hfid' hnf'
+      · exact hMeta.snapLive id' t' snap' bf hold hsnap' hbf hlt
       · obtain ⟨hidEq, htEq⟩ := Prod.mk.inj heq
-        exact hSnapMeta w' out old next modelTx snap' fid' nf' hstep hfindOld hw ht
-          (htEq ▸ hsnap') hfid' hnf'
-    · intro id' t' bm bv off fid' gf hmem hvm hfid' hgf hb hr'
-      rw [hh] at hfid' ⊢
+        exact hSnapMeta w' out old next modelTx snap' bf hstep hfindOld hw ht
+          (htEq ▸ hsnap') hbf hlt
+    · intro id' t' bm bv gf hmem hvm hgf hb hr'
+      rw [hh]
       rw [hn] at hmem
       rcases List.mem_or_eq_of_mem_set hmem with hold | heq
-      · exact hMeta.viewLive id' t' bm bv off fid' gf hold hvm hfid' hgf hb hr'
+      · exact hMeta.viewLive id' t' bm bv gf hold hvm hgf hb hr'
       · obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
-        exact hMeta.viewLive id' old bm bv off fid' gf (List.mem_of_getElem? hi)
-          (hviews ▸ hvm) hfid' hgf hb hr'
+        exact hMeta.viewLive id' old bm bv gf (List.mem_of_getElem? hi)
+          (hviews ▸ hvm) hgf hb hr'
   refine replace_attempt h.unique hattempts id index old next modelTx hi hn
     (congrArg State.txs hw)
     (by rw [hw]; exact hs)
@@ -192,11 +193,11 @@ theorem commit_begin_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (CcfKv.engine.Store.execute n (.CommitBegin id))
         (StepMatches encode sid (.commitBegin sid id.val) n
           (execute w (.commitBegin sid id.val))) := by
-  obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
+  obtain ⟨s, natHistory, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
   refine related_row encode sid n w id _ hs hhist hMeta hattempts h _
     (execute_commit_begin_matches_model encode n w sid id natArchive archive
       (lookup_for_lifecycle encode sid n w id hs hattempts)) ?_
-  intro w' out old next modelTx snap fid nf hstep hfindOld hw ht hsnap hfid hnf
+  intro w' out old next modelTx snap bf hstep hfindOld hw ht hsnap hbf hlt
   obtain ⟨tx, hlookup, hrelOld⟩ := lookup_of_attempts hs hattempts hfindOld
   have htxEq : modelTx.snapshot = tx.snapshot := by
     have hbind : ∀ {α β : Type} (x : α) (f : α → Option β), (some x >>= f) = f x := fun _ _ => rfl
@@ -220,8 +221,10 @@ theorem commit_begin_step_matches (encode : List U8 → String) (sid : Nat)
   | none => simp [holdSnap] at hsnapVer
   | some os =>
       have hosVer : os.version.val = snap.version.val := by simpa [holdSnap] using hsnapVer
-      exact hMeta.snapLive id old os fid nf (assoc_find_mem hfindOld) holdSnap
-        (hosVer ▸ hfid) hnf
+      have hosEq : os.version = snap.version := UScalar.eq_of_val_eq hosVer
+      rw [← hosEq]
+      exact hMeta.snapLive id old os bf (assoc_find_mem hfindOld) holdSnap hbf
+        (hosVer.symm ▸ hlt)
 
 /-- Commit completion preserves the relation even when replication fails. -/
 theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
@@ -230,17 +233,17 @@ theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (CcfKv.engine.Store.execute n (.CommitResult id result))
         (StepMatches encode sid (.commitResult sid id.val (modelOutcome result)) n
           (execute w (.commitResult sid id.val (modelOutcome result)))) := by
-  obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
-  have hSnapPres : ∀ (outKind : Outcome) w' out old next modelTx snap fid nf,
+  obtain ⟨s, natHistory, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
+  have hSnapPres : ∀ (outKind : Outcome) w' out old next modelTx snap bf,
       execute w (.commitResult sid id.val outKind) = some (w', out) →
       find n.txs.val id = some old →
       w' = {w with txs := Kv.Model.set w.txs id.val modelTx} →
       AttemptMatches encode sid n.history.index natArchive archive next modelTx →
       next.snapshot = some snap →
-      n.history.log.branch.val[snap.version.val]? = some fid →
-      n.history.log.frames.val[fid.val]? = some nf →
-      nf.meta_live = true := by
-    intro outKind w' out old next modelTx snap fid nf hstep hfindOld hw ht hsnap hfid hnf
+      n.history.activeFrames[0]? = some bf →
+      snap.version.val < bf.version.val →
+      ∃ rf ∈ n.history.retained.val, rf.version = snap.version := by
+    intro outKind w' out old next modelTx snap bf hstep hfindOld hw ht hsnap hbf hlt
     obtain ⟨tx, hlookup, hrelOld⟩ := lookup_of_attempts hs hattempts hfindOld
     have htxEq : modelTx.snapshot = tx.snapshot := by
       have hbind : ∀ {α β : Type} (x : α) (f : α → Option β), (some x >>= f) = f x := fun _ _ => rfl
@@ -276,8 +279,10 @@ theorem commit_result_step_matches (encode : List U8 → String) (sid : Nat)
     | none => simp [holdSnap] at hsnapVer
     | some os =>
         have hosVer : os.version.val = snap.version.val := by simpa [holdSnap] using hsnapVer
-        exact hMeta.snapLive id old os fid nf (assoc_find_mem hfindOld) holdSnap
-          (hosVer ▸ hfid) hnf
+        have hosEq : os.version = snap.version := UScalar.eq_of_val_eq hosVer
+        rw [← hosEq]
+        exact hMeta.snapLive id old os bf (assoc_find_mem hfindOld) holdSnap hbf
+          (hosVer.symm ▸ hlt)
   cases result <;> exact related_row encode sid n w id _ hs hhist hMeta hattempts h _
     (execute_commit_result_matches_model encode n w sid id natArchive archive _
       (lookup_for_lifecycle encode sid n w id hs hattempts)) (hSnapPres _)
@@ -288,7 +293,7 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (CcfKv.engine.Store.execute n (.Snapshot id))
         (StepMatches encode sid (.snapshot sid id.val) n
           (execute w (.snapshot sid id.val))) := by
-  obtain ⟨s, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
+  obtain ⟨s, natHistory, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
   obtain ⟨prior, head, hf, hhead⟩ := hh.split
   refine related_row encode sid n w id _ hs hh hMeta hattempts h _ ?_ ?_
   · apply execute_snapshot_matches_model encode n w sid id natArchive archive prior head hf hh.valid
@@ -300,7 +305,7 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
     · cases he
     · obtain ⟨rfl, hr⟩ := Option.rel_some_some.mp he
       exact .some ⟨LifecycleAttempt.ofMatched hr, hhead.version.symm, hh.global, hh.term⟩
-  · intro w' out old next modelTx snap fid nf hstep hfindOld hw ht hsnap hfid hnf
+  · intro w' out old next modelTx snap bf hstep hfindOld hw ht hsnap hbf hlt
     obtain ⟨tx, hlookup, _⟩ := lookup_of_attempts hs hattempts hfindOld
     have hmodelSnap : modelTx.snapshot = some {current := s.head, term := s.term} := by
       have hbind : ∀ {α β : Type} (x : α) (f : α → Option β), (some x >>= f) = f x := fun _ _ => rfl
@@ -315,23 +320,13 @@ theorem snapshot_step_matches (encode : List U8 → String) (sid : Nat)
       have h1 := ht.snapshot
       rw [hmodelSnap, hsnap] at h1
       exact (congrArg Prod.fst (Option.some.inj h1)).symm
-    have hbrLen : n.history.log.branch.val.length = n.history.activeFrames.length :=
-      (branch_values_length n.history.log hh.valid).symm
-    have hactLt : snap.version.val < n.history.activeFrames.length := by
-      rw [← hbrLen]; exact (List.getElem?_eq_some_iff.mp hfid).1
-    have hactAt : n.history.activeFrames[snap.version.val]? = some nf := by
-      rw [branch_active_getElem? n.history.log hh.valid, hfid]
-      simpa using hnf
-    have hactEq : n.history.activeFrames[snap.version.val] = nf :=
-      Option.some.inj ((List.getElem?_eq_getElem hactLt).symm.trans hactAt)
-    have hnfVer : nf.version.val = snap.version.val := by
-      rw [← hactEq]; exact hh.indexed snap.version.val hactLt
-    have hge : n.history.global.val ≤ nf.version.val := by
-      have hinv := Kv.Properties.reachable_store_invariants w sid s h.reachable hs
-      have hglLe : s.global ≤ s.head.version := hinv.2.2.1
-      rw [hnfVer, hsnapEq, ← hh.global]
-      exact hglLe
-    exact hh.aligned.globalMetaLive snap.version.val fid nf hfid hnf (fun _ => hge)
+    obtain ⟨bf0, hbf0, hbf0Le, _, _⟩ := hh.aligned.base
+    have hbfEq : bf = bf0 := Option.some.inj (hbf.symm.trans hbf0)
+    subst hbfEq
+    have hinv := Kv.Properties.reachable_store_invariants w sid s h.reachable hs
+    have hglLe : s.global ≤ s.head.version := hinv.2.2.1
+    rw [hh.global] at hglLe
+    omega
 
 /-- A term update does not alter the history frames or any frozen attempts. -/
 theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
@@ -339,21 +334,21 @@ theorem set_term_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (CcfKv.engine.Store.execute n (.SetTerm term))
         (StepMatches encode sid (.setTerm sid term.val) n
           (execute w (.setTerm sid term.val))) := by
-  obtain ⟨s, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
+  obtain ⟨s, natHistory, natArchive, archive, hs, hh, hMeta, hattempts⟩ := h.history
   apply WP.spec_mono (execute_set_term_matches_model n w sid term s hs hh.term)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
   intro w' _ _ ⟨he, hn⟩ reach
-  have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} natArchive archive :=
+  have hh' : HistoryMatches encode {n.history with term} {s with term := term.val} natHistory natArchive archive :=
     {hh with
       term := rfl
-      indexValid := hh.indexValid.congr rfl rfl
-      aligned := ⟨hh.aligned.len, hh.aligned.versionEq, hh.aligned.metaEq,
-        hh.aligned.globalMetaLive, hh.aligned.activeLive⟩}
+      indexValid := hh.indexValid.congr rfl rfl rfl
+      aligned := ⟨hh.aligned.nonempty, hh.aligned.base, hh.aligned.activeEq,
+        hh.aligned.retainedEq, hh.aligned.retainedReuse, hh.aligned.verIndexed⟩}
   have hlive' : IndexLiveness r.2.history.index (storePins r.2) := by
     rw [hn]
     exact h.liveness
-  have hmeta' : StoreMetaLive encode r.2 natArchive := by
+  have hmeta' : StoreMetaLive encode r.2 natHistory := by
     rw [hn]
     exact ⟨hMeta.snapLive, hMeta.viewLive⟩
   refine replace_history h.unique hattempts (s' := {s with term := term.val}) ?_ hmeta'
@@ -402,7 +397,7 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
     : WP.spec (CcfKv.engine.Store.execute n (.Begin id))
         (StepMatches encode sid (.txCreate sid id.val) n
           (execute w (.txCreate sid id.val))) := by
-  obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
+  obtain ⟨s, natHistory, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
   have he : (find w.txs id.val).isSome = (find n.txs.val id).isSome := by
     have hr := hattempts id
     cases hn : find n.txs.val id <;> cases hw : find w.txs id.val <;>
@@ -425,23 +420,23 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
       simp [txsPins, txPins, lifecycleNewTx, alloc.vec.Vec.new]
     rw [hh, hpins]
     exact h.liveness
-  have hmeta' : StoreMetaLive encode r.2 natArchive := by
+  have hmeta' : StoreMetaLive encode r.2 natHistory := by
     refine ⟨?_, ?_⟩
-    · intro id' t' snap' fid' nf' hmem hsnap' hfid' hnf'
-      rw [hh] at hfid' hnf'
+    · intro id' t' snap' bf hmem hsnap' hbf hlt
+      rw [hh] at hbf ⊢
       rw [hn, Kv.Model.set, erase_missing n.txs.val id hmiss] at hmem
       rcases List.mem_cons.mp hmem with heq | hold
       · obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
         simp [lifecycleNewTx] at hsnap'
-      · exact hMeta.snapLive id' t' snap' fid' nf' hold hsnap' hfid' hnf'
-    · intro id' t' bm bv off fid' gf hmem hvm hfid' hgf hb hr'
-      rw [hh] at hfid' ⊢
+      · exact hMeta.snapLive id' t' snap' bf hold hsnap' hbf hlt
+    · intro id' t' bm bv gf hmem hvm hgf hb hr'
+      rw [hh]
       rw [hn, Kv.Model.set, erase_missing n.txs.val id hmiss] at hmem
       rcases List.mem_cons.mp hmem with heq | hold
       · obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
         simp [lifecycleNewTx, alloc.vec.Vec.new] at hvm
-      · exact hMeta.viewLive id' t' bm bv off fid' gf hold hvm hfid' hgf hb hr'
-  refine ⟨⟨s, natArchive, archive, ?_, ?_, hmeta', ?_⟩, hlive', ?_, reach⟩
+      · exact hMeta.viewLive id' t' bm bv gf hold hvm hgf hb hr'
+  refine ⟨⟨s, natHistory, natArchive, archive, ?_, ?_, hmeta', ?_⟩, hlive', ?_, reach⟩
   · rw [hw]; exact hs
   · rw [hh]; exact hhist
   · intro q
@@ -454,8 +449,8 @@ theorem begin_step_matches (encode : List U8 → String) (sid : Nat)
   · rw [hn]
     exact keys_set _ _ _ h.unique
 
-/-- End releases the attempt's pins, erases its row, opportunistically elides compacted
-snapshot metadata, and retires freed nodes, or rejects without mutation. -/
+/-- End releases the attempt's pins, erases its row, prunes unneeded compacted
+retained metadata, and retires freed nodes, or rejects without mutation. -/
 theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective encode)
     (sid : Nat) (n : CcfKv.engine.Store) (w : State) (id : U64)
     (h : StateMatches encode sid n w)
@@ -468,100 +463,50 @@ theorem end_step_matches (encode : List U8 → String) (inj : Function.Injective
     : WP.spec (CcfKv.engine.Store.execute n (.End id))
         (StepMatches encode sid (.txEnd sid id.val) n
           (execute w (.txEnd sid id.val))) := by
-  obtain ⟨s, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
+  obtain ⟨s, natHistory, natArchive, archive, hs, hhist, hMeta, hattempts⟩ := h.history
   have he : (lookupTx w sid id.val).isSome = (find n.txs.val id).isSome := by
     have hr := lookupRelated_of_attempts hs hattempts id
     cases hn : find n.txs.val id <;> cases hw : lookupTx w sid id.val <;>
       rw [hn, hw] at hr <;> cases hr <;> rfl
+  obtain ⟨baseFrame, hbase0, _, _, _⟩ := hhist.aligned.base
   apply WP.spec_mono
-    (execute_end_matches_model n w sid id he h.unique hhist.nonempty hhist.indexed
-      hhist.globalBound hhist.valid hhist.unique h.liveness queueRoom)
+    (execute_end_matches_model n w sid id he h.unique baseFrame hbase0 hhist.valid
+      h.liveness queueRoom)
   intro r hr
   apply refinement_of_lifecycle_post encode sid n w _ r h _ hr
-  intro w' _ _ ⟨hw, hbrEq, hglobalEq, htermEq, hidentEq, hreuseEq, hvalid', hunique',
-    hframesLen, hn, hlive', hpres, globalId, globalFrame, hglBr, hglBefore, hglAfter, hslots⟩ reach
+  intro w' _ _ ⟨hw, hlogEq, hglobalEq, htermEq, hidentEq, hreuseEq, hn, hlive',
+    hpres, hretSub, hretDone⟩ reach
+  have hactEq : r.2.history.activeFrames = n.history.activeFrames := by
+    unfold CcfKv.engine.History.activeFrames; rw [hlogEq]
   have hpresFrames : IndexPreservesPins n.history.index r.2.history.index
-      (framePins r.2.history.log.frames.val ++ txsPins r.2.txs.val) := hpres
-  have hslotAt : ∀ (k : Nat) (f' : CcfKv.engine.Frame),
-      r.2.history.log.frames.val[k]? = some f'
-      → ∃ f, n.history.log.frames.val[k]? = some f
-        ∧ f'.version = f.version
-        ∧ f'.data = f.data
-        ∧ (f' = f
-            ∨ (f'.meta_live = false
-                ∧ f.version.val < n.history.global.val
-                ∧ n.history.reuse_compacted_images = true
-                ∧ CcfKv.engine.txs_need_frame r.2.txs f globalFrame = .ok false)) := by
-    intro k f' hf'
-    have hkLt : k < n.history.log.frames.val.length := by
-      rw [← hframesLen]; exact (List.getElem?_eq_some_iff.mp hf').1
-    let f := n.history.log.frames.val[k]'hkLt
-    have hf : n.history.log.frames.val[k]? = some f := List.getElem?_eq_getElem hkLt
-    obtain ⟨f'', hf'', hv, hd, hcase⟩ := hslots k f hf
-    have heq : f' = f'' := Option.some.inj (hf'.symm.trans hf'')
-    subst heq
-    exact ⟨f, hf, hv, hd, hcase⟩
+      (framePins r.2.history.activeFrames ++ txsPins r.2.txs.val) := hpres
   have hidxValid' : HistoryIndexValid r.2.history :=
-    hhist.indexValid.of_preserves_pins hlive'.valid hpresFrames (fun i f' hf' => by
-      obtain ⟨f, hf, _, hd, _⟩ := hslotAt i f' hf'
-      exact Or.inr ⟨i, f, hf, hd⟩)
-  have haligned' : ArchiveAligned encode r.2.history natArchive := by
-    refine ⟨by rw [hframesLen]; exact hhist.aligned.len, ?_, ?_, ?_, ?_⟩
-    · intro i nf gf hnf hgf
-      obtain ⟨f, hf, hv, _, _⟩ := hslotAt i nf hnf
-      rw [hv]
-      exact hhist.aligned.versionEq i f gf hf hgf
-    · intro i nf gf hnf hgf hml
-      obtain ⟨f, hf, _, _, hcase⟩ := hslotAt i nf hnf
-      rcases hcase with rfl | ⟨hfalse, _, _, _⟩
-      · exact hhist.aligned.metaEq i nf gf hf hgf hml
-      · simp [hfalse] at hml
-    · intro off fid nf hfid hnf hlive
-      obtain ⟨f, hf, hv, _, hcase⟩ := hslotAt fid.val nf hnf
-      have hlive0 : n.history.reuse_compacted_images = true → n.history.global.val ≤ f.version.val := by
-        rw [← hreuseEq, ← hglobalEq, ← hv]; exact hlive
-      rcases hcase with rfl | ⟨_, hlt, hreuseT, _⟩
-      · exact hhist.aligned.globalMetaLive off fid nf (hbrEq ▸ hfid) hf hlive0
-      · have := hlive0 hreuseT; omega
-    · intro off fid nf gf hfid hnf hgf hlive
-      obtain ⟨f, hf, hv, hd, hcase⟩ := hslotAt fid.val nf hnf
-      have hlive0 : n.history.reuse_compacted_images = true → n.history.global.val ≤ f.version.val := by
-        rw [← hreuseEq, ← hglobalEq, ← hv]; exact hlive
-      rcases hcase with rfl | ⟨_, hlt, hreuseT, _⟩
-      · have hmf0 := hhist.aligned.activeLive off fid nf gf (hbrEq ▸ hfid) hf hgf hlive0
-        have hpin : nf.data = 0#u32 ∨ nf.data ∈ framePins r.2.history.log.frames.val ++ txsPins r.2.txs.val := by
-          by_cases hz : nf.data = 0#u32
-          · exact Or.inl hz
-          · exact Or.inr (List.mem_append_left _
-              (List.mem_filterMap.mpr ⟨nf, List.mem_iff_getElem?.mpr ⟨fid.val, hnf⟩, by simp [hz]⟩))
-        have hview := index_preserves_pins_view hpresFrames nf.data _ hpin
-          (hhist.indexValid.archived fid.val nf hf)
-        have hrows : indexRows r.2.history.index nf.data = indexRows n.history.index nf.data :=
-          index_rows_eq hview
-        simpa only [modelFrame, hrows] using hmf0
-      · have := hlive0 hreuseT; omega
-  have hmeta' : StoreMetaLive encode r.2 natArchive :=
-    store_meta_live_after_elision inj hMeta hhist.indexed hhist.valid hbrEq
+    hhist.indexValid.of_preserves_pins hlive'.valid hpresFrames
+      (fun f' hf' => Or.inr ⟨f', hactEq ▸ hf', rfl⟩)
+      (fun rf hrf => hhist.indexValid.retainedEmpty rf (hretSub rf hrf))
+  have haligned' : ArchiveAligned encode r.2.history natHistory :=
+    hhist.aligned.of_preserves_pins hhist.indexValid hpresFrames hactEq
+      hretSub hglobalEq hreuseEq
+  have hmeta' : StoreMetaLive encode r.2 natHistory :=
+    store_meta_live_after_prune inj hMeta hhist.aligned haligned'
       (fun row hrow => by rw [hn] at hrow; exact (List.mem_filter.mp hrow).1)
-      hglBr hglAfter (fun k f hf => by
-        obtain ⟨f', hf', hv, _, hcase⟩ := hslots k f hf
-        refine ⟨f', hf', hv, ?_⟩
-        rcases hcase with rfl | ⟨hml, _, _, hfalse⟩
-        · exact Or.inl ⟨rfl, rfl, rfl⟩
-        · exact Or.inr ⟨hml, hfalse⟩)
-  have hnatEq : natModelFrames r.2.history.log natArchive = natModelFrames n.history.log natArchive := by
-    unfold natModelFrames
-    rw [hbrEq]
-  have hhist' : HistoryMatches encode r.2.history s natArchive archive :=
-    history_related reach (by rw [hw]; exact hs) (hnatEq.symm ▸ hhist.frames)
+      (by rw [hactEq]; exact List.mem_of_getElem? hbase0)
+      (fun f hf => by
+        rcases List.mem_append.mp hf with hact | hret
+        · exact Or.inl (List.mem_append_left _ (hactEq.symm ▸ hact))
+        · rcases hretDone f hret with hkept | hfalse
+          · exact Or.inl (List.mem_append_right _ hkept)
+          · exact Or.inr (Or.inr hfalse))
+  have hhist' : HistoryMatches encode r.2.history s natHistory natArchive archive :=
+    history_related reach (by rw [hw]; exact hs) hhist.frames
       (by rw [hglobalEq]; exact hhist.global)
       (by rw [htermEq]; exact hhist.term)
       (by rw [hidentEq]; exact hhist.identity)
-      hvalid' hunique' hidxValid' haligned'
-      (hnatEq.symm ▸ hhist.revisions)
+      (by rw [hlogEq]; exact hhist.valid) hidxValid' haligned'
+      hhist.revisions hhist.natSub
       (by rw [hidentEq]; exact hhist.nativeArchive)
       hhist.natSorted hhist.modelSub hhist.modelArchive
-  refine ⟨⟨s, natArchive, archive, ?_, hhist', hmeta', ?_⟩, hlive', ?_, reach⟩
+  refine ⟨⟨s, natHistory, natArchive, archive, ?_, hhist', hmeta', ?_⟩, hlive', ?_, reach⟩
   · rw [hw]; exact hs
   · intro q
     rw [hn, hw, find_erase_key, find_erase_key]

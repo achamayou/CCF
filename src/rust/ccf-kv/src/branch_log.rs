@@ -1,78 +1,125 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-#[derive(Clone, Copy)]
-pub struct FrameId(usize);
-
-/// Experimental snapshot storage. Rollback truncates the active branch, not
-/// the immutable frames; IDs are local to the issuing log and are never reused.
-#[derive(Clone)]
+/// Bounded ring-buffered active branch storage.
+/// Logical offsets `0..self.len` map to occupied slots starting at `self.head`
+/// modulo `self.slots.len()`; all other slots are `None`.
 pub struct BranchLog<T> {
-    frames: Vec<T>,
-    branch: Vec<usize>,
+    slots: Vec<Option<T>>,
+    head: usize,
+    len: usize,
 }
 
 impl<T> BranchLog<T> {
     pub fn new(base: T) -> Self {
-        let mut frames = Vec::new();
-        frames.push(base);
-        let mut branch = Vec::new();
-        branch.push(0);
-        Self { frames, branch }
-    }
-
-    pub fn append(&mut self, frame: T) -> FrameId {
-        let id = self.frames.len();
-        self.frames.push(frame);
-        self.branch.push(id);
-        FrameId(id)
+        let mut slots = Vec::new();
+        slots.push(Some(base));
+        Self {
+            slots,
+            head: 0,
+            len: 1,
+        }
     }
 
     pub fn active_len(&self) -> usize {
-        self.branch.len()
+        self.len
+    }
+
+    fn slot(&self, offset: usize) -> usize {
+        let suffix = self.slots.len() - self.head;
+        if offset < suffix {
+            self.head + offset
+        } else {
+            offset - suffix
+        }
+    }
+
+    fn reallocate(&mut self, capacity: usize) {
+        let mut next = Vec::with_capacity(capacity);
+        let mut i = 0;
+        while i < self.len {
+            let idx = self.slot(i);
+            next.push(self.slots[idx].take());
+            i += 1;
+        }
+        while next.len() < capacity {
+            next.push(None);
+        }
+        self.slots = next;
+        self.head = 0;
+    }
+
+    fn grow(&mut self) {
+        let capacity = 2 * self.slots.len() + 1;
+        self.reallocate(capacity);
+    }
+
+    pub fn shrink_if_sparse(&mut self) {
+        if self.slots.len() <= 64 || self.len >= self.slots.len() / 4 {
+            return;
+        }
+        let capacity = 2 * self.len + 1;
+        self.reallocate(capacity);
+    }
+
+    pub fn append(&mut self, frame: T) {
+        if self.len == self.slots.len() {
+            self.grow();
+        }
+        let idx = self.slot(self.len);
+        self.slots[idx] = Some(frame);
+        self.len += 1;
     }
 
     pub fn active_at(&self, offset: usize) -> &T {
-        self.read(FrameId(self.branch[offset]))
-    }
-
-    pub(crate) fn reset_branch(&mut self, base: T) {
-        self.branch.resize(0, 0);
-        self.append(base);
-    }
-
-    pub fn resolve(&self, offset: usize) -> Option<FrameId> {
-        if offset < self.branch.len() {
-            Some(FrameId(self.branch[offset]))
-        } else {
-            None
+        let idx = self.slot(offset);
+        match &self.slots[idx] {
+            Some(frame) => frame,
+            None => panic!("branch slot missing"),
         }
     }
 
-    pub fn at_cut(&self, offset: u64) -> FrameId {
-        let head = self.branch.len() - 1;
-        let i = if offset < head as u64 {
+    pub fn at_cut(&self, offset: u64) -> usize {
+        let head = self.len - 1;
+        if offset < head as u64 {
             offset as usize
         } else {
             head
-        };
-        FrameId(self.branch[i])
-    }
-
-    pub fn read(&self, id: FrameId) -> &T {
-        &self.frames[id.0]
-    }
-
-    pub fn read_mut(&mut self, id: FrameId) -> &mut T {
-        &mut self.frames[id.0]
-    }
-
-    pub fn rewind(&mut self, offset: usize) -> bool {
-        if offset >= self.branch.len() {
-            return false;
         }
-        self.branch.resize(offset + 1, 0);
-        true
+    }
+
+    pub fn pop_front(&mut self) -> T {
+        let idx = self.head;
+        let item = match self.slots[idx].take() {
+            Some(frame) => frame,
+            None => panic!("branch slot missing"),
+        };
+        self.head = self.slot(1);
+        self.len -= 1;
+        item
+    }
+
+    pub fn pop_back(&mut self) -> T {
+        let idx = self.slot(self.len - 1);
+        let item = match self.slots[idx].take() {
+            Some(frame) => frame,
+            None => panic!("branch slot missing"),
+        };
+        self.len -= 1;
+        item
+    }
+
+    pub(crate) fn reset_branch(&mut self, base: T) {
+        let mut slots = Vec::new();
+        slots.push(Some(base));
+        self.slots = slots;
+        self.head = 0;
+        self.len = 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot_capacity(&self) -> usize {
+        self.slots.len()
     }
 }
 
@@ -81,24 +128,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offsets_can_be_reused_but_old_frame_ids_keep_their_contents() {
-        let mut log = BranchLog::new("base");
-        let first = log.append("first");
-        let discarded = log.append("discarded");
-        let pinned = log.resolve(2).unwrap();
-        assert!(!log.rewind(3));
-        assert_eq!(*log.read(log.resolve(2).unwrap()), "discarded");
-        assert!(log.rewind(1));
-        assert!(log.resolve(2).is_none());
-        assert_eq!(log.at_cut(u64::MAX).0, first.0);
-        let replacement = log.append("replacement");
-        assert_ne!(replacement.0, discarded.0);
-        assert_eq!(log.at_cut(2).0, replacement.0);
-        assert_eq!(*log.read(log.resolve(0).unwrap()), "base");
-        assert_eq!(*log.read(log.resolve(2).unwrap()), "replacement");
-        assert_eq!(*log.read(first), "first");
-        assert_eq!(*log.read(pinned), "discarded");
-        assert!(log.rewind(0));
-        assert_eq!(*log.read(replacement), "replacement");
+    fn ring_buffer_wraps_grows_pops_and_shrinks() {
+        let mut log = BranchLog::new(0u64);
+        assert_eq!(log.active_len(), 1);
+        assert_eq!(*log.active_at(0), 0);
+
+        // Steady-state append + pop_front wraps without growing capacity.
+        for v in 1..=200u64 {
+            log.append(v);
+            assert_eq!(log.pop_front(), v - 1);
+            assert_eq!(log.active_len(), 1);
+            assert_eq!(*log.active_at(0), v);
+        }
+        assert!(log.slot_capacity() <= 3);
+
+        // Burst growth followed by rollback and shrink.
+        for v in 201..=300u64 {
+            log.append(v);
+        }
+        assert_eq!(log.active_len(), 101);
+        assert!(log.slot_capacity() > 64);
+        assert_eq!(log.at_cut(50), 50);
+        assert_eq!(log.at_cut(u64::MAX), 100);
+        while log.active_len() > 2 {
+            log.pop_back();
+        }
+        log.shrink_if_sparse();
+        assert_eq!(log.active_len(), 2);
+        assert_eq!(*log.active_at(0), 200);
+        assert_eq!(*log.active_at(1), 201);
+        assert!(log.slot_capacity() <= 5);
     }
 }

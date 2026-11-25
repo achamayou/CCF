@@ -316,8 +316,7 @@ theorem frame_advance_matches_model (encode : List U8 → String)
           ∧ IndexGrowth index arena
               (pending.val.length
                 * ((indexRows index before.data).length + pending.val.length + 1))
-              pending.val.length
-          ∧ after.meta_live = true) := by
+              pending.val.length) := by
   let data := indexRows index before.data
   unfold CcfKv.engine.Frame.advance
   simp only [clone_assoc, bind_ok]
@@ -329,7 +328,7 @@ theorem frame_advance_matches_model (encode : List U8 → String)
   change WP.spec (do
     let base ← CcfKv.engine.publication_base index before.data pending
     let (root, after) ← CcfKv.engine.publish_selected index base pending version
-    Result.ok (({version, data := root, revisions := rev, births := birth, meta_live := true} :
+    Result.ok (({version, data := root, revisions := rev, births := birth} :
       CcfKv.engine.Frame), after)) _
   apply WP.spec_bind
     (publication_base_refines index before.data data pending pins.length view live.valid
@@ -355,10 +354,9 @@ theorem frame_advance_matches_model (encode : List U8 → String)
       data := root
       revisions := rev
       births := birth
-      meta_live := true
     } : CcfKv.engine.Frame), after)) _
   rw [WP.spec_ok]
-  refine ⟨?_, projected.symm ▸ updated, arenaLive, kept, growth, rfl⟩
+  refine ⟨?_, projected.symm ▸ updated, arenaLive, kept, growth⟩
   refine ⟨?_, ?_, ?_, ?_⟩
   · simp only [modelFrame, modelMetadata, advance]
     exact hVersion
@@ -412,7 +410,7 @@ theorem frame_advance_order_matches_model (encode : List U8 → String)
     heads.version.symm ▸ hVersion
   apply WP.spec_mono (frame_advance_matches_model encode inj before index pins live hrootPin view
     representative pending version identity rfl nextVersion hIdentity space addresses hRevs hBirths)
-  rintro ⟨after, arena⟩ ⟨published, retained, lAfter, kept, _, _⟩
+  rintro ⟨after, arena⟩ ⟨published, retained, lAfter, kept, _⟩
   refine ⟨?_, retained, lAfter, kept⟩
   exact published.trans (advance_order_eq representative model _ _ heads rfl related
     (unique_of_perm heads.data.symm uniqueData) uniqueWrites)
@@ -423,7 +421,7 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
     (extraPins : List U32)
     (branch : BranchValid history.log) (split : history.activeFrames = prior ++ [head])
     (valid : HistoryIndexValid history)
-    (live : IndexLiveness history.index (framePins history.log.frames.val ++ extraPins))
+    (live : IndexLiveness history.index (framePins history.activeFrames ++ extraPins))
     (model : Store)
     (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
     (version identity : U64)
@@ -432,7 +430,7 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
     (nextId : identity.val = model.nextIdentity)
     (room
       : IndexBatchRoom history.index
-          (framePins history.log.frames.val ++ extraPins).length
+          (framePins history.activeFrames ++ extraPins).length
           ((indexRows history.index head.data).length + pending.val.length)
           pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
@@ -447,15 +445,14 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
             ∧ IndexView arena after.data (indexRows arena after.data)
             ∧ IndexLiveness arena
                 (if after.data = 0#u32 then
-                    framePins history.log.frames.val ++ extraPins
+                    framePins history.activeFrames ++ extraPins
                   else
-                    after.data :: (framePins history.log.frames.val ++ extraPins))
+                    after.data :: (framePins history.activeFrames ++ extraPins))
             ∧ IndexKeeps history.index arena
             ∧ IndexGrowth history.index arena
                 (pending.val.length
                   * ((indexRows history.index head.data).length + pending.val.length + 1))
-                pending.val.length
-            ∧ after.meta_live = true) := by
+                pending.val.length) := by
   unfold CcfKv.engine.History.prepare_frame
   apply WP.spec_bind (branch_active_len history.log branch)
   intro count hc
@@ -472,16 +469,15 @@ theorem prepare_frame_matches_model (encode : List U8 → String)
   apply WP.spec_bind (branch_active_at history.log branch off head selected)
   intro f h
   subst f
-  have hheadPin : head.data = 0#u32 ∨ head.data ∈ framePins history.log.frames.val ++ extraPins := by
+  have hheadPin : head.data = 0#u32 ∨ head.data ∈ framePins history.activeFrames ++ extraPins := by
     by_cases hz : head.data = 0#u32
     · exact Or.inl hz
     · have hmemAct : head ∈ history.activeFrames := by simp [split]
-      obtain ⟨id, _, hsaved⟩ := List.mem_filterMap.mp hmemAct
       exact Or.inr (List.mem_append_left extraPins
-        (List.mem_filterMap.mpr ⟨head, List.mem_iff_getElem?.mpr ⟨id.val, hsaved⟩, by simp [hz]⟩))
+        (List.mem_filterMap.mpr ⟨head, hmemAct, by simp [hz]⟩))
   apply WP.spec_bind
     (frame_advance_matches_model encode inj head history.index
-      (framePins history.log.frames.val ++ extraPins) live hheadPin
+      (framePins history.activeFrames ++ extraPins) live hheadPin
       (valid.head prior head split) model pending version identity before nextVersion
       nextId room addresses revisions births)
   rintro ⟨next, arena⟩ spec

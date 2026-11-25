@@ -59,9 +59,8 @@ theorem clone_pin (pin : CcfKv.engine.PinnedImage)
     CcfKv.radix.RadixRoot.Insts.CoreCloneClone.clone]
 
 def HistoryScanRoom (history : CcfKv.engine.History) : Prop :=
-  ∀ (i : Nat) (frame : CcfKv.engine.Frame),
-    history.log.frames.val[i]? = some frame
-    → 18 * (indexRows history.index frame.data).length ≤ Usize.max
+  ∀ frame ∈ history.activeFrames,
+    18 * (indexRows history.index frame.data).length ≤ Usize.max
 
 theorem release_pin_refines (index : CellIndex) (restPins : List U32)
     (pin : CcfKv.engine.PinnedImage)
@@ -324,7 +323,7 @@ def txsPins (txs : List (U64 × CcfKv.engine.Tx)) : List U32 :=
   txs.flatMap fun (_, t) => txPins t
 
 def storePins (s : CcfKv.engine.Store) : List U32 :=
-  framePins s.history.log.frames.val ++ txsPins s.txs.val
+  framePins s.history.activeFrames ++ txsPins s.txs.val
 
 theorem txsPins_set_same_views (txs : List (U64 × CcfKv.engine.Tx)) (i : Nat)
     (id : U64) (t t' : CcfKv.engine.Tx)

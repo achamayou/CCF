@@ -3,7 +3,7 @@
 
 //! A single-store KV state machine over finite association lists.
 
-use crate::branch_log::{BranchLog, FrameId};
+use crate::branch_log::BranchLog;
 use crate::kv_index::{AddressIndex, Binding};
 use crate::radix::{RadixRoot, RadixRow};
 
@@ -273,7 +273,6 @@ struct Frame {
     data: RadixRoot,
     revisions: Assoc<Bytes, Stamp>,
     births: Assoc<Bytes, Stamp>,
-    meta_live: bool,
 }
 
 impl Frame {
@@ -283,7 +282,6 @@ impl Frame {
             data,
             revisions: Assoc::new(),
             births: Assoc::new(),
-            meta_live: true,
         }
     }
 
@@ -295,9 +293,6 @@ impl Frame {
     }
 
     fn matches_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
-        if !self.meta_live {
-            return false;
-        }
         let same_birth = match (self.births.get(map), birth) {
             (Some(a), Some(b)) => a.same(b),
             (None, None) => true,
@@ -334,7 +329,6 @@ impl Frame {
             data: publish_selected(index, base, pending, version),
             revisions,
             births,
-            meta_live: true,
         }
     }
 }
@@ -536,9 +530,17 @@ fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CutRef {
+    Active(usize),
+    Retained(usize),
+}
+
 struct History {
-    // The active branch is oldest first and contiguous in version.
+    // Active uncompacted suffix, oldest first and contiguous in version.
     log: BranchLog<Frame>,
+    // Metadata-only compacted frames (< log base) still needed by live attempts.
+    retained: Vec<Frame>,
     index: AddressIndex<Cell>,
     global: Version,
     term: Term,
@@ -552,6 +554,7 @@ impl History {
         let index = AddressIndex::new();
         Self {
             log: BranchLog::new(Frame::empty(index.empty_root())),
+            retained: Vec::new(),
             index,
             global: 0,
             term,
@@ -569,8 +572,30 @@ impl History {
         if cut < base { 0 } else { cut - base }
     }
 
+    fn resolve_cut(&self, cut: Version) -> Option<CutRef> {
+        let base = self.log.active_at(0).version;
+        if cut < base {
+            let mut i = 0;
+            while i < self.retained.len() {
+                if self.retained[i].version == cut {
+                    return Some(CutRef::Retained(i));
+                }
+                i += 1;
+            }
+            return None;
+        }
+        Some(CutRef::Active(self.log.at_cut(cut - base)))
+    }
+
+    fn read_cut(&self, cut: CutRef) -> &Frame {
+        match cut {
+            CutRef::Active(offset) => self.log.active_at(offset),
+            CutRef::Retained(index) => &self.retained[index],
+        }
+    }
+
     fn at_cut(&self, cut: Version) -> &Frame {
-        self.log.read(self.pin_cut(cut))
+        self.log.active_at(self.log.at_cut(self.relative_cut(cut)))
     }
 
     fn retained_data(&self, cut: Version, fallback: RadixRoot) -> RadixRoot {
@@ -586,11 +611,7 @@ impl History {
         head.advance(&mut self.index, version, identity, pending)
     }
 
-    fn pin_cut(&self, cut: Version) -> FrameId {
-        self.log.at_cut(self.relative_cut(cut))
-    }
-
-    fn map_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
+    fn active_matches_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
         let mut i = self.log.active_len();
         while i > 0 {
             i -= 1;
@@ -601,65 +622,57 @@ impl History {
         false
     }
 
-    fn release_active_range(&mut self, start: usize, end: usize) {
-        let mut i = start;
-        while i < end {
-            if let Some(id) = self.log.resolve(i) {
-                let old = self.log.read(id).data;
-                if !old.is_empty() {
-                    self.log.read_mut(id).data = self.index.empty_root();
-                    self.index.release_root(old);
-                }
-                let slot = self.log.read_mut(id);
-                slot.revisions = Assoc::new();
-                slot.births = Assoc::new();
-                slot.meta_live = false;
+    fn retained_matches_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
+        let mut j = 0;
+        while j < self.retained.len() {
+            if self.retained[j].matches_lineage(map, birth, revision) {
+                return true;
             }
-            i += 1;
+            j += 1;
+        }
+        false
+    }
+
+    fn map_lineage(&self, map: &Bytes, birth: Option<Stamp>, revision: Stamp) -> bool {
+        if self.active_matches_lineage(map, birth, revision) {
+            return true;
+        }
+        self.retained_matches_lineage(map, birth, revision)
+    }
+
+    fn pop_active_to(&mut self, keep_len: usize) {
+        while self.log.active_len() > keep_len {
+            let frame = self.log.pop_back();
+            if !frame.data.is_empty() {
+                self.index.release_root(frame.data);
+            }
         }
     }
 
-    fn release_compacted_range(
-        &mut self,
-        start: usize,
-        end: usize,
-        global_id: FrameId,
-        txs: &Assoc<Attempt, Tx>,
-    ) {
-        let mut i = start;
-        while i < end {
-            if let Some(id) = self.log.resolve(i) {
-                let old = self.log.read(id).data;
-                if !old.is_empty() {
-                    self.log.read_mut(id).data = self.index.empty_root();
-                    self.index.release_root(old);
-                }
-                let elide = !txs_need_frame(txs, self.log.read(id), self.log.read(global_id));
-                if elide {
-                    let slot = self.log.read_mut(id);
-                    slot.revisions = Assoc::new();
-                    slot.births = Assoc::new();
-                    slot.meta_live = false;
-                }
+    fn compact_prefix(&mut self, mut count: usize, txs: &Assoc<Attempt, Tx>) {
+        while count > 0 {
+            let needed = txs_need_frame(txs, self.log.active_at(0), self.log.active_at(count));
+            let mut frame = self.log.pop_front();
+            if !frame.data.is_empty() {
+                let old = frame.data;
+                frame.data = self.index.empty_root();
+                self.index.release_root(old);
             }
-            i += 1;
+            if needed {
+                self.retained.push(frame);
+            }
+            count -= 1;
         }
     }
 
-    fn try_elide_compacted_version(&mut self, version: Version, txs: &Assoc<Attempt, Tx>) {
-        if !self.reuse_compacted_images || version >= self.global {
+    fn prune_retained(&mut self, txs: &Assoc<Attempt, Tx>) {
+        if !self.reuse_compacted_images || self.retained.is_empty() {
             return;
         }
-        let offset = self.relative_cut(version) as usize;
-        let global_id = self.pin_cut(self.global);
-        if let Some(id) = self.log.resolve(offset) {
-            let elide = !txs_need_frame(txs, self.log.read(id), self.log.read(global_id));
-            if elide {
-                let slot = self.log.read_mut(id);
-                slot.revisions = Assoc::new();
-                slot.births = Assoc::new();
-                slot.meta_live = false;
-            }
+        let global_frame = self.log.active_at(0);
+        if any_retained_prunable(&self.retained, global_frame, txs) {
+            let empty = self.index.empty_root();
+            prune_retained_frames(&mut self.retained, global_frame, txs, empty);
         }
     }
 
@@ -668,10 +681,9 @@ impl History {
         let next = compact_cut(old_global, self.head().version, requested);
         self.global = next;
         if self.reuse_compacted_images && old_global < next {
-            let start = self.relative_cut(old_global) as usize;
-            let end = self.relative_cut(next) as usize;
-            let global_id = self.pin_cut(next);
-            self.release_compacted_range(start, end, global_id, txs);
+            let count = (next - old_global) as usize;
+            self.compact_prefix(count, txs);
+            self.log.shrink_if_sparse();
             self.index.retire_budget(RETIRE_BUDGET);
         }
         self.global
@@ -687,16 +699,48 @@ impl History {
         let head = self.head().version;
         let cut = rollback_cut(self.global, head, requested);
         if cut < head {
-            // The cut's offset is below the last retained frame's index.
-            let offset = self.relative_cut(cut) as usize;
-            let active_len = self.log.active_len();
-            self.release_active_range(offset + 1, active_len);
-            assert!(self.log.rewind(offset));
+            let keep_len = self.relative_cut(cut) as usize + 1;
+            self.pop_active_to(keep_len);
+            self.log.shrink_if_sparse();
             self.index.retire_budget(RETIRE_BUDGET);
         }
         self.term = term;
         Ok(Output::RolledBack(cut))
     }
+}
+
+fn any_retained_prunable(
+    retained: &Vec<Frame>,
+    global_frame: &Frame,
+    txs: &Assoc<Attempt, Tx>,
+) -> bool {
+    let mut i = 0;
+    while i < retained.len() {
+        if !txs_need_frame(txs, &retained[i], global_frame) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn prune_retained_frames(
+    retained: &mut Vec<Frame>,
+    global_frame: &Frame,
+    txs: &Assoc<Attempt, Tx>,
+    empty: RadixRoot,
+) {
+    let mut kept = Vec::with_capacity(retained.len());
+    let mut i = 0;
+    while i < retained.len() {
+        let mut frame = Frame::empty(empty);
+        core::mem::swap(&mut frame, &mut retained[i]);
+        if txs_need_frame(txs, &frame, global_frame) {
+            kept.push(frame);
+        }
+        i += 1;
+    }
+    *retained = kept;
 }
 
 fn compact_cut(global: Version, head: Version, requested: Version) -> Version {
@@ -907,21 +951,21 @@ impl View {
 
 fn pin_maps(
     history: &mut History,
-    local: FrameId,
-    global: FrameId,
+    local: CutRef,
+    global_offset: usize,
     local_cut: Version,
 ) -> (PinnedImage, Option<PinnedImage>) {
     if history.reuse_compacted_images && local_cut < history.global {
-        let root = history.log.read(global).data;
+        let root = history.log.active_at(global_offset).data;
         history.index.retain_root(root);
         return (PinnedImage::Root(root), None);
     }
-    let local_root = history.log.read(local).data;
+    let local_root = history.read_cut(local).data;
     history.index.retain_root(local_root);
     let global_pin = if local_cut == history.global {
         None
     } else {
-        let global_root = history.log.read(global).data;
+        let global_root = history.log.active_at(global_offset).data;
         history.index.retain_root(global_root);
         Some(PinnedImage::Root(global_root))
     };
@@ -1111,8 +1155,11 @@ impl Tx {
         if !matches!(self.phase, Phase::Active) || self.views.index(&map).is_some() {
             return Err(Error::Disabled);
         }
-        let local_id = history.pin_cut(snapshot.version);
-        let local = history.log.read(local_id);
+        let Some(local_ref) = history.resolve_cut(snapshot.version) else {
+            self.unavailable = true;
+            return Ok(Output::Unavailable);
+        };
+        let local = history.read_cut(local_ref);
         let birth = local.births.get(&map);
         if birth.is_none() {
             self.views.set(
@@ -1126,8 +1173,8 @@ impl Tx {
             );
             return Ok(Output::Acquired(0, 0));
         }
-        let global_id = history.pin_cut(history.global);
-        let global = history.log.read(global_id);
+        let global_offset = history.log.at_cut(history.relative_cut(history.global));
+        let global = history.log.active_at(global_offset);
         let revision = local.revision(&map);
         let global_revision = global.revision(&map);
         // This local frame is on the surviving branch, so its lineage is present.
@@ -1135,7 +1182,8 @@ impl Tx {
             self.unavailable = true;
             return Ok(Output::Unavailable);
         }
-        let (local_image, global_image) = pin_maps(history, local_id, global_id, snapshot.version);
+        let (local_image, global_image) =
+            pin_maps(history, local_ref, global_offset, snapshot.version);
         let pinned = View {
             birth,
             revision,
@@ -1573,12 +1621,9 @@ impl Store {
             }
             Action::End(tx) => {
                 let i = self.tx_index(tx)?;
-                let snap = self.txs.0[i].1.snapshot;
                 release_tx_pins(&mut self.history.index, &self.txs.0[i].1);
                 erase_attempt(&mut self.txs, tx);
-                if let Some(s) = snap {
-                    self.history.try_elide_compacted_version(s.version, &self.txs);
-                }
+                self.history.prune_retained(&self.txs);
                 self.history.index.retire_budget(RETIRE_BUDGET);
                 Ok(Output::Unit)
             }
@@ -1674,13 +1719,12 @@ impl Store {
         if !matches!(t.phase, Phase::Active) || t.views.index(&map).is_some() {
             return Err(Error::Disabled);
         }
-        if snapshot.version < self.history.log.active_at(0).version {
+        let Some(local_ref) = self.history.resolve_cut(snapshot.version) else {
             t.unavailable = true;
             return Ok(Output::Unavailable);
-        }
+        };
         if let Some(global) = self.recovery_views.get(&map) {
-            let local_id = self.history.pin_cut(snapshot.version);
-            let local = self.history.log.read(local_id);
+            let local = self.history.read_cut(local_ref);
             let birth = local.births.get(&map);
             if birth.is_some() {
                 let revision = local.revision(&map);
@@ -1756,6 +1800,8 @@ impl Store {
         }
         self.history.log = my_frames;
         source.history.log = their_frames;
+        self.history.retained = Vec::new();
+        source.history.retained = Vec::new();
         self.history.index = my_index;
         source.history.index = their_index;
         self.history.next_identity = my_identity + 1;
@@ -1823,21 +1869,25 @@ impl Store {
     }
 
     pub fn map_revision_at(&self, version: Version, map: &Bytes) -> Option<Version> {
-        let frame = self.history.at_cut(version);
-        if !frame.meta_live {
-            let global_frame = self.history.at_cut(self.history.global);
-            if let Some(birth) = global_frame.births.get(map) {
-                if birth.version <= version {
-                    let rev = global_frame.revision(map).version;
-                    return Some(if rev <= version { rev } else { version });
+        match self.history.resolve_cut(version) {
+            Some(cut) => {
+                let frame = self.history.read_cut(cut);
+                if frame.births.index(map).is_none() {
+                    return None;
                 }
+                Some(frame.revision(map).version)
             }
-            return None;
+            None => {
+                let global_frame = self.history.at_cut(self.history.global);
+                if let Some(birth) = global_frame.births.get(map) {
+                    if birth.version <= version {
+                        let rev = global_frame.revision(map).version;
+                        return Some(if rev <= version { rev } else { version });
+                    }
+                }
+                None
+            }
         }
-        if frame.births.index(map).is_none() {
-            return None;
-        }
-        Some(frame.revision(map).version)
     }
 
     pub fn snapshot_maps(&self, version: Version) -> Result<Vec<SnapshotMap>, Error> {
@@ -1893,8 +1943,8 @@ impl Store {
             i += 1;
         }
         frame.data = index_from_rows(&mut self.history.index, rows);
-        let active_len = self.history.log.active_len();
-        self.history.release_active_range(0, active_len);
+        self.history.pop_active_to(0);
+        self.history.retained = Vec::new();
         self.history.log.reset_branch(frame);
         self.history.index.retire_budget(RETIRE_BUDGET);
         self.history.next_identity = identity + 1;

@@ -331,7 +331,7 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
     : WP.spec (CcfKv.engine.Store.execute n (.Operate id m op.rust))
         (StepMatches encode sid (.operation sid id.val (op.model encode m)) n
           (execute w (.operation sid id.val (op.model encode m)))) := by
-  obtain ⟨store, natArchive, archive, hStore, hist, hMeta, hattempts⟩ := h.history
+  obtain ⟨store, natHistory, natArchive, archive, hStore, hist, hMeta, hattempts⟩ := h.history
   unfold CcfKv.engine.Store.execute
   apply WP.spec_bind (tx_index n id)
   intro found hf
@@ -431,24 +431,24 @@ theorem operate_step_matches (encode : List U8 → String) (inj : Function.Injec
                 rw [hupdate next, txsPins_set_same_views n.txs.val i.val id t next hrow hviews]
               rw [hpins]
               exact h.liveness
-            have hmetaAfter : StoreMetaLive encode {n with txs := back (id, next)} natArchive := by
+            have hmetaAfter : StoreMetaLive encode {n with txs := back (id, next)} natHistory := by
               refine ⟨?_, ?_⟩
-              · intro id' t' snap' fid' nf' hmem hsnap' hfid' hnf'
+              · intro id' t' snap' bf hmem hsnap' hbf hlt
                 have hmem' : (id', t') ∈ n.txs.val.set i.val (id, next) := by
                   simpa only [hupdate next] using hmem
                 rcases List.mem_or_eq_of_mem_set hmem' with hold | heq
-                · exact hMeta.snapLive id' t' snap' fid' nf' hold hsnap' hfid' hnf'
+                · exact hMeta.snapLive id' t' snap' bf hold hsnap' hbf hlt
                 · obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
-                  exact hMeta.snapLive id' t snap' fid' nf' (List.mem_of_getElem? hrow)
-                    (hsnapEq.symm.trans hsnap') hfid' hnf'
-              · intro id' t' bm bv off fid' gf hmem hvm hfid' hgf hb hr
+                  exact hMeta.snapLive id' t snap' bf (List.mem_of_getElem? hrow)
+                    (hsnapEq.symm.trans hsnap') hbf hlt
+              · intro id' t' bm bv gf hmem hvm hgf hb hr
                 have hmem' : (id', t') ∈ n.txs.val.set i.val (id, next) := by
                   simpa only [hupdate next] using hmem
                 rcases List.mem_or_eq_of_mem_set hmem' with hold | heq
-                · exact hMeta.viewLive id' t' bm bv off fid' gf hold hvm hfid' hgf hb hr
+                · exact hMeta.viewLive id' t' bm bv gf hold hvm hgf hb hr
                 · obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
-                  exact hMeta.viewLive id' t bm bv off fid' gf (List.mem_of_getElem? hrow)
-                    (hviews ▸ hvm) hfid' hgf hb hr
+                  exact hMeta.viewLive id' t bm bv gf (List.mem_of_getElem? hrow)
+                    (hviews ▸ hvm) hgf hb hr
             change WP.spec (Result.ok (out, ({n with txs := back (id,next)} : CcfKv.engine.Store))) _
             rw [WP.spec_ok]
             change StepMatches encode sid modelAction n (execute w modelAction) _
