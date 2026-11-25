@@ -1020,3 +1020,182 @@ fn detached_tx_preserves_compacted_metadata_and_concurrent_reads() {
     s.end_detached(&mut r2);
     assert!(s.history.retained.is_empty());
 }
+
+#[test]
+fn reserved_placeholder_backfills_across_concurrent_writes_and_preserves_overwrites() {
+    let mut s = Store::new(1);
+
+    // Seed v1 with shared/k1 = "v1".
+    let mut seed = DetachedTx::new(1);
+    s.snapshot_and_acquire_detached(&mut seed, Bytes::copy_from(b"shared"), None)
+        .unwrap();
+    seed.stage_write(
+        Bytes::copy_from(b"shared"),
+        Bytes::copy_from(b"k1"),
+        Some(Bytes::copy_from(b"v1")),
+    )
+    .unwrap();
+    assert!(matches!(
+        s.prepare_ccf_commit_detached(&mut seed).unwrap(),
+        CommitPreparation::Applied(1, 1)
+    ));
+    s.end_detached(&mut seed);
+
+    // Reserve v2 as a placeholder, then commit a normal transaction at v3
+    // touching a disjoint map "app" and overwriting shared/k1.
+    assert_eq!(s.reserve_placeholder_ccf().unwrap(), 2);
+
+    let mut normal = DetachedTx::new(2);
+    s.snapshot_and_acquire_detached(&mut normal, Bytes::copy_from(b"app"), None)
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut normal, Bytes::copy_from(b"shared"), None)
+        .unwrap();
+    normal
+        .stage_write(
+            Bytes::copy_from(b"app"),
+            Bytes::copy_from(b"a"),
+            Some(Bytes::copy_from(b"app_v3")),
+        )
+        .unwrap();
+    normal
+        .stage_write(
+            Bytes::copy_from(b"shared"),
+            Bytes::copy_from(b"k1"),
+            Some(Bytes::copy_from(b"v3")),
+        )
+        .unwrap();
+    assert!(matches!(
+        s.prepare_ccf_commit_detached(&mut normal).unwrap(),
+        CommitPreparation::Applied(3, 1)
+    ));
+    s.end_detached(&mut normal);
+
+    // Backfill reserved v2 writing a new signature map "sig", plus shared/k1
+    // (overwritten at v3) and shared/k2 (untouched at v3).
+    let mut reserved = DetachedTx::new(3);
+    s.snapshot_and_acquire_detached(&mut reserved, Bytes::copy_from(b"sig"), Some(1))
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut reserved, Bytes::copy_from(b"shared"), Some(1))
+        .unwrap();
+    reserved
+        .stage_write(
+            Bytes::copy_from(b"sig"),
+            Bytes::copy_from(b"s"),
+            Some(Bytes::copy_from(b"sig_v2")),
+        )
+        .unwrap();
+    reserved
+        .stage_write(
+            Bytes::copy_from(b"shared"),
+            Bytes::copy_from(b"k1"),
+            Some(Bytes::copy_from(b"v2")),
+        )
+        .unwrap();
+    reserved
+        .stage_write(
+            Bytes::copy_from(b"shared"),
+            Bytes::copy_from(b"k2"),
+            Some(Bytes::copy_from(b"v2_k2")),
+        )
+        .unwrap();
+    assert!(matches!(
+        s.backfill_reserved_ccf(&mut reserved, 2).unwrap(),
+        CommitPreparation::Applied(2, 1)
+    ));
+    s.end_detached(&mut reserved);
+
+    // Verify historical cut at v2 sees v2's writes and NOT v3's writes.
+    let mut read_v2 = DetachedTx::new(4);
+    s.snapshot_and_acquire_detached(&mut read_v2, Bytes::copy_from(b"sig"), Some(2))
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut read_v2, Bytes::copy_from(b"shared"), Some(2))
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut read_v2, Bytes::copy_from(b"app"), Some(2))
+        .unwrap();
+    assert!(matches!(
+        read_v2
+            .operate(
+                &s,
+                Bytes::copy_from(b"sig"),
+                Operation::Get(Bytes::copy_from(b"s"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"sig_v2"
+    ));
+    assert!(matches!(
+        read_v2
+            .operate(
+                &s,
+                Bytes::copy_from(b"shared"),
+                Operation::Get(Bytes::copy_from(b"k1"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v2"
+    ));
+    assert!(matches!(
+        read_v2
+            .operate(
+                &s,
+                Bytes::copy_from(b"app"),
+                Operation::Get(Bytes::copy_from(b"a"), false)
+            )
+            .unwrap(),
+        Output::Value(None)
+    ));
+    s.end_detached(&mut read_v2);
+
+    // Verify head at v3 sees backfilled sig & shared/k2 AND preserves v3's
+    // overwrite of shared/k1 and app/a.
+    let mut read_v3 = DetachedTx::new(5);
+    s.snapshot_and_acquire_detached(&mut read_v3, Bytes::copy_from(b"sig"), None)
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut read_v3, Bytes::copy_from(b"shared"), None)
+        .unwrap();
+    s.snapshot_and_acquire_detached(&mut read_v3, Bytes::copy_from(b"app"), None)
+        .unwrap();
+    assert!(matches!(
+        read_v3
+            .operate(
+                &s,
+                Bytes::copy_from(b"sig"),
+                Operation::Get(Bytes::copy_from(b"s"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"sig_v2"
+    ));
+    assert!(matches!(
+        read_v3
+            .operate(
+                &s,
+                Bytes::copy_from(b"shared"),
+                Operation::Get(Bytes::copy_from(b"k1"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v3"
+    ));
+    assert!(matches!(
+        read_v3
+            .operate(
+                &s,
+                Bytes::copy_from(b"shared"),
+                Operation::Get(Bytes::copy_from(b"k2"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"v2_k2"
+    ));
+    assert!(matches!(
+        read_v3
+            .operate(
+                &s,
+                Bytes::copy_from(b"app"),
+                Operation::Get(Bytes::copy_from(b"a"), false)
+            )
+            .unwrap(),
+        Output::Value(Some(v)) if v.as_slice() == b"app_v3"
+    ));
+    s.end_detached(&mut read_v3);
+
+    assert!(matches!(s.compact_ccf(3), Output::Compacted(3)));
+    assert_eq!(s.map_revision_at(3, &Bytes::copy_from(b"sig")), Some(2));
+    assert_eq!(s.map_revision_at(3, &Bytes::copy_from(b"shared")), Some(3));
+}

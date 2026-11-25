@@ -303,18 +303,10 @@ namespace ccf::kv::rust_test
           s.version = reserved_id.seqno;
           return result_only(CommitResult::FAIL_NO_REPLICATE);
         }
-        if (
-          reserved_id.seqno <= store.head ||
-          reserved_id.seqno - store.head != 1 ||
-          reserved_id.seqno > store.reserved_through)
+        if (!store.open_reservations.contains(reserved_id.seqno))
         {
-          throw std::logic_error("Reserved transaction is not the next slot");
+          throw std::logic_error("Reserved transaction slot is not open");
         }
-      }
-      else if (!writes.empty() && store.reserved_through > store.head)
-      {
-        throw std::logic_error(
-          "A reserved slot must be filled before a normal write");
       }
 
       if (!writes.empty())
@@ -328,8 +320,11 @@ namespace ccf::kv::rust_test
       }
 
       s.committing = true;
-      auto applied = Store::wrap_reply(
-        ccf_rust_kv_tx_prepare_commit(store.native.get(), s.native_tx));
+      auto applied = reserved ?
+        Store::wrap_reply(ccf_rust_kv_tx_commit_reserved(
+          store.native.get(), s.native_tx, s.reserved->seqno)) :
+        Store::wrap_reply(
+          ccf_rust_kv_tx_prepare_commit(store.native.get(), s.native_tx));
       if (applied.status == Status::CONFLICT)
       {
         if (reserved)
@@ -356,8 +351,15 @@ namespace ccf::kv::rust_test
         return result_only(CommitResult::SUCCESS);
       }
       applied.require();
-      store.head = applied.number;
-      store.last_view = applied.detail;
+      if (reserved)
+      {
+        store.open_reservations.erase(applied.number);
+      }
+      else
+      {
+        store.head = applied.number;
+        store.last_view = applied.detail;
+      }
       id = TxID{applied.detail, applied.number};
       epoch = store.rollback_count;
 

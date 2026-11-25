@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -185,7 +186,7 @@ namespace ccf::kv::rust_test
       ccf_rust_kv_new(0), &ccf_rust_kv_delete};
     std::atomic<uint64_t> next_attempt{0};
     Version head = 0;
-    Version reserved_through = 0;
+    std::set<Version> open_reservations;
     Version last_replicated = 0;
     Version global = 0;
     View term = 0;
@@ -427,7 +428,7 @@ namespace ccf::kv::rust_test
     Version current_version() override
     {
       std::lock_guard lock(state_lock);
-      return std::max(head, reserved_through);
+      return head;
     }
 
     Version compacted_version() override
@@ -445,31 +446,33 @@ namespace ccf::kv::rust_test
     TxID current_txid() override
     {
       std::lock_guard lock(state_lock);
-      return {last_view, std::max(head, reserved_through)};
+      return {last_view, head};
     }
 
     std::pair<TxID, Term> current_txid_and_commit_term() override
     {
       std::lock_guard lock(state_lock);
-      return {{last_view, std::max(head, reserved_through)}, term};
+      return {{last_view, head}, term};
     }
 
     std::optional<std::tuple<Version, Version>> next_version(
       Term expected_commit_term) override
     {
-      std::lock_guard lock(state_lock);
+      std::scoped_lock lock(maps_lock, state_lock);
       if (term != expected_commit_term)
       {
         return std::nullopt;
       }
-      const auto current = std::max(head, reserved_through);
-      if (current == std::numeric_limits<Version>::max())
+      auto r = wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      if (r.status == Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV test version counter exhausted");
       }
-      reserved_through = current + 1;
+      r.require();
+      head = r.number;
       last_view = term;
-      return std::make_tuple(reserved_through, rollback_count);
+      open_reservations.insert(head);
+      return std::make_tuple(head, rollback_count);
     }
 
     void initialise_term(View view) override
@@ -591,15 +594,17 @@ namespace ccf::kv::rust_test
 
     TxID next_txid() override
     {
-      std::lock_guard lock(state_lock);
-      const auto current = std::max(head, reserved_through);
-      if (current == std::numeric_limits<Version>::max())
+      std::scoped_lock lock(maps_lock, state_lock);
+      auto r = wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      if (r.status == Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV test version counter exhausted");
       }
-      reserved_through = current + 1;
+      r.require();
+      head = r.number;
       last_view = term;
-      return {term, reserved_through};
+      open_reservations.insert(head);
+      return {term, head};
     }
 
     void set_max_transaction_size(size_t limit)
@@ -634,7 +639,7 @@ namespace ccf::kv::rust_test
     size_t committable_gap() override
     {
       std::lock_guard lock(state_lock);
-      return std::max(head, reserved_through) - last_committable;
+      return head - last_committable;
     }
 
     void clear()
@@ -644,7 +649,7 @@ namespace ccf::kv::rust_test
       dispatch({.op = Opcode::CLEAR_STORE}).require();
       head = NoVersion;
       global = NoVersion;
-      reserved_through = NoVersion;
+      open_reservations.clear();
       last_replicated = NoVersion;
       last_committable = NoVersion;
       term = 0;
@@ -694,10 +699,13 @@ namespace ccf::kv::rust_test
         {
           snapshotter->commit(v, consensus && consensus->is_primary());
         }
-        auto r = dispatch({.op = Opcode::COMPACT, .number = v});
+        const auto compact_target = open_reservations.empty() ?
+          v :
+          std::min(v, *open_reservations.begin() - 1);
+        auto r = dispatch({.op = Opcode::COMPACT, .number = compact_target});
         r.require();
         global = r.number;
-        if (v > head || v < global)
+        if (compact_target > head || compact_target < global)
         {
           return;
         }
@@ -747,16 +755,17 @@ namespace ccf::kv::rust_test
         throw std::logic_error("Cannot roll back compacted Rust KV history");
       }
       r.require();
-      const auto old_head = std::max(head, reserved_through);
+      const auto old_head = head;
       head = r.number;
-      reserved_through = std::min(reserved_through, txid.seqno);
+      open_reservations.erase(
+        open_reservations.upper_bound(head), open_reservations.end());
       term = new_term;
       last_view = txid.view;
       if (history)
       {
         history->rollback(txid, new_term);
       }
-      if (std::max(head, reserved_through) < old_head)
+      if (head < old_head)
       {
         ++rollback_count;
         last_replicated = head;

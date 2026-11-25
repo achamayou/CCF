@@ -264,3 +264,145 @@ TEST_CASE(
   CHECK(store.current_version() == 2 + worker_count);
   CHECK(consensus->number_of_replicas() == 2 + worker_count);
 }
+
+TEST_CASE("Rust KV commits normal transactions across open reserved slots")
+{
+  using namespace ccf::kv;
+  using MapT = Map<size_t, size_t>;
+
+  class ReservedPendingTx : public PendingTx
+  {
+    ccf::TxID txid;
+    test::TestStore& store;
+    MapT& table;
+    size_t val;
+
+  public:
+    ReservedPendingTx(
+      ccf::TxID txid_, test::TestStore& store_, MapT& table_, size_t val_) :
+      txid(txid_),
+      store(store_),
+      table(table_),
+      val(val_)
+    {}
+
+    PendingTxInfo call() override
+    {
+      auto tx = store.create_reserved_tx(txid);
+      tx.rw(table)->put(0, val);
+      return tx.commit_reserved();
+    }
+  };
+
+  class RecordingConsensus : public test::PrimaryStubConsensus
+  {
+  public:
+    std::vector<std::vector<Version>> batches;
+
+    bool replicate(const BatchVector& entries, ccf::View view) override
+    {
+      std::vector<Version> seqnos;
+      for (const auto& [v, _data, _committable, _hooks] : entries)
+      {
+        seqnos.push_back(v);
+      }
+      batches.push_back(std::move(seqnos));
+      return test::PrimaryStubConsensus::replicate(entries, view);
+    }
+  };
+
+  test::TestStore store;
+  auto consensus = std::make_shared<RecordingConsensus>();
+  store.set_consensus(consensus);
+  store.initialise_term(1);
+
+  MapT table("public:table");
+  MapT sig_table("public:sig");
+
+  // Baseline commit at v1.
+  {
+    auto tx = store.create_tx();
+    tx.rw(table)->put(0, 1);
+    REQUIRE(tx.commit() == CommitResult::SUCCESS);
+  }
+  REQUIRE(consensus->number_of_replicas() == 1);
+
+  // Single-threaded batch of two across an open reserved slot (mirrors
+  // src/node/test/history.cpp:733): reserve v2, commit normal tx at v3, then
+  // fill and commit v2 to flush [2, 3] together.
+  const auto rv = store.next_txid();
+  REQUIRE(rv == ccf::TxID{1, 2});
+
+  {
+    auto tx = store.create_tx();
+    tx.rw(table)->put(0, 2);
+    REQUIRE(tx.commit() == CommitResult::SUCCESS);
+    CHECK(tx.commit_version() == 3);
+  }
+  CHECK(consensus->number_of_replicas() == 1);
+
+  REQUIRE(
+    store.commit(
+      rv,
+      std::make_unique<ReservedPendingTx>(rv, store, sig_table, 99),
+      true) == CommitResult::SUCCESS);
+  CHECK(consensus->number_of_replicas() == 3);
+  REQUIRE(consensus->batches.size() == 2);
+  CHECK(consensus->batches[1] == std::vector<Version>{2, 3});
+
+  // Both the backfilled reserved write and the normal write are visible.
+  {
+    auto rtx = store.create_read_only_tx();
+    CHECK(rtx.ro(table)->get(0) == 2);
+    CHECK(rtx.ro(sig_table)->get(0) == 99);
+  }
+
+  // Multi-threaded writers keep committing concurrently while a reserved slot
+  // is open, then filling the reserved slot drains the full contiguous batch.
+  const auto rv2 = store.next_txid();
+  REQUIRE(rv2 == ccf::TxID{1, 4});
+
+  constexpr size_t worker_count = 4;
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  for (size_t i = 0; i < worker_count; ++i)
+  {
+    workers.emplace_back([&, i]() {
+      auto tx = store.create_tx();
+      MapT worker_map("public:w_" + std::to_string(i));
+      tx.rw(worker_map)->put(i, i + 10);
+      REQUIRE(tx.commit() == CommitResult::SUCCESS);
+    });
+  }
+  for (auto& w : workers)
+  {
+    w.join();
+  }
+  CHECK(store.current_version() == 4 + worker_count);
+  CHECK(consensus->number_of_replicas() == 3);
+
+  REQUIRE(
+    store.commit(
+      rv2,
+      std::make_unique<ReservedPendingTx>(rv2, store, sig_table, 100),
+      true) == CommitResult::SUCCESS);
+  CHECK(consensus->number_of_replicas() == 4 + worker_count);
+
+  // Replay all replicated entries on a fresh store and confirm identical state.
+  test::TestStore backup;
+  backup.initialise_term(1);
+  for (size_t idx = 0; idx < consensus->replica.size(); ++idx)
+  {
+    auto exec = backup.deserialize(*std::get<1>(consensus->replica[idx]));
+    REQUIRE(exec != nullptr);
+    REQUIRE(exec->apply() != ApplyResult::FAIL);
+  }
+  auto btx = backup.create_read_only_tx();
+  CHECK(btx.ro(table)->get(0) == 2);
+  CHECK(btx.ro(sig_table)->get(0) == 100);
+  for (size_t i = 0; i < worker_count; ++i)
+  {
+    MapT worker_map("public:w_" + std::to_string(i));
+    CHECK(btx.ro(worker_map)->get(i) == i + 10);
+  }
+}

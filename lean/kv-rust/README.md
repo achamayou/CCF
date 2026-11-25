@@ -89,7 +89,7 @@ The shared snapshot restore tests cover historical encryption secrets and captur
 The same fuzzer schedules and assertions run on both backends, but the C++ trace reporter and trace-conformance runner are not wired to the Rust adapter.
 
 The test adapter inherits from `ccf::kv::AbstractStore`, implementing store locking, snapshot capture/serialization, replay, compaction, rollback, and flag hooks while rejecting C++-only `AbstractMap` handle methods.
-It serializes commit submission and only fills reserved slots in order, and does not yet wire the Rust backend into the production CCF node lifecycle or replication loop.
+It runs staged writes lock-free and reads concurrently under a shared Rust `RwLock`, moves encryption/serialisation, observers, and consensus replication outside the store locks with C++-compatible `pending_txs` batching, and supports concurrent normal commits across open `next_txid()` reserved slots via placeholder frames and backfill; it does not yet wire the Rust backend into the production CCF node lifecycle or replication loop.
 The trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
 Both the action dispatcher and the CCF adapter now stage writes in descending key order with binary search and in-place replacement; the separate recency-order path has been removed.
 The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.

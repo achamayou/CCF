@@ -168,7 +168,7 @@ namespace ccf::kv::rust_test
         source.head,
         head));
     }
-    if (reserved_through > head || source.reserved_through > source.head)
+    if (!open_reservations.empty() || !source.open_reservations.empty())
     {
       throw std::logic_error("Cannot swap maps with outstanding reservations");
     }
@@ -357,7 +357,7 @@ namespace ccf::kv::rust_test
       return ApplyResult::FAIL;
     }
     head = *version;
-    reserved_through = head;
+    open_reservations.clear();
     last_replicated = head;
     pending_txs.clear();
     global = *version;

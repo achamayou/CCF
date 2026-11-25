@@ -1370,6 +1370,17 @@ impl Tx {
         true
     }
 
+    fn valid_dependencies_at(&self, index: &AddressIndex<Cell>, root: RadixRoot) -> bool {
+        let mut i = 0;
+        while i < self.deps.len() {
+            if !self.deps[i].holds(index, root) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     fn has_concurrent_map_creation(&self, head: &Frame) -> bool {
         let mut i = 0;
         while i < self.views.0.len() {
@@ -2474,6 +2485,217 @@ impl Store {
             self.history.prune_retained(&self.txs);
         }
         self.history.index.retire_budget(RETIRE_BUDGET);
+    }
+
+    /// Reserve the next sequence number by appending a placeholder frame that
+    /// shares the current head's radix root and metadata until backfilled.
+    pub fn reserve_placeholder_ccf(&mut self) -> Result<Version, Error> {
+        let head = self.history.head();
+        if head.version == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+        let version = head.version + 1;
+        let data = head.data;
+        let revisions = head.revisions.clone();
+        let births = head.births.clone();
+        self.history.index.retain_root(data);
+        self.history.log.append(Frame {
+            version,
+            data,
+            revisions,
+            births,
+        });
+        Ok(version)
+    }
+
+    /// Fill a previously reserved placeholder frame at `reserved_version` and
+    /// propagate non-overwritten writes through any later active frames
+    /// `(reserved_version ..= head)`.
+    pub fn backfill_reserved_ccf(
+        &mut self,
+        tx: &mut DetachedTx,
+        reserved_version: Version,
+    ) -> Result<CommitPreparation, Error> {
+        if !matches!(tx.tx.phase, Phase::Active) {
+            return Err(Error::Disabled);
+        }
+        if tx.tx.pending.0.is_empty() {
+            return Err(Error::Disabled);
+        }
+        let base_version = self.history.log.active_at(0).version;
+        let head_version = self.history.head().version;
+        if reserved_version == 0
+            || reserved_version < base_version
+            || reserved_version > head_version
+        {
+            return Err(Error::Disabled);
+        }
+        tx.tx.phase = Phase::Committing;
+        let start_off = (reserved_version - base_version) as usize;
+        if tx.tx.unavailable
+            || tx
+                .tx
+                .has_concurrent_map_creation(self.history.log.active_at(start_off))
+        {
+            tx.tx.phase = Phase::Finished;
+            return Ok(CommitPreparation::Rejected(Outcome::Conflict));
+        }
+        if let Some(snapshot) = tx.tx.snapshot {
+            if snapshot.term != self.history.term {
+                let outcome = if tx.tx.valid_lineage(&self.history)
+                    && tx.tx.valid_dependencies_at(
+                        &self.history.index,
+                        self.history.log.active_at(start_off).data,
+                    ) {
+                    Outcome::NoReplicate
+                } else {
+                    Outcome::Conflict
+                };
+                tx.tx.phase = Phase::Finished;
+                return Ok(CommitPreparation::Rejected(outcome));
+            }
+        }
+        if !tx.tx.valid_lineage(&self.history)
+            || !tx.tx.valid_dependencies_at(
+                &self.history.index,
+                self.history.log.active_at(start_off).data,
+            )
+        {
+            tx.tx.phase = Phase::Finished;
+            return Ok(CommitPreparation::Rejected(Outcome::Conflict));
+        }
+        if self.history.next_identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+
+        let identity = self.history.next_identity;
+        let stamp = Stamp {
+            version: reserved_version,
+            identity,
+        };
+        let end_off = self.history.log.active_len();
+        let write_count = tx.tx.pending.0.len();
+        let mut active_writes = Vec::with_capacity(write_count);
+        let mut w_init = 0;
+        while w_init < write_count {
+            active_writes.push(true);
+            w_init += 1;
+        }
+
+        // Keep the previous frame's pre-patch root retained until we have
+        // compared it with the next frame's pre-patch root to detect overwrites.
+        let mut prev_old_root: Option<RadixRoot> = None;
+        let mut off = start_off;
+        while off < end_off {
+            let old_root = self.history.log.active_at(off).data;
+            if let Some(prev) = prev_old_root {
+                let mut wi = 0;
+                while wi < write_count {
+                    if active_writes[wi] {
+                        let addr = &tx.tx.pending.0[wi].0;
+                        let before = self.history.index.get(prev, addr);
+                        let after = self.history.index.get(old_root, addr);
+                        if !same_opt_cell(before, after) {
+                            active_writes[wi] = false;
+                        }
+                    }
+                    wi += 1;
+                }
+                self.history.index.release_root(prev);
+                prev_old_root = None;
+            }
+
+            let mut filtered = Assoc::new();
+            let mut wi = 0;
+            while wi < write_count {
+                if active_writes[wi] {
+                    filtered.0.push(tx.tx.pending.0[wi].clone());
+                }
+                wi += 1;
+            }
+            if filtered.0.is_empty() {
+                break;
+            }
+
+            let mut revisions = self.history.log.active_at(off).revisions.clone();
+            let mut births = self.history.log.active_at(off).births.clone();
+            let frame_version = self.history.log.active_at(off).version;
+            let mut fi = 0;
+            while fi < filtered.0.len() {
+                backfill_stamps(
+                    &mut revisions,
+                    &mut births,
+                    &self.history.index,
+                    old_root,
+                    &filtered.0[fi],
+                    stamp,
+                );
+                fi += 1;
+            }
+            let new_root = publish_indexed(
+                &mut self.history.index,
+                old_root,
+                &filtered,
+                reserved_version,
+            );
+            let old_frame = self.history.log.replace_active_at(
+                off,
+                Frame {
+                    version: frame_version,
+                    data: new_root,
+                    revisions,
+                    births,
+                },
+            );
+            prev_old_root = Some(old_frame.data);
+            off += 1;
+        }
+        if let Some(prev) = prev_old_root {
+            self.history.index.release_root(prev);
+        }
+
+        self.history.next_identity += 1;
+        self.history.index.retire_budget(RETIRE_BUDGET);
+        tx.tx.phase = Phase::Applied(reserved_version);
+        Ok(CommitPreparation::Applied(
+            reserved_version,
+            self.history.term,
+        ))
+    }
+}
+
+fn same_opt_cell(a: Option<&Cell>, b: Option<&Cell>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(ca), Some(cb)) => ca.version == cb.version && ca.value.same(&cb.value),
+        _ => false,
+    }
+}
+
+fn backfill_stamps(
+    revisions: &mut Assoc<Bytes, Stamp>,
+    births: &mut Assoc<Bytes, Stamp>,
+    index: &AddressIndex<Cell>,
+    old_root: RadixRoot,
+    row: &(Address, Write),
+    stamp: Stamp,
+) {
+    let (a, w) = row;
+    if matches!(w, Write::Put(_)) || index.get(old_root, a).is_some() {
+        let should_update = match revisions.get(&a.map) {
+            None => true,
+            Some(existing) => existing.version < stamp.version,
+        };
+        if should_update {
+            revisions.set(a.map.clone(), stamp);
+        }
+    }
+    let should_birth = match births.get(&a.map) {
+        None => true,
+        Some(existing) => existing.version > stamp.version,
+    };
+    if should_birth {
+        births.set(a.map.clone(), stamp);
     }
 }
 

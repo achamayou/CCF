@@ -79,6 +79,16 @@ impl<T> BranchLog<T> {
         }
     }
 
+    pub(crate) fn replace_active_at(&mut self, offset: usize, frame: T) -> T {
+        let idx = self.slot(offset);
+        let mut replacement = Some(frame);
+        core::mem::swap(&mut self.slots[idx], &mut replacement);
+        match replacement {
+            Some(old) => old,
+            None => panic!("branch slot missing"),
+        }
+    }
+
     pub fn at_cut(&self, offset: u64) -> usize {
         let head = self.len - 1;
         if offset < head as u64 {

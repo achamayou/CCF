@@ -313,6 +313,42 @@ unsafe extern "C" fn ccf_rust_kv_tx_snapshot_and_acquire(
 }
 
 #[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_reserve_version(store: *const SharedStore) -> Reply {
+    let store = unsafe { &*store };
+    match store.write().reserve_placeholder_ccf() {
+        Ok(version) => {
+            let mut reply = Reply::status(Status::Ok);
+            reply.number = version;
+            reply
+        }
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_commit_reserved(
+    store: *const SharedStore,
+    tx: *mut DetachedTx,
+    version: u64,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    match store.write().backfill_reserved_ccf(tx, version) {
+        Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
+        Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
+        Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => Reply::status(Status::StaleTerm),
+        Ok(CommitPreparation::Rejected(Outcome::Success)) => Reply::status(Status::InvalidRequest),
+        Ok(CommitPreparation::Applied(v, term)) => {
+            let mut reply = Reply::status(Status::Ok);
+            reply.number = v;
+            reply.detail = term;
+            reply
+        }
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+#[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_prepare_commit(
     store: *const SharedStore,
     tx: *mut DetachedTx,

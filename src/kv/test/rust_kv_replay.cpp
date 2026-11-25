@@ -148,7 +148,9 @@ namespace ccf::kv::rust_test
       }
       store.head = id.seqno;
       store.last_view = id.view;
-      store.reserved_through = id.seqno;
+      store.open_reservations.erase(
+        store.open_reservations.lower_bound(id.seqno),
+        store.open_reservations.end());
       store.last_replicated = id.seqno;
       if (replace)
       {

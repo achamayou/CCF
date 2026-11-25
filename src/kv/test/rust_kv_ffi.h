@@ -130,6 +130,9 @@ namespace ccf::kv::rust_test
       ByteView map,
       bool has_reserved,
       uint64_t reserved_version);
+    Reply ccf_rust_kv_reserve_version(const NativeStore* store);
+    Reply ccf_rust_kv_tx_commit_reserved(
+      const NativeStore* store, NativeTx* tx, uint64_t version);
     Reply ccf_rust_kv_tx_prepare_commit(const NativeStore* store, NativeTx* tx);
     Reply ccf_rust_kv_tx_operate(
       const NativeStore* store, NativeTx* tx, Request request);
