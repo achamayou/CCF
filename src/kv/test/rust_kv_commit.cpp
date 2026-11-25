@@ -162,19 +162,61 @@ namespace ccf::kv::rust_test
       pending.data.reset();
       if (!reserved)
       {
-        SizeKvStoreSerialiser shape(
-          store.encryptor,
-          {s.captured_term.value(), NoVersion},
-          EntryType::WriteSetWithCommitEvidenceAndClaims,
-          0,
-          {},
-          claims);
-        serialise_writes(shape, writes);
-        const auto size = shape.get_serialised_size();
-        if (size > store.max_entry_size)
+        // Fast overflow-checked exact size pre-check; fall back to
+        // SizeKvStoreSerialiser if close to or above the limit or on overflow.
+        auto checked_add = [](size_t& acc, size_t delta) -> bool {
+          if (delta > std::numeric_limits<size_t>::max() - acc)
+          {
+            return false;
+          }
+          acc += delta;
+          return true;
+        };
+        size_t est = sizeof(SerialisedEntryHeader) +
+          store.encryptor->get_header_length() + sizeof(size_t);
+        bool ok = checked_add(
+          est,
+          sizeof(uint8_t) + sizeof(Version) +
+            sizeof(ccf::crypto::Sha256Hash::Representation) * 2 +
+            sizeof(Version));
+        for (const auto& [name, rows] : writes)
         {
-          throw MaxTransactionSizeExceeded(
-            describe_serialised_entry_size_error(size, store.max_entry_size));
+          if (!ok)
+          {
+            break;
+          }
+          ok = checked_add(
+            est,
+            sizeof(size_t) + name.size() + sizeof(Version) +
+              sizeof(uint64_t) * 3);
+          for (const auto& [key, val] : rows)
+          {
+            if (!ok)
+            {
+              break;
+            }
+            const size_t row_bytes = val.has_value() ?
+              (sizeof(size_t) * 2 + key.size() + val->size()) :
+              (sizeof(size_t) + key.size());
+            ok = checked_add(est, row_bytes);
+          }
+        }
+        if (!ok || est > store.max_entry_size)
+        {
+          SizeKvStoreSerialiser shape(
+            store.encryptor,
+            {s.captured_term.value(), NoVersion},
+            EntryType::WriteSetWithCommitEvidenceAndClaims,
+            0,
+            {},
+            claims);
+          serialise_writes(shape, writes);
+          const auto size = shape.get_serialised_size();
+          if (size > store.max_entry_size)
+          {
+            throw MaxTransactionSizeExceeded(
+              describe_serialised_entry_size_error(size, store.max_entry_size));
+          }
         }
       }
     }
@@ -243,8 +285,8 @@ namespace ccf::kv::rust_test
       claims,
       false,
       reserved ? max_serialised_entry_size : store.max_entry_size);
-    auto hooks = store.record_commit(id.seqno, writes);
     serialise_writes(serialiser, writes);
+    auto hooks = store.record_commit(id.seqno, std::move(writes));
     auto data = serialiser.get_raw_data();
     if (reserved)
     {

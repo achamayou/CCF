@@ -95,8 +95,9 @@ structure AttemptMatches (encode : List U8 → String) (sid : Nat)
   /-- Native pending writes stay strictly ordered by key for binary-search updates. -/
   sorted : PendingSorted native.pending.val
   /-- Each native condition corresponds to the reference dependency up to map-entry order. -/
-  deps : List.Forall₂ DependencyOrderEq (pointDeps encode native) model.normal.deps
+  deps : List.Forall₂ DependencyOrderEq (pointDeps encode index native) model.normal.deps
   nativeDeps : NativeDepsFromViews encode index native
+  depsPins : DepsPinsInViews native
   modelDeps : ModelDepsFromViews model
 
 /-- The native active offsets project via the ghost archive to frames matching the
@@ -352,6 +353,27 @@ theorem AttemptMatches.stamps {encode : List U8 → String} {sid : Nat}
       = n.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)) :=
   h.views.stamps
 
+private theorem pointDeps_preserved_of_pins (encode : List U8 → String)
+    {before after : CellIndex} {pins : List U32}
+    (pres : IndexPreservesPins before after pins) (n : Spike.engine.Tx)
+    (inPins : ∀ row ∈ n.views.val, ∀ r ∈ viewPins row.2, r ∈ pins)
+    (live : ViewsLive before n.views) (dp : DepsPinsInViews n)
+    : pointDeps encode after n = pointDeps encode before n := by
+  unfold pointDeps
+  congr 1
+  apply List.map_congr_left
+  intro d hd
+  cases d with
+  | Key a c => rfl
+  | Map m pin =>
+      obtain ⟨row, hrow, hmap, hpin⟩ := dp m pin hd
+      have hsub : ∀ r ∈ pinPins pin, r ∈ pins := by
+        intro r hr
+        exact inPins row hrow r (List.mem_append_left _ (hpin ▸ hr))
+      have hlive : PinLive before pin := hpin ▸ (live row hrow).1
+      have hEq := (pin_preserved_of_pins pres m pin hsub hlive).2
+      simp only [Function.comp_def, byteDependency, encodeDependency, hEq]
+
 theorem AttemptMatches.withPreservedPins {encode : List U8 → String} {sid : Nat}
     {before after : CellIndex} {pins : List U32}
     {natArchive natArchive' archive archive' : List Frame}
@@ -364,6 +386,7 @@ theorem AttemptMatches.withPreservedPins {encode : List U8 → String} {sid : Na
     : AttemptMatches encode sid after natArchive' archive' n t := by
   obtain ⟨live, views⟩ := pinned_views_preserved_of_pins encode pres n.views inPins h.live
   have orig := views_origin_preserved_of_pins encode pres natSub n.views inPins h.live h.nativeOrig
+  have hdepsEq := pointDeps_preserved_of_pins encode pres n inPins h.live h.depsPins
   refine {
     h with
       views := views.symm ▸ h.views
@@ -372,8 +395,10 @@ theorem AttemptMatches.withPreservedPins {encode : List U8 → String} {sid : Na
       modelViewsIn :=
         fun row hr =>
           ⟨sub _ (h.modelViewsIn row hr).1, sub _ (h.modelViewsIn row hr).2⟩
+      deps := hdepsEq.symm ▸ h.deps
       nativeDeps :=
         fun d hd => by
+          rw [hdepsEq] at hd
           have hd' := h.nativeDeps d hd
           cases d with
           | key _ _ => trivial
@@ -390,6 +415,17 @@ theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
     : AttemptMatches encode sid after natArchive' archive' n t := by
   obtain ⟨live, views⟩ := pinned_views_preserved encode kept n.views h.live
   have orig := views_origin_preserved encode kept natSub n.views h.live h.nativeOrig
+  have hdepsEq : pointDeps encode after n = pointDeps encode before n := by
+    unfold pointDeps
+    congr 1
+    apply List.map_congr_left
+    intro d hd
+    cases d with
+    | Key a c => rfl
+    | Map m pin =>
+        obtain ⟨row, hrow, _, hpin⟩ := h.depsPins m pin hd
+        have hEq := (pin_preserved kept m pin (hpin ▸ (h.live row hrow).1)).2
+        simp only [Function.comp_def, byteDependency, encodeDependency, hEq]
   refine {
     h with
       views := views.symm ▸ h.views
@@ -398,8 +434,10 @@ theorem AttemptMatches.withHistory {encode : List U8 → String} {sid : Nat}
       modelViewsIn :=
         fun row hr =>
           ⟨sub _ (h.modelViewsIn row hr).1, sub _ (h.modelViewsIn row hr).2⟩
+      deps := hdepsEq.symm ▸ h.deps
       nativeDeps :=
         fun d hd => by
+          rw [hdepsEq] at hd
           have hd' := h.nativeDeps d hd
           cases d with
           | key _ _ => trivial

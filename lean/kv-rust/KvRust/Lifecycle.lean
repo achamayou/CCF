@@ -146,7 +146,7 @@ private theorem clone_dependencies (rows : alloc.vec.Vec Spike.engine.Dependency
         cases cell <;> simp [Spike.engine.Dependency.Insts.CoreCloneClone.clone,
           Spike.engine.copy_cell, clone_address, clone_cell]
     | Map map image =>
-        simp [Spike.engine.Dependency.Insts.CoreCloneClone.clone, clone_bytes, clone_assoc]
+        simp [Spike.engine.Dependency.Insts.CoreCloneClone.clone, clone_bytes, clone_pin]
   generalize hr :
     alloc.vec.CloneVec.clone Spike.engine.Dependency.Insts.CoreCloneClone rows = result
   suffices h : WP.spec result (fun next => next = rows) by
@@ -663,7 +663,7 @@ theorem lifecycle_new_attempt (encode : List U8 → String) (sid : Nat)
     (index : CellIndex) (natArchive archive : List Frame)
     : LifecycleAttempt encode index natArchive archive lifecycleNewTx {store := sid} := by
   apply LifecycleAttempt.ofMatched (sid := sid)
-  refine ⟨rfl, rfl, rfl, .nil, ?_, ?_, ?_, ?_, ?_, ?_, ?_, rfl, .rfl, List.Pairwise.nil, .nil, ?_, ?_⟩
+  refine ⟨rfl, rfl, rfl, .nil, ?_, ?_, ?_, ?_, ?_, ?_, ?_, rfl, .rfl, List.Pairwise.nil, .nil, ?_, ?_, ?_⟩
   · intro _ h; cases h
   · intro _ h; cases h
   · intro _ h; cases h
@@ -672,6 +672,7 @@ theorem lifecycle_new_attempt (encode : List U8 → String) (sid : Nat)
   · intro _ h; cases h
   · intro _; rfl
   · intro _ h; cases h
+  · intro _ _ h; cases h
   · intro _ h; cases h
 
 /-- `CommitResult` uses exactly the model's phase, outcome, and pending-write guard. -/

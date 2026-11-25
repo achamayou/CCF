@@ -1278,6 +1278,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
             ∧ after.txs.val = s.txs.val.set index (id, tAfter)
             ∧ ViewsLive after.history.index tAfter.views
             ∧ ViewsOrigin encode after.history.index natArchive tAfter.views
+            ∧ (∀ row ∈ t.views.val, row ∈ tAfter.views.val)
             ∧ ∀ other,
                 other ≠ encode (alloc.vec.Vec.val m)
                 → find (rustPinnedViews encode after.history.index tAfter.views) other
@@ -1394,7 +1395,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .acquired lv.val gv.val, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
           hlogEq, hglEq, htmEq, hidEq, hreEq, hvalsEq, hLiveAfter.perm hstorePinsPerm,
-          hrow, hupdate, ?_, ?_, ?_⟩
+          hrow, hupdate, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_left ha, ← hl', ← hg']
         · rw [hout]
@@ -1426,6 +1427,9 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
           simp [pinned_data_image, he, ha]
         · rw [hNext]; exact hLive
         · rw [hNext]; exact hOrig
+        · intro row hrowMem
+          rw [hNext, hcons]
+          exact List.mem_cons_of_mem _ hrowMem
         · intro other hne
           rw [hNext, hViews, find_set_key]
           exact ite_eq_right hne
@@ -1441,7 +1445,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
         refine ⟨{w with txs := Kv.Model.set w.txs id.val modelNext}, modelNext, next,
           .unavailable, i.val, ?_, ?_, rfl, ?_, ?_, ?_, ?_, ?_,
           rfl, rfl, rfl, rfl, rfl, rfl, hstorePinsEq.symm ▸ live,
-          hrow, hupdate, ?_, ?_, ?_⟩
+          hrow, hupdate, ?_, ?_, ?_, ?_⟩
         · change execute w (.acquire sid id.val k) = _
           rw [hStep, ite_eq_right ha]
         · rw [hout]
@@ -1457,6 +1461,7 @@ theorem execute_acquire_matches_model (encode : List U8 → String)
           simp [modelNext, ha']
         · rw [hNext]; exact oldLive
         · rw [hNext]; exact oldOrig
+        · intro row hrowMem; rw [hNext]; exact hrowMem
         · intro other _; rw [hNext]
 
 end KvRust

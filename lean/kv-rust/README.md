@@ -23,13 +23,13 @@ Imported and recovered histories keep the original two-cut path.
 Existing handles keep their retained radix roots until `End` releases them and drains the retirement budget.
 The indexed [materialization](KvRust/IndexedImage.lean) and [pin](KvRust/PinnedImage.lean) proofs relate selected maps and point reads to those views without reconstructing the whole store.
 The [frame advancement proof](KvRust/Advance.lean) checks that the extracted publication produces the model's entire next frame, including the birth and revision metadata used for rollback lineage.
-The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies.
+The [validation proofs](KvRust/Validation.lean) compare the extracted OCC read-set check to the model for both point and whole-map dependencies, including root-matched and link-by-link whole-map comparisons without cloning map images.
 The [lineage proofs](KvRust/Lineage.lean) compose the read-set check with captured terms, map birth and revision stamps, and acquisition failures to match the model's commit eligibility test on related states.
 The [local application proofs](KvRust/Apply.lean) check that rejection preserves the Rust state and that an eligible, representable application returns the model's write set and advances the history and the committing attempt.
 The [dynamic history proofs](KvRust/History.lean) cover frame lookup at a cut, compaction, rollback guards and retention of the model's prefix under the indexed-history invariant.
 The [acquisition proofs](KvRust/Acquire.lean) cover the `Acquire` action, including independent local and global views, rejection without mutation, and updates to the model's pinned read image.
 The [point-operation proofs](KvRust/Point.lean) cover enabled `Get`, `Has`, `Previous`, and `Write` actions, including the returned observations, write overlay, and read dependencies.
-The [map-operation proofs](KvRust/Scan.lean) cover scans, sizes, clears, and half-open ranges sorted in byte order.
+The [map-operation proofs](KvRust/Scan.lean) cover scans, sizes, clears, and half-open ranges sorted in byte order, including direct pinned-root `Size` and filtered `Range` paths when no writes are staged.
 The [lifecycle proofs](KvRust/Lifecycle.lean) cover store initialization, attempt creation and removal, term and snapshot capture, and commit initiation and completion.
 
 [`initialized_run_matches`](KvRust/Simulation.lean) composes these results from the actual model's empty state: every in-bounds finite trace over the native single-store action surface produces matching observations and ends in related states.
@@ -86,8 +86,8 @@ Rust also tests the snapshot, rollback, and term guards through its own interfac
 The shared snapshot restore tests cover historical encryption secrets and captured-public-map reuse.
 The same fuzzer schedules and assertions run on both backends, but the C++ trace reporter and trace-conformance runner are not wired to the Rust adapter.
 
-The test adapter serializes commit submission and only fills reserved slots in order.
-It does not implement the full CCF store interface or production replication.
+The test adapter inherits from `ccf::kv::AbstractStore`, implementing store locking, snapshot capture/serialization, replay, compaction, rollback, and flag hooks while rejecting C++-only `AbstractMap` handle methods.
+It serializes commit submission and only fills reserved slots in order, and does not yet wire the Rust backend into the production CCF node lifecycle or replication loop.
 The trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
 Both the action dispatcher and the CCF adapter now stage writes in descending key order with binary search and in-place replacement; the separate recency-order path has been removed.
 The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.

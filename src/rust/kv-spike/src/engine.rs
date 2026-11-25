@@ -267,6 +267,7 @@ fn stage_write(pending: &mut Pending, address: Address, write: Write) {
     }
 }
 
+#[allow(dead_code)]
 fn publish(data: &Data, pending: &Pending, version: Version) -> Data {
     if pending.0.len() >= 64 {
         if let Some(next) = publish_batch(data, pending, version) {
@@ -276,6 +277,7 @@ fn publish(data: &Data, pending: &Pending, version: Version) -> Data {
     publish_sequential(data.clone(), pending, version)
 }
 
+#[allow(dead_code)]
 fn publish_sequential(mut data: Data, pending: &Pending, version: Version) -> Data {
     // The reference model folds the ordered write list right-to-left.
     let mut i = pending.0.len();
@@ -296,8 +298,10 @@ fn publish_sequential(mut data: Data, pending: &Pending, version: Version) -> Da
     data
 }
 
+#[allow(dead_code)]
 type Buckets = Vec<Vec<usize>>;
 
+#[allow(dead_code)]
 fn empty_buckets() -> Buckets {
     let mut buckets = Vec::new();
     let mut i = 0_usize;
@@ -308,6 +312,7 @@ fn empty_buckets() -> Buckets {
     buckets
 }
 
+#[allow(dead_code)]
 fn bucket_for(address: &Address) -> usize {
     let key = &address.key.0;
     if key.is_empty() {
@@ -317,6 +322,7 @@ fn bucket_for(address: &Address) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn bucket_contains(bucket: &Vec<usize>, pending: &Pending, address: &Address) -> bool {
     let mut i = 0;
     while i < bucket.len() {
@@ -328,6 +334,7 @@ fn bucket_contains(bucket: &Vec<usize>, pending: &Pending, address: &Address) ->
     false
 }
 
+#[allow(dead_code)]
 fn stage_batch(pending: &Pending, version: Version) -> Option<(Data, Buckets)> {
     let mut buckets = empty_buckets();
     let mut data = Assoc::new();
@@ -350,6 +357,7 @@ fn stage_batch(pending: &Pending, version: Version) -> Option<(Data, Buckets)> {
     Some((data, buckets))
 }
 
+#[allow(dead_code)]
 fn append_batch_put(data: &mut Data, row: &(Address, Write), version: Version) {
     if let Write::Put(value) = &row.1 {
         data.0.push((
@@ -362,12 +370,14 @@ fn append_batch_put(data: &mut Data, row: &(Address, Write), version: Version) {
     }
 }
 
+#[allow(dead_code)]
 fn append_untouched(data: &mut Data, row: &(Address, Cell), pending: &Pending, buckets: &Buckets) {
     if !bucket_contains(&buckets[bucket_for(&row.0)], pending, &row.0) {
         data.0.push((row.0.clone(), row.1.clone()));
     }
 }
 
+#[allow(dead_code)]
 fn publish_batch(data: &Data, pending: &Pending, version: Version) -> Option<Data> {
     let Some((mut next, buckets)) = stage_batch(pending, version) else {
         return None;
@@ -380,6 +390,7 @@ fn publish_batch(data: &Data, pending: &Pending, version: Version) -> Option<Dat
     Some(next)
 }
 
+#[allow(dead_code)]
 fn image(data: &Data, map: &Bytes) -> Image {
     let mut out = Vec::new();
     let mut i = 0;
@@ -390,12 +401,14 @@ fn image(data: &Data, map: &Bytes) -> Image {
     Assoc(out)
 }
 
+#[allow(dead_code)]
 fn copy_if_on_map(out: &mut Vec<(Bytes, Cell)>, row: &(Address, Cell), map: &Bytes) {
     if row.0.map.same(map) {
         out.push((row.0.key.clone(), row.1.clone()));
     }
 }
 
+#[allow(dead_code)]
 fn same_image(data: &Data, map: &Bytes, expected: &Image) -> bool {
     let mut i = 0;
     let mut matched = 0;
@@ -673,17 +686,6 @@ fn index_from_rows(index: &mut AddressIndex<Cell>, rows: Data) -> RadixRoot {
     root
 }
 
-fn update_revision(
-    revisions: &mut Assoc<Bytes, Stamp>,
-    data: &Data,
-    row: &(Address, Write),
-    stamp: Stamp,
-) {
-    if matches!(row.1, Write::Put(_)) || data.index(&row.0).is_some() {
-        revisions.set(row.0.map.clone(), stamp);
-    }
-}
-
 fn update_birth(births: &mut Assoc<Bytes, Stamp>, map: &Bytes, stamp: Stamp) {
     if births.index(map).is_none() {
         births.set(map.clone(), stamp);
@@ -842,6 +844,7 @@ impl PinnedImage {
         }
     }
 
+    #[allow(dead_code)]
     fn materialize(&self, history: &History, map: &Bytes) -> Image {
         match self {
             Self::Empty => Assoc::new(),
@@ -849,6 +852,105 @@ impl PinnedImage {
             Self::Recovered(rows) => rows.clone(),
         }
     }
+
+    fn entries(&self, history: &History, map: &Bytes) -> Entries {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Root(root) => indexed_entries(&history.index, *root, map),
+            Self::Recovered(rows) => {
+                let mut out = Vec::with_capacity(rows.0.len());
+                let mut i = 0;
+                while i < rows.0.len() {
+                    let row = &rows.0[i];
+                    out.push((row.0.clone(), row.1.value.clone()));
+                    i += 1;
+                }
+                out
+            }
+        }
+    }
+
+    fn size(&self, history: &History, map: &Bytes) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Root(root) => history.index.scan_map_links(*root, map).len(),
+            Self::Recovered(rows) => rows.0.len(),
+        }
+    }
+
+    fn range(
+        &self,
+        history: &History,
+        map: &Bytes,
+        lower: &Option<Bytes>,
+        upper: &Option<Bytes>,
+    ) -> Entries {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Root(root) => indexed_range(&history.index, *root, map, lower, upper),
+            Self::Recovered(rows) => ordered_range(&rows.0, lower, upper),
+        }
+    }
+}
+
+fn append_entry_row(rows: &mut Entries, address: &Address, cell: &Cell, map: &Bytes) {
+    if address.map.same(map) {
+        rows.push((address.key.clone(), cell.value.clone()));
+    }
+}
+
+fn indexed_entries(index: &AddressIndex<Cell>, root: RadixRoot, map: &Bytes) -> Entries {
+    let links = index.scan_map_links(root, map);
+    let mut rows = Vec::with_capacity(links.len());
+    let mut i = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        append_entry_row(&mut rows, address, cell, map);
+        i += 1;
+    }
+    rows
+}
+
+fn append_range_row(
+    out: &mut Entries,
+    address: &Address,
+    cell: &Cell,
+    map: &Bytes,
+    lower: &Option<Bytes>,
+    upper: &Option<Bytes>,
+) {
+    if !address.map.same(map) {
+        return;
+    }
+    let above_lower = match lower {
+        Some(l) => l.compare(&address.key) <= 0,
+        None => true,
+    };
+    let below_upper = match upper {
+        Some(u) => address.key.compare(u) < 0,
+        None => true,
+    };
+    if above_lower && below_upper {
+        out.push((address.key.clone(), cell.value.clone()));
+    }
+}
+
+fn indexed_range(
+    index: &AddressIndex<Cell>,
+    root: RadixRoot,
+    map: &Bytes,
+    lower: &Option<Bytes>,
+    upper: &Option<Bytes>,
+) -> Entries {
+    let links = index.scan_map_links(root, map);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        append_range_row(&mut out, address, cell, map, lower, upper);
+        i += 1;
+    }
+    out
 }
 
 fn release_pin(index: &mut AddressIndex<Cell>, pin: &PinnedImage) {
@@ -931,7 +1033,7 @@ impl Clone for View {
 
 enum Dependency {
     Key(Address, Option<Cell>),
-    Map(Bytes, Image),
+    Map(Bytes, PinnedImage),
 }
 
 impl Clone for Dependency {
@@ -950,6 +1052,62 @@ fn copy_cell(cell: &Option<Cell>) -> Option<Cell> {
     }
 }
 
+fn indexed_same_image(
+    index: &AddressIndex<Cell>,
+    root: RadixRoot,
+    map: &Bytes,
+    expected: &Image,
+) -> bool {
+    let links = index.scan_map_links(root, map);
+    if links.len() != expected.0.len() {
+        return false;
+    }
+    let mut i = 0;
+    let mut matched = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        let Some(next) = match_indexed_row(address, cell, map, expected, matched) else {
+            return false;
+        };
+        matched = next;
+        i += 1;
+    }
+    matched == expected.0.len()
+}
+
+fn same_map_link(index: &AddressIndex<Cell>, left: u32, right: u32) -> bool {
+    if left == right {
+        return true;
+    }
+    let (la, lc) = index.scan_row(left);
+    let (ra, rc) = index.scan_row(right);
+    la.key.same(&ra.key) && lc.same(rc)
+}
+
+fn indexed_same_map_roots(
+    index: &AddressIndex<Cell>,
+    left_root: RadixRoot,
+    right_root: RadixRoot,
+    map: &Bytes,
+) -> bool {
+    if left_root.0 == right_root.0 {
+        return true;
+    }
+    let left = index.scan_map_links(left_root, map);
+    let right = index.scan_map_links(right_root, map);
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < left.len() {
+        if !same_map_link(index, left[i], right[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 impl Dependency {
     fn holds(&self, index: &AddressIndex<Cell>, root: RadixRoot) -> bool {
         match self {
@@ -958,24 +1116,11 @@ impl Dependency {
                 (Some(current), Some(old)) => current.same(old),
                 _ => false,
             },
-            Self::Map(map, expected) => {
-                let links = index.scan_map_links(root, map);
-                if links.len() != expected.0.len() {
-                    return false;
-                }
-                let mut i = 0;
-                let mut matched = 0;
-                while i < links.len() {
-                    let (address, cell) = index.scan_row(links[i]);
-                    let Some(next) = match_indexed_row(address, cell, map, expected, matched)
-                    else {
-                        return false;
-                    };
-                    matched = next;
-                    i += 1;
-                }
-                matched == expected.0.len()
-            }
+            Self::Map(map, expected) => match expected {
+                PinnedImage::Empty => index.scan_map_links(root, map).is_empty(),
+                PinnedImage::Root(pinned) => indexed_same_map_roots(index, root, *pinned, map),
+                PinnedImage::Recovered(rows) => indexed_same_image(index, root, map, rows),
+            },
         }
     }
 }
@@ -1114,16 +1259,9 @@ impl Tx {
         map: &Bytes,
         view: &View,
     ) -> Entries {
-        let local = view.local.materialize(history, map);
-        let mut rows = Assoc::new();
-        let mut i = 0;
-        while i < local.0.len() {
-            let row = &local.0[i];
-            rows.0.push((row.0.clone(), row.1.value.clone()));
-            i += 1;
-        }
-        deps.push(Dependency::Map(map.clone(), local));
-        i = pending.0.len();
+        deps.push(Dependency::Map(map.clone(), view.local.clone()));
+        let mut rows = Assoc(view.local.entries(history, map));
+        let mut i = pending.0.len();
         while i > 0 {
             i -= 1;
             let row = &pending.0[i];
@@ -1186,9 +1324,16 @@ impl Tx {
                 &map,
                 view,
             ))),
-            Operation::Size => Ok(Output::Size(
-                Self::scan(history, &self.pending, &mut self.deps, &map, view).len(),
-            )),
+            Operation::Size => {
+                if self.pending.0.is_empty() {
+                    let count = view.local.size(history, &map);
+                    self.deps.push(Dependency::Map(map, view.local.clone()));
+                    return Ok(Output::Size(count));
+                }
+                Ok(Output::Size(
+                    Self::scan(history, &self.pending, &mut self.deps, &map, view).len(),
+                ))
+            }
             Operation::Clear => {
                 let entries = Self::scan(history, &self.pending, &mut self.deps, &map, view);
                 let mut i = 0;
@@ -1212,9 +1357,8 @@ impl Tx {
                     }
                 }
                 if self.pending.0.is_empty() {
-                    let local = view.local.materialize(history, &map);
-                    let rows = ordered_range(&local.0, &lower, &upper);
-                    self.deps.push(Dependency::Map(map, local));
+                    let rows = view.local.range(history, &map, &lower, &upper);
+                    self.deps.push(Dependency::Map(map, view.local.clone()));
                     return Ok(Output::Entries(rows));
                 }
                 Ok(Output::Entries(ordered_range(

@@ -168,7 +168,7 @@ namespace ccf::kv::rust_test
           store.chunker->rolled_back_to(id.seqno - 1);
         }
       }
-      hooks = store.record_commit(id.seqno, writes);
+      hooks = store.record_commit(id.seqno, std::move(writes));
       claims = decoder.consume_claims_digest();
       evidence = decoder.consume_commit_evidence_digest();
       if (signature)

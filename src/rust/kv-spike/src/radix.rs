@@ -1159,6 +1159,7 @@ pub struct DualRoot {
 }
 
 impl DualRoot {
+    #[allow(dead_code)]
     pub(crate) fn is_empty(self) -> bool {
         self.lookup == 0 && self.order == 0
     }

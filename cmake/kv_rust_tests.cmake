@@ -56,6 +56,8 @@ add_test_bin(
   kv_backend_bench
   ${CCF_DIR}/src/kv/test/kv_backend_bench.cpp
   ${CCF_DIR}/src/kv/test/rust_kv_commit.cpp
+  ${CCF_DIR}/src/kv/test/rust_kv_replay.cpp
+  ${CCF_DIR}/src/kv/test/rust_kv_snapshot.cpp
 )
 target_link_libraries(
   kv_backend_bench

@@ -94,10 +94,9 @@ namespace ccf::kv::rust_test
     }
   }
 
-  std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_maps(
+  std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_unsafe_maps(
     Version version)
   {
-    std::lock_guard lock(mutex);
     auto r = dispatch({.op = Opcode::SNAPSHOT_MAPS, .number = version});
     r.require();
     auto snapshot = std::make_unique<StoreSnapshot>(version);
@@ -125,6 +124,13 @@ namespace ccf::kv::rust_test
         std::string(name.begin(), name.end()), map.revision, std::move(rows)));
     }
     return snapshot;
+  }
+
+  std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_maps(
+    Version version)
+  {
+    std::lock_guard lock(mutex);
+    return snapshot_unsafe_maps(version);
   }
 
   std::vector<uint8_t> Store::serialise_snapshot(

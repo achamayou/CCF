@@ -291,11 +291,11 @@ theorem can_apply_matches_model (encode : List U8 → String)
         = t.views.val.map (viewStamps (encode ∘ alloc.vec.Vec.val)))
     (rows : CellRows) (indexView : IndexView s.index head.data rows)
     (indexValid : IndexValid s.index)
-    (room : ∀ d ∈ t.deps.val, DependencyRoom rows d)
+    (room : ∀ d ∈ t.deps.val, DependencyRoom s.index rows d)
     (hData : model.head.data = encodeData encode (indexedCellData rows))
     (hDeps
       : tx.normal.deps.reverse
-        = t.deps.val.map (encodeDependency encode ∘ byteDependency))
+        = t.deps.val.map (encodeDependency encode ∘ byteDependency s.index))
     (hTerm : model.term = s.term.val)
     (hSnapshot
       : tx.snapshot.map Snapshot.term = t.snapshot.map (fun snap => snap.term.val))
@@ -309,9 +309,10 @@ theorem can_apply_matches_model (encode : List U8 → String)
     s t model tx hHistory hViews valid
   have hd : WP.spec (Spike.engine.Tx.valid_dependencies t s)
       (fun r => r = validates model.head.data tx.normal.deps) := by
-    have hv := validates_encoding encode inj (indexedCellData rows) (t.deps.val.map byteDependency)
+    have hv := validates_encoding encode inj (indexedCellData rows)
+      (t.deps.val.map (byteDependency s.index))
     have he : validates model.head.data tx.normal.deps =
-        validates (indexedCellData rows) (t.deps.val.map byteDependency) := by
+        validates (indexedCellData rows) (t.deps.val.map (byteDependency s.index)) := by
       rw [← hv, hData, List.map_map, ← hDeps]
       exact (List.all_reverse).symm
     rw [he]

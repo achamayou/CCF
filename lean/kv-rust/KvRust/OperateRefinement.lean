@@ -146,9 +146,10 @@ private theorem related_operated (encode : List U8 → String) (sid : Nat)
     (hw : (pointWrites encode after).Perm (executeOperation tx op).1.normal.writes)
     (hso : PendingSorted after.pending.val)
     (hd
-      : List.Forall₂ DependencyOrderEq (pointDeps encode after)
+      : List.Forall₂ DependencyOrderEq (pointDeps encode index after)
           (executeOperation tx op).1.normal.deps)
     (hno : NativeDepsFromViews encode index after)
+    (hdp : DepsPinsInViews after)
     (hmo : ModelDepsFromViews (executeOperation tx op).1)
     (hc : pointKeepsContext native after)
     : AttemptMatches encode sid index natArchive archive after
@@ -175,7 +176,7 @@ private theorem related_operated (encode : List U8 → String) (sid : Nat)
   change (executeOperation tx op).1.data = tx.data at hData
   change (executeOperation tx op).1.unavailable = tx.unavailable at hUn
   refine ⟨hStore.trans bef.store, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hLog, ?_, ?_, hw, hso, hd,
-    hno, hmo⟩
+    hno, hdp, hmo⟩
   · rw [hSnap, hns]; exact bef.snapshot
   · rw [hPhase, hnp]; exact bef.phase
   · rw [hView, hnv]; exact bef.views
@@ -245,9 +246,10 @@ private theorem operate_enabled (encode : List U8 → String)
         (executeOperation tx (op.model encode m)).2)
       (hw : (pointWrites encode after).Perm (executeOperation tx (op.model encode m)).1.normal.writes)
       (hso : PendingSorted after.pending.val)
-      (hd : List.Forall₂ DependencyOrderEq (pointDeps encode after)
+      (hd : List.Forall₂ DependencyOrderEq (pointDeps encode history.index after)
         (executeOperation tx (op.model encode m)).1.normal.deps)
       (hno : NativeDepsFromViews encode history.index after)
+      (hdp : DepsPinsInViews after)
       (hmo : ModelDepsFromViews (executeOperation tx (op.model encode m)).1)
       (hc : pointKeepsContext t after) :
       ∃ value, r = .Ok value
@@ -259,7 +261,7 @@ private theorem operate_enabled (encode : List U8 → String)
     obtain ⟨value, hr, he⟩ := output_projection encode op r _ ho
     exact ⟨value, hr, he.symm ▸ hm, by simpa using congrArg Spike.engine.Tx.views hc,
       related_operated encode sid history.index natArchive archive t after tx (op.model encode m) h hFor hw hso hd
-        hno hmo hc⟩
+        hno hdp hmo hc⟩
   cases op with
   | point op =>
       have hGlobalUnique : Kv.Properties.Unique (image v.frame.data (encode m.val)) :=
@@ -267,21 +269,21 @@ private theorem operate_enabled (encode : List U8 → String)
       apply WP.spec_mono
         (operate_point_matches_model encode inj history t tx m op v hp hv h.views
           (h.localImage hv) (h.dataUnique _) hGlobalUnique h.writes h.sorted h.deps
-          h.nativeDeps h.modelDeps room h.live space)
-      rintro ⟨out, next⟩ ⟨ho, hw, hd, hc, hso, hno, hmo⟩
-      exact finish out next _ ho (OutputMatches.of_eq rfl) hw hso hd hno hmo hc
+          h.nativeDeps h.depsPins h.modelDeps room h.live space)
+      rintro ⟨out, next⟩ ⟨ho, hw, hd, hc, hso, hno, hdp, hmo⟩
+      exact finish out next _ ho (OutputMatches.of_eq rfl) hw hso hd hno hdp hmo hc
   | whole op =>
       obtain ⟨room, rows, clear⟩ := room
       obtain ⟨scanSpace, mapRoom⟩ := space
       apply WP.spec_mono
         (operate_scan_matches_model encode inj order history t tx m op v hp hv h.views
-          (h.localImage hv) h.writes h.sorted h.deps h.nativeDeps h.modelDeps room rows
-          (h.dataUnique _) clear h.live indexed.index mapRoom scanSpace)
-      rintro ⟨out, next⟩ ⟨⟨obs, ho, hmatch⟩, hw, hd, hc, hso, hno, hmo⟩
+          (h.localImage hv) h.writes h.sorted h.deps h.nativeDeps h.depsPins h.modelDeps
+          room rows (h.dataUnique _) clear h.live indexed.index mapRoom scanSpace)
+      rintro ⟨out, next⟩ ⟨⟨obs, ho, hmatch⟩, hw, hd, hc, hso, hno, hdp, hmo⟩
       have hmatch' : OutputMatches (.operation sid 0 (op.model encode (encode m.val))) obs
           (executeOperation tx (op.model encode (encode m.val))).2 := by
         cases op <;> cases obs <;> exact hmatch
-      exact finish out next obs ho hmatch' hw hso hd hno hmo hc
+      exact finish out next obs ho hmatch' hw hso hd hno hdp hmo hc
 
 /-- Disabled handle operations reject without changing the attempt. -/
 theorem operate_disabled (encode : List U8 → String)

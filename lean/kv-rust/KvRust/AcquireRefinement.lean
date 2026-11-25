@@ -87,6 +87,7 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
           m ≠ key
           → find (rustPinnedViews encode newIndex t'.views) m
             = find (rustPinnedViews encode oldIndex t.views) m)
+    (viewsKeep : ∀ row ∈ t.views.val, row ∈ t'.views.val)
     (hu : tx'.unavailable = t'.unavailable)
     (hn
       : if available s snap key then
@@ -118,7 +119,23 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
       cases h : find (rustPinnedViews encode oldIndex t.views) key with
       | none => rfl
       | some _ => rw [h] at hr; cases hr
-    refine ⟨?_, ?_, ?_, v, live, orig, ?_, ?_, ?_, ?_, ?_, hu, ?_, ?_, ?_, ?_, ?_⟩
+    have hdepsEq : pointDeps encode newIndex t' = pointDeps encode oldIndex t := by
+      have hdt : t'.deps = t.deps := by simpa using congrArg Spike.engine.Tx.deps hn
+      unfold pointDeps
+      rw [hdt]
+      congr 1
+      apply List.map_congr_left
+      intro d hd
+      cases d with
+      | Key _ _ => rfl
+      | Map m pin =>
+          obtain ⟨row, hrow, _, hpin⟩ := rel.depsPins m pin hd
+          have hsub : ∀ r ∈ pinPins pin, r ∈ txPins t := fun r hr =>
+            List.mem_flatMap.mpr ⟨row, hrow, List.mem_append_left _ (hpin ▸ hr)⟩
+          have hEq := (pin_preserved_of_pins (hpresAll (txPins t)) m pin hsub
+            (hpin ▸ (rel.live row hrow).1)).2
+          simp only [Function.comp_def, byteDependency, encodeDependency, hEq]
+    refine ⟨?_, ?_, ?_, v, live, orig, ?_, ?_, ?_, ?_, ?_, hu, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [hm]; exact rel.store
     · rw [hm, hn]; exact rel.snapshot
     · rw [hm, hn]; exact rel.phase
@@ -166,9 +183,9 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
       cases hz
     · rw [hm, hn]; exact rel.writes
     · rw [hn]; exact rel.sorted
-    · rw [hm, hn]; exact rel.deps
+    · rw [hm, hdepsEq]; exact rel.deps
     · intro d hd
-      rw [hn] at hd
+      rw [hdepsEq] at hd
       have hprev := rel.nativeDeps d hd
       cases d with
       | key _ _ => trivial
@@ -179,6 +196,11 @@ private theorem updated_relation (encode : List U8 → String) (sid : Nat)
             rw [hFreshNative] at hpv
             cases hpv
           exact ⟨pv, (otherViews m hne).trans hpv, hexp⟩
+    · intro mp pin hmem
+      have hdt : t'.deps = t.deps := by simpa using congrArg Spike.engine.Tx.deps hn
+      rw [hdt] at hmem
+      obtain ⟨row, hrow, hmEq, hpEq⟩ := rel.depsPins mp pin hmem
+      exact ⟨row, viewsKeep row hrow, hmEq, hpEq⟩
     · intro d hd
       rw [hm] at hd ⊢
       have hprev := rel.modelDeps d hd
@@ -267,7 +289,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                         hr.nativeOrig)
                     rintro ⟨output, after⟩ ⟨modelAfter, txAfter, tAfter, obs, index, hstep, ho, hw, hv, hu,
                       han, ham, _, hlog, hglobal, hterm, hident, hreuse, hvals, hliveAfter,
-                      hidx, hrow, hLive, hOrig, hOther⟩
+                      hidx, hrow, hLive, hOrig, hViewsKeep, hOther⟩
                     rw [hstep]
                     obtain ⟨out, hout, hc⟩ := acquire_observation encode output obs ho
                     have hpres : IndexPreservesPins n.history.index after.history.index (storePins after) := by
@@ -320,7 +342,7 @@ theorem acquire_step_matches (encode : List U8 → String) (inj : Function.Injec
                       natArchive archive s snap rustSnap key t tAfter tx txAfter hr hvals
                       hns hm hh.modelSub hh.modelArchive.emptyPresent
                       (selected_unique w sid s snap key rel.reachable hs)
-                      hv hLive hOrig hOther hu han ham
+                      hv hLive hOrig hOther hViewsKeep hu han ham
               · have hm : (tx.phase != .active) = true := by
                   rw [hr.phase]
                   exact model_phase_inactive t.phase hp

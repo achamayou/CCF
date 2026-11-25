@@ -219,7 +219,7 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     hs.modelArchive.unique s.head (hs.modelSub s.head hHeadMemModel)
   have hCheckDeps (hLin : tx.globalViews.all (fun (m, view) => mapLineage s view.current m) = true) :
       WP.spec (Spike.engine.Tx.valid_dependencies t n) (fun r => r = validates s.head.data tx.normal.deps) := by
-    have hNatCanon : ∀ d ∈ pointDeps encode t,
+    have hNatCanon : ∀ d ∈ pointDeps encode n.index t,
         d.holds nativeHead.data = holdsByContents nativeHead.data d := by
       intro d hd
       have hfrom := ht.nativeDeps d hd
@@ -308,11 +308,11 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
         tx.normal.deps.all (holdsByContents s.head.data) :=
       validates_by_contents hModelShape s.head s.head hHeadMemModel (.refl _) hModUnique
         hDepsRefl hModOrigins
-    have hNatEq : validates nativeHead.data (pointDeps encode t) =
+    have hNatEq : validates nativeHead.data (pointDeps encode n.index t) =
         tx.normal.deps.all (holdsByContents s.head.data) := by
       have hRel := ht.deps
       clear hModOrigins hDepsRefl hModelEq
-      generalize pointDeps encode t = nds at hRel hNatCanon
+      generalize pointDeps encode n.index t = nds at hRel hNatCanon
       generalize tx.normal.deps = mds at hRel
       induction hRel with
       | nil => rfl
@@ -327,8 +327,8 @@ private theorem eligibility (encode : List U8 → String) (inj : Function.Inject
     intro r hr
     rw [hr, ← validates_encoding encode inj]
     have hRev : validates (encodeData encode (indexedCellData (indexRows n.index head.data)))
-        ((t.deps.val.map byteDependency).map (encodeDependency encode)) =
-        validates nativeHead.data (pointDeps encode t) := by
+        ((t.deps.val.map (byteDependency n.index)).map (encodeDependency encode)) =
+        validates nativeHead.data (pointDeps encode n.index t) := by
       simp [validates, pointDeps, nativeHead, modelFrame, List.all_reverse,
         List.map_map, Function.comp_def]
     rw [hRev, hNatEq, ← hModelEq]

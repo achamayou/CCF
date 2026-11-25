@@ -66,3 +66,76 @@ TEST_CASE("Rust KV rejects invalid history operations without changing state")
   auto tx = store.create_read_only_tx();
   CHECK(tx.ro(map)->get("key") == "committed");
 }
+
+TEST_CASE("Rust KV store implements AbstractStore lifecycle and snapshot hooks")
+{
+  using namespace ccf::kv;
+  test::TestStore store;
+  AbstractStore& abstract = store;
+  const Map<std::string, std::string> map("public:abstract");
+
+  abstract.initialise_term(2);
+  CHECK(abstract.commit_view() == 2);
+  CHECK(abstract.get_encryptor() != nullptr);
+  CHECK(abstract.get_consensus() == nullptr);
+  CHECK(abstract.get_history() == nullptr);
+  CHECK(abstract.get_chunker() == nullptr);
+
+  {
+    auto tx = store.create_tx();
+    tx.rw(map)->put("a", "1");
+    REQUIRE(tx.commit() == CommitResult::SUCCESS);
+  }
+
+  const auto [txid, commit_term] = abstract.current_txid_and_commit_term();
+  CHECK(txid == ccf::TxID{2, 1});
+  CHECK(commit_term == 2);
+  CHECK(abstract.current_version() == 1);
+  CHECK(abstract.compacted_version() == 0);
+
+  CHECK_FALSE(abstract.next_version(1).has_value());
+  const auto reserved = abstract.next_version(2);
+  REQUIRE(reserved.has_value());
+  CHECK(std::get<0>(*reserved) == 2);
+  CHECK(std::get<1>(*reserved) == 0);
+  CHECK(abstract.check_rollback_count(0));
+  abstract.rollback({2, 1}, 2);
+  CHECK(abstract.check_rollback_count(1));
+
+  {
+    ScopedStoreMapsLock lock(&abstract);
+    abstract.set_flag_unsafe(
+      AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE);
+    CHECK(abstract.flag_enabled_unsafe(
+      AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE));
+    abstract.unset_flag_unsafe(
+      AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE);
+    CHECK_FALSE(abstract.flag_enabled_unsafe(
+      AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE));
+  }
+
+  std::unique_ptr<AbstractStore::AbstractSnapshot> snap;
+  {
+    ScopedStoreMapsLock lock(&abstract);
+    CHECK(abstract.current_version() == 1);
+    CHECK(abstract.get_encryptor() != nullptr);
+    snap = abstract.snapshot_unsafe_maps(1);
+    REQUIRE(snap != nullptr);
+    CHECK(snap->get_version() == 1);
+  }
+  const auto raw_snapshot = abstract.serialise_snapshot(std::move(snap));
+
+  test::TestStore restored;
+  AbstractStore& restored_abstract = restored;
+  ConsensusHookPtrs hooks;
+  CHECK(
+    restored_abstract.deserialise_snapshot(
+      raw_snapshot.data(), raw_snapshot.size(), hooks) == ApplyResult::PASS);
+  CHECK(restored_abstract.current_version() == 1);
+  CHECK(restored.create_read_only_tx().ro(map)->get("a") == "1");
+
+  REQUIRE_THROWS_AS(abstract.get_map(1, "public:abstract"), std::logic_error);
+  REQUIRE_THROWS_AS(
+    abstract.get_map_unsafe(1, "public:abstract"), std::logic_error);
+  REQUIRE_THROWS_AS(abstract.add_dynamic_map(1, nullptr), std::logic_error);
+}

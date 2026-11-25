@@ -189,7 +189,7 @@ structure ApplyCapacity (s : Spike.engine.History) (head : Spike.engine.Frame)
     : IndexBatchRoom s.index pinsCount
         ((indexRows s.index head.data).length + t.pending.val.length) t.pending.val.length
   addresses : ∀ row ∈ t.pending.val, IndexKeyRoom row
-  dependencies : ∀ d ∈ t.deps.val, DependencyRoom (indexRows s.index head.data) d
+  dependencies : ∀ d ∈ t.deps.val, DependencyRoom s.index (indexRows s.index head.data) d
   /-- Capacity for revision records. -/
   revisions : head.revisions.val.length + t.pending.val.length ≤ Usize.max
   /-- Capacity for birth records. -/

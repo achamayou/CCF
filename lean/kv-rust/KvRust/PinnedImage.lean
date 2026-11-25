@@ -17,16 +17,6 @@ def pinPins : Spike.engine.PinnedImage → List U32
   | .Root root => if root = 0#u32 then [] else [root]
   | _ => []
 
-def PinLive (index : CellIndex) : Spike.engine.PinnedImage → Prop
-  | .Root root => IndexView index root (indexRows index root)
-  | _ => True
-
-noncomputable def pinImage (index : CellIndex) (map : Spike.engine.Bytes)
-    : Spike.engine.PinnedImage → Assoc (List U8) (Cell (List U8))
-  | .Empty => []
-  | .Root root => image (indexedCellData (indexRows index root)) map.val
-  | .Recovered rows => byteImage rows
-
 theorem pin_preserved_of_pins {before after : CellIndex} {pins : List U32}
     (preserved : IndexPreservesPins before after pins)
     (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
@@ -68,10 +58,6 @@ theorem clone_pin (pin : Spike.engine.PinnedImage)
   cases pin <;> simp [Spike.engine.PinnedImage.Insts.CoreCloneClone.clone, clone_assoc,
     Spike.radix.RadixRoot.Insts.CoreCloneClone.clone]
 
-def PinScanRoom (index : CellIndex) : Spike.engine.PinnedImage → Prop
-  | .Root root => 18 * (indexRows index root).length ≤ Usize.max
-  | _ => True
-
 def HistoryScanRoom (history : Spike.engine.History) : Prop :=
   ∀ (i : Nat) (frame : Spike.engine.Frame),
     history.log.frames.val[i]? = some frame
@@ -97,6 +83,191 @@ theorem release_pin_refines (index : CellIndex) (restPins : List U32)
       have hlive : IndexLiveness index (if root = 0#u32 then restPins else root :: restPins) := by
         by_cases hz : root = 0#u32 <;> simpa [pinPins, hz] using live
       exact index_release_root_refines index restPins root hlive queueRoom
+
+/-- Materializing entries from a pinned handle copies precisely its key/value pairs in order. -/
+theorem pin_entries_refines (history : Spike.engine.History)
+    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+    (live : PinLive history.index pin) (valid : IndexValid history.index)
+    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
+    (space : PinScanRoom history.index pin)
+    : WP.spec (Spike.engine.PinnedImage.entries pin history map)
+        (fun rows =>
+          rows.val.map (fun (k, v) => (k.val, v.val))
+          = (pinImage history.index map pin).map (fun (k, c) => (k, c.value))) := by
+  unfold Spike.engine.PinnedImage.entries
+  cases pin with
+  | Empty => simp [alloc.vec.Vec.new, pinImage]
+  | Root root =>
+      unfold Spike.engine.indexed_entries
+      apply WP.spec_bind
+        (index_scan_map_refines history.index root (indexRows history.index root) map
+          live valid mapRoom space)
+      intro links ⟨hlen, hload⟩
+      let selected := (indexRows history.index root).filter fun r => decide (r.1.map.val = map.val)
+      change links.val.length = selected.length at hlen
+      change ∀ (i : Nat) link, links.val[i]? = some link →
+        ∃ entry, selected[i]? = some entry ∧
+          WP.spec (Spike.kv_index.AddressIndex.scan_row history.index link) (· = entry) at hload
+      unfold Spike.engine.indexed_entries_loop
+      have hcap := alloc.vec.Vec.len_ineq links
+      have hlenV : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
+      have hone : (1#usize : Usize).val = 1 := rfl
+      apply WP.spec_mono (P₀ := fun out =>
+        out.val.map (fun (k, v) => (k.val, v.val))
+          = selected.map (fun (a, c) => (a.key.val, c.value.val)))
+      · apply loop.spec_decr_nat
+          (fun (_, i) => selected.length - (i : Usize).val)
+          (fun (out, i) =>
+            i.val ≤ selected.length
+            ∧ out.val.map (fun (k, v) => (k.val, v.val))
+              = (selected.take i.val).map (fun (a, c) => (a.key.val, c.value.val)))
+          _ _ _
+        · rintro ⟨out, i⟩ ⟨hi, hinv⟩
+          dsimp only at hi hinv ⊢
+          unfold Spike.engine.indexed_entries_loop.body
+          by_cases run : i < alloc.vec.Vec.len links
+          · have hlt : i.val < links.val.length := by rwa [← hlenV]
+            have his : i.val < selected.length := by omega
+            have houtLen : out.val.length = i.val := by
+              have h1 := congrArg List.length hinv
+              simp only [List.length_map, List.length_take, Nat.min_eq_left hi] at h1
+              exact h1
+            rw [ite_eq_left run, alloc.vec.Vec.index_slice_index]
+            apply WP.spec_bind (alloc.vec.Vec.index_usize_spec links i hlt)
+            intro link hlink
+            obtain ⟨⟨a, c⟩, hat, hread⟩ := hload i.val link
+              ((List.getElem?_eq_getElem hlt).trans (congrArg some hlink.symm))
+            apply WP.spec_bind hread
+            rintro ⟨a', c'⟩ heq
+            obtain ⟨ha', hc'⟩ : a' = a ∧ c' = c := Prod.mk.inj heq
+            subst ha' hc'
+            have hOnMap : a'.map.val = map.val := by
+              have hmem : (a', c') ∈ selected := List.mem_of_getElem? hat
+              exact of_decide_eq_true (List.mem_filter.mp hmem).2
+            change WP.spec (do
+              let out1 ← Spike.engine.append_entry_row out a' c' map
+              let i1 ← i + 1#usize
+              Result.ok (ControlFlow.cont (out1, i1))) _
+            unfold Spike.engine.append_entry_row
+            simp only [bytes_same, hOnMap, decide_true, bind_ok, ite_true, clone_bytes]
+            apply WP.spec_bind (alloc.vec.Vec.push_spec out (a'.key, c'.value) (by omega))
+            intro out1 hout1
+            apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+            intro i1 hi1
+            have hi1Val : i1.val = i.val + 1 := by omega
+            rw [WP.spec_ok]
+            dsimp only
+            refine ⟨⟨by omega, ?_⟩, by omega⟩
+            rw [hout1, hi1Val, List.map_append, List.map_singleton, hinv,
+              List.take_add_one, hat]
+            simp
+          · have hge : selected.length ≤ i.val := by rw [← hlen, ← hlenV]; exact Nat.le_of_not_gt run
+            rw [ite_eq_right run, WP.spec_ok]
+            simpa [List.take_of_length_le hge] using hinv
+        · simp [alloc.vec.Vec.with_capacity]
+      · intro out hout
+        rw [hout]
+        unfold pinImage selected
+        have hproj : ∀ rows : CellRows,
+            (rows.filter fun r => decide (r.1.map.val = map.val)).map (fun (a, c) => (a.key.val, c.value.val))
+            = (image (indexedCellData rows) map.val).map (fun (k, c) => (k, c.value)) := by
+          intro rows
+          induction rows with
+          | nil => rfl
+          | cons row rest ih =>
+              obtain ⟨a, c⟩ := row
+              by_cases hm : a.map.val = map.val
+              · simp [hm, indexedCellData, image, byteAddr, byteCell, ih]
+              · simp [hm, indexedCellData, image, byteAddr, ih]
+        exact hproj (indexRows history.index root)
+  | Recovered rows =>
+      unfold Spike.engine.PinnedImage.entries_loop
+      have hcap := alloc.vec.Vec.len_ineq rows
+      have hlenV : (alloc.vec.Vec.len rows).val = rows.val.length := alloc.vec.Vec.len_val rows
+      have hone : (1#usize : Usize).val = 1 := rfl
+      apply WP.spec_mono (P₀ := fun out =>
+        out.val.map (fun (k, v) => (k.val, v.val))
+          = rows.val.map (fun (k, c) => (k.val, c.value.val)))
+      · apply loop.spec_decr_nat
+          (fun (_, i) => rows.val.length - (i : Usize).val)
+          (fun (out, i) =>
+            i.val ≤ rows.val.length
+            ∧ out.val.map (fun (k, v) => (k.val, v.val))
+              = (rows.val.take i.val).map (fun (k, c) => (k.val, c.value.val)))
+          _ _ _
+        · rintro ⟨out, i⟩ ⟨hi, hinv⟩
+          dsimp only at hi hinv ⊢
+          unfold Spike.engine.PinnedImage.entries_loop.body
+          by_cases run : i < alloc.vec.Vec.len rows
+          · have hlt : i.val < rows.val.length := by rwa [← hlenV]
+            have houtLen : out.val.length = i.val := by
+              have h1 := congrArg List.length hinv
+              simp only [List.length_map, List.length_take, Nat.min_eq_left hi] at h1
+              exact h1
+            rw [ite_eq_left run, alloc.vec.Vec.index_slice_index]
+            apply WP.spec_bind (alloc.vec.Vec.index_usize_spec rows i hlt)
+            rintro ⟨k, c⟩ hkc
+            simp only [clone_bytes, bind_ok]
+            apply WP.spec_bind (alloc.vec.Vec.push_spec out (k, c.value) (by omega))
+            intro out1 hout1
+            apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+            intro i1 hi1
+            have hi1Val : i1.val = i.val + 1 := by omega
+            have hstepTake : rows.val.take (i.val + 1) = rows.val.take i.val ++ [(k, c)] := by
+              rw [List.take_add_one, List.getElem?_eq_getElem hlt, ← hkc]
+              rfl
+            rw [WP.spec_ok]
+            dsimp only
+            refine ⟨⟨by omega, ?_⟩, by omega⟩
+            rw [hout1, hi1Val, List.map_append, List.map_singleton, hinv, hstepTake,
+              List.map_append, List.map_singleton]
+          · have hge : rows.val.length ≤ i.val := by rw [← hlenV]; exact Nat.le_of_not_gt run
+            rw [ite_eq_right run, WP.spec_ok]
+            simpa [List.take_of_length_le hge] using hinv
+        · simp [alloc.vec.Vec.with_capacity]
+      · intro out hout
+        rw [hout]
+        simp [pinImage, byteImage, byteCell, List.map_map, Function.comp_def]
+
+/-- Measuring the size of a pinned handle returns the exact number of keys on `map`. -/
+theorem pin_size_refines (history : Spike.engine.History)
+    (map : Spike.engine.Bytes) (pin : Spike.engine.PinnedImage)
+    (live : PinLive history.index pin) (valid : IndexValid history.index)
+    (mapRoom : 2 * (8 + map.val.length) ≤ Usize.max)
+    (space : PinScanRoom history.index pin)
+    : WP.spec (Spike.engine.PinnedImage.size pin history map)
+        (fun count => count.val = (pinImage history.index map pin).length) := by
+  unfold Spike.engine.PinnedImage.size
+  cases pin with
+  | Empty => simp [pinImage]
+  | Recovered rows =>
+      simp [pinImage, byteImage]
+  | Root root =>
+      apply WP.spec_bind
+        (index_scan_map_refines history.index root (indexRows history.index root) map
+          live valid mapRoom space)
+      intro links ⟨hlen, _⟩
+      rw [WP.spec_ok, alloc.vec.Vec.len_val]
+      refine Eq.trans hlen ?_
+      unfold pinImage
+      have hlenEq : ∀ rows : CellRows,
+          (rows.filter fun r => decide (r.1.map.val = map.val)).length
+          = (image (indexedCellData rows) map.val).length := by
+        intro rows
+        induction rows with
+        | nil => rfl
+        | cons row rest ih =>
+            obtain ⟨a, c⟩ := row
+            by_cases hm : a.map.val = map.val
+            · simp only [List.filter_cons, hm, decide_true, List.length_cons,
+                indexedCellData, List.map_cons, image, List.filterMap_cons,
+                byteAddr, ite_true]
+              exact congrArg Nat.succ ih
+            · simp only [List.filter_cons, hm, decide_false, Bool.false_eq_true, ite_false,
+                indexedCellData, List.map_cons, image, List.filterMap_cons,
+                byteAddr]
+              exact ih
+      exact hlenEq (indexRows history.index root)
 
 /-- Materializing a pinned root handle copies precisely its selected ordered map. -/
 theorem pin_materialize_refines (history : Spike.engine.History)

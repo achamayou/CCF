@@ -40,11 +40,7 @@ namespace ccf::kv::test
   inline std::unique_ptr<AbstractStore::AbstractSnapshot> take_snapshot(
     TestStoreBase& store, Version version)
   {
-#ifdef CCF_KV_RUST_TEST_BACKEND
-    return store.snapshot_maps(version);
-#else
     ScopedStoreMapsLock lock(&store);
     return store.snapshot_unsafe_maps(version);
-#endif
   }
 }
