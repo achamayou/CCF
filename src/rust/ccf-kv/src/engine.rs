@@ -1539,7 +1539,7 @@ fn without_map(data: &Data, map: &Bytes) -> Data {
     Assoc(out)
 }
 
-fn add_snapshot_map(frame: &mut Frame, rows: &mut Data, map: &SnapshotMap, identity: u64) -> bool {
+fn validate_snapshot_map(frame: &mut Frame, map: &SnapshotMap, identity: u64) -> bool {
     if map.revision > frame.version {
         return false;
     }
@@ -1548,8 +1548,6 @@ fn add_snapshot_map(frame: &mut Frame, rows: &mut Data, map: &SnapshotMap, ident
             return false;
         }
     }
-    // A snapshot updates each included map. An omitted map is not a deletion.
-    *rows = without_map(rows, &map.name);
     let stamp = Stamp {
         version: map.revision,
         identity,
@@ -1562,24 +1560,184 @@ fn add_snapshot_map(frame: &mut Frame, rows: &mut Data, map: &SnapshotMap, ident
     }
     let mut j = 0;
     while j < map.cells.len() {
-        let (key, written, value) = &map.cells[j];
-        let address = Address {
-            map: map.name.clone(),
-            key: key.clone(),
-        };
-        if *written == 0 || *written > map.revision || rows.index(&address).is_some() {
+        let written = map.cells[j].1;
+        if written == 0 || written > map.revision {
             return false;
         }
-        rows.0.push((
-            address,
+        j += 1;
+    }
+    true
+}
+
+fn validate_snapshot_maps(
+    frame: &mut Frame,
+    maps: &[SnapshotMap],
+    identity: u64,
+) -> Option<usize> {
+    let mut total_cells = 0usize;
+    let mut i = 0;
+    while i < maps.len() {
+        if !validate_snapshot_map(frame, &maps[i], identity) {
+            return None;
+        }
+        total_cells += maps[i].cells.len();
+        i += 1;
+    }
+    Some(total_cells)
+}
+
+fn push_preserved_snapshot_row(
+    batch: &mut Vec<Option<RadixRow<Binding<Cell>>>>,
+    address: &Address,
+    cell: &Cell,
+    births: &Assoc<Bytes, Stamp>,
+    identity: u64,
+) {
+    let replaced = match births.get(&address.map) {
+        Some(stamp) => stamp.identity == identity,
+        None => false,
+    };
+    if !replaced {
+        batch.push(Some(AddressIndex::batch_row(address.clone(), cell.clone())));
+    }
+}
+
+fn collect_preserved_snapshot_rows(
+    batch: &mut Vec<Option<RadixRow<Binding<Cell>>>>,
+    index: &AddressIndex<Cell>,
+    frame: &Frame,
+    identity: u64,
+) {
+    if frame.data.is_empty() {
+        return;
+    }
+    let links = index.scan_links(frame.data);
+    let mut i = 0;
+    while i < links.len() {
+        let (address, cell) = index.scan_row(links[i]);
+        push_preserved_snapshot_row(batch, address, cell, &frame.births, identity);
+        i += 1;
+    }
+}
+
+fn collect_snapshot_map_rows(
+    batch: &mut Vec<Option<RadixRow<Binding<Cell>>>>,
+    map: &SnapshotMap,
+) {
+    let mut j = 0;
+    while j < map.cells.len() {
+        let (key, written, value) = &map.cells[j];
+        let row = AddressIndex::batch_row(
+            Address {
+                map: map.name.clone(),
+                key: key.clone(),
+            },
             Cell {
                 version: *written,
                 value: value.clone(),
             },
-        ));
+        );
+        batch.push(Some(row));
         j += 1;
     }
-    true
+}
+
+fn batch_row_key(slot: &Option<RadixRow<Binding<Cell>>>) -> &[u8] {
+    match slot {
+        Some(row) => &row.key,
+        None => panic!("missing snapshot batch row"),
+    }
+}
+
+fn compare_batch_rows(
+    a: &Option<RadixRow<Binding<Cell>>>,
+    b: &Option<RadixRow<Binding<Cell>>>,
+) -> i8 {
+    compare_slices(batch_row_key(a), batch_row_key(b))
+}
+
+fn batch_order_state(batch: &[Option<RadixRow<Binding<Cell>>>]) -> i8 {
+    let mut i = 1;
+    while i < batch.len() {
+        let ord = compare_batch_rows(&batch[i - 1], &batch[i]);
+        if ord >= 0 {
+            return ord;
+        }
+        i += 1;
+    }
+    -1
+}
+
+fn merge_runs(
+    src: &mut Vec<Option<RadixRow<Binding<Cell>>>>,
+    dst: &mut Vec<Option<RadixRow<Binding<Cell>>>>,
+    left: usize,
+    mid: usize,
+    right: usize,
+) {
+    let mut i = left;
+    let mut j = mid;
+    while i < mid && j < right {
+        let take_left = compare_batch_rows(&src[i], &src[j]) <= 0;
+        if take_left {
+            dst.push(src[i].take());
+            i += 1;
+        } else {
+            dst.push(src[j].take());
+            j += 1;
+        }
+    }
+    while i < mid {
+        dst.push(src[i].take());
+        i += 1;
+    }
+    while j < right {
+        dst.push(src[j].take());
+        j += 1;
+    }
+}
+
+fn merge_pass(
+    mut src: Vec<Option<RadixRow<Binding<Cell>>>>,
+    width: usize,
+) -> Vec<Option<RadixRow<Binding<Cell>>>> {
+    let n = src.len();
+    let mut dst = Vec::with_capacity(n);
+    let mut left = 0;
+    while left < n {
+        let mid = if width < n - left { left + width } else { n };
+        let right = if width < n - mid { mid + width } else { n };
+        merge_runs(&mut src, &mut dst, left, mid, right);
+        left = right;
+    }
+    dst
+}
+
+fn sort_and_check_unique_batch(
+    batch: Vec<Option<RadixRow<Binding<Cell>>>>,
+) -> Option<Vec<Option<RadixRow<Binding<Cell>>>>> {
+    let n = batch.len();
+    if n <= 1 {
+        return Some(batch);
+    }
+    let initial = batch_order_state(&batch);
+    if initial == -1 {
+        return Some(batch);
+    }
+    if initial == 0 {
+        return None;
+    }
+    let mut sorted = batch;
+    let mut width = 1;
+    while width < n {
+        sorted = merge_pass(sorted, width);
+        width = if width > n - width { n } else { width + width };
+    }
+    if batch_order_state(&sorted) == -1 {
+        Some(sorted)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2236,16 +2394,21 @@ impl Store {
         }
 
         let mut frame = self.history.at_cut(version).clone();
-        let mut rows = indexed_data(&self.history.index, frame.data);
         frame.version = version;
+        let Some(total_cells) = validate_snapshot_maps(&mut frame, &maps, identity) else {
+            return Err(Error::Disabled);
+        };
+        let mut batch = Vec::with_capacity(total_cells);
+        collect_preserved_snapshot_rows(&mut batch, &self.history.index, &frame, identity);
         let mut i = 0;
         while i < maps.len() {
-            if !add_snapshot_map(&mut frame, &mut rows, &maps[i], identity) {
-                return Err(Error::Disabled);
-            }
+            collect_snapshot_map_rows(&mut batch, &maps[i]);
             i += 1;
         }
-        frame.data = index_from_rows(&mut self.history.index, rows);
+        let Some(sorted) = sort_and_check_unique_batch(batch) else {
+            return Err(Error::Disabled);
+        };
+        frame.data = self.history.index.build_sorted_batch(sorted);
         self.history.pop_active_to(0);
         self.history.retained = Vec::new();
         self.history.log.reset_branch(frame);

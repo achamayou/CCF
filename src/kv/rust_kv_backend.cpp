@@ -712,7 +712,15 @@ namespace ccf::kv
       std::vector<SnapshotCell> views;
     };
 
-    std::map<std::string, MapImage> maps;
+    struct AddressMapOrder
+    {
+      bool operator()(const std::string& a, const std::string& b) const
+      {
+        return a.size() != b.size() ? a.size() < b.size() : a < b;
+      }
+    };
+
+    std::map<std::string, MapImage, AddressMapOrder> maps;
     SnapshotPublicMaps captured;
     captured.version = *version;
     size_t reused = 0;

@@ -1199,3 +1199,66 @@ fn reserved_placeholder_backfills_across_concurrent_writes_and_preserves_overwri
     assert_eq!(s.map_revision_at(3, &Bytes::copy_from(b"sig")), Some(2));
     assert_eq!(s.map_revision_at(3, &Bytes::copy_from(b"shared")), Some(3));
 }
+
+#[test]
+fn install_snapshot_sorts_unsorted_maps_preserves_omitted_and_rejects_duplicates() {
+    let mut s = Store::new(1);
+    put(&mut s, 0, b"keep", b"old", b"v1", 1);
+    put(&mut s, 0, b"replaced", b"stale", b"drop", 2);
+
+    // Reject duplicate keys within a map without mutating the store.
+    let dup = vec![SnapshotMap {
+        name: Bytes::copy_from(b"replaced"),
+        revision: 2,
+        cells: vec![
+            (Bytes::copy_from(b"b"), 2, Bytes::copy_from(b"1")),
+            (Bytes::copy_from(b"a"), 1, Bytes::copy_from(b"2")),
+            (Bytes::copy_from(b"b"), 2, Bytes::copy_from(b"3")),
+        ],
+    }];
+    assert_eq!(s.install_snapshot(5, dup), Err(Error::Disabled));
+    assert_eq!(s.history.global, 0);
+
+    // Install unsorted multi-map snapshot with prefix keys and varying map lengths.
+    let snap = vec![
+        SnapshotMap {
+            name: Bytes::copy_from(b"longer_map"),
+            revision: 4,
+            cells: vec![
+                (Bytes::copy_from(b"ab"), 4, Bytes::copy_from(b"v_ab")),
+                (Bytes::copy_from(b""), 1, Bytes::copy_from(b"v_empty")),
+                (Bytes::copy_from(b"a"), 3, Bytes::copy_from(b"v_a")),
+            ],
+        },
+        SnapshotMap {
+            name: Bytes::copy_from(b"replaced"),
+            revision: 5,
+            cells: vec![
+                (Bytes::copy_from(b"z"), 5, Bytes::copy_from(b"vz")),
+                (Bytes::copy_from(b"k"), 2, Bytes::copy_from(b"vk")),
+            ],
+        },
+        SnapshotMap {
+            name: Bytes::copy_from(b"m"),
+            revision: 3,
+            cells: vec![(Bytes::copy_from(b"x"), 3, Bytes::copy_from(b"vx"))],
+        },
+    ];
+    s.install_snapshot(5, snap).unwrap();
+    assert_eq!(s.history.global, 5);
+
+    begin(&mut s, 10);
+    acquire(&mut s, 10, b"keep");
+    acquire(&mut s, 10, b"replaced");
+    acquire(&mut s, 10, b"longer_map");
+    acquire(&mut s, 10, b"m");
+    assert_read(&mut s, 10, b"keep", b"old", false, Some(b"v1"));
+    assert_read(&mut s, 10, b"replaced", b"stale", false, None);
+    assert_read(&mut s, 10, b"replaced", b"k", false, Some(b"vk"));
+    assert_read(&mut s, 10, b"replaced", b"z", false, Some(b"vz"));
+    assert_read(&mut s, 10, b"longer_map", b"", false, Some(b"v_empty"));
+    assert_read(&mut s, 10, b"longer_map", b"a", false, Some(b"v_a"));
+    assert_read(&mut s, 10, b"longer_map", b"ab", false, Some(b"v_ab"));
+    assert_read(&mut s, 10, b"m", b"x", false, Some(b"vx"));
+    run(&mut s, Action::End(10));
+}

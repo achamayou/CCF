@@ -40,5 +40,6 @@ public import KvRust.RetainedCuts
 public import KvRust.RetireQueue
 public import KvRust.Scan
 public import KvRust.Simulation
+public import KvRust.SnapshotInstall
 public import KvRust.SortedPublication
 public import KvRust.Validation
