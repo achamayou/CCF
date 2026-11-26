@@ -235,7 +235,19 @@ namespace ccf::kv
       serialise_internal(v);
     }
 
+    void serialise_write_span(
+      std::span<const uint8_t> k, std::span<const uint8_t> v)
+    {
+      serialise_internal(k);
+      serialise_internal(v);
+    }
+
     void serialise_remove(const SerialisedKey& k) override
+    {
+      serialise_internal(k);
+    }
+
+    void serialise_remove_span(std::span<const uint8_t> k)
     {
       serialise_internal(k);
     }
@@ -647,6 +659,19 @@ namespace ccf::kv
       return {
         current_reader->template read_next<SerialisedKey>(),
         current_reader->template read_next<SerialisedValue>()};
+    }
+
+    std::pair<std::span<const uint8_t>, std::span<const uint8_t>>
+    deserialise_write_span()
+    {
+      const auto k = current_reader->read_next_span();
+      const auto v = current_reader->read_next_span();
+      return {k, v};
+    }
+
+    std::span<const uint8_t> deserialise_remove_span()
+    {
+      return current_reader->read_next_span();
     }
 
     std::vector<uint8_t> deserialise_raw() override

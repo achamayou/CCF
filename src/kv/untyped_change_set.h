@@ -18,6 +18,12 @@
 namespace ccf::kv
 {
   class Store;
+#ifdef CCF_USE_RUST_KV
+  namespace rust_detail
+  {
+    struct FlatMapWrite;
+  }
+#endif
 }
 
 namespace ccf::kv::untyped
@@ -63,6 +69,7 @@ namespace ccf::kv::untyped
     const bool* rust_committed = nullptr;
     bool rust_read_only = false;
     bool rust_is_diff = false;
+    std::shared_ptr<const ccf::kv::rust_detail::FlatMapWrite> rust_diff;
 
     ChangeSet(
       ccf::kv::Store* store_,
@@ -75,9 +82,10 @@ namespace ccf::kv::untyped
       rust_read_only(read_only_)
     {}
 
-    explicit ChangeSet(ccf::kv::untyped::Write diff_writes) :
-      writes(std::move(diff_writes)),
-      rust_is_diff(true)
+    explicit ChangeSet(
+      std::shared_ptr<const ccf::kv::rust_detail::FlatMapWrite> diff_writes) :
+      rust_is_diff(true),
+      rust_diff(std::move(diff_writes))
     {}
 #endif
 

@@ -45,8 +45,7 @@ private theorem order_at_end_slice (a b : List U8) (i : Nat)
 
 /-- `engine.compare_slices` terminates with the unsigned lexicographic byte order. -/
 theorem compare_slices_spec (a b : Slice U8)
-    : WP.spec (CcfKv.engine.compare_slices a b)
-        (fun r => r = byteOrder a.val b.val) := by
+    : WP.spec (CcfKv.engine.compare_slices a b) (fun r => r = byteOrder a.val b.val) := by
   let xs := a.val
   let ys := b.val
   unfold CcfKv.engine.compare_slices CcfKv.engine.compare_slices_loop
@@ -140,7 +139,8 @@ private theorem pairwise_of_adjacent_lt {α : Type} {lt : α → α → Prop}
             simpa [List.getElem_cons_succ] using h
           exact trans (ihk (by omega)) hstep
 
-private theorem list_u8_lt_trans {a b c : List U8} (hab : a < b) (hbc : b < c) : a < c := by
+private theorem list_u8_lt_trans {a b c : List U8} (hab : a < b) (hbc : b < c)
+    : a < c := by
   induction a generalizing b c with
   | nil =>
       cases b with
@@ -170,7 +170,8 @@ private theorem list_u8_lt_trans {a b c : List U8} (hab : a < b) (hbc : b < c) :
 theorem batch_order_state_spec (batch : Slice (Option SnapshotBatchRow))
     (rows : List SnapshotBatchRow) (owned : batch.val = rows.map some)
     : WP.spec (CcfKv.engine.batch_order_state batch)
-        (fun ord => ord = (-1)#i8 → rows.Pairwise (fun a b => a.key.val < b.key.val)) := by
+        (fun ord =>
+          ord = (-1)#i8 → rows.Pairwise (fun a b => a.key.val < b.key.val)) := by
   unfold CcfKv.engine.batch_order_state CcfKv.engine.batch_order_state_loop
   have hlen : (Slice.len batch).val = rows.length := by
     simp [owned]
@@ -245,11 +246,13 @@ theorem batch_order_state_spec (batch : Slice (Option SnapshotBatchRow))
 private def subslice {α : Type} (l : List α) (lo hi : Nat) : List α :=
   (l.drop lo).take (hi - lo)
 
-private theorem subslice_nil {α : Type} (l : List α) (lo : Nat) : subslice l lo lo = [] := by
+private theorem subslice_nil {α : Type} (l : List α) (lo : Nat)
+    : subslice l lo lo = [] := by
   simp [subslice]
 
 private theorem subslice_length {α : Type} (l : List α) {lo hi : Nat}
-    (_h1 : lo ≤ hi) (h2 : hi ≤ l.length) : (subslice l lo hi).length = hi - lo := by
+    (_h1 : lo ≤ hi) (h2 : hi ≤ l.length)
+    : (subslice l lo hi).length = hi - lo := by
   simp [subslice]
   omega
 
@@ -277,7 +280,8 @@ private theorem subslice_split {α : Type} (l : List α) {a b c : Nat}
   rw [hdrop, ← List.take_add, show (b - a) + (c - b) = c - a by omega]
 
 private def SlicePreserved (src : List (Option SnapshotBatchRow))
-    (orig : List SnapshotBatchRow) (lo hi : Nat) : Prop :=
+    (orig : List SnapshotBatchRow) (lo hi : Nat)
+    : Prop :=
   src.length = orig.length
   ∧ ∀ k (hk : k < orig.length), lo ≤ k → k < hi → src[k]? = some (some orig[k])
 
@@ -303,25 +307,38 @@ private theorem merge_runs_loop0_spec
     (hdst_len : dst0.length + (right.val - left.val) ≤ orig.length)
     : WP.spec (CcfKv.engine.merge_runs_loop0 src dst mid right left mid)
         (fun (src', dst', i', j') =>
-          left.val ≤ i'.val ∧ i'.val ≤ mid.val
-          ∧ mid.val ≤ j'.val ∧ j'.val ≤ right.val
+          left.val ≤ i'.val
+          ∧ i'.val ≤ mid.val
+          ∧ mid.val ≤ j'.val
+          ∧ j'.val ≤ right.val
           ∧ SlicePreserved src'.val orig i'.val mid.val
           ∧ SlicePreserved src'.val orig j'.val right.val
           ∧ SlicePreserved src'.val orig right.val orig.length
-          ∧ ∃ taken, dst'.val = (dst0 ++ taken).map some
-              ∧ taken.Perm (subslice orig left.val i'.val ++ subslice orig mid.val j'.val)) := by
+          ∧ ∃ taken,
+              dst'.val = (dst0 ++ taken).map some
+              ∧ taken.Perm
+                  (subslice orig left.val i'.val ++ subslice orig mid.val j'.val)) := by
   unfold CcfKv.engine.merge_runs_loop0
   apply loop.spec_decr_nat
-    (fun (p : alloc.vec.Vec (Option SnapshotBatchRow) × alloc.vec.Vec (Option SnapshotBatchRow)
-          × Usize × Usize) => (mid.val - p.2.2.1.val) + (right.val - p.2.2.2.val))
+    (fun
+        (p
+          : alloc.vec.Vec (Option SnapshotBatchRow)
+            × alloc.vec.Vec (Option SnapshotBatchRow)
+            × Usize
+            × Usize) =>
+      (mid.val - p.2.2.1.val) + (right.val - p.2.2.2.val))
     (fun p =>
-      left.val ≤ p.2.2.1.val ∧ p.2.2.1.val ≤ mid.val
-      ∧ mid.val ≤ p.2.2.2.val ∧ p.2.2.2.val ≤ right.val
+      left.val ≤ p.2.2.1.val
+      ∧ p.2.2.1.val ≤ mid.val
+      ∧ mid.val ≤ p.2.2.2.val
+      ∧ p.2.2.2.val ≤ right.val
       ∧ SlicePreserved p.1.val orig p.2.2.1.val mid.val
       ∧ SlicePreserved p.1.val orig p.2.2.2.val right.val
       ∧ SlicePreserved p.1.val orig right.val orig.length
-      ∧ ∃ taken, p.2.1.val = (dst0 ++ taken).map some
-          ∧ taken.Perm (subslice orig left.val p.2.2.1.val ++ subslice orig mid.val p.2.2.2.val))
+      ∧ ∃ taken,
+          p.2.1.val = (dst0 ++ taken).map some
+          ∧ taken.Perm
+              (subslice orig left.val p.2.2.1.val ++ subslice orig mid.val p.2.2.2.val))
     _ _ _
   · rintro ⟨s, d, i, j⟩ ⟨hli, him, hmj, hjr, hsl, hsr, hst, taken, hd, hperm⟩
     dsimp only at hli him hmj hjr hsl hsr hst hd hperm ⊢
@@ -447,10 +464,15 @@ private theorem merge_runs_drain_spec
           ∧ dst'.val = (dst0 ++ subslice orig i0.val hi.val).map some) := by
   unfold CcfKv.engine.merge_runs_loop1
   apply loop.spec_decr_nat
-    (fun (p : alloc.vec.Vec (Option SnapshotBatchRow) × alloc.vec.Vec (Option SnapshotBatchRow)
-          × Usize) => hi.val - p.2.2.val)
+    (fun
+        (p
+          : alloc.vec.Vec (Option SnapshotBatchRow)
+            × alloc.vec.Vec (Option SnapshotBatchRow)
+            × Usize) =>
+      hi.val - p.2.2.val)
     (fun p =>
-      i0.val ≤ p.2.2.val ∧ p.2.2.val ≤ hi.val
+      i0.val ≤ p.2.2.val
+      ∧ p.2.2.val ≤ hi.val
       ∧ SlicePreserved p.1.val orig p.2.2.val hi.val
       ∧ SlicePreserved p.1.val orig other_lo other_hi
       ∧ SlicePreserved p.1.val orig tail_lo orig.length
@@ -508,7 +530,8 @@ private theorem merge_runs_drain_spec
 private theorem merge_runs_loop2_eq_loop1
     (src dst : alloc.vec.Vec (Option SnapshotBatchRow)) (right j : Usize)
     : CcfKv.engine.merge_runs_loop2 src dst right j
-      = CcfKv.engine.merge_runs_loop1 src dst right j := rfl
+      = CcfKv.engine.merge_runs_loop1 src dst right j :=
+  rfl
 
 private theorem merge_runs_spec
     (src dst : alloc.vec.Vec (Option SnapshotBatchRow))
@@ -522,7 +545,8 @@ private theorem merge_runs_spec
     : WP.spec (CcfKv.engine.merge_runs src dst left mid right)
         (fun (src', dst') =>
           SlicePreserved src'.val orig right.val orig.length
-          ∧ ∃ merged, dst'.val = (dst0 ++ merged).map some
+          ∧ ∃ merged,
+              dst'.val = (dst0 ++ merged).map some
               ∧ merged.Perm (subslice orig left.val right.val)) := by
   unfold CcfKv.engine.merge_runs
   have hsrc_l : SlicePreserved src.val orig left.val mid.val :=
@@ -532,29 +556,37 @@ private theorem merge_runs_spec
   have hsrc_t : SlicePreserved src.val orig right.val orig.length :=
     ⟨hsrc.1, fun k hk h1 h2 => hsrc.2 k hk (by omega) h2⟩
   apply WP.spec_bind
-    (merge_runs_loop0_spec src dst orig dst0 left mid right hord hcap hsrc_l hsrc_r hsrc_t hdst
-      hdst_len)
+    (merge_runs_loop0_spec src dst orig dst0 left mid right hord hcap hsrc_l hsrc_r hsrc_t
+      hdst hdst_len)
   rintro ⟨s1, d1, i1, j1⟩ ⟨hli, him, hmj, hjr, hsl1, hsr1, hst1, taken, hd1, hperm1⟩
   have htaken_len : taken.length = (i1.val - left.val) + (j1.val - mid.val) := by
     rw [hperm1.length_eq, List.length_append,
       subslice_length orig hli (by omega), subslice_length orig hmj (by omega)]
   apply WP.spec_bind
-    (merge_runs_drain_spec s1 d1 orig (dst0 ++ taken) i1 mid j1.val right.val right.val
-      ⟨him, by omega⟩ hcap (Or.inl (by omega)) (by omega) hsl1 hsr1 hst1 hd1
+    (merge_runs_drain_spec s1 d1 orig
+      (dst0 ++ taken)
+      i1 mid j1.val right.val right.val ⟨him, by omega⟩ hcap
+      (Or.inl (by omega))
+      (by omega)
+      hsl1 hsr1 hst1 hd1
       (by rw [List.length_append, htaken_len]; omega))
   rintro ⟨s2, d2⟩ ⟨hsr2, hst2, hd2⟩
   change WP.spec (CcfKv.engine.merge_runs_loop1 s2 d2 right j1) _
   apply WP.spec_mono
-    (merge_runs_drain_spec s2 d2 orig ((dst0 ++ taken) ++ subslice orig i1.val mid.val) j1 right
-      right.val right.val right.val
-      ⟨hjr, by omega⟩ hcap (Or.inl (Nat.le_refl _)) (Nat.le_refl _) hsr2
-      ⟨hsr2.1, fun _ _ h1 h2 => by omega⟩ hst2 hd2
+    (merge_runs_drain_spec s2 d2 orig ((dst0 ++ taken) ++ subslice orig i1.val mid.val) j1
+      right right.val right.val right.val ⟨hjr, by omega⟩ hcap (Or.inl (Nat.le_refl _))
+      (Nat.le_refl _) hsr2 ⟨hsr2.1, fun _ _ h1 h2 => by omega⟩ hst2 hd2
       (by
         rw [List.length_append, List.length_append, htaken_len,
           subslice_length orig him (by omega)]
         omega))
   rintro ⟨s3, d3⟩ ⟨_, hst3, hd3⟩
-  refine ⟨hst3, taken ++ subslice orig i1.val mid.val ++ subslice orig j1.val right.val, ?_, ?_⟩
+  refine ⟨
+    hst3,
+    taken ++ subslice orig i1.val mid.val ++ subslice orig j1.val right.val,
+    ?_,
+    ?_
+  ⟩
   · simpa [List.append_assoc] using hd3
   · have hleft := subslice_split orig hli him
     have hright := subslice_split orig hmj hjr
@@ -571,8 +603,9 @@ theorem merge_pass_spec (src : alloc.vec.Vec (Option SnapshotBatchRow))
     (rows : List SnapshotBatchRow) (width : Usize)
     (owned : src.val = rows.map some) (hpos : 0 < width.val)
     : WP.spec (CcfKv.engine.merge_pass src width)
-        (fun dst => ∃ (outRows : List SnapshotBatchRow),
-          dst.val = outRows.map some ∧ outRows.Perm rows) := by
+        (fun dst =>
+          ∃ (outRows : List SnapshotBatchRow),
+            dst.val = outRows.map some ∧ outRows.Perm rows) := by
   unfold CcfKv.engine.merge_pass CcfKv.engine.merge_pass_loop
   have hlen : (alloc.vec.Vec.len src).val = rows.length := by
     simp [owned]
@@ -586,8 +619,12 @@ theorem merge_pass_spec (src : alloc.vec.Vec (Option SnapshotBatchRow))
   have hdst0 : dst0.val = ([] : List SnapshotBatchRow).map some := by
     simp [dst0, alloc.vec.Vec.with_capacity]
   apply loop.spec_decr_nat
-    (fun (p : alloc.vec.Vec (Option SnapshotBatchRow) × alloc.vec.Vec (Option SnapshotBatchRow)
-          × Usize) => rows.length - p.2.2.val)
+    (fun
+        (p
+          : alloc.vec.Vec (Option SnapshotBatchRow)
+            × alloc.vec.Vec (Option SnapshotBatchRow)
+            × Usize) =>
+      rows.length - p.2.2.val)
     (fun p =>
       p.2.2.val ≤ rows.length
       ∧ SlicePreserved p.1.val rows p.2.2.val rows.length

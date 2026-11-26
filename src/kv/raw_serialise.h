@@ -50,7 +50,8 @@ namespace ccf::kv
     {
       if constexpr (
         ccf::nonstd::is_std_vector<T>::value ||
-        std::is_same_v<T, ccf::kv::serialisers::SerialisedEntry>)
+        std::is_same_v<T, ccf::kv::serialisers::SerialisedEntry> ||
+        std::is_same_v<T, std::span<const uint8_t>>)
       {
         return size_with_prefix(entry.size(), sizeof(typename T::value_type));
       }
@@ -82,7 +83,8 @@ namespace ccf::kv
     {
       if constexpr (
         ccf::nonstd::is_std_vector<T>::value ||
-        std::is_same_v<T, ccf::kv::serialisers::SerialisedEntry>)
+        std::is_same_v<T, ccf::kv::serialisers::SerialisedEntry> ||
+        std::is_same_v<T, std::span<const uint8_t>>)
       {
         append_size_prefixed(
           reinterpret_cast<const uint8_t*>(entry.data()),

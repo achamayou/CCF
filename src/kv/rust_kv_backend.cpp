@@ -162,10 +162,21 @@ namespace ccf::kv
         return ApplyResult::FAIL;
       }
 
-      MapWrites writes;
+      struct AddressMapOrder
+      {
+        bool operator()(const std::string& a, const std::string& b) const
+        {
+          return a.size() != b.size() ? a.size() < b.size() : a < b;
+        }
+      };
+
+      std::map<std::string, std::shared_ptr<FlatMapWrite>, AddressMapOrder>
+        decoded_maps;
+      size_t total_entries = 0;
       for (auto name = decoder.start_map(); name; name = decoder.start_map())
       {
-        if (!writes.try_emplace(*name).second)
+        auto [it, inserted] = decoded_maps.try_emplace(*name);
+        if (!inserted)
         {
           LOG_FAIL_FMT("Rust KV replay received a duplicate map");
           return ApplyResult::FAIL;
@@ -176,7 +187,6 @@ namespace ccf::kv
           LOG_FAIL_FMT("Rust KV replay received a private map in public data");
           return ApplyResult::FAIL;
         }
-        auto& rows = writes.at(*name);
         if (
           decoder.deserialise_entry_version() != NoVersion ||
           decoder.deserialise_read_header() != 0)
@@ -184,46 +194,76 @@ namespace ccf::kv
           LOG_FAIL_FMT("Rust KV replay does not support legacy read sets");
           return ApplyResult::FAIL;
         }
-        for (auto n = decoder.deserialise_write_header(); n != 0; --n)
+        auto flat = std::make_shared<FlatMapWrite>();
+        const auto n_writes = decoder.deserialise_write_header();
+        flat->entries.reserve(n_writes);
+        for (uint64_t n = n_writes; n != 0; --n)
         {
-          auto [k, v] = decoder.deserialise_write();
-          if (!rows.try_emplace(std::move(k), std::move(v)).second)
-          {
-            LOG_FAIL_FMT("Rust KV replay received a duplicate key");
-            return ApplyResult::FAIL;
-          }
+          auto [k, v] = decoder.deserialise_write_span();
+          flat->append(k, &v);
         }
-        for (auto n = decoder.deserialise_remove_header(); n != 0; --n)
+        const auto n_removes = decoder.deserialise_remove_header();
+        if (n_removes != 0)
         {
-          if (!rows.try_emplace(decoder.deserialise_remove(), std::nullopt)
-                 .second)
+          flat->entries.reserve(n_writes + n_removes);
+        }
+        for (uint64_t n = n_removes; n != 0; --n)
+        {
+          const auto k = decoder.deserialise_remove_span();
+          flat->append(k, nullptr);
+        }
+        bool duplicate_is_remove = false;
+        if (!flat->sort_and_check_unique(duplicate_is_remove))
+        {
+          if (duplicate_is_remove)
           {
             LOG_FAIL_FMT("Rust KV replay received a duplicate removal");
-            return ApplyResult::FAIL;
           }
+          else
+          {
+            LOG_FAIL_FMT("Rust KV replay received a duplicate key");
+          }
+          return ApplyResult::FAIL;
         }
+        total_entries += flat->entries.size();
+        it->second = std::move(flat);
       }
 
-      const bool classical = writes.contains(Tables::SIGNATURES);
-      const bool cose = writes.contains(Tables::COSE_SIGNATURES);
+      const bool classical = decoded_maps.contains(Tables::SIGNATURES);
+      const bool cose = decoded_maps.contains(Tables::COSE_SIGNATURES);
       const bool signature = classical || cose;
       if (
         signature &&
-        (!writes.contains(Tables::SERIALISED_MERKLE_TREE) ||
-         writes.size() !=
+        (!decoded_maps.contains(Tables::SERIALISED_MERKLE_TREE) ||
+         decoded_maps.size() !=
            1 + static_cast<size_t>(classical) + static_cast<size_t>(cose)))
       {
         LOG_FAIL_FMT("Rust KV replay received an invalid signature entry");
         return ApplyResult::FAIL;
       }
+      const bool has_encrypted_past_ledger_secret =
+        decoded_maps.contains(Tables::ENCRYPTED_PAST_LEDGER_SECRET);
+
       std::vector<Entry> entries;
-      for (const auto& [name, rows] : writes)
+      entries.reserve(total_entries);
+      FlatMapWrites flat_writes;
+      flat_writes.reserve(decoded_maps.size());
+      for (auto& [name, flat] : decoded_maps)
       {
-        for (const auto& [key, value] : rows)
+        const auto name_view = bytes(name);
+        for (const auto& e : flat->entries)
         {
-          entries.push_back(
-            {bytes(name), bytes(key), value ? bytes(*value) : ByteView{}});
+          const auto ks = flat->key_span(e);
+          const ByteView k_view{ks.data(), ks.size()};
+          ByteView v_view{};
+          if (e.val_len != FlatMapWrite::REMOVED)
+          {
+            const auto vs = flat->val_span(e);
+            v_view = ByteView{vs.data(), vs.size()};
+          }
+          entries.push_back({name_view, k_view, v_view});
         }
+        flat_writes.emplace_back(name, std::move(flat));
       }
       const bool replace = id.seqno <= store.head;
       Status status;
@@ -265,7 +305,10 @@ namespace ccf::kv
         store.pending_txs.clear();
         for (auto& [_, deltas] : store.map_deltas)
         {
-          deltas.erase(deltas.lower_bound(id.seqno), deltas.end());
+          while (!deltas.empty() && deltas.back().first >= id.seqno)
+          {
+            deltas.pop_back();
+          }
         }
         if (store.history)
         {
@@ -276,7 +319,7 @@ namespace ccf::kv
           store.chunker->rolled_back_to(id.seqno - 1);
         }
       }
-      hooks = store.record_commit_locked(id.seqno, writes);
+      hooks = store.record_commit_flat_locked(id.seqno, flat_writes);
       claims = decoder.consume_claims_digest();
       evidence = decoder.consume_commit_evidence_digest();
       if (signature)
@@ -304,7 +347,7 @@ namespace ccf::kv
           store.chunker->produced_chunk_at(id.seqno);
         }
       }
-      if (writes.contains(Tables::ENCRYPTED_PAST_LEDGER_SECRET))
+      if (has_encrypted_past_ledger_secret)
       {
         return ApplyResult::PASS_ENCRYPTED_PAST_LEDGER_SECRET;
       }
@@ -824,21 +867,25 @@ namespace ccf::kv
       const bool global_hook = glob != global_hooks.end() && glob->second;
       if ((local || global_hook) && !image.rows.empty())
       {
-        untyped::Write writes;
+        auto flat = std::make_shared<FlatMapWrite>();
+        flat->entries.reserve(image.rows.size());
         for (const auto& [key, value] : image.rows)
         {
-          writes.emplace(key, value.value);
+          const std::span<const uint8_t> ks(key.data(), key.size());
+          const std::span<const uint8_t> vs(
+            value.value.data(), value.value.size());
+          flat->append(ks, &vs);
         }
         if (local)
         {
+          const auto writes = flat->materialize();
           if (auto hook = it->second(image.revision, writes); hook)
           {
             hooks.push_back(std::move(hook));
           }
         }
-        map_deltas[name].emplace(
-          image.revision,
-          MapDelta{std::make_shared<const untyped::Write>(std::move(writes))});
+        insert_map_delta(
+          map_deltas[name], image.revision, MapDelta{std::move(flat)});
       }
     }
     if (view_history)
@@ -1119,8 +1166,7 @@ namespace ccf::kv
       throw std::logic_error("Reserved transaction cannot be empty");
     }
 
-    std::vector<std::pair<std::string, std::shared_ptr<const untyped::Write>>>
-      shared_writes;
+    FlatMapWrites flat_writes;
     EncryptorPtr enc;
     size_t max_size = max_serialised_entry_size;
     if (pending.size != 0)
@@ -1138,7 +1184,7 @@ namespace ccf::kv
       {
         throw KvSerialiserException("No encryptor set");
       }
-      auto writes = collect_writes(pending);
+      flat_writes = collect_flat_writes(pending);
       pending.data.reset();
       if (!params.is_reserved)
       {
@@ -1157,7 +1203,7 @@ namespace ccf::kv
           sizeof(uint8_t) + sizeof(Version) +
             sizeof(ccf::crypto::Sha256Hash::Representation) * 2 +
             sizeof(Version));
-        for (const auto& [name, rows] : writes)
+        for (const auto& [name, rows_ptr] : flat_writes)
         {
           if (!ok)
           {
@@ -1167,15 +1213,15 @@ namespace ccf::kv
             est,
             sizeof(size_t) + name.size() + sizeof(Version) +
               sizeof(uint64_t) * 3);
-          for (const auto& [key, val] : rows)
+          for (const auto& e : rows_ptr->entries)
           {
             if (!ok)
             {
               break;
             }
-            const size_t row_bytes = val.has_value() ?
-              (sizeof(size_t) * 2 + key.size() + val->size()) :
-              (sizeof(size_t) + key.size());
+            const size_t row_bytes = e.val_len != FlatMapWrite::REMOVED ?
+              (sizeof(size_t) * 2 + e.key_len + e.val_len) :
+              (sizeof(size_t) + e.key_len);
             ok = checked_add(est, row_bytes);
           }
         }
@@ -1188,7 +1234,7 @@ namespace ccf::kv
             0,
             {},
             params.claims);
-          serialise_writes(shape, writes);
+          serialise_flat_writes(shape, flat_writes);
           const auto size = shape.get_serialised_size();
           if (size > max_size)
           {
@@ -1196,12 +1242,6 @@ namespace ccf::kv
               describe_serialised_entry_size_error(size, max_size));
           }
         }
-      }
-      shared_writes.reserve(writes.size());
-      for (auto& [name, rows] : writes)
-      {
-        shared_writes.emplace_back(
-          name, std::make_shared<const untyped::Write>(std::move(rows)));
       }
     }
 
@@ -1230,7 +1270,7 @@ namespace ccf::kv
         }
       }
 
-      if (!shared_writes.empty())
+      if (!flat_writes.empty())
       {
         enc = encryptor;
         max_size = max_entry_size;
@@ -1246,14 +1286,27 @@ namespace ccf::kv
       if (!params.is_reserved && trace::enabled())
       {
         trace_writes = trace::Json::array();
-        for (const auto& [name, rows_ptr] : shared_writes)
+        for (const auto& [name, rows_ptr] : flat_writes)
         {
-          for (const auto& [key, val] : *rows_ptr)
+          for (const auto& e : rows_ptr->entries)
           {
-            trace_writes.push_back(
-              {{"map", name},
-               {"key", ccf::ds::to_hex(key)},
-               {"value", trace::bytes(val.has_value() ? &*val : nullptr)}});
+            const auto ks = rows_ptr->key_span(e);
+            if (e.val_len != FlatMapWrite::REMOVED)
+            {
+              const auto vs = rows_ptr->val_span(e);
+              const Bytes vb(vs.begin(), vs.end());
+              trace_writes.push_back(
+                {{"map", name},
+                 {"key", ccf::ds::to_hex(ks)},
+                 {"value", trace::bytes(&vb)}});
+            }
+            else
+            {
+              trace_writes.push_back(
+                {{"map", name},
+                 {"key", ccf::ds::to_hex(ks)},
+                 {"value", trace::bytes(nullptr)}});
+            }
           }
         }
       }
@@ -1351,7 +1404,7 @@ namespace ccf::kv
         local_entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_AFTER;
       }
 
-      hooks = record_commit_shared_locked(id.seqno, shared_writes);
+      hooks = record_commit_flat_locked(id.seqno, flat_writes);
     }
 
     const auto evidence = enc->get_commit_evidence(id);
@@ -1365,42 +1418,7 @@ namespace ccf::kv
       params.claims,
       false,
       params.is_reserved ? max_serialised_entry_size : max_size);
-    for (const auto domain : {SecurityDomain::PUBLIC, SecurityDomain::PRIVATE})
-    {
-      for (const auto& [name, rows_ptr] : shared_writes)
-      {
-        const auto& rows = *rows_ptr;
-        if (rows.empty() || get_security_domain(name) != domain)
-        {
-          continue;
-        }
-        serialiser.start_map(name, domain);
-        serialiser.serialise_entry_version(NoVersion);
-        serialiser.serialise_count_header(0);
-        uint64_t puts = 0;
-        uint64_t removes = 0;
-        for (const auto& [_, value] : rows)
-        {
-          ++(value.has_value() ? puts : removes);
-        }
-        serialiser.serialise_count_header(puts);
-        for (const auto& [key, value] : rows)
-        {
-          if (value.has_value())
-          {
-            serialiser.serialise_write(key, *value);
-          }
-        }
-        serialiser.serialise_count_header(removes);
-        for (const auto& [key, value] : rows)
-        {
-          if (!value.has_value())
-          {
-            serialiser.serialise_remove(key);
-          }
-        }
-      }
-    }
+    serialise_flat_writes(serialiser, flat_writes);
     auto data = serialiser.get_raw_data();
 
     if (params.is_reserved)

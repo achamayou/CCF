@@ -4,16 +4,74 @@
 #include "ccf/kv/untyped_map_diff.h"
 
 #include "ds/internal_logger.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_store_impl.h"
+#endif
 #include "kv/untyped_change_set.h"
 
 namespace ccf::kv::untyped
 {
 #ifdef CCF_USE_RUST_KV
+  namespace
+  {
+    void assign_span(MapDiff::KeyType& dst, std::span<const uint8_t> src)
+    {
+      dst.resize(src.size());
+      if (!src.empty())
+      {
+        std::memcpy(dst.data(), src.data(), src.size());
+      }
+    }
+
+    const rust_detail::FlatMapWrite::EntrySpan* find_flat_entry(
+      const rust_detail::FlatMapWrite& flat, const MapDiff::KeyType& key)
+    {
+      const std::span<const uint8_t> ks(key.data(), key.size());
+      const auto it = std::lower_bound(
+        flat.entries.begin(),
+        flat.entries.end(),
+        ks,
+        [&](
+          const rust_detail::FlatMapWrite::EntrySpan& e,
+          std::span<const uint8_t> target) {
+          return rust_detail::FlatMapWrite::compare_spans(
+                   flat.key_span(e), target) < 0;
+        });
+      if (
+        it == flat.entries.end() ||
+        rust_detail::FlatMapWrite::compare_spans(flat.key_span(*it), ks) != 0)
+      {
+        return nullptr;
+      }
+      return &*it;
+    }
+  }
+
   void MapDiff::foreach_(const MapDiff::ElementVisitorWithEarlyOut& f)
   {
-    for (const auto& [key, val] : change_set.writes)
+    if (!change_set.rust_diff)
     {
-      if (!f(key, val))
+      return;
+    }
+    const auto& flat = *change_set.rust_diff;
+    KeyType key_buf;
+    std::optional<ValueType> val_buf;
+    for (const auto& e : flat.entries)
+    {
+      assign_span(key_buf, flat.key_span(e));
+      if (e.val_len == rust_detail::FlatMapWrite::REMOVED)
+      {
+        val_buf.reset();
+      }
+      else
+      {
+        if (!val_buf.has_value())
+        {
+          val_buf.emplace();
+        }
+        assign_span(*val_buf, flat.val_span(e));
+      }
+      if (!f(key_buf, val_buf))
       {
         return;
       }
@@ -33,24 +91,44 @@ namespace ccf::kv::untyped
   std::optional<std::optional<MapDiff::ValueType>> MapDiff::get(
     const MapDiff::KeyType& key)
   {
-    const auto it = change_set.writes.find(key);
-    if (it == change_set.writes.end())
+    if (!change_set.rust_diff)
     {
       return std::nullopt;
     }
-    return std::optional<std::optional<ValueType>>(std::in_place, it->second);
+    const auto& flat = *change_set.rust_diff;
+    const auto* e = find_flat_entry(flat, key);
+    if (e == nullptr)
+    {
+      return std::nullopt;
+    }
+    if (e->val_len == rust_detail::FlatMapWrite::REMOVED)
+    {
+      return std::optional<std::optional<ValueType>>(
+        std::in_place, std::nullopt);
+    }
+    const auto vs = flat.val_span(*e);
+    return std::optional<std::optional<ValueType>>(
+      std::in_place, ValueType(vs.begin(), vs.end()));
   }
 
   bool MapDiff::has(const MapDiff::KeyType& key)
   {
-    const auto it = change_set.writes.find(key);
-    return it != change_set.writes.end() && it->second.has_value();
+    if (!change_set.rust_diff)
+    {
+      return false;
+    }
+    const auto* e = find_flat_entry(*change_set.rust_diff, key);
+    return e != nullptr && e->val_len != rust_detail::FlatMapWrite::REMOVED;
   }
 
   bool MapDiff::is_deleted(const MapDiff::KeyType& key)
   {
-    const auto it = change_set.writes.find(key);
-    return it != change_set.writes.end() && !it->second.has_value();
+    if (!change_set.rust_diff)
+    {
+      return false;
+    }
+    const auto* e = find_flat_entry(*change_set.rust_diff, key);
+    return e != nullptr && e->val_len == rust_detail::FlatMapWrite::REMOVED;
   }
 
   void MapDiff::foreach(const MapDiff::ElementVisitorWithEarlyOut& f)
@@ -60,7 +138,7 @@ namespace ccf::kv::untyped
 
   size_t MapDiff::size()
   {
-    return change_set.writes.size();
+    return change_set.rust_diff ? change_set.rust_diff->entries.size() : 0;
   }
 
   void MapDiff::range(
@@ -69,17 +147,55 @@ namespace ccf::kv::untyped
     const std::optional<MapDiff::KeyType>& to)
   {
     if (
-      from.has_value() && to.has_value() &&
-      (from.value() == to.value() || to.value() < from.value()))
+      !change_set.rust_diff ||
+      (from.has_value() && to.has_value() &&
+       (from.value() == to.value() || to.value() < from.value())))
     {
       return;
     }
-    for (auto it = from ? change_set.writes.lower_bound(*from) :
-                          change_set.writes.begin();
-         it != change_set.writes.end() && (!to || it->first < *to);
-         ++it)
+    const auto& flat = *change_set.rust_diff;
+    auto it = flat.entries.begin();
+    if (from.has_value())
     {
-      f(it->first, it->second);
+      const std::span<const uint8_t> fs(from->data(), from->size());
+      it = std::lower_bound(
+        flat.entries.begin(),
+        flat.entries.end(),
+        fs,
+        [&](
+          const rust_detail::FlatMapWrite::EntrySpan& e,
+          std::span<const uint8_t> target) {
+          return rust_detail::FlatMapWrite::compare_spans(
+                   flat.key_span(e), target) < 0;
+        });
+    }
+    KeyType key_buf;
+    std::optional<ValueType> val_buf;
+    for (; it != flat.entries.end(); ++it)
+    {
+      const auto ks = flat.key_span(*it);
+      if (to.has_value())
+      {
+        const std::span<const uint8_t> ts(to->data(), to->size());
+        if (rust_detail::FlatMapWrite::compare_spans(ks, ts) >= 0)
+        {
+          break;
+        }
+      }
+      assign_span(key_buf, ks);
+      if (it->val_len == rust_detail::FlatMapWrite::REMOVED)
+      {
+        val_buf.reset();
+      }
+      else
+      {
+        if (!val_buf.has_value())
+        {
+          val_buf.emplace();
+        }
+        assign_span(*val_buf, flat.val_span(*it));
+      }
+      f(key_buf, val_buf);
     }
   }
 #else

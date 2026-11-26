@@ -1262,3 +1262,55 @@ fn install_snapshot_sorts_unsorted_maps_preserves_omitted_and_rejects_duplicates
     assert_read(&mut s, 10, b"m", b"x", false, Some(b"vx"));
     run(&mut s, Action::End(10));
 }
+
+#[test]
+fn replay_ccf_sorted_batch_handles_large_ordered_and_rejects_duplicates() {
+    let mut s = Store::new(1);
+    let mut writes = Vec::with_capacity(80);
+    for i in 0..80u32 {
+        let key = format!("k{i:03}");
+        let val = format!("v{i:03}");
+        writes.push((
+            Address {
+                map: Bytes::copy_from(b"m1"),
+                key: Bytes::copy_from(key.as_bytes()),
+            },
+            Some(Bytes::copy_from(val.as_bytes())),
+        ));
+    }
+    s.replay_ccf(1, writes, false).unwrap();
+    assert_eq!(s.map_revision_at(1, &Bytes::copy_from(b"m1")), Some(1));
+
+    begin(&mut s, 1);
+    acquire(&mut s, 1, b"m1");
+    assert_read(&mut s, 1, b"m1", b"k000", false, Some(b"v000"));
+    assert_read(&mut s, 1, b"m1", b"k079", false, Some(b"v079"));
+    run(&mut s, Action::End(1));
+
+    // Duplicate in unsorted replay must still be rejected without advancing head.
+    let dup = vec![
+        (
+            Address {
+                map: Bytes::copy_from(b"m1"),
+                key: Bytes::copy_from(b"b"),
+            },
+            Some(Bytes::copy_from(b"1")),
+        ),
+        (
+            Address {
+                map: Bytes::copy_from(b"m1"),
+                key: Bytes::copy_from(b"a"),
+            },
+            Some(Bytes::copy_from(b"2")),
+        ),
+        (
+            Address {
+                map: Bytes::copy_from(b"m1"),
+                key: Bytes::copy_from(b"b"),
+            },
+            Some(Bytes::copy_from(b"3")),
+        ),
+    ];
+    assert_eq!(s.replay_ccf(2, dup, false), Err(Error::Disabled));
+    assert_eq!(s.history.head().version, 1);
+}

@@ -1775,6 +1775,92 @@ pub struct DetachedTx {
     registered: bool,
 }
 
+fn compare_address_order(a: &Address, b: &Address) -> i8 {
+    let ma = a.map.as_slice();
+    let mb = b.map.as_slice();
+    if ma.len() < mb.len() {
+        return -1;
+    }
+    if ma.len() > mb.len() {
+        return 1;
+    }
+    let map_ord = compare_slices(ma, mb);
+    if map_ord != 0 {
+        return map_ord;
+    }
+    compare_slices(a.key.as_slice(), b.key.as_slice())
+}
+
+fn writes_strictly_increasing(writes: &WriteSet) -> bool {
+    let mut i = 1;
+    while i < writes.len() {
+        if compare_address_order(&writes[i - 1].0, &writes[i].0) != -1 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn prepare_replay_ordered(writes: &WriteSet) -> Pending {
+    let mut rows = Vec::with_capacity(writes.len());
+    let mut i = 0;
+    while i < writes.len() {
+        let (address, value) = &writes[i];
+        let write = match value {
+            Some(bytes) => Write::Put(bytes.clone()),
+            None => Write::Remove,
+        };
+        rows.push((address.clone(), write));
+        i += 1;
+    }
+    Assoc(rows)
+}
+
+fn collect_replay_put_batch(
+    pending: &Pending,
+    version: Version,
+) -> Option<Vec<Option<RadixRow<Binding<Cell>>>>> {
+    let len = pending.0.len();
+    if len < 64 {
+        return None;
+    }
+    let mut batch = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        let (address, write) = &pending.0[i];
+        let Write::Put(value) = write else {
+            return None;
+        };
+        batch.push(Some(AddressIndex::batch_row(
+            address.clone(),
+            Cell {
+                value: value.clone(),
+                version,
+            },
+        )));
+        i += 1;
+    }
+    Some(batch)
+}
+
+fn advance_replay_stamps_put_only(
+    revisions: &mut Assoc<Bytes, Stamp>,
+    births: &mut Assoc<Bytes, Stamp>,
+    pending: &Pending,
+    stamp: Stamp,
+) {
+    let mut i = 0;
+    while i < pending.0.len() {
+        let map = &pending.0[i].0.map;
+        if i == 0 || !pending.0[i - 1].0.map.same(map) {
+            revisions.set(map.clone(), stamp);
+            update_birth(births, map, stamp);
+        }
+        i += 1;
+    }
+}
+
 fn compare_slices(a: &[u8], b: &[u8]) -> i8 {
     let mut i = 0;
     while i < a.len() && i < b.len() {
@@ -2559,7 +2645,7 @@ impl Store {
             }
             // Validate before cutting back the active branch. The index and
             // all frame IDs stay in the same arena.
-            let pending = Self::prepare_replay(
+            let pending = Self::prepare_replay_ccf(
                 self.history.at_cut(previous).version,
                 self.history.next_identity,
                 version,
@@ -2571,7 +2657,7 @@ impl Store {
             ) {
                 return Err(Error::Disabled);
             }
-            self.append_replay(version, &pending, track_deletes);
+            self.append_replay_ccf(version, &pending, track_deletes);
             return Ok(());
         }
         if version > 1 && self.history.head().version == 0 {
@@ -2581,12 +2667,73 @@ impl Store {
             let mut isolated = Store::new(self.history.term);
             isolated.history.next_identity = self.history.next_identity;
             isolated.install_snapshot(version - 1, Vec::new())?;
-            isolated.replay_indexed(version, &writes, track_deletes)?;
+            isolated.replay_indexed_ccf(version, &writes, track_deletes)?;
             self.history = isolated.history;
             Ok(())
         } else {
-            self.replay_indexed(version, &writes, track_deletes)
+            self.replay_indexed_ccf(version, &writes, track_deletes)
         }
+    }
+
+    fn replay_indexed_ccf(
+        &mut self,
+        version: Version,
+        writes: &WriteSet,
+        track_deletes: bool,
+    ) -> Result<(), Error> {
+        let pending = Self::prepare_replay_ccf(
+            self.history.head().version,
+            self.history.next_identity,
+            version,
+            writes,
+        )?;
+        self.append_replay_ccf(version, &pending, track_deletes);
+        Ok(())
+    }
+
+    fn prepare_replay_ccf(
+        previous: Version,
+        identity: u64,
+        version: Version,
+        writes: &WriteSet,
+    ) -> Result<Pending, Error> {
+        if previous == u64::MAX || identity == u64::MAX {
+            return Err(Error::Exhausted);
+        }
+        if version != previous + 1 {
+            return Err(Error::Disabled);
+        }
+        if writes_strictly_increasing(writes) {
+            Ok(prepare_replay_ordered(writes))
+        } else {
+            Self::prepare_replay(previous, identity, version, writes)
+        }
+    }
+
+    fn append_replay_ccf(&mut self, version: Version, pending: &Pending, track_deletes: bool) {
+        if self.history.head().data.is_empty() {
+            if let Some(batch) = collect_replay_put_batch(pending, version) {
+                if let Some(sorted) = sort_and_check_unique_batch(batch) {
+                    let identity = self.history.next_identity;
+                    let stamp = Stamp { version, identity };
+                    let mut revisions = self.history.head().revisions.clone();
+                    let mut births = self.history.head().births.clone();
+                    advance_replay_stamps_put_only(&mut revisions, &mut births, pending, stamp);
+                    let data = self.history.index.build_sorted_batch(sorted);
+                    let next = Frame {
+                        version,
+                        data,
+                        revisions,
+                        births,
+                    };
+                    self.history.log.append(next);
+                    self.history.next_identity += 1;
+                    self.history.reuse_compacted_images = false;
+                    return;
+                }
+            }
+        }
+        self.append_replay(version, pending, track_deletes);
     }
 
     fn replay_indexed(

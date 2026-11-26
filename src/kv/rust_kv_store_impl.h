@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
+#include <deque>
 #include <format>
 #include <limits>
 #include <map>
@@ -103,30 +105,205 @@ namespace ccf::kv
         {reply.data, &rust_ffi::ccf_rust_kv_reply_delete}};
     }
 
-    inline MapWrites collect_writes(const Response& reply)
+    struct FlatMapWrite
     {
-      MapWrites maps;
+      static constexpr size_t REMOVED = std::numeric_limits<size_t>::max();
+
+      struct EntrySpan
+      {
+        size_t key_off = 0;
+        size_t key_len = 0;
+        size_t val_off = 0;
+        size_t val_len = REMOVED;
+      };
+
+      std::vector<uint8_t> blob;
+      std::vector<EntrySpan> entries;
+      size_t puts = 0;
+      size_t removes = 0;
+
+      [[nodiscard]] bool empty() const
+      {
+        return entries.empty();
+      }
+
+      [[nodiscard]] std::span<const uint8_t> key_span(const EntrySpan& e) const
+      {
+        return {blob.data() + e.key_off, e.key_len};
+      }
+
+      [[nodiscard]] std::span<const uint8_t> val_span(const EntrySpan& e) const
+      {
+        return {blob.data() + e.val_off, e.val_len};
+      }
+
+      static int compare_spans(
+        std::span<const uint8_t> a, std::span<const uint8_t> b)
+      {
+        const size_t min_len = std::min(a.size(), b.size());
+        if (min_len != 0)
+        {
+          const int cmp = std::memcmp(a.data(), b.data(), min_len);
+          if (cmp != 0)
+          {
+            return cmp;
+          }
+        }
+        return a.size() < b.size() ? -1 : (a.size() > b.size() ? 1 : 0);
+      }
+
+      void append(
+        std::span<const uint8_t> key, const std::span<const uint8_t>* val)
+      {
+        const size_t k_off = blob.size();
+        blob.insert(blob.end(), key.begin(), key.end());
+        size_t v_off = 0;
+        size_t v_len = REMOVED;
+        if (val != nullptr)
+        {
+          v_off = blob.size();
+          v_len = val->size();
+          blob.insert(blob.end(), val->begin(), val->end());
+          ++puts;
+        }
+        else
+        {
+          ++removes;
+        }
+        entries.push_back({k_off, key.size(), v_off, v_len});
+      }
+
+      // Sort entries by ascending key order. Returns false if a duplicate key
+      // exists, setting duplicate_is_remove when the duplicate is a removal.
+      bool sort_and_check_unique(bool& duplicate_is_remove)
+      {
+        if (entries.size() <= 1)
+        {
+          return true;
+        }
+        bool sorted = true;
+        for (size_t i = 1; i < entries.size(); ++i)
+        {
+          const int cmp =
+            compare_spans(key_span(entries[i - 1]), key_span(entries[i]));
+          if (cmp == 0)
+          {
+            duplicate_is_remove = (entries[i].val_len == REMOVED);
+            return false;
+          }
+          if (cmp > 0)
+          {
+            sorted = false;
+            break;
+          }
+        }
+        if (sorted)
+        {
+          return true;
+        }
+        std::stable_sort(
+          entries.begin(),
+          entries.end(),
+          [this](const EntrySpan& a, const EntrySpan& b) {
+            return compare_spans(key_span(a), key_span(b)) < 0;
+          });
+        for (size_t i = 1; i < entries.size(); ++i)
+        {
+          if (
+            compare_spans(key_span(entries[i - 1]), key_span(entries[i])) == 0)
+          {
+            duplicate_is_remove = (entries[i].val_len == REMOVED);
+            return false;
+          }
+        }
+        return true;
+      }
+
+      [[nodiscard]] untyped::Write materialize() const
+      {
+        untyped::Write out;
+        for (const auto& e : entries)
+        {
+          const auto ks = key_span(e);
+          Bytes k(ks.begin(), ks.end());
+          if (e.val_len == REMOVED)
+          {
+            out.emplace(std::move(k), std::nullopt);
+          }
+          else
+          {
+            const auto vs = val_span(e);
+            out.emplace(std::move(k), Bytes(vs.begin(), vs.end()));
+          }
+        }
+        return out;
+      }
+
+      [[nodiscard]] std::shared_ptr<const FlatMapWrite> without_removes() const
+      {
+        auto out = std::make_shared<FlatMapWrite>();
+        out->entries.reserve(puts);
+        out->blob.reserve(blob.size());
+        for (const auto& e : entries)
+        {
+          if (e.val_len != REMOVED)
+          {
+            const auto vs = val_span(e);
+            out->append(key_span(e), &vs);
+          }
+        }
+        return out;
+      }
+    };
+
+    using FlatMapWrites =
+      std::vector<std::pair<std::string, std::shared_ptr<const FlatMapWrite>>>;
+
+    inline FlatMapWrites collect_flat_writes(const Response& reply)
+    {
+      std::map<std::string, std::shared_ptr<FlatMapWrite>> by_map;
       for (size_t i = 0; i < reply.size; ++i)
       {
         const auto row = reply.entry(i);
         std::string name(
           reinterpret_cast<const char*>(row.map.data), row.map.size);
-        maps[std::move(name)].insert_or_assign(
-          copy(row.key),
-          row.value.data == nullptr ? std::nullopt :
-                                      std::optional<Bytes>(copy(row.value)));
+        auto& ptr = by_map[std::move(name)];
+        if (!ptr)
+        {
+          ptr = std::make_shared<FlatMapWrite>();
+        }
+        const std::span<const uint8_t> ks(row.key.data, row.key.size);
+        if (row.value.data == nullptr)
+        {
+          ptr->append(ks, nullptr);
+        }
+        else
+        {
+          const std::span<const uint8_t> vs(row.value.data, row.value.size);
+          ptr->append(ks, &vs);
+        }
       }
-      return maps;
+      FlatMapWrites out;
+      out.reserve(by_map.size());
+      for (auto& [name, ptr] : by_map)
+      {
+        bool unused = false;
+        ptr->sort_and_check_unique(unused);
+        out.emplace_back(name, std::move(ptr));
+      }
+      return out;
     }
 
-    inline void serialise_writes(
-      KvStoreSerialiser& serialiser, const MapWrites& maps)
+    template <typename Serialiser>
+    inline void serialise_flat_writes(
+      Serialiser& serialiser, const FlatMapWrites& maps)
     {
       for (const auto domain :
            {SecurityDomain::PUBLIC, SecurityDomain::PRIVATE})
       {
-        for (const auto& [name, writes] : maps)
+        for (const auto& [name, writes_ptr] : maps)
         {
+          const auto& writes = *writes_ptr;
           if (writes.empty() || get_security_domain(name) != domain)
           {
             continue;
@@ -134,27 +311,21 @@ namespace ccf::kv
           serialiser.start_map(name, domain);
           serialiser.serialise_entry_version(NoVersion);
           serialiser.serialise_count_header(0);
-
-          uint64_t puts = 0;
-          uint64_t removes = 0;
-          for (const auto& [_, value] : writes)
+          serialiser.serialise_count_header(writes.puts);
+          for (const auto& e : writes.entries)
           {
-            ++(value.has_value() ? puts : removes);
-          }
-          serialiser.serialise_count_header(puts);
-          for (const auto& [key, value] : writes)
-          {
-            if (value.has_value())
+            if (e.val_len != FlatMapWrite::REMOVED)
             {
-              serialiser.serialise_write(key, *value);
+              serialiser.serialise_write_span(
+                writes.key_span(e), writes.val_span(e));
             }
           }
-          serialiser.serialise_count_header(removes);
-          for (const auto& [key, value] : writes)
+          serialiser.serialise_count_header(writes.removes);
+          for (const auto& e : writes.entries)
           {
-            if (!value.has_value())
+            if (e.val_len == FlatMapWrite::REMOVED)
             {
-              serialiser.serialise_remove(key);
+              serialiser.serialise_remove_span(writes.key_span(e));
             }
           }
         }
@@ -490,11 +661,48 @@ namespace ccf::kv
 
     struct MapDelta
     {
-      std::shared_ptr<const untyped::Write> writes;
+      std::shared_ptr<const rust_detail::FlatMapWrite> writes;
       bool delivered = false;
     };
 
-    std::map<std::string, std::map<Version, MapDelta>> map_deltas;
+    using MapDeltaLog = std::deque<std::pair<Version, MapDelta>>;
+    std::map<std::string, MapDeltaLog> map_deltas;
+
+    static void insert_map_delta(
+      MapDeltaLog& log, Version version, MapDelta delta)
+    {
+      if (log.empty() || log.back().first < version)
+      {
+        log.emplace_back(version, std::move(delta));
+        return;
+      }
+      auto it = std::lower_bound(
+        log.begin(), log.end(), version, [](const auto& entry, Version v) {
+          return entry.first < v;
+        });
+      if (it == log.end() || it->first != version)
+      {
+        log.emplace(it, version, std::move(delta));
+      }
+    }
+
+    static MapDeltaLog::iterator upper_bound_delta(
+      MapDeltaLog& log, Version version)
+    {
+      return std::upper_bound(
+        log.begin(), log.end(), version, [](Version v, const auto& entry) {
+          return v < entry.first;
+        });
+    }
+
+    static MapDeltaLog::const_iterator upper_bound_delta(
+      const MapDeltaLog& log, Version version)
+    {
+      return std::upper_bound(
+        log.begin(), log.end(), version, [](Version v, const auto& entry) {
+          return v < entry.first;
+        });
+    }
 
     static uint64_t next_store_instance_id()
     {
@@ -734,67 +942,24 @@ namespace ccf::kv
       return r.number;
     }
 
-    ConsensusHookPtrs record_commit_locked(
-      Version version, const rust_detail::MapWrites& maps)
-    {
-      ConsensusHookPtrs hooks;
-      for (const auto& [name, writes] : maps)
-      {
-        if (auto it = local_hooks.find(name);
-            it != local_hooks.end() && it->second)
-        {
-          if (auto hook = it->second(version, writes); hook != nullptr)
-          {
-            hooks.push_back(std::move(hook));
-          }
-        }
-        bool has_put = false;
-        for (const auto& [_, value] : writes)
-        {
-          if (value.has_value())
-          {
-            has_put = true;
-            break;
-          }
-        }
-        if (has_put || map_revision_at(version, name) == version)
-        {
-          map_deltas[name].emplace(
-            version, MapDelta{std::make_shared<const untyped::Write>(writes)});
-        }
-      }
-      return hooks;
-    }
-
-    ConsensusHookPtrs record_commit_shared_locked(
-      Version version,
-      const std::vector<
-        std::pair<std::string, std::shared_ptr<const untyped::Write>>>& maps)
+    ConsensusHookPtrs record_commit_flat_locked(
+      Version version, const rust_detail::FlatMapWrites& maps)
     {
       ConsensusHookPtrs hooks;
       for (const auto& [name, writes_ptr] : maps)
       {
-        const auto& writes = *writes_ptr;
         if (auto it = local_hooks.find(name);
             it != local_hooks.end() && it->second)
         {
-          if (auto hook = it->second(version, writes); hook != nullptr)
+          const auto materialized = writes_ptr->materialize();
+          if (auto hook = it->second(version, materialized); hook != nullptr)
           {
             hooks.push_back(std::move(hook));
           }
         }
-        bool has_put = false;
-        for (const auto& [_, value] : writes)
+        if (writes_ptr->puts > 0 || map_revision_at(version, name) == version)
         {
-          if (value.has_value())
-          {
-            has_put = true;
-            break;
-          }
-        }
-        if (has_put || map_revision_at(version, name) == version)
-        {
-          map_deltas[name].emplace(version, MapDelta{writes_ptr});
+          insert_map_delta(map_deltas[name], version, MapDelta{writes_ptr});
         }
       }
       return hooks;
@@ -831,20 +996,21 @@ namespace ccf::kv
       return mark;
     }
 
-    untyped::Write diff_entries_for(Version version, const std::string& name)
+    std::shared_ptr<const rust_detail::FlatMapWrite> diff_entries_for(
+      Version version, const std::string& name)
     {
       std::lock_guard lock(state_lock);
       const auto it = map_deltas.find(name);
       if (it == map_deltas.end() || it->second.empty())
       {
-        return {};
+        return nullptr;
       }
-      const auto upper = it->second.upper_bound(version);
+      const auto upper = upper_bound_delta(it->second, version);
       if (upper == it->second.begin())
       {
-        return {};
+        return nullptr;
       }
-      return *std::prev(upper)->second.writes;
+      return std::prev(upper)->second.writes;
     }
 
     CommitResult commit_internal(
@@ -883,7 +1049,7 @@ namespace ccf::kv
       {
         if (!changes.empty())
         {
-          writes.emplace(name, *changes.rbegin()->second.writes);
+          writes.emplace(name, changes.back().second.writes->materialize());
         }
       }
       return writes;
@@ -1338,6 +1504,7 @@ namespace ccf::kv
       }
       std::vector<std::tuple<untyped::CommitHook, Version, untyped::Write>>
         callbacks;
+      std::vector<std::shared_ptr<const rust_detail::FlatMapWrite>> to_drop;
       {
         std::scoped_lock lock(maps_lock, state_lock);
         const auto compact_target = open_reservations.empty() ?
@@ -1367,7 +1534,7 @@ namespace ccf::kv
         }
         for (auto& [name, changes] : map_deltas)
         {
-          auto end = changes.upper_bound(global);
+          auto end = upper_bound_delta(changes, global);
           if (end == changes.begin())
           {
             continue;
@@ -1380,20 +1547,26 @@ namespace ccf::kv
               if (!it->second.delivered)
               {
                 callbacks.emplace_back(
-                  hook->second, it->first, *it->second.writes);
+                  hook->second, it->first, it->second.writes->materialize());
                 it->second.delivered = true;
-                auto filtered =
-                  std::make_shared<untyped::Write>(*it->second.writes);
-                std::erase_if(*filtered, [](const auto& row) {
-                  return !row.second.has_value();
-                });
-                it->second.writes = std::move(filtered);
+                if (it->second.writes->removes > 0)
+                {
+                  to_drop.push_back(std::move(it->second.writes));
+                  it->second.writes = to_drop.back()->without_removes();
+                }
               }
             }
           }
-          changes.erase(changes.begin(), std::prev(end));
+          const auto drop_count =
+            static_cast<size_t>(std::distance(changes.begin(), std::prev(end)));
+          for (size_t i = 0; i < drop_count; ++i)
+          {
+            to_drop.push_back(std::move(changes.front().second.writes));
+            changes.pop_front();
+          }
         }
       }
+      to_drop.clear();
       for (const auto& [hook, version, writes] : callbacks)
       {
         hook(version, writes);
@@ -1474,7 +1647,10 @@ namespace ccf::kv
       }
       for (auto& [_, changes] : map_deltas)
       {
-        changes.erase(changes.upper_bound(head), changes.end());
+        while (!changes.empty() && changes.back().first > head)
+        {
+          changes.pop_back();
+        }
       }
     }
 
