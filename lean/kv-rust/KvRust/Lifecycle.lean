@@ -148,7 +148,7 @@ private theorem clone_dependencies (rows : alloc.vec.Vec CcfKv.engine.Dependency
   cases rows
   simp
 
-private theorem clone_tx (t : CcfKv.engine.Tx)
+theorem clone_tx (t : CcfKv.engine.Tx)
     : CcfKv.engine.Tx.Insts.CoreCloneClone.clone t = .ok t := by
   simp [CcfKv.engine.Tx.Insts.CoreCloneClone.clone, clone_assoc, clone_dependencies]
 

@@ -20,7 +20,8 @@ open Kv.Model
 `(map, birth, revision)` stamps of `full` while holding no radix root pins. -/
 def StubOf (stub full : CcfKv.engine.Tx) : Prop :=
   stub.snapshot = full.snapshot
-  ∧ stub.views.val = full.views.val.map (fun (m, v) => (m, {v with «local» := .Empty, global := none}))
+  ∧ stub.views.val
+    = full.views.val.map (fun (m, v) => (m, {v with «local» := .Empty, global := none}))
 
 /-- A metadata-only stub holds zero radix root pins. -/
 theorem stub_tx_pins_empty {stub full : CcfKv.engine.Tx} (h : StubOf stub full)
@@ -47,7 +48,8 @@ theorem tx_needs_frame_stub {stub full : CcfKv.engine.Tx} (h : StubOf stub full)
   | vis _ _ => rw [h1] at hs1; simp at hs1
   | div => rw [h1] at hs1; simp at hs1
   | ret b1 =>
-      cases h2 : CcfKv.engine.tx_needs_frame full frame globalFrame using Result.cases with
+      cases h2 : CcfKv.engine.tx_needs_frame full frame globalFrame
+        using Result.cases with
       | vis _ _ => rw [h2] at hs2; simp at hs2
       | div => rw [h2] at hs2; simp at hs2
       | ret b2 =>
@@ -94,15 +96,18 @@ theorem detached_stage_write_matches_operate (d : CcfKv.engine.DetachedTx)
   cases hp : d.tx.phase with
   | Committing =>
       have hrest : { d with tx := { d.tx with phase := .Committing } } = d := by
-        cases d with | mk _ tx _ => cases tx; simp_all
+        cases d with
+        | mk _ tx _ => cases tx; simp_all
       simp [hrest]
   | Applied ver =>
       have hrest : { d with tx := { d.tx with phase := .Applied ver } } = d := by
-        cases d with | mk _ tx _ => cases tx; simp_all
+        cases d with
+        | mk _ tx _ => cases tx; simp_all
       simp [hrest]
   | Finished =>
       have hrest : { d with tx := { d.tx with phase := .Finished } } = d := by
-        cases d with | mk _ tx _ => cases tx; simp_all
+        cases d with
+        | mk _ tx _ => cases tx; simp_all
       simp [hrest]
   | Active =>
       simp only [bind_ok]
@@ -114,7 +119,8 @@ theorem detached_stage_write_matches_operate (d : CcfKv.engine.DetachedTx)
       | none =>
           have hmiss : find d.tx.views.val m = none := hidx
           have hrest : { d with tx := { d.tx with phase := .Active } } = d := by
-            cases d with | mk _ tx _ => cases tx; simp_all
+            cases d with
+            | mk _ tx _ => cases tx; simp_all
           simp [core.option.Option.is_none, hmiss, hrest]
       | some i =>
           obtain ⟨view, _, hfind⟩ := hidx
@@ -123,9 +129,13 @@ theorem detached_stage_write_matches_operate (d : CcfKv.engine.DetachedTx)
           have hfrom : CcfKv.engine.Write.from_option v = .ok w := by
             cases v <;> rfl
           rw [hfrom, bind_ok]
-          have hstage : ∃ nextP,
-              CcfKv.engine.stage_write d.tx.pending { map := m, key := k } w = .ok nextP := by
-            have hspec := stage_write_by_key_refines d.tx.pending { map := m, key := k } w hSorted hRoom
+          have hstage
+              : ∃ nextP,
+                  CcfKv.engine.stage_write d.tx.pending { map := m, key := k } w
+                  = .ok nextP := by
+            have hspec :=
+              stage_write_by_key_refines d.tx.pending { map := m, key := k } w hSorted
+                hRoom
             cases hres : CcfKv.engine.stage_write d.tx.pending { map := m, key := k } w
               using Result.cases with
             | ret nextP => exact ⟨nextP, rfl⟩
@@ -139,8 +149,10 @@ theorem detached_stage_write_matches_operate (d : CcfKv.engine.DetachedTx)
               d.tx.views m = .ok (some view) := by
             have hspec := assoc_get_ref CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey d.tx.views m
               (fun a => key_same a m)
-            cases hres : CcfKv.engine.Assoc.get_ref CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-              d.tx.views m using Result.cases with
+            cases hres
+                  : CcfKv.engine.Assoc.get_ref CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+                      d.tx.views m
+              using Result.cases with
             | ret o =>
                 rw [hres, WP.spec_ok, hfind] at hspec
                 rw [hspec]
@@ -150,7 +162,8 @@ theorem detached_stage_write_matches_operate (d : CcfKv.engine.DetachedTx)
 
 /-- `DetachedTx.finish` matches `lifecycleCommitVersion` identically to `Store.finish`
 without borrowing `Store`. -/
-theorem detached_finish_matches (d : CcfKv.engine.DetachedTx) (outcome : CcfKv.engine.Outcome)
+theorem detached_finish_matches (d : CcfKv.engine.DetachedTx)
+    (outcome : CcfKv.engine.Outcome)
     : WP.spec (CcfKv.engine.DetachedTx.finish d outcome)
         (fun (res, after) =>
           match lifecycleCommitVersion d.tx outcome with
@@ -173,9 +186,14 @@ theorem detached_end_refines (s : CcfKv.engine.Store) (d : CcfKv.engine.Detached
     (hbase0 : s.history.activeFrames[0]? = some baseFrame)
     (valid : BranchValid s.history.log)
     (idxValid : HistoryIndexValid s.history)
-    (live : IndexLiveness s.history.index (txPins d.tx ++ (framePins s.history.activeFrames ++ otherPins)))
+    (live
+      : IndexLiveness s.history.index
+          (txPins d.tx ++ (framePins s.history.activeFrames ++ otherPins)))
     (queueRoom
-      : 2 * (s.history.index.values.dirs.val.length + s.history.index.values.rows.val.length) + 1
+      : 2
+            * (s.history.index.values.dirs.val.length
+                + s.history.index.values.rows.val.length)
+          + 1
         ≤ Usize.max)
     : WP.spec (CcfKv.engine.Store.end_detached s d)
         (fun (afterStore, afterTx) =>
@@ -192,11 +210,12 @@ theorem detached_end_refines (s : CcfKv.engine.Store) (d : CcfKv.engine.Detached
               (framePins afterStore.history.activeFrames ++ otherPins)
           ∧ HistoryIndexValid afterStore.history
           ∧ (∀ f ∈ afterStore.history.retained.val, f ∈ s.history.retained.val)
-          ∧ (d.registered = true →
-              afterStore.txs.val = erase s.txs.val d.id
-              ∧ ∀ f ∈ s.history.retained.val,
-                  f ∈ afterStore.history.retained.val
-                  ∨ CcfKv.engine.txs_need_frame afterStore.txs f baseFrame = .ok false)) := by
+          ∧ (d.registered = true
+              → afterStore.txs.val = erase s.txs.val d.id
+                ∧ ∀ f ∈ s.history.retained.val,
+                    f ∈ afterStore.history.retained.val
+                    ∨ CcfKv.engine.txs_need_frame afterStore.txs f baseFrame
+                      = .ok false)) := by
   unfold CcfKv.engine.Store.end_detached
   let restPins := framePins s.history.activeFrames ++ otherPins
   apply WP.spec_bind
@@ -260,13 +279,22 @@ theorem detached_end_refines (s : CcfKv.engine.Store) (d : CcfKv.engine.Detached
       hview.sorted⟩, ?_⟩
     simp [singleBindings, haiVals]
   have hpres : IndexPreservesPins s.history.index ai1 restPins := hkeptAi.trans hai1Pres
-  refine ⟨hlog, hgl, htm, hid, hre, hreg', rfl,
+  refine ⟨
+    hlog,
+    hgl,
+    htm,
+    hid,
+    hre,
+    hreg',
+    rfl,
     by simpa only [hactEq] using hai1Live,
     by simpa only [hactEq] using hpres,
     idxValid.of_preserves_pins hai1Live.valid (by simpa only [hactEq] using hpres)
       (fun f' hf' => Or.inr ⟨f', hactEq ▸ hf', rfl⟩)
       (fun rf hrf => idxValid.retainedEmpty rf (hretSub rf hrf)),
-    hretSub, hregSpec⟩
+    hretSub,
+    hregSpec
+  ⟩
 
 /-- Reserving a placeholder frame retains `head.data`, appends `{head with version := head.version + 1}`,
 and preserves `BranchValid`, `HistoryIndexValid`, `IndexLiveness`, and `IndexKeeps`. -/
@@ -279,7 +307,8 @@ theorem reserve_placeholder_refines (s : CcfKv.engine.Store) (extraPins : List U
     (live : IndexLiveness s.history.index (framePins s.history.activeFrames ++ extraPins))
     (refRoom
       : (framePins s.history.activeFrames ++ extraPins).length
-          + 17 * s.history.index.values.dirs.val.length + 1
+          + 17 * s.history.index.values.dirs.val.length
+          + 1
         ≤ U32.max)
     (ringRoom
       : s.history.log.len.val = s.history.log.slots.val.length
@@ -702,5 +731,711 @@ theorem index_get_bytes_refines {V : Type} (index : CcfKv.kv_index.AddressIndex 
       exact hfallback
   · rw [ite_eq_right h1]
     exact hfallback
+
+/-- `Store.readonly_pins` selects the exact same `(local, global)` pinned images as
+`pin_maps` without retaining roots, and reports the exact nonzero root IDs `(r0, r1)`
+that external hazard slots must keep alive. -/
+theorem readonly_pins_matches (reuse : Bool) (snapVer globalVer : U64)
+    (localData globalData : CcfKv.radix.RadixRoot)
+    : WP.spec
+        (CcfKv.engine.Store.readonly_pins reuse snapVer globalVer localData globalData)
+        (fun (loc, glob, r0, r1) =>
+          [r0, r1].filter (· != 0#u32)
+            = pinPins loc
+              ++ (match glob with
+                  | none => []
+                  | some g => pinPins g)
+          ∧ (∀ r ∈ [r0, r1].filter (· != 0#u32), r = localData ∨ r = globalData)
+          ∧ (reuse = true ∧ snapVer.val < globalVer.val
+              → loc = .Root globalData ∧ glob = none)
+          ∧ (¬(reuse = true ∧ snapVer.val < globalVer.val) ∧ snapVer = globalVer
+              → loc = .Root localData ∧ glob = none)
+          ∧ (¬(reuse = true ∧ snapVer.val < globalVer.val) ∧ snapVer ≠ globalVer
+              → loc = .Root localData ∧ glob = some (.Root globalData))) := by
+  unfold CcfKv.engine.Store.readonly_pins
+  cases reuse with
+  | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte, false_and, not_false_eq_true, true_and]
+      by_cases heq : snapVer = globalVer
+      · rw [ite_eq_left heq, WP.spec_ok]
+        by_cases hz : localData = 0#u32 <;> simp [pinPins, hz, heq]
+      · rw [ite_eq_right heq, WP.spec_ok]
+        by_cases hl : localData = 0#u32 <;> by_cases hg : globalData = 0#u32 <;>
+          simp [pinPins, hl, hg, heq]
+  | true =>
+      simp only [↓reduceIte, true_and]
+      by_cases hlt : snapVer < globalVer
+      · have hltVal : snapVer.val < globalVer.val := hlt
+        have hne : snapVer ≠ globalVer := fun h => by subst h; omega
+        rw [ite_eq_left hlt, WP.spec_ok]
+        by_cases hg : globalData = 0#u32 <;> simp [pinPins, hg, hltVal, hne]
+      · have hgeVal : ¬(snapVer.val < globalVer.val) := hlt
+        rw [ite_eq_right hlt]
+        by_cases heq : snapVer = globalVer
+        · rw [ite_eq_left heq, WP.spec_ok]
+          by_cases hl : localData = 0#u32 <;> simp [pinPins, hl, heq]
+        · rw [ite_eq_right heq, WP.spec_ok]
+          by_cases hl : localData = 0#u32 <;> by_cases hg : globalData = 0#u32 <;>
+            simp [pinPins, hl, hg, hgeVal, heq]
+
+/-- `Store.snapshot_and_acquire_readonly` borrows `&Store` immutably, captures the
+head snapshot if unset, evaluates the exact same cut-resolution and availability
+checks as `Acquire`, and returns `(snap.version, snap.term, out, r0, r1)` where
+`[r0, r1].filter (· != 0)` equals the exact `viewPins` of any newly acquired view. -/
+theorem snapshot_and_acquire_readonly_refines (s : CcfKv.engine.Store)
+    (d : CcfKv.engine.DetachedTx) (map : CcfKv.engine.Bytes)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
+    (baseFrame : CcfKv.engine.Frame)
+    (hframes : s.history.activeFrames = prior ++ [head])
+    (hbase0 : s.history.activeFrames[0]? = some baseFrame)
+    (hbaseLeGlobal : baseFrame.version.val ≤ s.history.global.val)
+    (hrec : s.recovery_views.val = [])
+    (hactive : d.tx.phase = .Active)
+    (hunreg : d.registered = false)
+    (hmissing : find d.tx.views.val map = none)
+    (hviewRoom : d.tx.views.val.length < Usize.max)
+    (valid : BranchValid s.history.log)
+    : WP.spec (CcfKv.engine.Store.snapshot_and_acquire_readonly s d map)
+        (fun (res, after) =>
+          let snap :=
+            d.tx.snapshot.getD { version := head.version, term := s.history.term }
+          after.id = d.id
+          ∧ after.registered = false
+          ∧ after.tx.snapshot = some snap
+          ∧ after.tx.phase = .Active
+          ∧ match res with
+            | .Err _ => False
+            | .Ok (sv, st, out, r0, r1) =>
+                sv = snap.version
+                ∧ st = snap.term
+                ∧ match out with
+                  | .Unavailable =>
+                      r0 = 0#u32
+                      ∧ r1 = 0#u32
+                      ∧ after.tx.unavailable = true
+                      ∧ after.tx.views = d.tx.views
+                  | .Acquired locRev globRev =>
+                      ∃ v,
+                        after.tx.views.val = (map, v) :: erase d.tx.views.val map
+                        ∧ [r0, r1].filter (· != 0#u32) = viewPins v
+                        ∧ v.revision.version = locRev
+                        ∧ (∀ r ∈ viewPins v,
+                            ∃ f ∈ s.history.activeFrames ++ s.history.retained.val,
+                              f.data = r)
+                        ∧ (v.birth = none
+                            → locRev = 0#u64 ∧ globRev = 0#u64 ∧ viewPins v = [])
+                  | _ => False) := by
+  unfold CcfKv.engine.Store.snapshot_and_acquire_readonly
+  rw [hactive, hunreg]
+  simp only [↓reduceIte, Bool.false_eq_true, bind_ok]
+  let snap : CcfKv.engine.Snapshot :=
+    d.tx.snapshot.getD { version := head.version, term := s.history.term }
+  have hsnapStep : WP.spec
+      (if core.option.Option.is_none d.tx.snapshot then do
+          let f ← CcfKv.engine.History.head s.history
+          Result.ok (s, some ({ version := f.version, term := s.history.term } : CcfKv.engine.Snapshot))
+        else Result.ok (s, d.tx.snapshot))
+      (fun (s1, o) => s1 = s ∧ o = some snap) := by
+    cases hs : d.tx.snapshot with
+    | none =>
+        simp only [core.option.Option.is_none, Option.isNone_none, ↓reduceIte, snap, hs, Option.getD_none]
+        rw [history_head s.history prior head hframes valid, bind_ok, WP.spec_ok]
+        exact ⟨rfl, rfl⟩
+    | some sn =>
+        simp [core.option.Option.is_none, snap, hs]
+  apply WP.spec_bind hsnapStep
+  rintro ⟨s1, o⟩ ⟨hs1, ho⟩
+  subst s1; subst ho
+  apply WP.spec_bind
+    (assoc_index CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey d.tx.views map
+      (fun a => key_same a map))
+  intro idx hidx
+  have hidxNone : idx = none := by
+    cases idx with
+    | none => rfl
+    | some i =>
+        obtain ⟨_, _, hfind⟩ := hidx
+        rw [hmissing] at hfind
+        cases hfind
+  subst hidxNone
+  simp only [core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true, ↓reduceIte]
+  apply WP.spec_bind (history_resolve_cut s.history snap.version baseFrame hbase0 valid)
+  intro cutRef hcutRef
+  cases cutRef with
+  | none =>
+      rw [WP.spec_ok]
+      exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  | some localRef =>
+      have hrecNone : CcfKv.engine.Assoc.get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.RecoveryView.Insts.CoreCloneClone
+          s.recovery_views map = .ok none := by
+        have hgs := assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.RecoveryView.Insts.CoreCloneClone
+          s.recovery_views map (fun a => key_same a map)
+          (fun rv => by
+            cases rv
+            simp [CcfKv.engine.RecoveryView.Insts.CoreCloneClone.clone, clone_assoc, lift])
+        cases hres
+              : CcfKv.engine.Assoc.get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+                  CcfKv.engine.Bytes.Insts.CoreCloneClone
+                  CcfKv.engine.RecoveryView.Insts.CoreCloneClone s.recovery_views map
+          using Result.cases with
+        | vis _ _ => rw [hres] at hgs; simp at hgs
+        | div => rw [hres] at hgs; simp at hgs
+        | ret o =>
+            rw [hres, WP.spec_ok, hrec] at hgs
+            simpa [find] using hgs
+      dsimp only
+      rw [hrecNone, bind_ok]
+      have hreadSpec : ∃ localFrame,
+          WP.spec (CcfKv.engine.History.read_cut s.history localRef) (· = localFrame)
+          ∧ localFrame ∈ s.history.activeFrames ++ s.history.retained.val := by
+        cases localRef with
+        | Active off =>
+            by_cases hlt : snap.version.val < baseFrame.version.val
+            · simp [hlt] at hcutRef
+            · simp only [hlt, ↓reduceIte] at hcutRef
+              obtain ⟨idx', hidxEq, hidxVal⟩ := hcutRef
+              cases hidxEq
+              have hoffLt : off.val < s.history.activeFrames.length := by
+                have hpos : 0 < s.history.activeFrames.length := by
+                  rw [hframes, List.length_append]; simp
+                omega
+              let f := s.history.activeFrames[off.val]
+              have hf : s.history.activeFrames[off.val]? = some f := List.getElem?_eq_getElem hoffLt
+              refine ⟨f, history_read_cut_active s.history off f valid hf, ?_⟩
+              exact List.mem_append_left _ (List.mem_of_getElem? hf)
+        | Retained ridx =>
+            by_cases hlt : snap.version.val < baseFrame.version.val
+            · simp only [hlt, ↓reduceIte] at hcutRef
+              obtain ⟨f, hf, _⟩ := hcutRef
+              refine ⟨f, history_read_cut_retained s.history ridx f hf, ?_⟩
+              exact List.mem_append_right _ (List.mem_of_getElem? hf)
+            · simp only [hlt, ↓reduceIte] at hcutRef
+              obtain ⟨_, hcontra, _⟩ := hcutRef
+              cases hcontra
+      obtain ⟨localFrame, hreadLocal, hlocalMem⟩ := hreadSpec
+      apply WP.spec_bind hreadLocal
+      intro lf hlf; rw [hlf]
+      apply WP.spec_bind
+        (assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+          CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
+          localFrame.births map (fun a => key_same a map)
+          (fun st => by simp [CcfKv.engine.Stamp.Insts.CoreCloneClone.clone]))
+      intro birth hbirth
+      cases birth with
+      | none =>
+          simp only [core.option.Option.is_none]
+          have hzero : CcfKv.engine.Stamp.zero = .ok { version := 0#u64, identity := 0#u64 } := rfl
+          rw [hzero, bind_ok]
+          let vEmpty : CcfKv.engine.View :=
+            { birth := none, revision := { version := 0#u64, identity := 0#u64 },
+              «local» := .Empty, global := none }
+          apply WP.spec_bind
+            (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+              CcfKv.engine.Bytes.Insts.CoreCloneClone
+              CcfKv.engine.View.Insts.CoreCloneClone d.tx.views map vEmpty
+              (fun a => key_same a map) clone_bytes clone_view hviewRoom)
+          intro views1 hviews1
+          rw [WP.spec_ok]
+          refine ⟨
+            rfl,
+            rfl,
+            rfl,
+            rfl,
+            rfl,
+            rfl,
+            vEmpty,
+            by simpa [Kv.Model.set] using hviews1,
+            ?_,
+            rfl,
+            ?_,
+            ?_
+          ⟩
+          · simp [vEmpty, viewPins, pinPins]
+          · intro r hr; simp [vEmpty, viewPins, pinPins] at hr
+          · intro _; simp [vEmpty, viewPins, pinPins]
+      | some bStamp =>
+          simp only [core.option.Option.is_none]
+          have hrelSpec : WP.spec (CcfKv.engine.History.relative_cut s.history s.history.global)
+              (fun i => i.val = s.history.global.val - baseFrame.version.val) := by
+            unfold CcfKv.engine.History.relative_cut
+            apply WP.spec_bind (branch_active_at s.history.log valid 0#usize baseFrame hbase0)
+            intro bf hbf; rw [hbf]
+            by_cases hlt : s.history.global < baseFrame.version
+            · have : s.history.global.val < baseFrame.version.val := hlt
+              omega
+            · rw [ite_eq_right hlt]
+              apply WP.spec_mono (U64.sub_spec (x := s.history.global) (y := baseFrame.version) (by omega))
+              intro diff hd; omega
+          apply WP.spec_bind hrelSpec
+          intro relOff hrelOff
+          apply WP.spec_bind (branch_cut_refines s.history.log valid relOff)
+          intro globOff hglobOff
+          have hglobLt : globOff.val < s.history.activeFrames.length := by
+            have hpos : 0 < s.history.activeFrames.length := by
+              rw [hframes, List.length_append]; simp
+            rw [CcfKv.engine.History.activeFrames, branch_values_length _ valid] at hpos ⊢
+            omega
+          let globalFrame := s.history.activeFrames[globOff.val]
+          have hglobGet : s.history.activeFrames[globOff.val]? = some globalFrame :=
+            List.getElem?_eq_getElem hglobLt
+          have hglobMem : globalFrame ∈ s.history.activeFrames ++ s.history.retained.val :=
+            List.mem_append_left _ (List.mem_of_getElem? hglobGet)
+          apply WP.spec_bind
+            (branch_active_at s.history.log valid globOff globalFrame hglobGet)
+          intro gf hgf; rw [hgf]
+          have hrevSpec (f : CcfKv.engine.Frame) : ∃ rev,
+              CcfKv.engine.Frame.revision f map = .ok rev := by
+            unfold CcfKv.engine.Frame.revision
+            have hgs := assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+              CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
+              f.revisions map (fun a => key_same a map)
+              (fun st => by simp [CcfKv.engine.Stamp.Insts.CoreCloneClone.clone])
+            cases hres
+                  : CcfKv.engine.Assoc.get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+                      CcfKv.engine.Bytes.Insts.CoreCloneClone
+                      CcfKv.engine.Stamp.Insts.CoreCloneClone f.revisions map
+              using Result.cases with
+            | vis _ _ => rw [hres] at hgs; simp at hgs
+            | div => rw [hres] at hgs; simp at hgs
+            | ret o =>
+                cases o with
+                | none =>
+                    exact ⟨
+                      { version := 0#u64, identity := 0#u64 },
+                      by simp [CcfKv.engine.Stamp.zero]
+                    ⟩
+                | some st => exact ⟨st, by simp⟩
+          obtain ⟨locRev, hlocRev⟩ := hrevSpec localFrame
+          obtain ⟨globRev, hglobRev⟩ := hrevSpec globalFrame
+          rw [hlocRev, bind_ok, hglobRev, bind_ok]
+          by_cases hltRev : locRev.version < globRev.version
+          · rw [ite_eq_left hltRev, WP.spec_ok]
+            exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+          · rw [ite_eq_right hltRev]
+            apply WP.spec_bind
+              (readonly_pins_matches s.history.reuse_compacted_images snap.version
+                s.history.global localFrame.data globalFrame.data)
+            rintro ⟨locImg, globImg, r0, r1⟩ ⟨hpins, hfrom, _, _, _⟩
+            let vNew : CcfKv.engine.View :=
+              { birth := some bStamp, revision := locRev, «local» := locImg, global := globImg }
+            apply WP.spec_bind
+              (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+                CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.View.Insts.CoreCloneClone
+                d.tx.views map vNew (fun a => key_same a map) clone_bytes clone_view hviewRoom)
+            intro views1 hviews1
+            rw [WP.spec_ok]
+            refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, vNew, by simpa [Kv.Model.set] using hviews1, hpins, rfl, ?_, ?_⟩
+            · intro r hr
+              have hr' : r ∈ List.filter (fun x => x != 0#u32) [r0, r1] := by
+                rw [hpins]; exact hr
+              rcases hfrom r hr' with rfl | rfl
+              · exact ⟨localFrame, hlocalMem, rfl⟩
+              · exact ⟨globalFrame, hglobMem, rfl⟩
+            · intro hnone; cases hnone
+
+/-- Promoting a hazard-pinned `DetachedTx` retains every view root in `d.tx.views`,
+registers a metadata-only stub in `s.txs` with identical `tx_needs_frame` behavior
+and zero radix pins, and preserves `IndexLiveness`, `IndexKeeps`, and `HistoryIndexValid`. -/
+theorem promote_detached_tx_refines (s : CcfKv.engine.Store) (d : CcfKv.engine.DetachedTx)
+    (basePins : List U32)
+    (hunreg : d.registered = false)
+    (hmissing : find s.txs.val d.id = none)
+    (htxsRoom : s.txs.val.length < Usize.max)
+    (hviewsUnique : (d.tx.views.val.map Prod.fst).Nodup)
+    (idxValid : HistoryIndexValid s.history)
+    (live : IndexLiveness s.history.index basePins)
+    (hrootsLive
+      : ∀ r ∈ txPins d.tx,
+          SingleLinkLive s.history.index.values.dirs.val s.history.index.values.rows.val r
+          ∧ radixReferences s.history.index.values.dirs.val basePins r > 0)
+    (refRoom
+      : basePins.length
+          + (txPins d.tx).length
+          + 17 * s.history.index.values.dirs.val.length
+          + 1
+        ≤ U32.max)
+    : WP.spec (CcfKv.engine.Store.promote_detached_tx s d)
+        (fun (res, afterStore, afterTx) =>
+          res = .Ok ()
+          ∧ afterTx = { d with registered := true }
+          ∧ afterStore.history.log = s.history.log
+          ∧ afterStore.history.retained = s.history.retained
+          ∧ afterStore.history.global = s.history.global
+          ∧ afterStore.history.term = s.history.term
+          ∧ afterStore.history.next_identity = s.history.next_identity
+          ∧ afterStore.history.reuse_compacted_images = s.history.reuse_compacted_images
+          ∧ IndexLiveness afterStore.history.index (txPins d.tx ++ basePins)
+          ∧ IndexKeeps s.history.index afterStore.history.index
+          ∧ HistoryIndexValid afterStore.history
+          ∧ ∃ stub,
+              afterStore.txs.val = (d.id, stub) :: erase s.txs.val d.id
+              ∧ txPins stub = []
+              ∧ ∀ frame globalFrame,
+                  CcfKv.engine.tx_needs_frame stub frame globalFrame
+                  = CcfKv.engine.tx_needs_frame d.tx frame globalFrame) := by
+  unfold CcfKv.engine.Store.promote_detached_tx
+  rw [hunreg, ite_eq_right (by decide : ¬false = true)]
+  apply WP.spec_bind
+    (assoc_index CcfKv.U64.Insts.Ccf_kvEngineKey s.txs d.id (fun _ => rfl))
+  intro idx hidx
+  have hidxNone : idx = none := by
+    cases idx with
+    | none => rfl
+    | some _ =>
+        obtain ⟨_, _, hfind⟩ := hidx
+        rw [hmissing] at hfind
+        cases hfind
+  subst hidxNone
+  simp only [core.option.Option.is_some, Option.isSome_none, Bool.false_eq_true, ↓reduceIte]
+  rw [tx_new_lifecycle, bind_ok]
+  let n := d.tx.views.val.length
+  let prePins (k : Nat) : List U32 :=
+    (d.tx.views.val.take k).flatMap fun (_, v) => viewPins v
+  let strip (row : CcfKv.engine.Bytes × CcfKv.engine.View) : CcfKv.engine.Bytes × CcfKv.engine.View :=
+    (row.1, { row.2 with «local» := .Empty, global := none })
+  have hloop : WP.spec
+      (CcfKv.engine.Store.promote_detached_tx_loop s.history d.tx.views lifecycleNewTx.views 0#usize)
+      (fun (h, v, stubViews) =>
+        h.log = s.history.log
+        ∧ h.retained = s.history.retained
+        ∧ h.global = s.history.global
+        ∧ h.term = s.history.term
+        ∧ h.next_identity = s.history.next_identity
+        ∧ h.reuse_compacted_images = s.history.reuse_compacted_images
+        ∧ h.index.values = s.history.index.values
+        ∧ v = d.tx.views
+        ∧ IndexLiveness h.index (txPins d.tx ++ basePins)
+        ∧ stubViews.val.Perm (d.tx.views.val.map strip)) := by
+    unfold CcfKv.engine.Store.promote_detached_tx_loop
+    apply loop.spec_decr_nat (fun (_, _, _, i) => n - i.val)
+      (fun (curH, curV, curStub, i) =>
+        i.val ≤ n
+        ∧ curH.log = s.history.log
+        ∧ curH.retained = s.history.retained
+        ∧ curH.global = s.history.global
+        ∧ curH.term = s.history.term
+        ∧ curH.next_identity = s.history.next_identity
+        ∧ curH.reuse_compacted_images = s.history.reuse_compacted_images
+        ∧ curH.index.values = s.history.index.values
+        ∧ curV = d.tx.views
+        ∧ IndexLiveness curH.index (prePins i.val ++ basePins)
+        ∧ curStub.val.Perm ((d.tx.views.val.take i.val).map strip))
+      _ _ _
+    · rintro ⟨curH, curV, curStub, i⟩
+        ⟨hi, hlog, hret, hgl, htm, hid, hre, hvals, hcurV, hliveCur, hpermCur⟩
+      dsimp only at hi hlog hret hgl htm hid hre hvals hcurV hliveCur hpermCur ⊢
+      subst curV
+      unfold CcfKv.engine.Store.promote_detached_tx_loop.body
+      have hlen : (alloc.vec.Vec.len d.tx.views).val = n := alloc.vec.Vec.len_val _
+      have hcap := alloc.vec.Vec.len_ineq d.tx.views
+      have hone : (1#usize : Usize).val = 1 := rfl
+      by_cases hlt : i < alloc.vec.Vec.len d.tx.views
+      · have hilt : i.val < n := by rwa [← hlen]
+        rw [ite_eq_left hlt, alloc.vec.Vec.index_slice_index]
+        apply WP.spec_bind (alloc.vec.Vec.index_usize_spec d.tx.views i hilt)
+        rintro ⟨m, view⟩ hrow
+        have htakeStep : d.tx.views.val.take (i.val + 1) = d.tx.views.val.take i.val ++ [(m, view)] := by
+          rw [List.take_add_one, List.getElem?_eq_getElem hilt, ← hrow]
+          simp
+        have hpreLen : (prePins i.val).length + (viewPins view).length ≤ (txPins d.tx).length := by
+          have h1 : (d.tx.views.val.take (i.val + 1)).flatMap (fun p => viewPins p.2)
+              = prePins i.val ++ viewPins view := by
+            rw [htakeStep, List.flatMap_append]; simp [prePins]
+          have h3 : (txPins d.tx).length =
+              ((d.tx.views.val.take (i.val + 1)).flatMap (fun p => viewPins p.2)).length
+              + ((d.tx.views.val.drop (i.val + 1)).flatMap (fun p => viewPins p.2)).length := by
+            unfold txPins
+            conv_lhs => rw [← List.take_append_drop (i.val + 1) d.tx.views.val]
+            rw [List.flatMap_append, List.length_append]
+          rw [h1, List.length_append] at h3
+          omega
+        have hviewMemTx : (m, view) ∈ d.tx.views.val := by
+          rw [hrow]; exact List.getElem_mem hilt
+        have hretainPin : ∀ (hIn : CcfKv.engine.History) (pinsIn : List U32) (p : CcfKv.engine.PinnedImage),
+            hIn.index.values = s.history.index.values →
+            IndexLiveness hIn.index (pinsIn ++ basePins) →
+            (∀ r ∈ pinPins p, r ∈ txPins d.tx) →
+            pinsIn.length + (pinPins p).length ≤ (txPins d.tx).length →
+            WP.spec
+              (match p with
+                | .Empty => Result.ok hIn
+                | .Root root => do
+                    let ai ← CcfKv.kv_index.AddressIndex.retain_root hIn.index root
+                    Result.ok { hIn with index := ai }
+                | .Recovered _ => Result.ok hIn)
+              (fun hOut =>
+                hOut.log = hIn.log
+                ∧ hOut.retained = hIn.retained
+                ∧ hOut.global = hIn.global
+                ∧ hOut.term = hIn.term
+                ∧ hOut.next_identity = hIn.next_identity
+                ∧ hOut.reuse_compacted_images = hIn.reuse_compacted_images
+                ∧ hOut.index.values = s.history.index.values
+                ∧ IndexLiveness hOut.index ((pinPins p ++ pinsIn) ++ basePins)) := by
+          intro hIn pinsIn p hInVals hInLive hpSub hpLen
+          cases p with
+          | Empty =>
+              simp [pinPins, hInVals, hInLive]
+          | Recovered _ =>
+              simp [pinPins, hInVals, hInLive]
+          | Root root =>
+              have hrootLive : root ≠ 0#u32 →
+                  SingleLinkLive hIn.index.values.dirs.val hIn.index.values.rows.val root
+                  ∧ radixReferences hIn.index.values.dirs.val (pinsIn ++ basePins) root > 0 := by
+                intro hnz
+                have hmem : root ∈ txPins d.tx := hpSub root (by simp [pinPins, hnz])
+                obtain ⟨hsll, hpos⟩ := hrootsLive root hmem
+                rw [hInVals]
+                refine ⟨hsll, ?_⟩
+                rw [radixReferences_eq] at hpos ⊢
+                have hcnt : (basePins ++ arenaEdges s.history.index.values.dirs.val).count root
+                    ≤ ((pinsIn ++ basePins) ++ arenaEdges s.history.index.values.dirs.val).count root := by
+                  simp only [List.count_append]
+                  omega
+                omega
+              have hrootRoom : root ≠ 0#u32 →
+                  radixReferences hIn.index.values.dirs.val (pinsIn ++ basePins) root < U32.max := by
+                intro _
+                have h1 := owners_count_le_bound hIn.index.values.dirs.val (pinsIn ++ basePins) root
+                rw [hInVals] at h1 ⊢
+                rw [radixReferences_eq]
+                have hlen1 : (pinsIn ++ basePins).length = pinsIn.length + basePins.length :=
+                  List.length_append
+                have h2 : pinsIn.length ≤ (txPins d.tx).length := by omega
+                have h3 : basePins.length + (txPins d.tx).length
+                    + 17 * s.history.index.values.dirs.val.length + 1 ≤ U32.max := refRoom
+                omega
+              apply WP.spec_bind
+                (index_retain_root_refines hIn.index (pinsIn ++ basePins) root hInLive
+                  hrootLive hrootRoom)
+              intro ai ⟨haiVals, haiLive⟩
+              rw [WP.spec_ok]
+              refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, haiVals.trans hInVals, ?_⟩
+              by_cases hz : root = 0#u32
+              · simpa [pinPins, hz] using haiLive
+              · simpa [pinPins, hz, List.cons_append] using haiLive
+        have hlocSub : ∀ r ∈ pinPins view.local, r ∈ txPins d.tx := by
+          intro r hr
+          exact List.mem_flatMap.mpr ⟨(m, view), hviewMemTx, by
+            dsimp only; unfold viewPins; exact List.mem_append_left _ hr⟩
+        have hlocLen : (prePins i.val).length + (pinPins view.local).length ≤ (txPins d.tx).length := by
+          have : (pinPins view.local).length ≤ (viewPins view).length := by
+            unfold viewPins; rw [List.length_append]; omega
+          omega
+        apply WP.spec_bind
+          (hretainPin curH (prePins i.val) view.local hvals hliveCur hlocSub hlocLen)
+        rintro h1 ⟨hlog1, hret1, hgl1, htm1, hid1, hre1, hvals1, hlive1⟩
+        have hglobStep : WP.spec
+            (match view.global with
+              | none => Result.ok h1
+              | some pi =>
+                  match pi with
+                  | .Empty => Result.ok h1
+                  | .Root root => do
+                      let ai ← CcfKv.kv_index.AddressIndex.retain_root h1.index root
+                      Result.ok { h1 with index := ai }
+                  | .Recovered _ => Result.ok h1)
+            (fun h2 =>
+              h2.log = h1.log
+              ∧ h2.retained = h1.retained
+              ∧ h2.global = h1.global
+              ∧ h2.term = h1.term
+              ∧ h2.next_identity = h1.next_identity
+              ∧ h2.reuse_compacted_images = h1.reuse_compacted_images
+              ∧ h2.index.values = s.history.index.values
+              ∧ IndexLiveness h2.index (prePins (i.val + 1) ++ basePins)) := by
+          cases hg : view.global with
+          | none =>
+              rw [WP.spec_ok]
+              refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, hvals1, ?_⟩
+              have hperm : ((pinPins view.local ++ prePins i.val) ++ basePins).Perm
+                  (prePins (i.val + 1) ++ basePins) := by
+                have hvp : viewPins view = pinPins view.local := by simp [viewPins, hg]
+                have hpreNext : prePins (i.val + 1) = prePins i.val ++ pinPins view.local := by
+                  unfold prePins; rw [htakeStep, List.flatMap_append]; simp [hvp]
+                rw [hpreNext]
+                exact List.perm_append_comm.append_right basePins
+              exact hlive1.perm hperm
+          | some gpin =>
+              have hgsub : ∀ r ∈ pinPins gpin, r ∈ txPins d.tx := by
+                intro r hr
+                exact List.mem_flatMap.mpr ⟨(m, view), hviewMemTx, by
+                  dsimp only; unfold viewPins; rw [hg]; exact List.mem_append_right _ hr⟩
+              have hglen : (pinPins view.local ++ prePins i.val).length + (pinPins gpin).length
+                  ≤ (txPins d.tx).length := by
+                have hvp : (viewPins view).length = (pinPins view.local).length + (pinPins gpin).length := by
+                  unfold viewPins; rw [hg, List.length_append]
+                rw [List.length_append]; omega
+              apply WP.spec_mono
+                (hretainPin h1 (pinPins view.local ++ prePins i.val) gpin hvals1 hlive1
+                  hgsub hglen)
+              rintro h2 ⟨hl2, hr2, hgl2, htm2, hid2, hre2, hvals2, hlive2⟩
+              refine ⟨hl2, hr2, hgl2, htm2, hid2, hre2, hvals2, ?_⟩
+              have hperm : ((pinPins gpin ++ (pinPins view.local ++ prePins i.val)) ++ basePins).Perm
+                  (prePins (i.val + 1) ++ basePins) := by
+                have hvp : viewPins view = pinPins view.local ++ pinPins gpin := by simp [viewPins, hg]
+                have hpreNext : prePins (i.val + 1) = prePins i.val ++ (pinPins view.local ++ pinPins gpin) := by
+                  unfold prePins; rw [htakeStep, List.flatMap_append]; simp [hvp]
+                rw [hpreNext]
+                have p1 : (pinPins gpin ++ (pinPins view.local ++ prePins i.val)).Perm
+                    (prePins i.val ++ (pinPins view.local ++ pinPins gpin)) := by
+                  have a1 : (pinPins gpin ++ (pinPins view.local ++ prePins i.val)).Perm
+                      ((pinPins gpin ++ pinPins view.local) ++ prePins i.val) := by
+                    rw [List.append_assoc]
+                  have a2 : ((pinPins gpin ++ pinPins view.local) ++ prePins i.val).Perm
+                      (prePins i.val ++ (pinPins gpin ++ pinPins view.local)) := List.perm_append_comm
+                  have a3 : (prePins i.val ++ (pinPins gpin ++ pinPins view.local)).Perm
+                      (prePins i.val ++ (pinPins view.local ++ pinPins gpin)) :=
+                    List.perm_append_comm.append_left _
+                  exact a1.trans (a2.trans a3)
+                exact p1.append_right basePins
+              exact hlive2.perm hperm
+        apply WP.spec_bind hglobStep
+        rintro h2 ⟨hlog2, hret2, hgl2, htm2, hid2, hre2, hvals2, hlive2⟩
+        rw [clone_bytes, bind_ok]
+        have hstubRoom : curStub.val.length < Usize.max := by
+          have : curStub.val.length = i.val := by
+            rw [hpermCur.length_eq, List.length_map, List.length_take, Nat.min_eq_left hi]
+          omega
+        apply WP.spec_bind
+          (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
+            CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.View.Insts.CoreCloneClone
+            curStub m { view with «local» := .Empty, global := none }
+            (fun a => key_same a m) clone_bytes clone_view hstubRoom)
+        intro stubNext hstubNext
+        apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
+        intro iNext hiNext
+        have hiNextVal : iNext.val = i.val + 1 := by omega
+        rw [WP.spec_ok]
+        dsimp only
+        have hnotMemTake : m ∉ (d.tx.views.val.take i.val).map Prod.fst := by
+          intro hmem
+          have htakeMap : (d.tx.views.val.take (i.val + 1)).map Prod.fst
+              = (d.tx.views.val.take i.val).map Prod.fst ++ [m] := by
+            rw [htakeStep, List.map_append]; rfl
+          have hsubNodup : ((d.tx.views.val.take (i.val + 1)).map Prod.fst).Nodup := by
+            have hprefix : (d.tx.views.val.take (i.val + 1)).map Prod.fst
+                <+: d.tx.views.val.map Prod.fst :=
+              (List.take_prefix _ _).map _
+            exact hviewsUnique.sublist hprefix.sublist
+          rw [htakeMap, List.nodup_append] at hsubNodup
+          exact hsubNodup.2.2 m hmem m List.mem_cons_self rfl
+        have heraseId : erase curStub.val m = curStub.val := by
+          unfold erase
+          apply List.filter_eq_self.mpr
+          intro row hrowMem
+          have hmemMap : row ∈ (d.tx.views.val.take i.val).map strip := hpermCur.subset hrowMem
+          obtain ⟨orig, horigMem, rfl⟩ := List.mem_map.mp hmemMap
+          have hne : orig.1 ≠ m := fun heq =>
+            hnotMemTake (List.mem_map.mpr ⟨orig, horigMem, heq⟩)
+          simp [strip, hne]
+        have hpermNext : stubNext.val.Perm ((d.tx.views.val.take (i.val + 1)).map strip) := by
+          rw [hstubNext, Kv.Model.set, heraseId, htakeStep, List.map_append, List.map_singleton]
+          exact ((hpermCur.cons (strip (m, view))).trans (List.perm_append_singleton _ _).symm)
+        refine ⟨
+          ⟨
+            by omega,
+            hlog2.trans (hlog1.trans hlog),
+            hret2.trans (hret1.trans hret),
+            hgl2.trans (hgl1.trans hgl),
+            htm2.trans (htm1.trans htm),
+            hid2.trans (hid1.trans hid),
+            hre2.trans (hre1.trans hre),
+            hvals2,
+            rfl,
+            by rwa [hiNextVal],
+            by rwa [hiNextVal]
+          ⟩,
+          by omega
+        ⟩
+      · have hge : n ≤ i.val := by rw [← hlen]; exact Nat.le_of_not_gt hlt
+        have hiEq : i.val = n := Nat.le_antisymm hi hge
+        rw [ite_eq_right hlt, WP.spec_ok]
+        have htakeAll : d.tx.views.val.take i.val = d.tx.views.val := by
+          rw [hiEq]; exact List.take_length
+        refine ⟨hlog, hret, hgl, htm, hid, hre, hvals, rfl, ?_, ?_⟩
+        · simpa [prePins, txPins, htakeAll] using hliveCur
+        · simpa [htakeAll] using hpermCur
+    · refine ⟨Nat.zero_le _, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_, ?_⟩
+      · simpa [prePins] using live
+      · simp [lifecycleNewTx]
+  apply WP.spec_bind hloop
+  rintro ⟨h, v, stubViews⟩ ⟨hlog, hret, hgl, htm, hid, hre, hvals, hvEq, hliveH, hpermStub⟩
+  let stub : CcfKv.engine.Tx := { lifecycleNewTx with snapshot := d.tx.snapshot, views := stubViews }
+  apply WP.spec_bind
+    (assoc_set CcfKv.U64.Insts.Ccf_kvEngineKey core.clone.CloneU64
+      CcfKv.engine.Tx.Insts.CoreCloneClone s.txs d.id stub (fun _ => rfl) (fun _ => rfl)
+      clone_tx htxsRoom)
+  intro txs1 htxs1
+  rw [WP.spec_ok]
+  have hk : IndexKeeps s.history.index h.index := by unfold IndexKeeps; rw [hvals]; exact .refl _
+  have hactEq : h.activeFrames = s.history.activeFrames := by
+    unfold CcfKv.engine.History.activeFrames; rw [hlog]
+  have hidxValidAfter : HistoryIndexValid h := by
+    refine ⟨hliveH.valid, ?_, by rw [hret]; exact idxValid.retainedEmpty⟩
+    intro f hf
+    rw [hactEq] at hf
+    have hview0 := idxValid.active f hf
+    have hview1 := index_keeps_view hk f.data (indexRows s.history.index f.data) hview0
+    rw [index_rows_eq hview1]
+    exact hview1
+  have hstubPins : txPins stub = [] := by
+    unfold txPins
+    rw [List.flatMap_eq_nil_iff]
+    intro row hrow
+    obtain ⟨orig, _, rfl⟩ := List.mem_map.mp (hpermStub.subset hrow)
+    simp [strip, viewPins, pinPins]
+  have hneedsEq : ∀ frame globalFrame,
+      CcfKv.engine.tx_needs_frame stub frame globalFrame
+      = CcfKv.engine.tx_needs_frame d.tx frame globalFrame := by
+    intro frame globalFrame
+    have encInj : Function.Injective (encodeBytes ∘ alloc.vec.Vec.val (α := U8)) :=
+      encodeBytes_injective.comp (fun _ _ => alloc.vec.Vec.ext _ _)
+    have hs1 := tx_needs_frame_spec (encodeBytes ∘ alloc.vec.Vec.val) encInj stub frame globalFrame
+    have hs2 := tx_needs_frame_spec (encodeBytes ∘ alloc.vec.Vec.val) encInj d.tx frame globalFrame
+    cases h1 : CcfKv.engine.tx_needs_frame stub frame globalFrame using Result.cases with
+    | vis _ _ => rw [h1] at hs1; simp at hs1
+    | div => rw [h1] at hs1; simp at hs1
+    | ret b1 =>
+        cases h2 : CcfKv.engine.tx_needs_frame d.tx frame globalFrame
+          using Result.cases with
+        | vis _ _ => rw [h2] at hs2; simp at hs2
+        | div => rw [h2] at hs2; simp at hs2
+        | ret b2 =>
+            rw [h1, WP.spec_ok] at hs1
+            rw [h2, WP.spec_ok] at hs2
+            congr 1
+            rw [hs1, hs2]
+            have hsnapEq : stub.snapshot = d.tx.snapshot := rfl
+            rw [hsnapEq]
+            congr 1
+            have hanyPerm : ∀ (p : CcfKv.engine.Bytes × CcfKv.engine.View → Bool),
+                stub.views.val.any p = (d.tx.views.val.map strip).any p := by
+              intro p
+              apply Bool.eq_iff_iff.mpr
+              simp only [List.any_eq_true]
+              exact ⟨fun ⟨x, hx, hp⟩ => ⟨x, hpermStub.subset hx, hp⟩,
+                fun ⟨x, hx, hp⟩ => ⟨x, hpermStub.symm.subset hx, hp⟩⟩
+            rw [hanyPerm, List.any_map]
+            rfl
+  refine ⟨
+    rfl,
+    by rw [hvEq],
+    hlog,
+    hret,
+    hgl,
+    htm,
+    hid,
+    hre,
+    hliveH,
+    hk,
+    hidxValidAfter,
+    stub,
+    htxs1,
+    hstubPins,
+    hneedsEq
+  ⟩
 
 end KvRust

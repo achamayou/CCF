@@ -712,4 +712,86 @@ theorem branch_pop_back_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
     ((back none).val[branchSlot (back none).val.length log.head.val k]?).join
   rw [hkeepSlot k hkLt]
 
+/-- Replacing an active slot in place returns the previous element, preserves
+`BranchValid` and ring geometry, and updates `branchValues` at `offset`. -/
+theorem branch_replace_active_at_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
+    (offset : Usize) (frame : T) (valid : BranchValid log)
+    (hoff : offset.val < log.len.val)
+    : WP.spec (CcfKv.branch_log.BranchLog.replace_active_at log offset frame)
+        (fun (old, after) =>
+          (branchValues log)[offset.val]? = some old
+          ∧ BranchValid after
+          ∧ after.len = log.len
+          ∧ after.head = log.head
+          ∧ after.slots.val.length = log.slots.val.length
+          ∧ branchValues after = (branchValues log).set offset.val frame) := by
+  unfold CcfKv.branch_log.BranchLog.replace_active_at
+  have hoffCap : offset.val < log.slots.val.length := lt_of_lt_of_le hoff valid.lenLeCap
+  apply WP.spec_bind (branch_slot_matches log offset (Nat.le_of_lt valid.headLt))
+  intro idx hidx
+  have hidxLt : idx.val < log.slots.val.length := by
+    rw [hidx]; exact branch_slot_lt valid.headLt hoffCap
+  obtain ⟨oldVal, holdVal⟩ := valid.live offset.val hoff
+  rw [alloc.vec.Vec.index_mut_slice_index]
+  apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec log.slots idx hidxLt)
+  rintro ⟨o, back⟩ ⟨ho, hback⟩
+  have hoEq : o = some oldVal := by
+    have h1 : log.slots.val[idx.val]? = some o := by
+      rw [List.getElem?_eq_getElem hidxLt, ← ho]
+    rw [hidx] at h1
+    exact Option.some.inj (h1.symm.trans holdVal)
+  simp only [core.mem.swap, hoEq]
+  change WP.spec (Result.ok (oldVal, { log with slots := back (some frame) })) _
+  rw [WP.spec_ok]
+  have hvVal : (back (some frame)).val = log.slots.val.set idx.val (some frame) := by
+    rw [hback]; exact alloc.vec.Vec.set_val_eq _ _ _
+  have hvLen : (back (some frame)).val.length = log.slots.val.length := by
+    rw [hvVal, List.length_set]
+  have hslotEq : ∀ k, k < log.len.val →
+      (back (some frame)).val[branchSlot (back (some frame)).val.length log.head.val k]?
+        = if k = offset.val then some (some frame)
+          else log.slots.val[branchSlot log.slots.val.length log.head.val k]? := by
+    intro k hk
+    rw [hvLen, hvVal]
+    by_cases hkeq : k = offset.val
+    · subst hkeq
+      rw [ite_eq_left rfl, ← hidx, List.getElem?_set_self hidxLt]
+    · rw [ite_eq_right hkeq]
+      have hne : branchSlot log.slots.val.length log.head.val k ≠ idx.val := by
+        rw [hidx]
+        intro heq
+        exact hkeq (branch_slot_inj valid.headLt (lt_of_lt_of_le hk valid.lenLeCap) hoffCap heq)
+      exact List.getElem?_set_ne (Ne.symm hne)
+  have hvalidAfter : BranchValid { log with slots := back (some frame) } := by
+    refine ⟨valid.nonempty, by change log.len.val ≤ (back (some frame)).val.length; rw [hvLen]; exact valid.lenLeCap,
+      by change log.head.val < (back (some frame)).val.length; rw [hvLen]; exact valid.headLt, ?_⟩
+    intro k hk
+    change k < log.len.val at hk
+    change ∃ v, (back (some frame)).val[branchSlot (back (some frame)).val.length log.head.val k]? = some (some v)
+    rw [hslotEq k hk]
+    split
+    · exact ⟨frame, rfl⟩
+    · exact valid.live k hk
+  have hgetOld : (branchValues log)[offset.val]? = some oldVal := by
+    have h1 := branch_values_getElem? log valid hoff
+    rw [h1, holdVal]; rfl
+  refine ⟨hgetOld, hvalidAfter, rfl, rfl, hvLen, ?_⟩
+  apply List.ext_getElem?
+  intro k
+  have hlenBefore : (branchValues log).length = log.len.val := branch_values_length log valid
+  have hlenAfter : (branchValues { log with slots := back (some frame) }).length = log.len.val :=
+    branch_values_length _ hvalidAfter
+  by_cases hk : k < log.len.val
+  · rw [branch_values_getElem? _ hvalidAfter hk]
+    change ((back (some frame)).val[branchSlot (back (some frame)).val.length log.head.val k]?).join = _
+    rw [hslotEq k hk]
+    by_cases hkeq : k = offset.val
+    · subst hkeq
+      rw [ite_eq_left rfl, Option.join_some, List.getElem?_set_self (by omega)]
+    · rw [ite_eq_right hkeq, List.getElem?_set_ne (Ne.symm hkeq), branch_values_getElem? log valid hk]
+  · have hge1 : (branchValues { log with slots := back (some frame) }).length ≤ k := by omega
+    have hge2 : ((branchValues log).set offset.val frame).length ≤ k := by
+      rw [List.length_set]; omega
+    rw [List.getElem?_eq_none hge1, List.getElem?_eq_none hge2]
+
 end KvRust

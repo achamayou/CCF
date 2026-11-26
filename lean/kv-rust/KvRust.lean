@@ -9,6 +9,7 @@ public import KvRust.Advance
 public import KvRust.Apply
 public import KvRust.ApplyRefinement
 public import KvRust.Assoc
+public import KvRust.Backfill
 public import KvRust.BranchLog
 public import KvRust.Detached
 public import KvRust.Environment

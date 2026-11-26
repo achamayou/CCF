@@ -2969,13 +2969,27 @@ impl Store {
             return Err(Error::Exhausted);
         }
 
+        self.apply_backfill_ccf(&tx.tx.pending, reserved_version, start_off);
+        tx.tx.phase = Phase::Applied(reserved_version);
+        Ok(CommitPreparation::Applied(
+            reserved_version,
+            self.history.term,
+        ))
+    }
+
+    fn apply_backfill_ccf(
+        &mut self,
+        pending: &Pending,
+        reserved_version: Version,
+        start_off: usize,
+    ) {
         let identity = self.history.next_identity;
         let stamp = Stamp {
             version: reserved_version,
             identity,
         };
         let end_off = self.history.log.active_len();
-        let write_count = tx.tx.pending.0.len();
+        let write_count = pending.0.len();
         let mut active_writes = Vec::with_capacity(write_count);
         let mut w_init = 0;
         while w_init < write_count {
@@ -2990,30 +3004,18 @@ impl Store {
         while off < end_off {
             let old_root = self.history.log.active_at(off).data;
             if let Some(prev) = prev_old_root {
-                let mut wi = 0;
-                while wi < write_count {
-                    if active_writes[wi] {
-                        let addr = &tx.tx.pending.0[wi].0;
-                        let before = self.history.index.get(prev, addr);
-                        let after = self.history.index.get(old_root, addr);
-                        if !same_opt_cell(before, after) {
-                            active_writes[wi] = false;
-                        }
-                    }
-                    wi += 1;
-                }
+                filter_overwritten_writes(
+                    &self.history.index,
+                    prev,
+                    old_root,
+                    pending,
+                    &mut active_writes,
+                );
                 self.history.index.release_root(prev);
                 prev_old_root = None;
             }
 
-            let mut filtered = Assoc::new();
-            let mut wi = 0;
-            while wi < write_count {
-                if active_writes[wi] {
-                    filtered.0.push(tx.tx.pending.0[wi].clone());
-                }
-                wi += 1;
-            }
+            let filtered = collect_active_writes(pending, &active_writes);
             if filtered.0.is_empty() {
                 break;
             }
@@ -3021,18 +3023,14 @@ impl Store {
             let mut revisions = self.history.log.active_at(off).revisions.clone();
             let mut births = self.history.log.active_at(off).births.clone();
             let frame_version = self.history.log.active_at(off).version;
-            let mut fi = 0;
-            while fi < filtered.0.len() {
-                backfill_stamps(
-                    &mut revisions,
-                    &mut births,
-                    &self.history.index,
-                    old_root,
-                    &filtered.0[fi],
-                    stamp,
-                );
-                fi += 1;
-            }
+            apply_backfill_stamps(
+                &mut revisions,
+                &mut births,
+                &self.history.index,
+                old_root,
+                &filtered,
+                stamp,
+            );
             let new_root = publish_indexed(
                 &mut self.history.index,
                 old_root,
@@ -3057,11 +3055,54 @@ impl Store {
 
         self.history.next_identity += 1;
         self.history.index.retire_budget(RETIRE_BUDGET);
-        tx.tx.phase = Phase::Applied(reserved_version);
-        Ok(CommitPreparation::Applied(
-            reserved_version,
-            self.history.term,
-        ))
+    }
+}
+
+fn filter_overwritten_writes(
+    index: &AddressIndex<Cell>,
+    prev: RadixRoot,
+    current: RadixRoot,
+    pending: &Pending,
+    active_writes: &mut Vec<bool>,
+) {
+    let mut wi = 0;
+    while wi < pending.0.len() {
+        if active_writes[wi] {
+            let addr = &pending.0[wi].0;
+            let before = index.get(prev, addr);
+            let after = index.get(current, addr);
+            if !same_opt_cell(before, after) {
+                active_writes[wi] = false;
+            }
+        }
+        wi += 1;
+    }
+}
+
+fn collect_active_writes(pending: &Pending, active_writes: &Vec<bool>) -> Pending {
+    let mut filtered = Assoc::new();
+    let mut wi = 0;
+    while wi < pending.0.len() {
+        if active_writes[wi] {
+            filtered.0.push(pending.0[wi].clone());
+        }
+        wi += 1;
+    }
+    filtered
+}
+
+fn apply_backfill_stamps(
+    revisions: &mut Assoc<Bytes, Stamp>,
+    births: &mut Assoc<Bytes, Stamp>,
+    index: &AddressIndex<Cell>,
+    old_root: RadixRoot,
+    filtered: &Pending,
+    stamp: Stamp,
+) {
+    let mut fi = 0;
+    while fi < filtered.0.len() {
+        backfill_stamps(revisions, births, index, old_root, &filtered.0[fi], stamp);
+        fi += 1;
     }
 }
 
