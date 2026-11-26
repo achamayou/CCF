@@ -121,140 +121,17 @@ namespace ccf::kv
       s.rust_explicit_read_txid = true;
     }
 
-    bool acquired = false;
-    if (
-      !s.rust_registered && !s.rust_reserved.has_value() &&
-      !s.rust_explicit_read_txid)
-    {
-      if (s.rust_hazard_slot < 0)
-      {
-        s.rust_hazard_slot = store.try_claim_hazard_slot();
-      }
-      if (s.rust_hazard_slot >= 0)
-      {
-        auto& slot =
-          store.hazard_slots[static_cast<size_t>(s.rust_hazard_slot)];
-        size_t free_entries = 0;
-        for (const auto& existing : slot.roots)
-        {
-          if (existing.load(std::memory_order_relaxed) == 0)
-          {
-            ++free_entries;
-          }
-        }
-        if (free_entries >= 2)
-        {
-          uint32_t r0 = 0;
-          uint32_t r1 = 0;
-          auto r = [&]() {
-            Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-            auto res = wrap_reply(ccf_rust_kv_tx_ro_acquire(
-              store.native.get(), s.rust_tx, bytes(map_name), &r0, &r1));
-            if (res.status == Status::OK)
-            {
-              auto add_root = [&](uint32_t root) {
-                if (root == 0)
-                {
-                  return;
-                }
-                for (auto& existing : slot.roots)
-                {
-                  const auto cur = existing.load(std::memory_order_relaxed);
-                  if (cur == root)
-                  {
-                    return;
-                  }
-                  if (cur == 0)
-                  {
-                    existing.store(root, std::memory_order_release);
-                    return;
-                  }
-                }
-              };
-              add_root(r0);
-              add_root(r1);
-              if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
-              {
-                slot.snap_plus_one.store(
-                  res.number + 1, std::memory_order_release);
-              }
-            }
-            return res;
-          }();
-          if (r.status == Status::UNAVAILABLE)
-          {
-            if (!s.read_txid.has_value())
-            {
-              s.read_txid =
-                TxID{store.last_view.load(std::memory_order_acquire), r.number};
-            }
-            return {nullptr, nullptr};
-          }
-          r.require();
-          if (!s.read_txid.has_value())
-          {
-            s.commit_view = r.detail;
-            s.read_txid =
-              TxID{store.last_view.load(std::memory_order_acquire), r.number};
-          }
-          acquired = true;
-        }
-        else
-        {
-          Store::ShardedRwLock::WriteGuard guard(store.native_lock);
-          const auto pstatus =
-            ccf_rust_kv_tx_promote(store.native.get(), s.rust_tx);
-          if (pstatus != Status::OK)
-          {
-            throw std::logic_error(
-              "Unexpected Rust KV promote status " +
-              std::to_string(static_cast<unsigned>(pstatus)));
-          }
-          s.rust_registered = true;
-          store.release_hazard_slot(s.rust_hazard_slot);
-          s.rust_hazard_slot = -1;
-          auto r = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-            store.native.get(), s.rust_tx, bytes(map_name), false, 0));
-          if (r.status == Status::UNAVAILABLE)
-          {
-            return {nullptr, nullptr};
-          }
-          r.require();
-          acquired = true;
-        }
-      }
-    }
-    if (!acquired)
-    {
-      const bool has_explicit_ver =
-        s.rust_reserved.has_value() || s.rust_explicit_read_txid;
-      const Version explicit_ver = s.rust_reserved.has_value() ?
-        s.rust_reserved->seqno - 1 :
-        (s.read_txid.has_value() ? s.read_txid->seqno : 0);
-      auto r = [&]() {
-        Store::ShardedRwLock::WriteGuard guard(store.native_lock);
-        return wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-          store.native.get(),
+    if (!store.acquire_map_for_tx(
           s.rust_tx,
-          bytes(map_name),
-          has_explicit_ver,
-          explicit_ver));
-      }();
-      s.rust_registered = true;
-      if (
-        r.status == Status::UNAVAILABLE ||
-        (s.rust_explicit_read_txid && r.status == Status::DISABLED &&
-         explicit_ver < store.compacted_version()))
-      {
-        return {nullptr, nullptr};
-      }
-      r.require();
-      if (!s.read_txid.has_value())
-      {
-        s.commit_view = r.detail;
-        s.read_txid =
-          TxID{store.last_view.load(std::memory_order_acquire), r.number};
-      }
+          map_name,
+          s.rust_registered,
+          s.rust_hazard_slot,
+          s.rust_reserved,
+          s.rust_explicit_read_txid,
+          s.read_txid,
+          s.commit_view))
+    {
+      return {nullptr, nullptr};
     }
 
     return {

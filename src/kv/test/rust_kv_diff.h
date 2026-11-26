@@ -149,15 +149,6 @@ namespace ccf::kv::rust_test
 
   inline TxDiff Store::create_tx_diff()
   {
-    std::lock_guard lock(state_lock);
-    MapWrites writes;
-    for (const auto& [name, changes] : map_deltas)
-    {
-      if (!changes.empty())
-      {
-        writes.emplace(name, changes.rbegin()->second.writes);
-      }
-    }
-    return TxDiff(std::move(writes));
+    return TxDiff(latest_map_deltas());
   }
 }

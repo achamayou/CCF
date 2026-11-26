@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "ccf-kv-cpp-test"
+name = "ccf-kv-ffi"
 version = "0.1.0"
 dependencies = [
  "ccf-kv",

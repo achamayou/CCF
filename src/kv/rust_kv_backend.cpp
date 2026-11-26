@@ -4,10 +4,13 @@
 #include "ds/internal_logger.h"
 #include "kv/committable_tx.h"
 #include "kv/internal_table_names.h"
+#include "kv/rust_kv_store_impl.h"
 #include "kv/snapshot.h"
-#include "kv/store.h"
-#include "kv/tx_pimpl.h"
-#include "kv/untyped_change_set.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/store.h"
+#  include "kv/tx_pimpl.h"
+#  include "kv/untyped_change_set.h"
+#endif
 
 #include <bit>
 #include <format>
@@ -105,7 +108,7 @@ namespace ccf::kv
 
   class RustReplayEntry : public AbstractExecutionWrapper
   {
-    Store& store;
+    RustStore& store;
     const std::vector<uint8_t> data;
     const bool public_only;
     const std::optional<TxID> expected_txid;
@@ -116,7 +119,7 @@ namespace ccf::kv
 
   public:
     RustReplayEntry(
-      Store& store_,
+      RustStore& store_,
       const std::vector<uint8_t>& data_,
       bool public_only_,
       const std::optional<TxID>& expected_txid_) :
@@ -225,7 +228,7 @@ namespace ccf::kv
       const bool replace = id.seqno <= store.head;
       Status status;
       {
-        Store::ShardedRwLock::WriteGuard native_guard(store.native_lock);
+        RustStore::ShardedRwLock::WriteGuard native_guard(store.native_lock);
         store.sync_hazards_locked();
         status = ccf_rust_kv_replay(
           store.native.get(),
@@ -340,7 +343,7 @@ namespace ccf::kv
     }
   };
 
-  std::unique_ptr<AbstractExecutionWrapper> Store::deserialize(
+  std::unique_ptr<AbstractExecutionWrapper> RustStore::deserialize(
     const std::vector<uint8_t>& data,
     bool public_only,
     const std::optional<TxID>& expected_txid)
@@ -349,7 +352,7 @@ namespace ccf::kv
       *this, data, public_only, expected_txid);
   }
 
-  CommitResult Store::commit(
+  CommitResult RustStore::commit(
     const TxID& id, std::unique_ptr<PendingTx> entry, bool committable)
   {
     std::lock_guard ordered(commit_lock);
@@ -491,8 +494,8 @@ namespace ccf::kv
     return CommitResult::SUCCESS;
   }
 
-  std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_unsafe_maps(
-    Version version)
+  std::unique_ptr<AbstractStore::AbstractSnapshot> RustStore::
+    snapshot_unsafe_maps(Version version)
   {
     std::shared_ptr<TxHistory> h;
     std::shared_ptr<Consensus> c;
@@ -546,14 +549,14 @@ namespace ccf::kv
     return snapshot;
   }
 
-  std::unique_ptr<AbstractStore::AbstractSnapshot> Store::snapshot_maps(
+  std::unique_ptr<AbstractStore::AbstractSnapshot> RustStore::snapshot_maps(
     Version version)
   {
     std::lock_guard lock(maps_lock);
     return snapshot_unsafe_maps(version);
   }
 
-  std::vector<uint8_t> Store::serialise_snapshot(
+  std::vector<uint8_t> RustStore::serialise_snapshot(
     std::unique_ptr<AbstractStore::AbstractSnapshot> snapshot)
   {
     EncryptorPtr e;
@@ -564,7 +567,7 @@ namespace ccf::kv
     return snapshot->serialise(e);
   }
 
-  void Store::swap_private_maps(Store& source)
+  void RustStore::swap_private_maps(RustStore& source)
   {
     if (this == &source)
     {
@@ -624,7 +627,7 @@ namespace ccf::kv
     }
   }
 
-  ApplyResult Store::deserialise_snapshot(
+  ApplyResult RustStore::deserialise_snapshot(
     const uint8_t* data,
     size_t size,
     ConsensusHookPtrs& hooks,
@@ -635,7 +638,7 @@ namespace ccf::kv
       data, size, nullptr, hooks, view_history, public_only, nullptr, nullptr);
   }
 
-  ApplyResult Store::deserialise_snapshot_in_place(
+  ApplyResult RustStore::deserialise_snapshot_in_place(
     std::span<uint8_t> data,
     ConsensusHookPtrs& hooks,
     std::vector<Version>* view_history,
@@ -652,7 +655,7 @@ namespace ccf::kv
       public_maps);
   }
 
-  ApplyResult Store::deserialise_public_snapshot_capturing(
+  ApplyResult RustStore::deserialise_public_snapshot_capturing(
     const uint8_t* data,
     size_t size,
     ConsensusHookPtrs& hooks,
@@ -664,7 +667,7 @@ namespace ccf::kv
       data, size, nullptr, hooks, view_history, true, &captured, nullptr);
   }
 
-  ApplyResult Store::deserialise_snapshot_internal(
+  ApplyResult RustStore::deserialise_snapshot_internal(
     const uint8_t* data,
     size_t size,
     uint8_t* writable,
@@ -828,60 +831,200 @@ namespace ccf::kv
     return ApplyResult::PASS;
   }
 
-  PendingTxInfo CommittableTx::commit_rust_impl(
-    const ccf::ClaimsDigest& claims,
-    const WriteSetObserver& observer,
-    bool reserved)
+  bool RustStore::acquire_map_for_tx(
+    NativeTx* tx,
+    const std::string& map_name,
+    bool& registered,
+    int& hazard_slot,
+    const std::optional<TxID>& reserved,
+    bool explicit_read_txid,
+    std::optional<TxID>& read_txid,
+    View& commit_view)
   {
+    bool acquired = false;
+    if (!registered && !reserved.has_value() && !explicit_read_txid)
+    {
+      if (hazard_slot < 0)
+      {
+        hazard_slot = try_claim_hazard_slot();
+      }
+      if (hazard_slot >= 0)
+      {
+        auto& slot = hazard_slots[static_cast<size_t>(hazard_slot)];
+        size_t free_entries = 0;
+        for (const auto& existing : slot.roots)
+        {
+          if (existing.load(std::memory_order_relaxed) == 0)
+          {
+            ++free_entries;
+          }
+        }
+        if (free_entries >= 2)
+        {
+          uint32_t r0 = 0;
+          uint32_t r1 = 0;
+          auto r = [&]() {
+            ShardedRwLock::ReadGuard guard(native_lock);
+            auto res = wrap_reply(ccf_rust_kv_tx_ro_acquire(
+              native.get(), tx, bytes(map_name), &r0, &r1));
+            if (res.status == Status::OK)
+            {
+              auto add_root = [&](uint32_t root) {
+                if (root == 0)
+                {
+                  return;
+                }
+                for (auto& existing : slot.roots)
+                {
+                  const auto cur = existing.load(std::memory_order_relaxed);
+                  if (cur == root)
+                  {
+                    return;
+                  }
+                  if (cur == 0)
+                  {
+                    existing.store(root, std::memory_order_release);
+                    return;
+                  }
+                }
+              };
+              add_root(r0);
+              add_root(r1);
+              if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
+              {
+                slot.snap_plus_one.store(
+                  res.number + 1, std::memory_order_release);
+              }
+            }
+            return res;
+          }();
+          if (r.status == Status::UNAVAILABLE)
+          {
+            if (!read_txid.has_value())
+            {
+              read_txid =
+                TxID{last_view.load(std::memory_order_acquire), r.number};
+            }
+            return false;
+          }
+          r.require();
+          if (!read_txid.has_value())
+          {
+            commit_view = r.detail;
+            read_txid =
+              TxID{last_view.load(std::memory_order_acquire), r.number};
+          }
+          acquired = true;
+        }
+        else
+        {
+          ShardedRwLock::WriteGuard guard(native_lock);
+          const auto pstatus = ccf_rust_kv_tx_promote(native.get(), tx);
+          if (pstatus != Status::OK)
+          {
+            throw std::logic_error(
+              "Unexpected Rust KV promote status " +
+              std::to_string(static_cast<unsigned>(pstatus)));
+          }
+          registered = true;
+          release_hazard_slot(hazard_slot);
+          hazard_slot = -1;
+          auto r = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+            native.get(), tx, bytes(map_name), false, 0));
+          if (r.status == Status::UNAVAILABLE)
+          {
+            return false;
+          }
+          r.require();
+          acquired = true;
+        }
+      }
+    }
+    if (!acquired)
+    {
+      const bool has_explicit_ver = reserved.has_value() || explicit_read_txid;
+      const Version explicit_ver = reserved.has_value() ?
+        reserved->seqno - 1 :
+        (read_txid.has_value() ? read_txid->seqno : 0);
+      auto r = [&]() {
+        ShardedRwLock::WriteGuard guard(native_lock);
+        return wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+          native.get(), tx, bytes(map_name), has_explicit_ver, explicit_ver));
+      }();
+      registered = true;
+      if (
+        r.status == Status::UNAVAILABLE ||
+        (explicit_read_txid && r.status == Status::DISABLED &&
+         explicit_ver < compacted_version()))
+      {
+        return false;
+      }
+      r.require();
+      if (!read_txid.has_value())
+      {
+        commit_view = r.detail;
+        read_txid = TxID{last_view.load(std::memory_order_acquire), r.number};
+      }
+    }
+    return true;
+  }
+
+  PendingTxInfo RustStore::commit_tx_impl(TxCommitParams& params)
+  {
+    using TxFlag = CommittableTx::TxFlag;
+    auto flag_enabled = [&](TxFlag flag) {
+      return (params.flags & static_cast<CommittableTx::TxFlags>(flag)) != 0;
+    };
+    auto unset_flag = [&](TxFlag flag) {
+      params.flags &= ~static_cast<CommittableTx::TxFlags>(flag);
+    };
     auto result_only = [](CommitResult result) -> PendingTxInfo {
       return {result, {}, empty_claims(), {}, {}};
     };
-    if (committed || pimpl->rust_committing)
+    if (params.committed || params.committing)
     {
       throw std::logic_error("Transaction already committed");
     }
-    if (reserved != pimpl->rust_reserved.has_value())
+    if (params.is_reserved != params.reserved.has_value())
     {
       throw std::logic_error("Use the commit method for this transaction kind");
     }
-    if (!reserved && all_changes.empty())
+    if (!params.is_reserved && !params.has_any_changes)
     {
-      committed = true;
-      success = true;
-      pimpl->rust_committing = true;
-      pimpl->rust_committed = true;
+      params.committed = true;
+      params.success = true;
+      params.committing = true;
       return result_only(CommitResult::SUCCESS);
     }
 
-    auto& store = *pimpl->rust_store;
-    auto pending = wrap_reply(ccf_rust_kv_tx_pending_writes(pimpl->rust_tx));
+    auto pending = wrap_reply(ccf_rust_kv_tx_pending_writes(params.rust_tx));
     pending.require();
-    if (reserved && pending.size == 0)
+    if (params.is_reserved && pending.size == 0)
     {
       throw std::logic_error("Reserved transaction cannot be empty");
     }
 
     MapWrites writes;
-    EncryptorPtr encryptor;
-    size_t max_entry_size = max_serialised_entry_size;
+    EncryptorPtr enc;
+    size_t max_size = max_serialised_entry_size;
     if (pending.size != 0)
     {
-      if (claims.empty())
+      if (params.claims.empty())
       {
         throw std::logic_error("Missing claims");
       }
       {
-        std::lock_guard lock(store.state_lock);
-        encryptor = store.encryptor;
-        max_entry_size = store.max_entry_size;
+        std::lock_guard lock(state_lock);
+        enc = encryptor;
+        max_size = max_entry_size;
       }
-      if (encryptor == nullptr)
+      if (enc == nullptr)
       {
         throw KvSerialiserException("No encryptor set");
       }
       writes = collect_writes(pending);
       pending.data.reset();
-      if (!reserved)
+      if (!params.is_reserved)
       {
         auto checked_add = [](size_t& acc, size_t delta) -> bool {
           if (delta > std::numeric_limits<size_t>::max() - acc)
@@ -891,8 +1034,8 @@ namespace ccf::kv
           acc += delta;
           return true;
         };
-        size_t est = sizeof(SerialisedEntryHeader) +
-          encryptor->get_header_length() + sizeof(size_t);
+        size_t est = sizeof(SerialisedEntryHeader) + enc->get_header_length() +
+          sizeof(size_t);
         bool ok = checked_add(
           est,
           sizeof(uint8_t) + sizeof(Version) +
@@ -920,21 +1063,21 @@ namespace ccf::kv
             ok = checked_add(est, row_bytes);
           }
         }
-        if (!ok || est > max_entry_size)
+        if (!ok || est > max_size)
         {
           SizeKvStoreSerialiser shape(
-            encryptor,
-            {pimpl->commit_view, NoVersion},
+            enc,
+            {params.commit_view, NoVersion},
             EntryType::WriteSetWithCommitEvidenceAndClaims,
             0,
             {},
-            claims);
+            params.claims);
           serialise_writes(shape, writes);
           const auto size = shape.get_serialised_size();
-          if (size > max_entry_size)
+          if (size > max_size)
           {
             throw MaxTransactionSizeExceeded(
-              describe_serialised_entry_size_error(size, max_entry_size));
+              describe_serialised_entry_size_error(size, max_size));
           }
         }
       }
@@ -946,22 +1089,20 @@ namespace ccf::kv
     ConsensusHookPtrs hooks;
 
     {
-      std::scoped_lock lock(store.maps_lock, store.state_lock);
-      if (reserved)
+      std::scoped_lock lock(maps_lock, state_lock);
+      if (params.is_reserved)
       {
-        const auto reserved_id = *pimpl->rust_reserved;
-        if (
-          pimpl->rust_reserve_epoch != store.rollback_count ||
-          reserved_id.view != store.term)
+        const auto reserved_id = *params.reserved;
+        if (params.reserve_epoch != rollback_count || reserved_id.view != term)
         {
-          pimpl->rust_committing = true;
-          pimpl->rust_aborted = true;
-          committed = true;
-          success = false;
-          version = reserved_id.seqno;
+          params.committing = true;
+          params.aborted = true;
+          params.committed = true;
+          params.success = false;
+          params.version = reserved_id.seqno;
           return result_only(CommitResult::FAIL_NO_REPLICATE);
         }
-        if (!store.open_reservations.contains(reserved_id.seqno))
+        if (!open_reservations.contains(reserved_id.seqno))
         {
           throw std::logic_error("Reserved transaction slot is not open");
         }
@@ -969,108 +1110,106 @@ namespace ccf::kv
 
       if (!writes.empty())
       {
-        encryptor = store.encryptor;
-        max_entry_size = store.max_entry_size;
-        if (encryptor == nullptr)
+        enc = encryptor;
+        max_size = max_entry_size;
+        if (enc == nullptr)
         {
           throw KvSerialiserException("No encryptor set");
         }
       }
 
-      pimpl->rust_committing = true;
+      params.committing = true;
       auto applied = [&]() {
-        Store::ShardedRwLock::WriteGuard native_guard(store.native_lock);
-        return reserved ?
+        ShardedRwLock::WriteGuard native_guard(native_lock);
+        return params.is_reserved ?
           wrap_reply(ccf_rust_kv_tx_commit_reserved(
-            store.native.get(), pimpl->rust_tx, pimpl->rust_reserved->seqno)) :
+            native.get(), params.rust_tx, params.reserved->seqno)) :
           wrap_reply(
-            ccf_rust_kv_tx_prepare_commit(store.native.get(), pimpl->rust_tx));
+            ccf_rust_kv_tx_prepare_commit(native.get(), params.rust_tx));
       }();
       if (applied.status == Status::CONFLICT)
       {
-        if (reserved)
+        if (params.is_reserved)
         {
           throw std::logic_error("Failed to commit reserved transaction");
         }
-        success = false;
+        params.success = false;
         return result_only(CommitResult::FAIL_CONFLICT);
       }
       if (applied.status == Status::STALE_TERM)
       {
-        success = false;
+        params.success = false;
         return result_only(CommitResult::FAIL_NO_REPLICATE);
       }
       if (applied.status == Status::READ_ONLY)
       {
         if (
-          tx_flag_enabled(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE) &&
-          pimpl->read_txid.has_value())
+          flag_enabled(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE) &&
+          params.has_snapshot)
         {
-          store.snapshot_requested.store(true, std::memory_order_release);
-          unset_tx_flag(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE);
+          snapshot_requested.store(true, std::memory_order_release);
+          unset_flag(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE);
         }
-        version = NoVersion;
-        committed = true;
-        success = true;
-        pimpl->rust_committed = true;
+        params.version = NoVersion;
+        params.committed = true;
+        params.success = true;
         return result_only(CommitResult::SUCCESS);
       }
       applied.require();
-      if (reserved)
+      if (params.is_reserved)
       {
-        store.open_reservations.erase(applied.number);
+        open_reservations.erase(applied.number);
       }
       else
       {
-        store.head = applied.number;
-        store.last_view.store(applied.detail, std::memory_order_release);
+        head = applied.number;
+        last_view.store(applied.detail, std::memory_order_release);
       }
       id = TxID{applied.detail, applied.number};
-      epoch = store.rollback_count;
+      epoch = rollback_count;
 
-      if (tx_flag_enabled(TxFlag::LEDGER_CHUNK_BEFORE_THIS_TX))
+      if (flag_enabled(TxFlag::LEDGER_CHUNK_BEFORE_THIS_TX))
       {
         local_entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_BEFORE;
       }
-      if (!reserved)
+      if (!params.is_reserved)
       {
-        store.apply_tx_flags_locked(
+        apply_tx_flags_locked(
           id.seqno,
-          tx_flag_enabled(TxFlag::LEDGER_CHUNK_AT_NEXT_SIGNATURE),
-          tx_flag_enabled(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE));
+          flag_enabled(TxFlag::LEDGER_CHUNK_AT_NEXT_SIGNATURE),
+          flag_enabled(TxFlag::SNAPSHOT_AT_NEXT_SIGNATURE));
       }
-      else if (store.mark_reserved_chunk_locked(id.seqno))
+      else if (mark_reserved_chunk_locked(id.seqno))
       {
         local_entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_AFTER;
       }
 
-      hooks = store.record_commit_locked(id.seqno, writes);
+      hooks = record_commit_locked(id.seqno, writes);
     }
 
-    const auto evidence = encryptor->get_commit_evidence(id);
+    const auto evidence = enc->get_commit_evidence(id);
     auto evidence_digest = ccf::crypto::Sha256Hash(evidence);
     RawKvStoreSerialiser serialiser(
-      encryptor,
+      enc,
       id,
       EntryType::WriteSetWithCommitEvidenceAndClaims,
       local_entry_flags,
       evidence_digest,
-      claims,
+      params.claims,
       false,
-      reserved ? max_serialised_entry_size : max_entry_size);
+      params.is_reserved ? max_serialised_entry_size : max_size);
     serialise_writes(serialiser, writes);
     auto data = serialiser.get_raw_data();
 
-    if (reserved)
+    if (params.is_reserved)
     {
       wrap_reply(ccf_rust_kv_tx_finish(
-                   pimpl->rust_tx, static_cast<uint64_t>(Outcome::SUCCESS)))
+                   params.rust_tx, static_cast<uint64_t>(Outcome::SUCCESS)))
         .require();
-      version = id.seqno;
-      pimpl->commit_view = id.view;
-      committed = true;
-      success = true;
-      pimpl->rust_committed = true;
+      params.version = id.seqno;
+      params.commit_view = id.view;
+      params.committed = true;
+      params.success = true;
       return {
         CommitResult::SUCCESS,
         std::move(data),
@@ -1079,22 +1218,21 @@ namespace ccf::kv
         std::move(hooks)};
     }
 
-    if (observer)
+    if (params.observer)
     {
       const auto digest = ccf::crypto::Sha256Hash(data.data(), data.size());
-      observer(digest, evidence);
+      params.observer(digest, evidence);
     }
 
     bool survived_pre_commit = true;
     {
-      std::lock_guard lock(store.state_lock);
-      survived_pre_commit =
-        (store.rollback_count == epoch && store.term == id.view);
+      std::lock_guard lock(state_lock);
+      survived_pre_commit = (rollback_count == epoch && term == id.view);
     }
 
-    ClaimsDigest claims_copy = claims;
+    ClaimsDigest claims_copy = params.claims;
     const auto commit_result = survived_pre_commit ?
-      store.commit(
+      commit(
         id,
         std::make_unique<MovePendingTx>(
           std::move(data),
@@ -1108,13 +1246,44 @@ namespace ccf::kv
       Outcome::SUCCESS :
       Outcome::NO_REPLICATE;
     auto output = wrap_reply(
-      ccf_rust_kv_tx_finish(pimpl->rust_tx, static_cast<uint64_t>(outcome)));
+      ccf_rust_kv_tx_finish(params.rust_tx, static_cast<uint64_t>(outcome)));
     output.require();
-    version = output.number;
-    pimpl->commit_view = id.view;
-    committed = true;
-    success = true;
-    pimpl->rust_committed = true;
+    params.version = output.number;
+    params.commit_view = id.view;
+    params.committed = true;
+    params.success = true;
     return result_only(commit_result);
   }
+
+#ifdef CCF_USE_RUST_KV
+  PendingTxInfo CommittableTx::commit_rust_impl(
+    const ccf::ClaimsDigest& claims,
+    const WriteSetObserver& observer,
+    bool reserved)
+  {
+    auto& store = *pimpl->rust_store;
+    RustStore::TxCommitParams params{
+      .rust_tx = pimpl->rust_tx,
+      .reserved = pimpl->rust_reserved,
+      .reserve_epoch = pimpl->rust_reserve_epoch,
+      .claims = claims,
+      .observer = observer,
+      .is_reserved = reserved,
+      .has_any_changes = !all_changes.empty(),
+      .has_snapshot = pimpl->read_txid.has_value(),
+      .committing = pimpl->rust_committing,
+      .committed = committed,
+      .success = success,
+      .aborted = pimpl->rust_aborted,
+      .version = version,
+      .commit_view = pimpl->commit_view,
+      .flags = flags};
+    auto info = store.commit_tx_impl(params);
+    if (committed)
+    {
+      pimpl->rust_committed = true;
+    }
+    return info;
+  }
+#endif
 }

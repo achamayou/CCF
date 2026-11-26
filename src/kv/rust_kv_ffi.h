@@ -7,7 +7,8 @@
 
 namespace ccf::kv::rust_ffi
 {
-  // Keep the wire layout and discriminants in sync with cpp-test/src/lib.rs.
+  // Keep the wire layout and discriminants in sync with
+  // src/rust/ccf-kv/ffi/src/lib.rs.
   enum class Opcode : uint8_t
   {
     BEGIN,

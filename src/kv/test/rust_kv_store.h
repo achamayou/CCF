@@ -2,35 +2,16 @@
 // Licensed under the Apache 2.0 License.
 #pragma once
 
-#include "ccf/kv/serialisers/serialised_entry.h"
-#include "ccf/tx_id.h"
-#include "kv/claims.h"
-#include "kv/committable_tx.h"
-#include "kv/compacted_version_conflict.h"
-#include "kv/kv_serialiser.h"
-#include "kv/kv_types.h"
-#include "kv/ledger_chunker_interface.h"
-#include "kv/test/rust_kv_ffi.h"
-#include "kv/version_v.h"
+#include "kv/rust_kv_store_impl.h"
 
-#include <array>
-#include <atomic>
-#include <bit>
 #include <limits>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <pthread.h>
-#include <set>
-#include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <tuple>
 #include <typeindex>
-#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace ccf::kv::untyped
 {
@@ -39,1079 +20,29 @@ namespace ccf::kv::untyped
 
 namespace ccf::kv::rust_test
 {
-  using Bytes = serialisers::SerialisedEntry;
-
-  inline ByteView bytes(std::string_view s)
-  {
-    static constexpr uint8_t EMPTY = 0;
-    return {
-      s.empty() ? &EMPTY : reinterpret_cast<const uint8_t*>(s.data()),
-      s.size()};
-  }
-
-  inline ByteView bytes(const Bytes& b)
-  {
-    return {b.data(), b.size()};
-  }
-
-  inline Bytes copy(ByteView b)
-  {
-    if (b.data == nullptr)
-    {
-      throw std::logic_error("Rust KV reply is missing bytes");
-    }
-    if (b.size == 0)
-    {
-      return {};
-    }
-    return Bytes(b.data, b.data + b.size);
-  }
-
-  struct Response
-  {
-    Status status;
-    uint64_t number;
-    uint64_t detail;
-    size_t size;
-    std::unique_ptr<ReplyData, decltype(&ccf_rust_kv_reply_delete)> data;
-
-    void require(Status expected = Status::OK) const
-    {
-      if (status != expected)
-      {
-        throw std::logic_error(
-          "Unexpected Rust KV status " +
-          std::to_string(static_cast<unsigned>(status)));
-      }
-    }
-
-    Entry entry(size_t i) const
-    {
-      return ccf_rust_kv_reply_entry(data.get(), i);
-    }
-  };
-
-  using MapWrites = std::map<std::string, untyped::Write, std::less<>>;
-
-  inline MapWrites collect_writes(const Response& r)
-  {
-    MapWrites writes;
-    auto current = writes.end();
-    // Pending writes arrive sorted in descending (map, key) order; iterating
-    // backwards inserts each map and key at end() in amortized O(1).
-    for (size_t i = r.size; i > 0; --i)
-    {
-      const auto row = r.entry(i - 1);
-      if (row.map.data == nullptr)
-      {
-        throw std::logic_error("Rust KV reply is missing map name");
-      }
-      const std::string_view name(
-        reinterpret_cast<const char*>(row.map.data), row.map.size);
-      if (current == writes.end() || current->first != name)
-      {
-        current = writes.lower_bound(name);
-        if (current == writes.end() || current->first != name)
-        {
-          current =
-            writes.emplace_hint(current, std::string(name), untyped::Write{});
-        }
-      }
-      current->second.emplace_hint(
-        current->second.end(),
-        copy(row.key),
-        row.value.data != nullptr ? std::make_optional(copy(row.value)) :
-                                    std::nullopt);
-    }
-    return writes;
-  }
-
-  inline void serialise_writes(KvStoreSerialiser& s, const MapWrites& writes)
-  {
-    for (const auto domain : {SecurityDomain::PUBLIC, SecurityDomain::PRIVATE})
-    {
-      for (const auto& [name, rows] : writes)
-      {
-        if (parse_map_name(name).first == domain)
-        {
-          serialise_map_writes(s, name, domain, rows);
-        }
-      }
-    }
-  }
+  using namespace ccf::kv::rust_ffi;
+  using namespace ccf::kv::rust_detail;
 
   class Tx;
   class TxDiff;
   class ReadOnlyTx;
-  class ReplayEntry;
+  class MapAccess;
 
-  // Concurrent Rust KV adapter. Each Tx owns its detached Rust Tx state so
-  // staged writes are lock-free and reads share the Rust RwLock concurrently.
-  // Lock hierarchy (strictly non-recursive, always acquired in this order):
-  //   1. commit_lock     - pending_txs reorder buffer & consensus replication
-  //   2. compaction_lock - compact() ordering & global hook delivery
-  //   3. maps_lock       - store-wide structural barriers (lock_maps/apply/
-  //                        compact/rollback/replay/snapshot)
-  //   4. state_lock      - C++ metadata fields (versions, hooks, pending_txs)
-  //   5. native_lock     - sharded shared_mutex guarding NativeStore
-  class Store : public AbstractStore
+  // Thin test/benchmark wrapper around ccf::kv::RustStore that provides
+  // standalone Tx/ReadOnlyTx/TxDiff handles so Rust KV can be instantiated
+  // alongside C++ ccf::kv::Store in interop tests and benchmarks.
+  class Store : public ccf::kv::RustStore
   {
-  public:
-    class ShardedRwLock
-    {
-      static constexpr size_t NUM_STRIPES = 8;
-
-      struct alignas(64) Stripe
-      {
-        mutable pthread_rwlock_t rwlock;
-
-        Stripe()
-        {
-          pthread_rwlockattr_t attr;
-          pthread_rwlockattr_init(&attr);
-#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
-          pthread_rwlockattr_setkind_np(
-            &attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
-#endif
-          pthread_rwlock_init(&rwlock, &attr);
-          pthread_rwlockattr_destroy(&attr);
-        }
-
-        ~Stripe()
-        {
-          pthread_rwlock_destroy(&rwlock);
-        }
-
-        Stripe(const Stripe&) = delete;
-        Stripe& operator=(const Stripe&) = delete;
-      };
-
-      mutable std::mutex write_gate;
-      std::array<Stripe, NUM_STRIPES> stripes;
-
-      static size_t thread_stripe()
-      {
-        static std::atomic<size_t> next_stripe{0};
-        thread_local const size_t idx =
-          next_stripe.fetch_add(1, std::memory_order_relaxed) &
-          (NUM_STRIPES - 1);
-        return idx;
-      }
-
-    public:
-      class ReadGuard
-      {
-        pthread_rwlock_t& rwlock;
-
-      public:
-        explicit ReadGuard(const ShardedRwLock& lock) :
-          rwlock(lock.stripes[thread_stripe()].rwlock)
-        {
-          pthread_rwlock_rdlock(&rwlock);
-        }
-
-        ~ReadGuard()
-        {
-          pthread_rwlock_unlock(&rwlock);
-        }
-
-        ReadGuard(const ReadGuard&) = delete;
-        ReadGuard& operator=(const ReadGuard&) = delete;
-      };
-
-      class WriteGuard
-      {
-        const ShardedRwLock& lock;
-
-      public:
-        explicit WriteGuard(const ShardedRwLock& lock_) : lock(lock_)
-        {
-          lock.write_gate.lock();
-          for (size_t i = 0; i < NUM_STRIPES; ++i)
-          {
-            pthread_rwlock_wrlock(&lock.stripes[i].rwlock);
-          }
-        }
-
-        ~WriteGuard()
-        {
-          for (size_t i = NUM_STRIPES; i > 0; --i)
-          {
-            pthread_rwlock_unlock(&lock.stripes[i - 1].rwlock);
-          }
-          lock.write_gate.unlock();
-        }
-
-        WriteGuard(const WriteGuard&) = delete;
-        WriteGuard& operator=(const WriteGuard&) = delete;
-      };
-
-      static size_t current_thread_stripe()
-      {
-        return thread_stripe();
-      }
-    };
-
-    static constexpr size_t NUM_HAZARD_SLOTS = 64;
-    static constexpr size_t ROOTS_PER_HAZARD = 12;
-
-    struct alignas(64) HazardSlot
-    {
-      std::atomic<bool> claimed{false};
-      std::atomic<uint64_t> snap_plus_one{0};
-      std::array<std::atomic<uint32_t>, ROOTS_PER_HAZARD> roots{};
-    };
-
-    class SnapshotPublicMaps
-    {
-      struct CapturedMap
-      {
-        Version revision;
-        ccf::crypto::Sha256Hash digest;
-        std::vector<std::pair<Bytes, VersionV<Bytes>>> rows;
-      };
-
-      friend class Store;
-      Version version = NoVersion;
-      std::map<std::string, CapturedMap> maps;
-      SnapshotPublicMaps() = default;
-
-    public:
-      SnapshotPublicMaps(SnapshotPublicMaps&&) noexcept = default;
-      SnapshotPublicMaps& operator=(SnapshotPublicMaps&&) noexcept = default;
-    };
-
-  private:
-    friend class Tx;
     friend class MapAccess;
-    friend class ReplayEntry;
-
-    std::mutex commit_lock;
-    std::mutex compaction_lock;
-    std::mutex maps_lock;
-    mutable std::mutex state_lock;
-    mutable ShardedRwLock native_lock;
-    std::unique_ptr<NativeStore, decltype(&ccf_rust_kv_delete)> native{
-      ccf_rust_kv_new(0), &ccf_rust_kv_delete};
-    std::array<HazardSlot, NUM_HAZARD_SLOTS> hazard_slots;
-    std::atomic<uint64_t> hazard_active_mask{0};
-    std::vector<uint32_t> hazard_retained_roots;
-    std::vector<std::pair<Version, uint64_t>> hazard_pinned_snaps;
-    uint64_t next_hazard_pin_id = (uint64_t(1) << 63);
-    std::atomic<uint64_t> next_attempt{0};
-    Version head = 0;
-    std::set<Version> open_reservations;
-    Version last_replicated = 0;
-    Version global = 0;
-    View term = 0;
-    std::atomic<View> last_view{0};
-    size_t rollback_count = 0;
-    Version last_committable = NoVersion;
-    EncryptorPtr encryptor;
-    std::shared_ptr<Consensus> consensus;
-    std::shared_ptr<TxHistory> history;
-    size_t max_entry_size = max_serialised_entry_size;
-    std::atomic<bool> snapshot_requested{false};
-    std::shared_ptr<ILedgerChunker> chunker;
-    SnapshotterPtr snapshotter;
-    std::unordered_map<Version, std::tuple<std::unique_ptr<PendingTx>, bool>>
-      pending_txs;
-    std::map<std::string, untyped::MapHook> local_hooks;
-    std::map<std::string, untyped::CommitHook> global_hooks;
-
-    struct MapDelta
-    {
-      untyped::Write writes;
-      bool delivered = false;
-    };
-
-    std::map<std::string, std::map<Version, MapDelta>> map_deltas;
-
-    static Response wrap_reply(Reply reply)
-    {
-      return {
-        reply.status,
-        reply.number,
-        reply.detail,
-        reply.size,
-        {reply.data, &ccf_rust_kv_reply_delete}};
-    }
-
-    int try_claim_hazard_slot()
-    {
-      const size_t start =
-        (ShardedRwLock::current_thread_stripe() * 8) % NUM_HAZARD_SLOTS;
-      for (size_t i = 0; i < NUM_HAZARD_SLOTS; ++i)
-      {
-        const size_t idx = (start + i) % NUM_HAZARD_SLOTS;
-        bool expected = false;
-        if (hazard_slots[idx].claimed.compare_exchange_strong(
-              expected, true, std::memory_order_acq_rel))
-        {
-          hazard_active_mask.fetch_or(
-            uint64_t(1) << idx, std::memory_order_release);
-          return static_cast<int>(idx);
-        }
-      }
-      return -1;
-    }
-
-    void release_hazard_slot(int slot)
-    {
-      const auto idx = static_cast<size_t>(slot);
-      auto& h = hazard_slots[idx];
-      for (auto& r : h.roots)
-      {
-        r.store(0, std::memory_order_release);
-      }
-      h.snap_plus_one.store(0, std::memory_order_release);
-      hazard_active_mask.fetch_and(
-        ~(uint64_t(1) << idx), std::memory_order_release);
-      h.claimed.store(false, std::memory_order_release);
-    }
-
-    // Must be called while holding ShardedRwLock::WriteGuard. Reconciles
-    // lock-free hazard slots against Rust root refcounts and snapshot stubs
-    // before/after compaction, rollback, replay, snapshot install, or swaps.
-    void sync_hazards_locked()
-    {
-      uint64_t mask = hazard_active_mask.load(std::memory_order_acquire);
-      if (
-        mask == 0 && hazard_retained_roots.empty() &&
-        hazard_pinned_snaps.empty())
-      {
-        return;
-      }
-      std::array<uint32_t, NUM_HAZARD_SLOTS * ROOTS_PER_HAZARD> active_roots{};
-      size_t active_root_count = 0;
-      std::array<Version, NUM_HAZARD_SLOTS> active_snaps{};
-      size_t active_snap_count = 0;
-
-      auto contains_root = [&](uint32_t v) {
-        for (size_t i = 0; i < active_root_count; ++i)
-        {
-          if (active_roots[i] == v)
-          {
-            return true;
-          }
-        }
-        return false;
-      };
-      auto contains_snap = [&](Version v) {
-        for (size_t i = 0; i < active_snap_count; ++i)
-        {
-          if (active_snaps[i] == v)
-          {
-            return true;
-          }
-        }
-        return false;
-      };
-
-      while (mask != 0)
-      {
-        const auto idx = static_cast<size_t>(std::countr_zero(mask));
-        mask &= (mask - 1);
-        const auto& slot = hazard_slots[idx];
-        const auto sp = slot.snap_plus_one.load(std::memory_order_acquire);
-        if (sp != 0 && !contains_snap(sp - 1))
-        {
-          active_snaps[active_snap_count++] = sp - 1;
-        }
-        for (const auto& r : slot.roots)
-        {
-          const auto root = r.load(std::memory_order_acquire);
-          if (root != 0 && !contains_root(root))
-          {
-            active_roots[active_root_count++] = root;
-          }
-        }
-      }
-
-      for (size_t i = 0; i < active_root_count; ++i)
-      {
-        const auto root = active_roots[i];
-        bool already = false;
-        for (const auto existing : hazard_retained_roots)
-        {
-          if (existing == root)
-          {
-            already = true;
-            break;
-          }
-        }
-        if (!already)
-        {
-          ccf_rust_kv_retain_root(native.get(), root);
-          hazard_retained_roots.push_back(root);
-        }
-      }
-      for (size_t i = 0; i < hazard_retained_roots.size();)
-      {
-        if (!contains_root(hazard_retained_roots[i]))
-        {
-          ccf_rust_kv_release_root(native.get(), hazard_retained_roots[i]);
-          hazard_retained_roots[i] = hazard_retained_roots.back();
-          hazard_retained_roots.pop_back();
-        }
-        else
-        {
-          ++i;
-        }
-      }
-      for (size_t i = 0; i < active_snap_count; ++i)
-      {
-        const auto ver = active_snaps[i];
-        bool already = false;
-        for (const auto& [existing_ver, _] : hazard_pinned_snaps)
-        {
-          if (existing_ver == ver)
-          {
-            already = true;
-            break;
-          }
-        }
-        if (!already)
-        {
-          const auto pin_id = next_hazard_pin_id++;
-          ccf_rust_kv_pin_snapshot(native.get(), pin_id, ver);
-          hazard_pinned_snaps.emplace_back(ver, pin_id);
-        }
-      }
-      for (size_t i = 0; i < hazard_pinned_snaps.size();)
-      {
-        if (!contains_snap(hazard_pinned_snaps[i].first))
-        {
-          ccf_rust_kv_unpin_snapshot(
-            native.get(), hazard_pinned_snaps[i].second);
-          hazard_pinned_snaps[i] = hazard_pinned_snaps.back();
-          hazard_pinned_snaps.pop_back();
-        }
-        else
-        {
-          ++i;
-        }
-      }
-    }
-
-    Response dispatch_read_locked(Request request) const
-    {
-      return wrap_reply(ccf_rust_kv_execute_read(native.get(), request));
-    }
-
-    Response dispatch_read(Request request) const
-    {
-      ShardedRwLock::ReadGuard guard(native_lock);
-      return dispatch_read_locked(request);
-    }
-
-    Response dispatch_write_locked(Request request)
-    {
-      return wrap_reply(ccf_rust_kv_execute(native.get(), request));
-    }
-
-    Response dispatch_write(Request request)
-    {
-      ShardedRwLock::WriteGuard guard(native_lock);
-      return dispatch_write_locked(request);
-    }
-
-    std::optional<Version> map_revision_at(
-      Version version, const std::string& name) const
-    {
-      auto r = dispatch_read(
-        {.op = Opcode::MAP_REVISION, .number = version, .map = bytes(name)});
-      if (r.status == Status::MISSING)
-      {
-        return std::nullopt;
-      }
-      r.require();
-      return r.number;
-    }
-
-    // Called under state_lock immediately after APPLY. Records map_deltas
-    // atomically with version publication and returns matching local hooks so
-    // callers can invoke them outside locks if needed.
-    ConsensusHookPtrs record_commit_locked(
-      Version version, const MapWrites& maps)
-    {
-      ConsensusHookPtrs hooks;
-      for (const auto& [name, writes] : maps)
-      {
-        if (auto it = local_hooks.find(name);
-            it != local_hooks.end() && it->second)
-        {
-          if (auto hook = it->second(version, writes); hook != nullptr)
-          {
-            hooks.push_back(std::move(hook));
-          }
-        }
-        // Any put advances the map revision to `version`; only an all-delete
-        // batch on missing keys can publish without bumping the revision.
-        bool has_put = false;
-        for (const auto& [_, value] : writes)
-        {
-          if (value.has_value())
-          {
-            has_put = true;
-            break;
-          }
-        }
-        if (has_put || map_revision_at(version, name) == version)
-        {
-          map_deltas[name].emplace(version, MapDelta{writes});
-        }
-      }
-      return hooks;
-    }
-
-    ApplyResult deserialise_snapshot_internal(
-      const uint8_t* data,
-      size_t size,
-      uint8_t* writable,
-      ConsensusHookPtrs& hooks,
-      std::vector<Version>* view_history,
-      bool public_only,
-      std::optional<SnapshotPublicMaps>* capture,
-      const SnapshotPublicMaps* reuse);
-
-    bool should_create_ledger_chunk_locked(Version version)
-    {
-      const bool chunk = chunker && chunker->is_chunk_end_requested(version);
-      const bool snapshot = snapshotter ?
-        snapshotter->record_committable(version) :
-        snapshot_requested.load(std::memory_order_acquire);
-      return chunk || snapshot;
-    }
-
-    bool mark_reserved_chunk_locked(Version version)
-    {
-      const auto mark = should_create_ledger_chunk_locked(version);
-      if (mark && chunker)
-      {
-        chunker->produced_chunk_at(version);
-      }
-      return mark;
-    }
-
-    void apply_tx_flags_locked(Version version, bool force_chunk, bool snapshot)
-    {
-      if (force_chunk && chunker)
-      {
-        chunker->force_end_of_chunk(version);
-      }
-      if (snapshot)
-      {
-        snapshot_requested.store(true, std::memory_order_release);
-      }
-    }
+    friend class Tx;
 
   public:
-    Store() = default;
-    Store(const Store&) = delete;
-    Store& operator=(const Store&) = delete;
+    using ccf::kv::RustStore::RustStore;
 
     Tx create_tx();
     Tx create_reserved_tx(const TxID& version);
-    CommitResult commit(
-      const TxID& id,
-      std::unique_ptr<PendingTx> entry,
-      bool committable) override;
     TxDiff create_tx_diff();
     ReadOnlyTx create_read_only_tx();
-    std::unique_ptr<AbstractExecutionWrapper> deserialize(
-      const std::vector<uint8_t>& data,
-      bool public_only = false,
-      const std::optional<TxID>& expected_txid = std::nullopt) override;
-    std::unique_ptr<AbstractStore::AbstractSnapshot> snapshot_unsafe_maps(
-      Version version) override;
-    std::unique_ptr<AbstractStore::AbstractSnapshot> snapshot_maps(
-      Version version);
-    void swap_private_maps(Store& source);
-    std::vector<uint8_t> serialise_snapshot(
-      std::unique_ptr<AbstractStore::AbstractSnapshot> snapshot) override;
-    ApplyResult deserialise_snapshot(
-      const uint8_t* data,
-      size_t size,
-      ConsensusHookPtrs& hooks,
-      std::vector<Version>* view_history = nullptr,
-      bool public_only = false) override;
-    ApplyResult deserialise_snapshot_in_place(
-      std::span<uint8_t> data,
-      ConsensusHookPtrs& hooks,
-      std::vector<Version>* view_history = nullptr,
-      const SnapshotPublicMaps* public_maps = nullptr);
-    ApplyResult deserialise_public_snapshot_capturing(
-      const uint8_t* data,
-      size_t size,
-      ConsensusHookPtrs& hooks,
-      std::vector<Version>* view_history,
-      std::optional<SnapshotPublicMaps>& captured);
-
-    void lock_map_set() override
-    {
-      maps_lock.lock();
-    }
-
-    void unlock_map_set() override
-    {
-      maps_lock.unlock();
-    }
-
-    void lock_maps() override
-    {
-      maps_lock.lock();
-    }
-
-    void unlock_maps() override
-    {
-      maps_lock.unlock();
-    }
-
-    std::shared_ptr<AbstractMap> get_map(
-      Version /*v*/, const std::string& /*map_name*/) override
-    {
-      throw std::logic_error(
-        "Rust KV store does not expose C++ AbstractMap handles");
-    }
-
-    std::shared_ptr<AbstractMap> get_map_unsafe(
-      Version /*v*/, const std::string& /*map_name*/) override
-    {
-      throw std::logic_error(
-        "Rust KV store does not expose C++ AbstractMap handles");
-    }
-
-    void add_dynamic_map(
-      Version /*v*/, const std::shared_ptr<AbstractMap>& /*map*/) override
-    {
-      throw std::logic_error(
-        "Rust KV store does not expose C++ AbstractMap handles");
-    }
-
-    std::shared_ptr<Consensus> get_consensus() override
-    {
-      std::lock_guard lock(state_lock);
-      return consensus;
-    }
-
-    std::shared_ptr<TxHistory> get_history() override
-    {
-      std::lock_guard lock(state_lock);
-      return history;
-    }
-
-    std::shared_ptr<ILedgerChunker> get_chunker() override
-    {
-      std::lock_guard lock(state_lock);
-      return chunker;
-    }
-
-    EncryptorPtr get_encryptor() override
-    {
-      std::lock_guard lock(state_lock);
-      return encryptor;
-    }
-
-    Version current_version() override
-    {
-      std::lock_guard lock(state_lock);
-      return head;
-    }
-
-    Version compacted_version() override
-    {
-      std::lock_guard lock(state_lock);
-      return global;
-    }
-
-    View commit_view() override
-    {
-      std::lock_guard lock(state_lock);
-      return term;
-    }
-
-    TxID current_txid() override
-    {
-      std::lock_guard lock(state_lock);
-      return {last_view, head};
-    }
-
-    std::pair<TxID, Term> current_txid_and_commit_term() override
-    {
-      std::lock_guard lock(state_lock);
-      return {{last_view, head}, term};
-    }
-
-    std::optional<std::tuple<Version, Version>> next_version(
-      Term expected_commit_term) override
-    {
-      std::scoped_lock lock(maps_lock, state_lock);
-      if (term != expected_commit_term)
-      {
-        return std::nullopt;
-      }
-      Response r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        return wrap_reply(ccf_rust_kv_reserve_version(native.get()));
-      }();
-      if (r.status == Status::EXHAUSTED)
-      {
-        throw std::overflow_error("Rust KV test version counter exhausted");
-      }
-      r.require();
-      head = r.number;
-      last_view.store(term, std::memory_order_release);
-      open_reservations.insert(head);
-      return std::make_tuple(head, rollback_count);
-    }
-
-    void initialise_term(View view) override
-    {
-      std::lock_guard lock(state_lock);
-      if (term != 0)
-      {
-        throw std::logic_error("Commit term is already initialised");
-      }
-      dispatch_write({.op = Opcode::SET_TERM, .number = view}).require();
-      term = view;
-      if (history)
-      {
-        history->set_term(view);
-      }
-    }
-
-    void set_encryptor(const EncryptorPtr& e)
-    {
-      std::lock_guard lock(state_lock);
-      encryptor = e;
-    }
-
-    void set_consensus(const std::shared_ptr<Consensus>& c)
-    {
-      std::lock_guard lock(state_lock);
-      consensus = c;
-    }
-
-    void set_history(const std::shared_ptr<TxHistory>& h)
-    {
-      std::lock_guard lock(state_lock);
-      history = h;
-    }
-
-    void set_chunker(const std::shared_ptr<ILedgerChunker>& c)
-    {
-      std::lock_guard lock(state_lock);
-      chunker = c;
-    }
-
-    void set_snapshotter(const SnapshotterPtr& s)
-    {
-      std::lock_guard lock(state_lock);
-      snapshotter = s;
-    }
-
-    bool flag_enabled(AbstractStore::StoreFlag flag) override
-    {
-      return flag_enabled_unsafe(flag);
-    }
-
-    bool flag_enabled_unsafe(AbstractStore::StoreFlag flag) const override
-    {
-      return flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE &&
-        snapshot_requested.load(std::memory_order_acquire);
-    }
-
-    void set_flag(AbstractStore::StoreFlag flag) override
-    {
-      set_flag_unsafe(flag);
-    }
-
-    void set_flag_unsafe(AbstractStore::StoreFlag flag) override
-    {
-      if (flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE)
-      {
-        snapshot_requested.store(true, std::memory_order_release);
-      }
-    }
-
-    void unset_flag_unsafe(AbstractStore::StoreFlag flag) override
-    {
-      if (flag == AbstractStore::StoreFlag::SNAPSHOT_AT_NEXT_SIGNATURE)
-      {
-        snapshot_requested.store(false, std::memory_order_release);
-      }
-    }
-
-    bool apply_tx_flags(
-      Version version,
-      View expected_term,
-      Version expected_rollback_count,
-      bool force_chunk,
-      bool snapshot) override
-    {
-      std::lock_guard lock(state_lock);
-      if (term != expected_term || rollback_count != expected_rollback_count)
-      {
-        return false;
-      }
-      apply_tx_flags_locked(version, force_chunk, snapshot);
-      return true;
-    }
-
-    std::optional<bool> should_create_ledger_chunk_for_reserved_tx(
-      Version version,
-      View expected_term,
-      Version expected_rollback_count) override
-    {
-      std::lock_guard lock(state_lock);
-      if (term != expected_term || rollback_count != expected_rollback_count)
-      {
-        return std::nullopt;
-      }
-      return mark_reserved_chunk_locked(version);
-    }
-
-    bool should_create_ledger_chunk(Version version) override
-    {
-      std::lock_guard lock(state_lock);
-      return should_create_ledger_chunk_locked(version);
-    }
-
-    bool should_create_ledger_chunk_unsafe(Version version) override
-    {
-      return should_create_ledger_chunk_locked(version);
-    }
-
-    TxID next_txid() override
-    {
-      std::scoped_lock lock(maps_lock, state_lock);
-      Response r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        return wrap_reply(ccf_rust_kv_reserve_version(native.get()));
-      }();
-      if (r.status == Status::EXHAUSTED)
-      {
-        throw std::overflow_error("Rust KV test version counter exhausted");
-      }
-      r.require();
-      head = r.number;
-      last_view.store(term, std::memory_order_release);
-      open_reservations.insert(head);
-      return {term, head};
-    }
-
-    void set_max_transaction_size(size_t limit)
-    {
-      if (
-        limit >
-        std::min(max_serialised_entry_size, std::vector<uint8_t>().max_size()))
-      {
-        throw std::logic_error("Maximum transaction size is not representable");
-      }
-      std::lock_guard lock(state_lock);
-      max_entry_size = limit;
-    }
-
-    size_t get_max_transaction_size() const override
-    {
-      std::lock_guard lock(state_lock);
-      return max_entry_size;
-    }
-
-    bool has_map_at(Version version, const std::string& name)
-    {
-      return map_revision_at(version, name).has_value();
-    }
-
-    bool check_rollback_count(Version expected) override
-    {
-      std::lock_guard lock(state_lock);
-      return rollback_count == expected;
-    }
-
-    size_t committable_gap() override
-    {
-      std::lock_guard lock(state_lock);
-      return head - last_committable;
-    }
-
-    void clear()
-    {
-      std::scoped_lock lock(
-        commit_lock, compaction_lock, maps_lock, state_lock);
-      {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        sync_hazards_locked();
-        dispatch_write_locked({.op = Opcode::CLEAR_STORE}).require();
-        hazard_retained_roots.clear();
-        hazard_pinned_snaps.clear();
-      }
-      head = NoVersion;
-      global = NoVersion;
-      open_reservations.clear();
-      last_replicated = NoVersion;
-      last_committable = NoVersion;
-      term = 0;
-      last_view.store(0, std::memory_order_release);
-      ++rollback_count;
-      snapshot_requested.store(false, std::memory_order_release);
-      pending_txs.clear();
-      map_deltas.clear();
-    }
-
-    void set_map_hook(const std::string& name, untyped::MapHook hook)
-    {
-      std::lock_guard lock(state_lock);
-      local_hooks.insert_or_assign(name, std::move(hook));
-    }
-
-    void unset_map_hook(const std::string& name)
-    {
-      std::lock_guard lock(state_lock);
-      local_hooks.erase(name);
-    }
-
-    void set_global_hook(const std::string& name, untyped::CommitHook hook)
-    {
-      std::lock_guard lock(state_lock);
-      global_hooks.insert_or_assign(name, std::move(hook));
-    }
-
-    void unset_global_hook(const std::string& name)
-    {
-      std::lock_guard lock(state_lock);
-      global_hooks.erase(name);
-    }
-
-    void compact(Version v) override
-    {
-      std::lock_guard ordered(compaction_lock);
-      SnapshotterPtr snap;
-      std::shared_ptr<Consensus> cons;
-      std::shared_ptr<ILedgerChunker> ch;
-      {
-        std::lock_guard lock(state_lock);
-        snap = snapshotter;
-        cons = consensus;
-        ch = chunker;
-      }
-      if (snap)
-      {
-        snap->commit(v, cons && cons->is_primary());
-      }
-      if (ch)
-      {
-        ch->compacted_to(v);
-      }
-      std::vector<std::tuple<untyped::CommitHook, Version, untyped::Write>>
-        callbacks;
-      {
-        std::scoped_lock lock(maps_lock, state_lock);
-        const auto compact_target = open_reservations.empty() ?
-          v :
-          std::min(v, *open_reservations.begin() - 1);
-        Response r = [&]() {
-          ShardedRwLock::WriteGuard native_guard(native_lock);
-          sync_hazards_locked();
-          auto res = dispatch_write_locked(
-            {.op = Opcode::COMPACT, .number = compact_target});
-          sync_hazards_locked();
-          return res;
-        }();
-        r.require();
-        global = r.number;
-        if (compact_target > head || compact_target < global)
-        {
-          return;
-        }
-        if (history)
-        {
-          history->compact(global);
-        }
-        for (auto& [name, changes] : map_deltas)
-        {
-          auto end = changes.upper_bound(global);
-          if (end == changes.begin())
-          {
-            continue;
-          }
-          const auto hook = global_hooks.find(name);
-          if (hook != global_hooks.end() && hook->second)
-          {
-            for (auto it = changes.begin(); it != end; ++it)
-            {
-              if (!it->second.delivered)
-              {
-                callbacks.emplace_back(
-                  hook->second, it->first, it->second.writes);
-                it->second.delivered = true;
-                std::erase_if(it->second.writes, [](const auto& row) {
-                  return !row.second.has_value();
-                });
-              }
-            }
-          }
-          changes.erase(changes.begin(), std::prev(end));
-        }
-      }
-      for (const auto& [hook, version, writes] : callbacks)
-      {
-        hook(version, writes);
-      }
-    }
-
-    void rollback(const TxID& txid, View new_term) override
-    {
-      std::scoped_lock lock(maps_lock, state_lock);
-      Response r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        sync_hazards_locked();
-        auto res = dispatch_write_locked(
-          {.op = Opcode::ROLLBACK, .attempt = new_term, .number = txid.seqno});
-        sync_hazards_locked();
-        return res;
-      }();
-      if (r.status == Status::ROLLBACK_REJECTED)
-      {
-        throw std::logic_error("Cannot roll back compacted Rust KV history");
-      }
-      r.require();
-      const auto old_head = head;
-      head = r.number;
-      open_reservations.erase(
-        open_reservations.upper_bound(head), open_reservations.end());
-      term = new_term;
-      last_view.store(txid.view, std::memory_order_release);
-      if (history)
-      {
-        history->rollback(txid, new_term);
-      }
-      if (head < old_head)
-      {
-        ++rollback_count;
-        last_replicated = head;
-        last_committable = std::min(last_committable, head);
-        snapshot_requested.store(false, std::memory_order_release);
-        if (encryptor != nullptr)
-        {
-          encryptor->rollback(head);
-        }
-        pending_txs.clear();
-      }
-      if (chunker)
-      {
-        chunker->rolled_back_to(std::min(txid.seqno, old_head));
-      }
-      if (snapshotter)
-      {
-        snapshotter->rollback(txid.seqno);
-      }
-      for (auto& [_, changes] : map_deltas)
-      {
-        changes.erase(changes.upper_bound(head), changes.end());
-      }
-    }
   };
 
   template <typename M>
@@ -1228,7 +159,7 @@ namespace ccf::kv::rust_test
     {
       auto r = [&]() {
         Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-        return Store::wrap_reply(ccf_rust_kv_tx_has(
+        return wrap_reply(ccf_rust_kv_tx_has(
           store.native.get(),
           native_tx,
           committed,
@@ -1245,7 +176,7 @@ namespace ccf::kv::rust_test
     {
       auto r = [&]() {
         Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-        return Store::wrap_reply(ccf_rust_kv_tx_previous(
+        return wrap_reply(ccf_rust_kv_tx_previous(
           store.native.get(),
           native_tx,
           committed,
@@ -1265,7 +196,7 @@ namespace ccf::kv::rust_test
       Opcode op, ByteView key = {}, ByteView value = {}, bool global = false)
     {
       Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-      return Store::wrap_reply(ccf_rust_kv_tx_operate(
+      return wrap_reply(ccf_rust_kv_tx_operate(
         store.native.get(),
         native_tx,
         {.op = op,
@@ -1488,7 +419,7 @@ namespace ccf::kv::rust_test
       uint64_t id;
       NativeTx* native_tx;
       std::vector<HandleSlot> handles;
-      std::optional<View> captured_term;
+      View commit_view = 0;
       std::optional<TxID> read_txid;
       std::optional<TxID> reserved;
       size_t reserve_epoch = 0;
@@ -1497,6 +428,7 @@ namespace ccf::kv::rust_test
       int hazard_slot = -1;
       bool committing = false;
       bool committed = false;
+      bool success = false;
       bool aborted = false;
       std::optional<Version> version;
       CommittableTx::TxFlags flags = 0;
@@ -1510,20 +442,9 @@ namespace ccf::kv::rust_test
 
       ~State()
       {
-        if (hazard_slot >= 0)
-        {
-          store.release_hazard_slot(hazard_slot);
-          hazard_slot = -1;
-        }
-        if (registered)
-        {
-          Store::ShardedRwLock::WriteGuard guard(store.native_lock);
-          ccf_rust_kv_tx_delete(store.native.get(), native_tx);
-        }
-        else
-        {
-          ccf_rust_kv_tx_delete(nullptr, native_tx);
-        }
+        store.release_tx_resources(hazard_slot, registered, native_tx);
+        hazard_slot = -1;
+        native_tx = nullptr;
       }
     };
 
@@ -1532,7 +453,33 @@ namespace ccf::kv::rust_test
     PendingTxInfo commit_impl(
       const ClaimsDigest& claims,
       const CommittableTx::WriteSetObserver& observer,
-      bool reserved);
+      bool reserved)
+    {
+      auto& s = *state;
+      Version v = NoVersion;
+      ccf::kv::RustStore::TxCommitParams params{
+        .rust_tx = s.native_tx,
+        .reserved = s.reserved,
+        .reserve_epoch = s.reserve_epoch,
+        .claims = claims,
+        .observer = observer,
+        .is_reserved = reserved,
+        .has_any_changes = true,
+        .has_snapshot = s.read_txid.has_value(),
+        .committing = s.committing,
+        .committed = s.committed,
+        .success = s.success,
+        .aborted = s.aborted,
+        .version = v,
+        .commit_view = s.commit_view,
+        .flags = s.flags};
+      auto info = s.store.commit_tx_impl(params);
+      if (s.committed || s.aborted)
+      {
+        s.version = v;
+      }
+      return info;
+    }
 
   public:
     Tx(Store& store, uint64_t id, bool read_only = false) :
@@ -1569,130 +516,18 @@ namespace ccf::kv::rust_test
       // Typed and untyped handles share the single native acquisition.
       if (!map_acquired)
       {
-        bool acquired = false;
-        if (!s.registered && !s.reserved.has_value())
-        {
-          if (s.hazard_slot < 0)
-          {
-            s.hazard_slot = s.store.try_claim_hazard_slot();
-          }
-          if (s.hazard_slot >= 0)
-          {
-            auto& slot =
-              s.store.hazard_slots[static_cast<size_t>(s.hazard_slot)];
-            size_t free_entries = 0;
-            for (const auto& existing : slot.roots)
-            {
-              if (existing.load(std::memory_order_relaxed) == 0)
-              {
-                ++free_entries;
-              }
-            }
-            if (free_entries >= 2)
-            {
-              uint32_t r0 = 0;
-              uint32_t r1 = 0;
-              auto r = [&]() {
-                Store::ShardedRwLock::ReadGuard guard(s.store.native_lock);
-                auto res = Store::wrap_reply(ccf_rust_kv_tx_ro_acquire(
-                  s.store.native.get(), s.native_tx, bytes(name), &r0, &r1));
-                if (res.status == Status::OK)
-                {
-                  auto add_root = [&](uint32_t root) {
-                    if (root == 0)
-                    {
-                      return;
-                    }
-                    for (auto& existing : slot.roots)
-                    {
-                      const auto cur = existing.load(std::memory_order_relaxed);
-                      if (cur == root)
-                      {
-                        return;
-                      }
-                      if (cur == 0)
-                      {
-                        existing.store(root, std::memory_order_release);
-                        return;
-                      }
-                    }
-                  };
-                  add_root(r0);
-                  add_root(r1);
-                  if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
-                  {
-                    slot.snap_plus_one.store(
-                      res.number + 1, std::memory_order_release);
-                  }
-                }
-                return res;
-              }();
-              if (r.status == Status::UNAVAILABLE)
-              {
-                throw CompactedVersionConflict(
-                  "Cannot acquire a compacted Rust KV map: " + name);
-              }
-              r.require();
-              if (!s.captured_term.has_value())
-              {
-                s.captured_term = r.detail;
-                s.read_txid = TxID{
-                  s.store.last_view.load(std::memory_order_acquire), r.number};
-              }
-              acquired = true;
-            }
-            else
-            {
-              // Slot is nearly full after many compactions: promote existing
-              // views atomically under WriteGuard before releasing the slot.
-              Store::ShardedRwLock::WriteGuard guard(s.store.native_lock);
-              const auto pstatus =
-                ccf_rust_kv_tx_promote(s.store.native.get(), s.native_tx);
-              if (pstatus != Status::OK)
-              {
-                throw std::logic_error(
-                  "Unexpected Rust KV promote status " +
-                  std::to_string(static_cast<unsigned>(pstatus)));
-              }
-              s.registered = true;
-              s.store.release_hazard_slot(s.hazard_slot);
-              s.hazard_slot = -1;
-              auto r = Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-                s.store.native.get(), s.native_tx, bytes(name), false, 0));
-              if (r.status == Status::UNAVAILABLE)
-              {
-                throw CompactedVersionConflict(
-                  "Cannot acquire a compacted Rust KV map: " + name);
-              }
-              r.require();
-              acquired = true;
-            }
-          }
-        }
-        if (!acquired)
-        {
-          auto r = [&]() {
-            Store::ShardedRwLock::WriteGuard guard(s.store.native_lock);
-            return Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-              s.store.native.get(),
+        if (!s.store.acquire_map_for_tx(
               s.native_tx,
-              bytes(name),
-              s.reserved.has_value(),
-              s.reserved ? s.reserved->seqno - 1 : 0));
-          }();
-          s.registered = true;
-          if (r.status == Status::UNAVAILABLE)
-          {
-            throw CompactedVersionConflict(
-              "Cannot acquire a compacted Rust KV map: " + name);
-          }
-          r.require();
-          if (!s.captured_term.has_value())
-          {
-            s.captured_term = r.detail;
-            s.read_txid =
-              TxID{s.store.last_view.load(std::memory_order_acquire), r.number};
-          }
+              name,
+              s.registered,
+              s.hazard_slot,
+              s.reserved,
+              /*explicit_read_txid=*/false,
+              s.read_txid,
+              s.commit_view))
+        {
+          throw CompactedVersionConflict(
+            "Cannot acquire a compacted Rust KV map: " + name);
         }
       }
       auto handle = std::make_unique<Full>(
@@ -1734,8 +569,15 @@ namespace ccf::kv::rust_test
 
     CommitResult commit(
       const ClaimsDigest& claims = empty_claims(),
-      const CommittableTx::WriteSetObserver& observer = nullptr);
-    PendingTxInfo commit_reserved();
+      const CommittableTx::WriteSetObserver& observer = nullptr)
+    {
+      return commit_impl(claims, observer, false).success;
+    }
+
+    PendingTxInfo commit_reserved()
+    {
+      return commit_impl(empty_claims(), nullptr, true);
+    }
 
     void set_tx_flag(CommittableTx::TxFlag flag)
     {
@@ -1768,7 +610,7 @@ namespace ccf::kv::rust_test
     View commit_term() const
     {
       static_cast<void>(commit_version());
-      return state->captured_term.value_or(0);
+      return state->commit_view;
     }
 
     std::optional<TxID> get_txid() const
@@ -1778,7 +620,7 @@ namespace ccf::kv::rust_test
       {
         return state->read_txid;
       }
-      return TxID{state->captured_term.value(), version};
+      return TxID{state->commit_view, version};
     }
   };
 
@@ -1804,21 +646,24 @@ namespace ccf::kv::rust_test
 
   inline Tx Store::create_tx()
   {
-    const auto previous = next_attempt.fetch_add(1, std::memory_order_relaxed);
-    if (previous == std::numeric_limits<uint64_t>::max())
+    return Tx(*this, allocate_attempt_id());
+  }
+
+  inline Tx Store::create_reserved_tx(const TxID& version)
+  {
+    if (version.seqno == NoVersion)
     {
-      throw std::overflow_error("Rust KV test attempt counter exhausted");
+      throw std::logic_error("Reserved transaction needs a version");
     }
-    return Tx(*this, previous + 1);
+    auto tx = create_tx();
+    std::lock_guard lock(state_lock);
+    tx.state->reserved = version;
+    tx.state->reserve_epoch = rollback_count;
+    return tx;
   }
 
   inline ReadOnlyTx Store::create_read_only_tx()
   {
-    const auto previous = next_attempt.fetch_add(1, std::memory_order_relaxed);
-    if (previous == std::numeric_limits<uint64_t>::max())
-    {
-      throw std::overflow_error("Rust KV test attempt counter exhausted");
-    }
-    return ReadOnlyTx(Tx(*this, previous + 1, /*read_only=*/true));
+    return ReadOnlyTx(Tx(*this, allocate_attempt_id(), /*read_only=*/true));
   }
 }

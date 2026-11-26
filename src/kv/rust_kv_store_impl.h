@@ -15,6 +15,7 @@
 #include "kv/ledger_chunker_interface.h"
 #include "kv/rust_kv_ffi.h"
 #include "kv/snapshot.h"
+#include "kv/store_readiness.h"
 #include "kv/untyped_map.h"
 #include "kv/version_v.h"
 
@@ -169,9 +170,28 @@ namespace ccf::kv
   //                        compact/rollback/replay/snapshot)
   //   4. state_lock      - C++ metadata fields (versions, hooks, pending_txs)
   //   5. native_lock     - sharded rwlock guarding NativeStore
-  class Store : public AbstractStore, public ReadOnlyStore
+  class RustStore : public AbstractStore
   {
   public:
+    struct TxCommitParams
+    {
+      rust_ffi::NativeTx* rust_tx = nullptr;
+      const std::optional<TxID>& reserved;
+      size_t reserve_epoch = 0;
+      const ccf::ClaimsDigest& claims;
+      const CommittableTx::WriteSetObserver& observer;
+      bool is_reserved = false;
+      bool has_any_changes = true;
+      bool has_snapshot = false;
+      bool& committing;
+      bool& committed;
+      bool& success;
+      bool& aborted;
+      Version& version;
+      View& commit_view;
+      CommittableTx::TxFlags& flags;
+    };
+
     class ShardedRwLock
     {
       static constexpr size_t NUM_STRIPES = 8;
@@ -286,7 +306,7 @@ namespace ccf::kv
         std::vector<std::pair<rust_detail::Bytes, untyped::VersionV>> rows;
       };
 
-      friend class Store;
+      friend class RustStore;
       Version version = NoVersion;
       std::map<std::string, CapturedMap> maps;
       SnapshotPublicMaps() = default;
@@ -299,7 +319,7 @@ namespace ccf::kv
       ~SnapshotPublicMaps() = default;
     };
 
-  private:
+  protected:
     friend class BaseTx;
     friend class CommittableTx;
     friend class ReservedTx;
@@ -645,8 +665,40 @@ namespace ccf::kv
       const SnapshotPublicMaps* reuse);
 
   public:
-    explicit Store(bool is_historical_ = false) : is_historical(is_historical_)
+    explicit RustStore(bool is_historical_ = false) :
+      is_historical(is_historical_)
     {}
+
+    bool has_map_at(Version version, const std::string& name)
+    {
+      return map_revision_at(version, name).has_value();
+    }
+
+    rust_detail::MapWrites latest_map_deltas()
+    {
+      std::lock_guard lock(state_lock);
+      rust_detail::MapWrites writes;
+      for (const auto& [name, changes] : map_deltas)
+      {
+        if (!changes.empty())
+        {
+          writes.emplace(name, changes.rbegin()->second.writes);
+        }
+      }
+      return writes;
+    }
+
+    bool acquire_map_for_tx(
+      rust_ffi::NativeTx* tx,
+      const std::string& map_name,
+      bool& registered,
+      int& hazard_slot,
+      const std::optional<TxID>& reserved,
+      bool explicit_read_txid,
+      std::optional<TxID>& read_txid,
+      View& commit_view);
+
+    PendingTxInfo commit_tx_impl(TxCommitParams& params);
 
     void release_tx_resources(
       int hazard_slot, bool registered, rust_ffi::NativeTx* tx)
@@ -677,9 +729,9 @@ namespace ccf::kv
         rust_ffi::ccf_rust_kv_tx_operate(native.get(), tx, request));
     }
 
-    ~Store() override = default;
-    Store(const Store&) = delete;
-    Store& operator=(const Store&) = delete;
+    ~RustStore() override = default;
+    RustStore(const RustStore&) = delete;
+    RustStore& operator=(const RustStore&) = delete;
 
     void set_readiness(StoreReadiness readiness_)
     {
@@ -1207,43 +1259,11 @@ namespace ccf::kv
       ConsensusHookPtrs& hooks,
       std::vector<Version>* view_history,
       std::optional<SnapshotPublicMaps>& captured);
-    void swap_private_maps(Store& source);
+    void swap_private_maps(RustStore& source);
 
     std::unique_ptr<AbstractExecutionWrapper> deserialize(
       const std::vector<uint8_t>& data,
       bool public_only = false,
       const std::optional<TxID>& expected_txid = std::nullopt) override;
-
-    ReadOnlyTx create_read_only_tx() override
-    {
-      return {this};
-    }
-
-    std::unique_ptr<ReadOnlyTx> create_read_only_tx_ptr() override
-    {
-      return std::make_unique<ReadOnlyTx>(this);
-    }
-
-    TxDiff create_tx_diff() override
-    {
-      return {this};
-    }
-
-    CommittableTx create_tx()
-    {
-      return {this};
-    }
-
-    std::unique_ptr<CommittableTx> create_tx_ptr()
-    {
-      return std::make_unique<CommittableTx>(this);
-    }
-
-    ReservedTx create_reserved_tx(const TxID& tx_id)
-    {
-      std::lock_guard lock(state_lock);
-      return {
-        this, last_view.load(std::memory_order_acquire), tx_id, rollback_count};
-    }
   };
 }

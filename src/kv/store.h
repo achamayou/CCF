@@ -12,6 +12,7 @@
 #include "kv/committable_tx.h"
 #include "kv/ledger_chunker_interface.h"
 #include "kv/snapshot.h"
+#include "kv/store_readiness.h"
 #include "kv/untyped_map.h"
 #include "kv_serialiser.h"
 #include "kv_types.h"
@@ -21,22 +22,54 @@
 #include <format>
 #include <memory>
 
-namespace ccf::kv
-{
-  enum class StoreReadiness : uint8_t
-  {
-    Unavailable,
-    InstallingSnapshot,
-    Ready,
-    Failed
-  };
-}
-
 #ifdef CCF_USE_RUST_KV
 #  include "kv/rust_kv_store_impl.h"
 
 namespace ccf::kv
 {
+  class Store : public RustStore, public ReadOnlyStore
+  {
+  public:
+    using RustStore::RustStore;
+
+    ccf::TxID current_txid() override
+    {
+      return RustStore::current_txid();
+    }
+
+    ReadOnlyTx create_read_only_tx() override
+    {
+      return {this};
+    }
+
+    std::unique_ptr<ReadOnlyTx> create_read_only_tx_ptr() override
+    {
+      return std::make_unique<ReadOnlyTx>(this);
+    }
+
+    TxDiff create_tx_diff() override
+    {
+      return {this};
+    }
+
+    CommittableTx create_tx()
+    {
+      return {this};
+    }
+
+    std::unique_ptr<CommittableTx> create_tx_ptr()
+    {
+      return std::make_unique<CommittableTx>(this);
+    }
+
+    ReservedTx create_reserved_tx(const TxID& tx_id)
+    {
+      std::lock_guard lock(state_lock);
+      return {
+        this, last_view.load(std::memory_order_acquire), tx_id, rollback_count};
+    }
+  };
+
   using StorePtr = std::shared_ptr<ccf::kv::Store>;
 }
 #else
