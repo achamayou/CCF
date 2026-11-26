@@ -6,13 +6,35 @@
 #include "ds/ccf_assert.h"
 #include "kv/compacted_version_conflict.h"
 #include "kv/kv_types.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/store.h"
+#endif
 #include "kv/tx_pimpl.h"
 #include "kv/untyped_map.h"
 
 #include <format>
+#include <typeinfo>
 
 namespace ccf::kv
 {
+#ifdef CCF_USE_RUST_KV
+  BaseTx::PrivateImpl::~PrivateImpl()
+  {
+    if (rust_store != nullptr)
+    {
+      rust_store->release_tx_resources(
+        rust_hazard_slot, rust_registered, rust_tx);
+      rust_hazard_slot = -1;
+      rust_tx = nullptr;
+    }
+    else if (rust_tx != nullptr)
+    {
+      rust_ffi::ccf_rust_kv_tx_delete(nullptr, rust_tx);
+      rust_tx = nullptr;
+    }
+  }
+#endif
+
   MapChanges::MapChanges(
     const std::shared_ptr<AbstractMap>& m,
     std::unique_ptr<untyped::ChangeSet>&& cs) :
@@ -51,10 +73,199 @@ namespace ccf::kv
   MapChanges BaseTx::get_map_and_change_set_by_name(
     const std::string& map_name, bool track_deletes_on_missing_keys)
   {
+#ifdef CCF_USE_RUST_KV
+    using namespace rust_ffi;
+    using namespace rust_detail;
+    auto& s = *pimpl;
+    if (s.rust_store == nullptr)
+    {
+      throw std::logic_error("Transaction is not bound to a Rust KV Store");
+    }
+    auto& store = *s.rust_store;
+    if (s.rust_committing)
+    {
+      throw std::logic_error("Cannot acquire a new handle after commit");
+    }
+    parse_map_name(map_name);
+
+    if (track_deletes_on_missing_keys)
+    {
+      if (!s.read_txid.has_value())
+      {
+        auto p = s.store->current_txid_and_commit_term();
+        s.read_txid = p.first;
+        s.commit_view = p.second;
+      }
+      auto writes = store.diff_entries_for(s.read_txid->seqno, map_name);
+      return {nullptr, std::make_unique<untyped::ChangeSet>(std::move(writes))};
+    }
+
+    const bool is_read_only = (dynamic_cast<const Tx*>(this) == nullptr);
+    s.rust_read_only = is_read_only;
+
+    if (s.rust_tx == nullptr)
+    {
+      s.rust_attempt_id = store.allocate_attempt_id();
+      s.rust_tx = ccf_rust_kv_tx_new(s.rust_attempt_id);
+    }
+
+    // If a test subclass overrides current_txid_and_commit_term() (e.g.
+    // CompactingOnReadStore), honour its hook by capturing read_txid
+    // explicitly.
+    const bool subclass_store = (typeid(*s.store) != typeid(Store));
+    if (subclass_store && !s.read_txid.has_value() && !s.rust_reserved)
+    {
+      auto p = s.store->current_txid_and_commit_term();
+      s.read_txid = p.first;
+      s.commit_view = p.second;
+      s.rust_explicit_read_txid = true;
+    }
+
+    bool acquired = false;
+    if (
+      !s.rust_registered && !s.rust_reserved.has_value() &&
+      !s.rust_explicit_read_txid)
+    {
+      if (s.rust_hazard_slot < 0)
+      {
+        s.rust_hazard_slot = store.try_claim_hazard_slot();
+      }
+      if (s.rust_hazard_slot >= 0)
+      {
+        auto& slot =
+          store.hazard_slots[static_cast<size_t>(s.rust_hazard_slot)];
+        size_t free_entries = 0;
+        for (const auto& existing : slot.roots)
+        {
+          if (existing.load(std::memory_order_relaxed) == 0)
+          {
+            ++free_entries;
+          }
+        }
+        if (free_entries >= 2)
+        {
+          uint32_t r0 = 0;
+          uint32_t r1 = 0;
+          auto r = [&]() {
+            Store::ShardedRwLock::ReadGuard guard(store.native_lock);
+            auto res = wrap_reply(ccf_rust_kv_tx_ro_acquire(
+              store.native.get(), s.rust_tx, bytes(map_name), &r0, &r1));
+            if (res.status == Status::OK)
+            {
+              auto add_root = [&](uint32_t root) {
+                if (root == 0)
+                {
+                  return;
+                }
+                for (auto& existing : slot.roots)
+                {
+                  const auto cur = existing.load(std::memory_order_relaxed);
+                  if (cur == root)
+                  {
+                    return;
+                  }
+                  if (cur == 0)
+                  {
+                    existing.store(root, std::memory_order_release);
+                    return;
+                  }
+                }
+              };
+              add_root(r0);
+              add_root(r1);
+              if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
+              {
+                slot.snap_plus_one.store(
+                  res.number + 1, std::memory_order_release);
+              }
+            }
+            return res;
+          }();
+          if (r.status == Status::UNAVAILABLE)
+          {
+            if (!s.read_txid.has_value())
+            {
+              s.read_txid =
+                TxID{store.last_view.load(std::memory_order_acquire), r.number};
+            }
+            return {nullptr, nullptr};
+          }
+          r.require();
+          if (!s.read_txid.has_value())
+          {
+            s.commit_view = r.detail;
+            s.read_txid =
+              TxID{store.last_view.load(std::memory_order_acquire), r.number};
+          }
+          acquired = true;
+        }
+        else
+        {
+          Store::ShardedRwLock::WriteGuard guard(store.native_lock);
+          const auto pstatus =
+            ccf_rust_kv_tx_promote(store.native.get(), s.rust_tx);
+          if (pstatus != Status::OK)
+          {
+            throw std::logic_error(
+              "Unexpected Rust KV promote status " +
+              std::to_string(static_cast<unsigned>(pstatus)));
+          }
+          s.rust_registered = true;
+          store.release_hazard_slot(s.rust_hazard_slot);
+          s.rust_hazard_slot = -1;
+          auto r = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+            store.native.get(), s.rust_tx, bytes(map_name), false, 0));
+          if (r.status == Status::UNAVAILABLE)
+          {
+            return {nullptr, nullptr};
+          }
+          r.require();
+          acquired = true;
+        }
+      }
+    }
+    if (!acquired)
+    {
+      const bool has_explicit_ver =
+        s.rust_reserved.has_value() || s.rust_explicit_read_txid;
+      const Version explicit_ver = s.rust_reserved.has_value() ?
+        s.rust_reserved->seqno - 1 :
+        (s.read_txid.has_value() ? s.read_txid->seqno : 0);
+      auto r = [&]() {
+        Store::ShardedRwLock::WriteGuard guard(store.native_lock);
+        return wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+          store.native.get(),
+          s.rust_tx,
+          bytes(map_name),
+          has_explicit_ver,
+          explicit_ver));
+      }();
+      s.rust_registered = true;
+      if (
+        r.status == Status::UNAVAILABLE ||
+        (s.rust_explicit_read_txid && r.status == Status::DISABLED &&
+         explicit_ver < store.compacted_version()))
+      {
+        return {nullptr, nullptr};
+      }
+      r.require();
+      if (!s.read_txid.has_value())
+      {
+        s.commit_view = r.detail;
+        s.read_txid =
+          TxID{store.last_view.load(std::memory_order_acquire), r.number};
+      }
+    }
+
+    return {
+      nullptr,
+      std::make_unique<untyped::ChangeSet>(
+        &store, s.rust_tx, &s.rust_committed, is_read_only)};
+#else
     auto& read_txid = pimpl->read_txid;
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
     trace::Context trace_context(pimpl->trace_attempt.id);
-#endif
+#  endif
 
     if (!read_txid.has_value())
     {
@@ -101,6 +312,7 @@ namespace ccf::kv
       abstract_map,
       untyped_map->create_change_set(
         read_txid->seqno, track_deletes_on_missing_keys)};
+#endif
   }
 
   std::list<AbstractHandle*> BaseTx::get_possible_handles(
@@ -136,6 +348,9 @@ namespace ccf::kv
   {
     pimpl = std::make_unique<PrivateImpl>();
     pimpl->store = store_;
+#ifdef CCF_USE_RUST_KV
+    pimpl->rust_store = dynamic_cast<Store*>(store_);
+#endif
     KV_TRACE(pimpl->trace_attempt.bind(store_));
   }
 

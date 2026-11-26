@@ -8,6 +8,76 @@
 
 namespace ccf::kv::untyped
 {
+#ifdef CCF_USE_RUST_KV
+  void MapDiff::foreach_(const MapDiff::ElementVisitorWithEarlyOut& f)
+  {
+    for (const auto& [key, val] : change_set.writes)
+    {
+      if (!f(key, val))
+      {
+        return;
+      }
+    }
+  }
+
+  MapDiff::MapDiff(ccf::kv::untyped::ChangeSet& cs, std::string map_name_) :
+    change_set(cs),
+    map_name(std::move(map_name_))
+  {}
+
+  std::optional<std::optional<MapDiff::ValueType>> MapDiff::get(
+    const MapDiff::KeyType& key)
+  {
+    const auto it = change_set.writes.find(key);
+    if (it == change_set.writes.end())
+    {
+      return std::nullopt;
+    }
+    return std::optional<std::optional<ValueType>>(std::in_place, it->second);
+  }
+
+  bool MapDiff::has(const MapDiff::KeyType& key)
+  {
+    const auto it = change_set.writes.find(key);
+    return it != change_set.writes.end() && it->second.has_value();
+  }
+
+  bool MapDiff::is_deleted(const MapDiff::KeyType& key)
+  {
+    const auto it = change_set.writes.find(key);
+    return it != change_set.writes.end() && !it->second.has_value();
+  }
+
+  void MapDiff::foreach(const MapDiff::ElementVisitorWithEarlyOut& f)
+  {
+    foreach_(f);
+  }
+
+  size_t MapDiff::size()
+  {
+    return change_set.writes.size();
+  }
+
+  void MapDiff::range(
+    const MapDiff::ElementVisitor& f,
+    const std::optional<MapDiff::KeyType>& from,
+    const std::optional<MapDiff::KeyType>& to)
+  {
+    if (
+      from.has_value() && to.has_value() &&
+      (from.value() == to.value() || to.value() < from.value()))
+    {
+      return;
+    }
+    for (auto it = from ? change_set.writes.lower_bound(*from) :
+                          change_set.writes.begin();
+         it != change_set.writes.end() && (!to || it->first < *to);
+         ++it)
+    {
+      f(it->first, it->second);
+    }
+  }
+#else
   // A change set created for a diff (see Map::create_change_set) holds the
   // state as of its start version, and its writes contain exactly the keys
   // deleted by the commit at that version, all mapped to nullopt. Puts are the
@@ -178,4 +248,5 @@ namespace ccf::kv::untyped
       f(e.first, e.second);
     }
   }
+#endif
 }

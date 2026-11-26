@@ -323,6 +323,7 @@ add_ccf_static_library(
 # CCF kv lib
 option(CCF_KV_TRACING "Enable test-only KV semantic trace capture" OFF)
 option(BUILD_RUST_KV_TESTS "Build the test-only Rust KV adapter" OFF)
+option(USE_RUST_KV "Use the Rust KV engine for ccf_kv" OFF)
 set(
   CCF_KV_TRACE_CHECKER
   ""
@@ -348,6 +349,46 @@ if(CCF_KV_TRACING)
   add_compile_definitions(CCF_KV_TRACING)
 endif()
 
+if(USE_RUST_KV)
+  # Rust KV changes the layout of internal KV types, so every target in the
+  # build must agree on it.
+  add_compile_definitions(CCF_USE_RUST_KV)
+  set(CCF_KV_RUST_CRATE "${CCF_DIR}/src/rust/ccf-kv/cpp-test")
+  set(CCF_KV_RUST_CARGO_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo/ccf-kv-rust")
+  set(
+    CCF_KV_RUST_CARGO_LIB
+    "${CCF_KV_RUST_CARGO_DIR}/release/libccf_kv_cpp_test.a"
+  )
+  set(
+    CCF_KV_RUST_COMBINED_OBJECT
+    "${CCF_KV_RUST_CARGO_DIR}/ccf_kv_rust_combined.o"
+  )
+  set(CCF_KV_RUST_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/libccf_kv_rust.a")
+  add_custom_target(
+    cargo-build_ccf_kv_rust
+    BYPRODUCTS "${CCF_KV_RUST_LIBRARY}" "${CCF_KV_RUST_COMBINED_OBJECT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CCF_KV_RUST_CARGO_DIR}"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env --unset=CARGO_BUILD_TARGET
+      "RUSTFLAGS=-C relocation-model=pic" "${CARGO}" build --locked --offline
+      --release --target-dir "${CCF_KV_RUST_CARGO_DIR}"
+    COMMAND
+      "${CMAKE_CXX_COMPILER}" -r -nostdlib -Wl,--whole-archive
+      "${CCF_KV_RUST_CARGO_LIB}" -Wl,--no-whole-archive -o
+      "${CCF_KV_RUST_COMBINED_OBJECT}"
+    COMMAND
+      "${CMAKE_OBJCOPY}" --wildcard "--keep-global-symbol=ccf_rust_kv_*"
+      "${CCF_KV_RUST_COMBINED_OBJECT}"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${CCF_KV_RUST_LIBRARY}"
+    COMMAND
+      "${CMAKE_AR}" qc "${CCF_KV_RUST_LIBRARY}" "${CCF_KV_RUST_COMBINED_OBJECT}"
+    COMMAND "${CMAKE_RANLIB}" "${CCF_KV_RUST_LIBRARY}"
+    WORKING_DIRECTORY "${CCF_KV_RUST_CRATE}"
+    COMMENT "Building the Rust KV engine library"
+    VERBATIM
+  )
+endif()
+
 add_ccf_static_library(
   ccf_kv
   SRCS
@@ -358,6 +399,14 @@ add_ccf_static_library(
 )
 if(CCF_KV_TRACING)
   target_sources(ccf_kv PRIVATE ${CCF_DIR}/src/kv/trace.cpp)
+endif()
+if(USE_RUST_KV)
+  target_sources(ccf_kv PRIVATE ${CCF_DIR}/src/kv/rust_kv_backend.cpp)
+  target_link_libraries(
+    ccf_kv
+    PUBLIC ccfcrypto "${CCF_KV_RUST_LIBRARY}" ${CMAKE_DL_LIBS} m
+  )
+  add_dependencies(ccf_kv cargo-build_ccf_kv_rust)
 endif()
 
 # CCF endpoints lib

@@ -9,7 +9,7 @@ Callers explicitly capture a snapshot before acquiring the first map, and explic
 Compaction advances the global frontier, changes which map views can be acquired, pops compacted frames off the front of the active ring, releases their radix roots through a bounded retirement FIFO, keeps only metadata-only entries in `retained` when a live transaction snapshot or acquired view lineage still needs them, and shrinks the ring when sparse.
 Rollback similarly pops discarded frames off the back of the active ring, releases their radix roots, shrinks the ring when sparse, and leaves `retained` intact.
 Ending a transaction releases its pinned view roots, prunes any `retained` entries no remaining transaction needs, and drains the retirement budget.
-The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the production store lifecycle is not implemented.
+The opt-in C++ test adapter supports ordinary ledger writes, replay, and snapshots; the opt-in `-DUSE_RUST_KV=ON` build option also wires the Rust KV engine directly into `ccf_kv` so full CCF nodes, apps, and unit/e2e suites can run against it without changing public headers.
 
 The [association-list proofs](KvRust/Assoc.lean) connect extracted lookup, replacement and erasure to the model's operations, given correct equality and cloning.
 The [key proofs](KvRust/Keys.lean) establish the byte comparator's lexicographic order and the address equality used by the engine.
@@ -90,7 +90,8 @@ The shared snapshot restore tests cover historical encryption secrets and captur
 The same fuzzer schedules and assertions run on both backends, but the C++ trace reporter and trace-conformance runner are not wired to the Rust adapter.
 
 The test adapter inherits from `ccf::kv::AbstractStore`, implementing store locking, snapshot capture/serialization, replay, compaction, rollback, and flag hooks while rejecting C++-only `AbstractMap` handle methods.
-It runs staged writes lock-free and reads concurrently under a shared Rust `RwLock`, moves encryption/serialisation, observers, and consensus replication outside the store locks with C++-compatible `pending_txs` batching, and supports concurrent normal commits across open `next_txid()` reserved slots via placeholder frames and backfill; it does not yet wire the Rust backend into the production CCF node lifecycle or replication loop.
+It runs staged writes lock-free and reads concurrently under a sharded writer-preferring `pthread_rwlock` (`ShardedRwLock`) with hazard-slot map acquisition, moves encryption/serialisation, observers, and consensus replication outside the store locks with C++-compatible `pending_txs` batching, and supports concurrent normal commits across open `next_txid()` reserved slots via placeholder frames and backfill.
+Configuring CMake with `-DUSE_RUST_KV=ON` replaces `ccf::kv::Store`, `BaseTx`, `CommittableTx`, `ReservedTx`, `untyped::MapHandle`, and `untyped::MapDiff` in `ccf_kv` with this Rust KV backend (keeping all public headers under `include/ccf/kv/` unchanged) so full CCF nodes (`logging`, `js_generic`, `programmability`), node unit tests, and multi-node e2e suites (`e2e_logging`, `recovery_test`) run directly on Rust KV.
 The trace theorem applies to the single-store `Action` dispatcher, not the C ABI, CCF commit classification and post-commit reads, the ledger codec, the locking wrapper, or imported snapshot state.
 Both the action dispatcher and the CCF adapter now stage writes in descending key order with binary search and in-place replacement; the separate recency-order path has been removed.
 The [extracted staging proof](KvRust/PendingWrites.lean) checks that binary search and in-place replacement preserve exactly the same final writes, including deletions, up to permutation.

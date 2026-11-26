@@ -987,18 +987,27 @@ namespace ccf::kv::rust_test
     void compact(Version v) override
     {
       std::lock_guard ordered(compaction_lock);
+      SnapshotterPtr snap;
+      std::shared_ptr<Consensus> cons;
+      std::shared_ptr<ILedgerChunker> ch;
+      {
+        std::lock_guard lock(state_lock);
+        snap = snapshotter;
+        cons = consensus;
+        ch = chunker;
+      }
+      if (snap)
+      {
+        snap->commit(v, cons && cons->is_primary());
+      }
+      if (ch)
+      {
+        ch->compacted_to(v);
+      }
       std::vector<std::tuple<untyped::CommitHook, Version, untyped::Write>>
         callbacks;
       {
         std::scoped_lock lock(maps_lock, state_lock);
-        if (chunker)
-        {
-          chunker->compacted_to(v);
-        }
-        if (snapshotter)
-        {
-          snapshotter->commit(v, consensus && consensus->is_primary());
-        }
         const auto compact_target = open_reservations.empty() ?
           v :
           std::min(v, *open_reservations.begin() - 1);

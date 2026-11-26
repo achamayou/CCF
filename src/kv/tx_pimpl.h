@@ -3,15 +3,35 @@
 #pragma once
 
 #include "ccf/kv/tx.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_ffi.h"
+#endif
 #include "kv/trace.h"
 
 namespace ccf::kv
 {
+  class Store;
+
   struct BaseTx::PrivateImpl
   {
     AbstractStore* store = nullptr;
 #ifdef CCF_KV_TRACING
     trace::Attempt trace_attempt;
+#endif
+#ifdef CCF_USE_RUST_KV
+    Store* rust_store = nullptr;
+    uint64_t rust_attempt_id = 0;
+    rust_ffi::NativeTx* rust_tx = nullptr;
+    bool rust_read_only = false;
+    bool rust_registered = false;
+    int rust_hazard_slot = -1;
+    std::optional<TxID> rust_reserved = std::nullopt;
+    size_t rust_reserve_epoch = 0;
+    bool rust_explicit_read_txid = false;
+    bool rust_committing = false;
+    bool rust_committed = false;
+    bool rust_aborted = false;
+    ~PrivateImpl();
 #endif
 
     // NB: This exists only to maintain the old API, where this Tx stores

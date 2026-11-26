@@ -180,6 +180,21 @@ namespace ccf::kv
       const ccf::crypto::Sha256Hash& write_set_digest,
       const std::string& commit_evidence)>;
 
+#ifdef CCF_USE_RUST_KV
+  protected:
+    PendingTxInfo commit_rust_impl(
+      const ccf::ClaimsDigest& claims,
+      const WriteSetObserver& observer,
+      bool reserved);
+
+  public:
+    CommitResult commit(
+      const ccf::ClaimsDigest& claims = ccf::empty_claims(),
+      WriteSetObserver write_set_observer = nullptr)
+    {
+      return commit_rust_impl(claims, write_set_observer, false).success;
+    }
+#else
     /** Commit this transaction to the local KV and submit it to consensus for
      * replication
      *
@@ -202,9 +217,9 @@ namespace ccf::kv
         throw std::logic_error("Transaction already committed");
       }
 
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Commit trace_commit(pimpl->trace_attempt.id);
-#endif
+#  endif
       if (all_changes.empty())
       {
         committed = true;
@@ -242,7 +257,7 @@ namespace ccf::kv
       bool commit_term_changed = false;
       std::optional<Version> c;
       std::optional<Version> expected_rollback_count;
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Json trace_writes;
       if (trace::enabled())
       {
@@ -258,13 +273,13 @@ namespace ccf::kv
           }
         }
       }
-#endif
+#  endif
       {
         MapSetLockGuard map_set_guard(*pimpl->store, maps_created);
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
         trace::Context trace_context(
           pimpl->trace_attempt.id, &trace_writes, &trace_commit);
-#endif
+#  endif
         c = apply_changes(
           all_changes,
           [&]() {
@@ -404,6 +419,7 @@ namespace ccf::kv
         throw KvSerialiserException(e.what());
       }
     }
+#endif
 
     /** Get version at which this transaction was committed.
      *
@@ -484,6 +500,9 @@ namespace ccf::kv
       }
       pimpl->read_txid = tx_id;
       pimpl->commit_view = commit_view_;
+#ifdef CCF_USE_RUST_KV
+      pimpl->rust_explicit_read_txid = true;
+#endif
     }
 
     void set_root_at_read_version(const ccf::crypto::Sha256Hash& r)
@@ -517,8 +536,10 @@ namespace ccf::kv
   // never conflict.
   class ReservedTx : public CommittableTx
   {
+#ifndef CCF_USE_RUST_KV
   private:
     Version rollback_count = 0;
+#endif
 
   public:
     ReservedTx(
@@ -526,18 +547,32 @@ namespace ccf::kv
       Term read_term,
       const TxID& reserved_tx_id,
       Version rollback_count_) :
-      CommittableTx(_store),
+      CommittableTx(_store)
+#ifndef CCF_USE_RUST_KV
+      ,
       rollback_count(rollback_count_)
+#endif
     {
       version = reserved_tx_id.seqno;
       KV_TRACE(trace::unsupported(pimpl->store, "reserved transaction"));
       pimpl->commit_view = reserved_tx_id.view;
       pimpl->read_txid = TxID(read_term, reserved_tx_id.seqno - 1);
+#ifdef CCF_USE_RUST_KV
+      if (reserved_tx_id.seqno == NoVersion)
+      {
+        throw std::logic_error("Reserved transaction needs a version");
+      }
+      pimpl->rust_reserved = reserved_tx_id;
+      pimpl->rust_reserve_epoch = rollback_count_;
+#endif
     }
 
     // Used by frontend to commit reserved transactions
     PendingTxInfo commit_reserved()
     {
+#ifdef CCF_USE_RUST_KV
+      return commit_rust_impl(ccf::empty_claims(), nullptr, true);
+#else
       if (committed)
       {
         throw std::logic_error("Transaction already committed");
@@ -630,6 +665,7 @@ namespace ccf::kv
         ccf::empty_claims(),
         std::move(commit_evidence_digest),
         std::move(hooks)};
+#endif
     }
   };
 }

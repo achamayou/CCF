@@ -7,10 +7,18 @@
 #include "ccf/kv/untyped.h"
 #include "ds/champ_map.h"
 #include "kv/kv_types.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_ffi.h"
+#endif
 #include "kv/trace.h"
 #include "kv/version_v.h"
 
 #include <optional>
+
+namespace ccf::kv
+{
+  class Store;
+}
 
 namespace ccf::kv::untyped
 {
@@ -48,6 +56,30 @@ namespace ccf::kv::untyped
     std::optional<Version> read_version = std::nullopt;
     ccf::kv::untyped::Read reads;
     ccf::kv::untyped::Write writes;
+
+#ifdef CCF_USE_RUST_KV
+    ccf::kv::Store* rust_store = nullptr;
+    ccf::kv::rust_ffi::NativeTx* rust_tx = nullptr;
+    const bool* rust_committed = nullptr;
+    bool rust_read_only = false;
+    bool rust_is_diff = false;
+
+    ChangeSet(
+      ccf::kv::Store* store_,
+      ccf::kv::rust_ffi::NativeTx* tx_,
+      const bool* committed_,
+      bool read_only_) :
+      rust_store(store_),
+      rust_tx(tx_),
+      rust_committed(committed_),
+      rust_read_only(read_only_)
+    {}
+
+    explicit ChangeSet(ccf::kv::untyped::Write diff_writes) :
+      writes(std::move(diff_writes)),
+      rust_is_diff(true)
+    {}
+#endif
 
     ChangeSet(
       size_t rollbacks,

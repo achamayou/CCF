@@ -30,7 +30,19 @@ namespace ccf::kv
     Ready,
     Failed
   };
+}
 
+#ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_store_impl.h"
+
+namespace ccf::kv
+{
+  using StorePtr = std::shared_ptr<ccf::kv::Store>;
+}
+#else
+
+namespace ccf::kv
+{
   class StoreState
   {
   protected:
@@ -820,9 +832,9 @@ namespace ccf::kv
   public:
     void compact(Version v) override
     {
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Environment trace_environment;
-#endif
+#  endif
       // This is called when the store will never be rolled back to any
       // state before the specified version.
       // No transactions can be prepared or committed during compaction.
@@ -843,7 +855,7 @@ namespace ccf::kv
 
       if (v > current_version())
       {
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
         if (trace::enabled())
         {
           // The no-op is only traced faithfully if no version was allocated
@@ -856,7 +868,7 @@ namespace ccf::kv
           }
           trace::compact(this, compacted, v);
         }
-#endif
+#  endif
         return;
       }
 
@@ -899,18 +911,18 @@ namespace ccf::kv
 
     void rollback(const TxID& tx_id, Term term_of_next_version_) override
     {
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Environment trace_environment;
-#endif
+#  endif
       // This is called to roll the store back to the state it was in
       // at the specified version.
       // No transactions can be prepared or committed during rollback.
 
       std::lock_guard<ccf::ds::Mutex> mguard(maps_lock);
 
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Rollback trace_rollback(this);
-#endif
+#  endif
       {
         std::lock_guard<ccf::ds::Mutex> vguard(version_lock);
         if (tx_id.seqno < compacted)
@@ -1683,3 +1695,4 @@ namespace ccf::kv
 
   using StorePtr = std::shared_ptr<ccf::kv::Store>;
 }
+#endif

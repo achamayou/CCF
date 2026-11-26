@@ -4,11 +4,285 @@
 #include "ccf/kv/untyped_map_handle.h"
 
 #include "ds/internal_logger.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/store.h"
+#endif
 #include "kv/untyped_change_set.h"
 
 namespace ccf::kv::untyped
 {
-#ifdef CCF_KV_TRACING
+#ifdef CCF_USE_RUST_KV
+  namespace
+  {
+    rust_detail::Response rust_operate(
+      const ChangeSet& tx_changes,
+      const std::string& map_name,
+      rust_ffi::Opcode op,
+      rust_ffi::ByteView key = {},
+      rust_ffi::ByteView value = {},
+      bool global = false)
+    {
+      return tx_changes.rust_store->operate_tx_read(
+        tx_changes.rust_tx,
+        {.op = op,
+         .inspect_finished = *tx_changes.rust_committed,
+         .attempt = 0,
+         .number = global,
+         .map = rust_detail::bytes(map_name),
+         .key = key,
+         .value = value});
+    }
+  }
+
+  const MapHandle::ValueType* MapHandle::read_key(const KeyType&)
+  {
+    throw std::logic_error("MapHandle::read_key is not used by Rust KV");
+  }
+
+  void MapHandle::foreach_state_and_writes(
+    const ElementVisitorWithEarlyOut& f, bool)
+  {
+    foreach(f);
+  }
+
+  MapHandle::MapHandle(ccf::kv::untyped::ChangeSet& cs, std::string map_name_) :
+    tx_changes(cs),
+    map_name(std::move(map_name_))
+  {}
+
+  std::string MapHandle::get_name_of_map() const
+  {
+    return map_name;
+  }
+
+  std::optional<MapHandle::ValueType> MapHandle::get(
+    const MapHandle::KeyType& key)
+  {
+    ValueType out;
+    rust_ffi::Status status;
+    {
+      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
+      status = rust_ffi::ccf_rust_kv_tx_get(
+        tx_changes.rust_store->native.get(),
+        tx_changes.rust_tx,
+        *tx_changes.rust_committed,
+        tx_changes.rust_read_only,
+        false,
+        rust_detail::bytes(map_name),
+        rust_detail::bytes(key),
+        &out,
+        +[](void* ctx, const uint8_t* ptr, size_t len) {
+          auto* dst = static_cast<ValueType*>(ctx);
+          if (len != 0)
+          {
+            *dst = ValueType(ptr, ptr + len);
+          }
+        });
+    }
+    if (status == rust_ffi::Status::MISSING)
+    {
+      return std::nullopt;
+    }
+    if (status != rust_ffi::Status::OK)
+    {
+      throw std::logic_error(
+        "Unexpected Rust KV status " +
+        std::to_string(static_cast<unsigned>(status)));
+    }
+    return out;
+  }
+
+  std::optional<Version> MapHandle::get_version_of_previous_write(
+    const MapHandle::KeyType& key)
+  {
+    auto r = [&]() {
+      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
+      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_previous(
+        tx_changes.rust_store->native.get(),
+        tx_changes.rust_tx,
+        *tx_changes.rust_committed,
+        tx_changes.rust_read_only,
+        rust_detail::bytes(map_name),
+        rust_detail::bytes(key)));
+    }();
+    if (r.status == rust_ffi::Status::MISSING)
+    {
+      return std::nullopt;
+    }
+    r.require();
+    return r.number;
+  }
+
+  std::optional<MapHandle::ValueType> MapHandle::get_globally_committed(
+    const MapHandle::KeyType& key)
+  {
+    ValueType out;
+    rust_ffi::Status status;
+    {
+      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
+      status = rust_ffi::ccf_rust_kv_tx_get(
+        tx_changes.rust_store->native.get(),
+        tx_changes.rust_tx,
+        *tx_changes.rust_committed,
+        tx_changes.rust_read_only,
+        true,
+        rust_detail::bytes(map_name),
+        rust_detail::bytes(key),
+        &out,
+        +[](void* ctx, const uint8_t* ptr, size_t len) {
+          auto* dst = static_cast<ValueType*>(ctx);
+          if (len != 0)
+          {
+            *dst = ValueType(ptr, ptr + len);
+          }
+        });
+    }
+    if (status == rust_ffi::Status::MISSING)
+    {
+      return std::nullopt;
+    }
+    if (status != rust_ffi::Status::OK)
+    {
+      throw std::logic_error(
+        "Unexpected Rust KV status " +
+        std::to_string(static_cast<unsigned>(status)));
+    }
+    return out;
+  }
+
+  bool MapHandle::has(const MapHandle::KeyType& key)
+  {
+    auto r = [&]() {
+      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
+      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
+        tx_changes.rust_store->native.get(),
+        tx_changes.rust_tx,
+        *tx_changes.rust_committed,
+        tx_changes.rust_read_only,
+        false,
+        rust_detail::bytes(map_name),
+        rust_detail::bytes(key)));
+    }();
+    r.require();
+    return r.number != 0;
+  }
+
+  bool MapHandle::has_globally_committed(const MapHandle::KeyType& key)
+  {
+    auto r = [&]() {
+      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
+      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
+        tx_changes.rust_store->native.get(),
+        tx_changes.rust_tx,
+        *tx_changes.rust_committed,
+        tx_changes.rust_read_only,
+        true,
+        rust_detail::bytes(map_name),
+        rust_detail::bytes(key)));
+    }();
+    r.require();
+    return r.number != 0;
+  }
+
+  void MapHandle::put(
+    const MapHandle::KeyType& key, const MapHandle::ValueType& value)
+  {
+    if (*tx_changes.rust_committed)
+    {
+      throw std::logic_error("Unexpected Rust KV status 1");
+    }
+    const auto status = rust_ffi::ccf_rust_kv_tx_write(
+      tx_changes.rust_tx,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key),
+      rust_detail::bytes(value));
+    if (status != rust_ffi::Status::OK)
+    {
+      throw std::logic_error(
+        "Unexpected Rust KV status " +
+        std::to_string(static_cast<unsigned>(status)));
+    }
+  }
+
+  void MapHandle::remove(const MapHandle::KeyType& key)
+  {
+    if (*tx_changes.rust_committed)
+    {
+      throw std::logic_error("Unexpected Rust KV status 1");
+    }
+    const auto status = rust_ffi::ccf_rust_kv_tx_write(
+      tx_changes.rust_tx,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key),
+      {});
+    if (status != rust_ffi::Status::OK)
+    {
+      throw std::logic_error(
+        "Unexpected Rust KV status " +
+        std::to_string(static_cast<unsigned>(status)));
+    }
+  }
+
+  void MapHandle::clear()
+  {
+    rust_operate(tx_changes, map_name, rust_ffi::Opcode::CLEAR).require();
+  }
+
+  void MapHandle::foreach(const MapHandle::ElementVisitorWithEarlyOut& f)
+  {
+    auto r = rust_operate(tx_changes, map_name, rust_ffi::Opcode::SCAN);
+    r.require();
+    for (size_t i = 0; i < r.size; ++i)
+    {
+      const auto row = r.entry(i);
+      if (!f(rust_detail::copy(row.key), rust_detail::copy(row.value)))
+      {
+        break;
+      }
+    }
+  }
+
+  size_t MapHandle::size()
+  {
+    auto r = rust_operate(tx_changes, map_name, rust_ffi::Opcode::SIZE);
+    r.require();
+    return r.size;
+  }
+
+  void MapHandle::range(
+    const MapHandle::ElementVisitor& f,
+    const std::optional<MapHandle::KeyType>& from,
+    const std::optional<MapHandle::KeyType>& to)
+  {
+    auto run = [&](rust_ffi::ByteView lo, rust_ffi::ByteView hi) {
+      auto r =
+        rust_operate(tx_changes, map_name, rust_ffi::Opcode::RANGE, lo, hi);
+      r.require();
+      for (size_t i = 0; i < r.size; ++i)
+      {
+        const auto row = r.entry(i);
+        f(rust_detail::copy(row.key), rust_detail::copy(row.value));
+      }
+    };
+    if (from && to)
+    {
+      run(rust_detail::bytes(*from), rust_detail::bytes(*to));
+    }
+    else if (from)
+    {
+      run(rust_detail::bytes(*from), {});
+    }
+    else if (to)
+    {
+      run({}, rust_detail::bytes(*to));
+    }
+    else
+    {
+      run({}, {});
+    }
+  }
+#else
+#  ifdef CCF_KV_TRACING
   namespace
   {
     // Traces one iteration: its start, every visited entry followed by the
@@ -56,7 +330,7 @@ namespace ccf::kv::untyped
         metadata, "foreach_end", map_name, {{"iteration", iteration}});
     }
   }
-#endif
+#  endif
 
   const MapHandle::ValueType* MapHandle::read_key(const KeyType& key)
   {
@@ -262,9 +536,9 @@ namespace ccf::kv::untyped
   void MapHandle::clear()
   {
     KV_TRACE(trace::operation(tx_changes.trace_metadata, "clear", map_name));
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
     trace::Suppress trace_suppress(tx_changes.trace_metadata);
-#endif
+#  endif
     foreach([this](const auto& k, const auto&) {
       remove(k);
       return true;
@@ -288,9 +562,9 @@ namespace ccf::kv::untyped
     size_t size_ = 0;
 
     {
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
       trace::Suppress trace_suppress(tx_changes.trace_metadata);
-#endif
+#  endif
       foreach([&size_](const auto&, const auto&) {
         ++size_;
         return true;
@@ -307,7 +581,7 @@ namespace ccf::kv::untyped
     const std::optional<MapHandle::KeyType>& from,
     const std::optional<MapHandle::KeyType>& to)
   {
-#ifdef CCF_KV_TRACING
+#  ifdef CCF_KV_TRACING
     // Records the bounds and the collected entries, in visiting order, before
     // any callback runs.
     const auto trace_range = [&](const std::map<KeyType, ValueType>& entries) {
@@ -325,7 +599,7 @@ namespace ccf::kv::untyped
          {"to", trace::bytes(to.has_value() ? &*to : nullptr)},
          {"entries", std::move(observed)}});
     };
-#endif
+#  endif
     // Current limitations/ineficiencies:
     // - The state and writes are wastefully looped over until `from` is
     // found.
@@ -379,4 +653,5 @@ namespace ccf::kv::untyped
       f(e.first, e.second);
     }
   }
+#endif
 }
