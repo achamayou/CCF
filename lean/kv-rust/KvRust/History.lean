@@ -589,6 +589,156 @@ theorem history_pop_active_to_refines (s : CcfKv.engine.History)
   rw [WP.spec_ok]
   exact hpost
 
+/-- Popping all active frames (`keepLen = 0`) releases every active frame's radix
+root and leaves `IndexLiveness after.index extraPins` before `reset_branch`. -/
+theorem history_pop_active_to_zero_refines (s : CcfKv.engine.History)
+    (extraPins : List U32) (valid : BranchValid s.log)
+    (live : IndexLiveness s.index (framePins s.activeFrames ++ extraPins))
+    (queueRoom
+      : 2 * (s.index.values.dirs.val.length + s.index.values.rows.val.length) + 1
+        ≤ Usize.max)
+    : WP.spec (CcfKv.engine.History.pop_active_to s 0#usize)
+        (fun after =>
+          after.log.len = 0#usize
+          ∧ after.retained = s.retained
+          ∧ after.global = s.global
+          ∧ after.term = s.term
+          ∧ after.next_identity = s.next_identity
+          ∧ after.reuse_compacted_images = s.reuse_compacted_images
+          ∧ after.index.values = s.index.values
+          ∧ IndexLiveness after.index extraPins) := by
+  unfold CcfKv.engine.History.pop_active_to CcfKv.engine.History.pop_active_to_loop
+  have hloop : WP.spec
+      (loop (fun cur => CcfKv.engine.History.pop_active_to_loop.body 0#usize cur) s)
+      (fun (bl, v, ai, gl, tm, nid, re) =>
+        bl.len = 0#usize
+        ∧ v = s.retained
+        ∧ gl = s.global
+        ∧ tm = s.term
+        ∧ nid = s.next_identity
+        ∧ re = s.reuse_compacted_images
+        ∧ ai.values = s.index.values
+        ∧ IndexLiveness ai extraPins) := by
+    apply loop.spec_decr_nat
+      (fun cur : CcfKv.engine.History => cur.log.len.val)
+      (fun cur =>
+        (cur.log.len = 0#usize ∨ BranchValid cur.log)
+        ∧ cur.retained = s.retained
+        ∧ cur.global = s.global
+        ∧ cur.term = s.term
+        ∧ cur.next_identity = s.next_identity
+        ∧ cur.reuse_compacted_images = s.reuse_compacted_images
+        ∧ cur.index.values = s.index.values
+        ∧ IndexLiveness cur.index
+            (if cur.log.len = 0#usize then extraPins
+              else framePins cur.activeFrames ++ extraPins)) _ _ _
+    · intro cur ⟨hstate, hret, hgl, htm, hid, hre, hvals, hlive⟩
+      unfold CcfKv.engine.History.pop_active_to_loop.body
+      dsimp only
+      rcases hstate with hzero | hval
+      · simp only [CcfKv.branch_log.BranchLog.active_len, hzero, bind_ok]
+        have hnotgt : ¬ (0#usize > 0#usize) := by decide
+        rw [ite_eq_right hnotgt, WP.spec_ok]
+        rw [ite_eq_left hzero] at hlive
+        exact ⟨hzero, hret, hgl, htm, hid, hre, hvals, hlive⟩
+      · have hne0 : cur.log.len ≠ 0#usize := fun h => by
+          have := hval.nonempty
+          rw [h] at this
+          exact absurd this (by decide)
+        rw [ite_eq_right hne0] at hlive
+        have hgt : cur.log.len > 0#usize := by
+          change (0#usize : Usize).val < cur.log.len.val
+          exact hval.nonempty
+        simp only [CcfKv.branch_log.BranchLog.active_len, bind_ok]
+        rw [ite_eq_left hgt]
+        by_cases hlen1 : cur.log.len.val = 1
+        · apply WP.spec_bind (branch_pop_back_single_refines cur.log hval hlen1)
+          rintro ⟨frame, bl1⟩ ⟨hvals1, hbl1Zero⟩
+          have hpins1 : (framePins cur.activeFrames ++ extraPins).Perm
+              (if frame.data = 0#u32 then extraPins else frame.data :: extraPins) := by
+            change (framePins (branchValues cur.log) ++ extraPins).Perm _
+            rw [hvals1]
+            by_cases hz : frame.data = 0#u32 <;> simp [framePins, hz]
+          change WP.spec (do
+            let b ← CcfKv.radix.RadixRoot.is_empty frame.data
+            if b then Result.ok (ControlFlow.cont { cur with log := bl1 })
+            else do
+              let ai ← CcfKv.kv_index.AddressIndex.release_root cur.index frame.data
+              Result.ok (ControlFlow.cont { cur with log := bl1, index := ai })) _
+          simp only [CcfKv.radix.RadixRoot.is_empty, bind_ok]
+          by_cases hz : frame.data = 0#u32
+          · rw [ite_eq_left (by simp [hz]), WP.spec_ok]
+            rw [ite_eq_left hz] at hpins1
+            have hlive' : IndexLiveness cur.index extraPins := hlive.perm hpins1
+            refine ⟨⟨Or.inl hbl1Zero, hret, hgl, htm, hid, hre, hvals,
+              by simpa only [hbl1Zero, ite_true] using hlive'⟩, ?_⟩
+            change bl1.len.val < cur.log.len.val
+            rw [hbl1Zero, hlen1]; decide
+          · rw [ite_eq_right (by simp [hz])]
+            have hqCur : 2 * (cur.index.values.dirs.val.length + cur.index.values.rows.val.length) + 1
+                ≤ Usize.max := by rw [hvals]; exact queueRoom
+            have hlive' : IndexLiveness cur.index
+                (if frame.data = 0#u32 then extraPins else frame.data :: extraPins) :=
+              hlive.perm hpins1
+            apply WP.spec_bind
+              (index_release_root_refines cur.index extraPins frame.data hlive' hqCur)
+            intro ai1 ⟨hvals1', hlive1⟩
+            rw [WP.spec_ok]
+            refine ⟨⟨Or.inl hbl1Zero, hret, hgl, htm, hid, hre, hvals1'.trans hvals,
+              by simpa only [hbl1Zero, ite_true] using hlive1⟩, ?_⟩
+            change bl1.len.val < cur.log.len.val
+            rw [hbl1Zero, hlen1]; decide
+        · have hge2 : 2 ≤ cur.log.len.val := by have := hval.nonempty; omega
+          apply WP.spec_bind (branch_pop_back_refines cur.log hval hge2)
+          rintro ⟨frame, bl1⟩ ⟨hval1, hsplit, hlenDec⟩
+          have hbl1Ne0 : bl1.len ≠ 0#usize := fun h => by
+            have := hval1.nonempty; rw [h] at this; exact absurd this (by decide)
+          have hpinsSplit : (framePins cur.activeFrames ++ extraPins).Perm
+              (if frame.data = 0#u32 then framePins (branchValues bl1) ++ extraPins
+                else frame.data :: (framePins (branchValues bl1) ++ extraPins)) := by
+            change (framePins (branchValues cur.log) ++ extraPins).Perm _
+            rw [hsplit]
+            have hp := (framePins_append (branchValues bl1) frame).append_right extraPins
+            by_cases hz : frame.data = 0#u32 <;> simpa [hz] using hp
+          change WP.spec (do
+            let b ← CcfKv.radix.RadixRoot.is_empty frame.data
+            if b then Result.ok (ControlFlow.cont { cur with log := bl1 })
+            else do
+              let ai ← CcfKv.kv_index.AddressIndex.release_root cur.index frame.data
+              Result.ok (ControlFlow.cont { cur with log := bl1, index := ai })) _
+          simp only [CcfKv.radix.RadixRoot.is_empty, bind_ok]
+          by_cases hz : frame.data = 0#u32
+          · rw [ite_eq_left (by simp [hz]), WP.spec_ok]
+            rw [ite_eq_left hz] at hpinsSplit
+            have hlive' : IndexLiveness cur.index (framePins (branchValues bl1) ++ extraPins) :=
+              hlive.perm hpinsSplit
+            refine ⟨⟨Or.inr hval1, hret, hgl, htm, hid, hre, hvals,
+              by simpa only [hbl1Ne0, ite_false] using hlive'⟩,
+              by change bl1.len.val < cur.log.len.val; omega⟩
+          · rw [ite_eq_right (by simp [hz])]
+            have hqCur : 2 * (cur.index.values.dirs.val.length + cur.index.values.rows.val.length) + 1
+                ≤ Usize.max := by rw [hvals]; exact queueRoom
+            have hlive' : IndexLiveness cur.index
+                (if frame.data = 0#u32 then framePins (branchValues bl1) ++ extraPins
+                  else frame.data :: (framePins (branchValues bl1) ++ extraPins)) :=
+              hlive.perm hpinsSplit
+            apply WP.spec_bind
+              (index_release_root_refines cur.index (framePins (branchValues bl1) ++ extraPins)
+                frame.data hlive' hqCur)
+            intro ai1 ⟨hvals1', hlive1⟩
+            rw [WP.spec_ok]
+            refine ⟨⟨Or.inr hval1, hret, hgl, htm, hid, hre, hvals1'.trans hvals,
+              by simpa only [hbl1Ne0, ite_false] using hlive1⟩,
+              by change bl1.len.val < cur.log.len.val; omega⟩
+    · have hne0 : s.log.len ≠ 0#usize := fun h => by
+        have := valid.nonempty; rw [h] at this; exact absurd this (by decide)
+      exact ⟨Or.inr valid, rfl, rfl, rfl, rfl, rfl, rfl, by simpa [hne0] using live⟩
+  apply WP.spec_bind hloop
+  rintro ⟨bl, v, ai, gl, tm, nid, re⟩ hpost
+  change WP.spec (Result.ok _) _
+  rw [WP.spec_ok]
+  exact hpost
+
 /-- Compacting `count` leading active frames pops them from the ring, releases
 their radix roots, and moves needed metadata-only frames into `retained`. -/
 theorem history_compact_prefix_refines (s : CcfKv.engine.History)

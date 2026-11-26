@@ -794,4 +794,77 @@ theorem branch_replace_active_at_refines {T : Type} (log : CcfKv.branch_log.Bran
       rw [List.length_set]; omega
     rw [List.getElem?_eq_none hge1, List.getElem?_eq_none hge2]
 
+/-- Popping the sole remaining element of a length-1 ring returns that element
+and leaves `len = 0`. -/
+theorem branch_pop_back_single_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
+    (valid : BranchValid log) (honeLen : log.len.val = 1)
+    : WP.spec (CcfKv.branch_log.BranchLog.pop_back log)
+        (fun (frame, after) =>
+          branchValues log = [frame] ∧ after.len = 0#usize) := by
+  have hone : (1#usize : Usize).val = 1 := rfl
+  unfold CcfKv.branch_log.BranchLog.pop_back
+  apply WP.spec_bind (Usize.sub_spec (x := log.len) (y := 1#usize) (by omega))
+  intro lastIdx hlastIdx
+  have hlastZero : lastIdx = 0#usize := UScalar.eq_of_val_eq (by rw [hlastIdx.1, hone, honeLen]; rfl)
+  have hlastValEq : lastIdx.val = 0 := by rw [hlastZero]; rfl
+  have hlastCap : lastIdx.val < log.slots.val.length := lt_of_lt_of_le (by omega) valid.lenLeCap
+  apply WP.spec_bind (branch_slot_matches log lastIdx (Nat.le_of_lt valid.headLt))
+  intro idx hidx
+  have hidxLt : idx.val < log.slots.val.length := by
+    rw [hidx]; exact branch_slot_lt valid.headLt hlastCap
+  obtain ⟨lastVal, hlastVal⟩ := valid.live 0 (by omega)
+  rw [alloc.vec.Vec.index_mut_slice_index]
+  apply WP.spec_bind (alloc.vec.Vec.index_mut_usize_spec log.slots idx hidxLt)
+  rintro ⟨o, back⟩ ⟨ho, _⟩
+  have hoEq : o = some lastVal := by
+    have h1 : log.slots.val[idx.val]? = some o := by
+      rw [List.getElem?_eq_getElem hidxLt, ← ho]
+    rw [hidx, hlastValEq] at h1
+    exact Option.some.inj (h1.symm.trans hlastVal)
+  simp only [hoEq, core.option.Option.take]
+  change WP.spec (Result.ok (lastVal, { log with slots := back none, len := lastIdx })) _
+  rw [WP.spec_ok]
+  refine ⟨?_, hlastZero⟩
+  unfold branchValues
+  rw [honeLen]
+  simp [List.range_one, hlastVal]
+
+/-- Resetting a branch log replaces its active ring with the single frame `[base]`. -/
+theorem branch_reset_branch_refines {T : Type} (log : CcfKv.branch_log.BranchLog T)
+    (base : T)
+    : WP.spec (CcfKv.branch_log.BranchLog.reset_branch log base)
+        (fun after => BranchValid after ∧ branchValues after = [base]) := by
+  unfold CcfKv.branch_log.BranchLog.reset_branch
+  have hroom : (alloc.vec.Vec.new (Option T)).val.length < Usize.max := by
+    have := Usize.max_succ_eq_pow
+    rcases System.Platform.numBits_eq with h | h <;> simp [h] at this <;>
+      simp [alloc.vec.Vec.new] <;> omega
+  apply WP.spec_bind
+    (alloc.vec.Vec.push_spec (alloc.vec.Vec.new (Option T)) (some base) hroom)
+  intro slots hslots
+  rw [WP.spec_ok]
+  have hslotsVal : slots.val = [some base] := by simpa [alloc.vec.Vec.new] using hslots
+  have hvalid : BranchValid { slots, head := 0#usize, len := 1#usize } := by
+    refine ⟨by change 0 < (1#usize : Usize).val; decide, ?_, ?_, ?_⟩
+    · change (1#usize : Usize).val ≤ slots.val.length
+      rw [hslotsVal]; simp
+    · change (0#usize : Usize).val < slots.val.length
+      rw [hslotsVal]; simp
+    · intro i hi
+      change i < (1#usize : Usize).val at hi
+      have hi0 : i = 0 := by
+        have h1 : (1#usize : Usize).val = 1 := rfl
+        omega
+      subst hi0
+      refine ⟨base, ?_⟩
+      change slots.val[branchSlot slots.val.length (0#usize : Usize).val 0]? = some (some base)
+      rw [hslotsVal]
+      rfl
+  refine ⟨hvalid, ?_⟩
+  unfold branchValues
+  change (List.range 1).filterMap (fun i =>
+    (slots.val[branchSlot slots.val.length 0 i]?).join) = [base]
+  rw [hslotsVal]
+  rfl
+
 end KvRust

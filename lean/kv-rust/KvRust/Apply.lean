@@ -482,7 +482,7 @@ def replayRow (row : CcfKv.engine.Address × Option CcfKv.engine.Bytes) : IndexW
     | none => .Remove
   )
 
-private theorem prepare_replay_matches (previous identity version : U64)
+theorem prepare_replay_matches (previous identity version : U64)
     (hVersion : version.val = previous.val + 1) (hI : identity.val < U64.max)
     (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
     : WP.spec (CcfKv.engine.Store.prepare_replay previous identity version writes)

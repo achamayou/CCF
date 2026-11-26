@@ -53,6 +53,6 @@ for module in KvRust.Extracted.Types KvRust.Extracted.Funs \
   KvRust.Range KvRust.Scan KvRust.Relation KvRust.Lifecycle \
   KvRust.LifecycleRefinement KvRust.Environment KvRust.ApplyRefinement \
   KvRust.AcquireRefinement KvRust.OperateRefinement KvRust.Simulation \
-  KvRust.Detached KvRust.Backfill KvRust.SnapshotInstall; do
+  KvRust.Detached KvRust.Backfill KvRust.SnapshotInstall KvRust.ReplayAndSnapshot; do
   lake env leanchecker "$module"
 done

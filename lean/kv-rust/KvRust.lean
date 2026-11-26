@@ -36,6 +36,7 @@ public import KvRust.RadixSingle
 public import KvRust.RadixSingleReclaim
 public import KvRust.Range
 public import KvRust.Relation
+public import KvRust.ReplayAndSnapshot
 public import KvRust.RetainedCuts
 public import KvRust.RetireQueue
 public import KvRust.Scan
