@@ -88,6 +88,9 @@ namespace ccf::kv::rust_test
     std::string name;
     const bool& committed;
     bool read_only;
+#ifdef CCF_KV_TRACING
+    trace::MapMetadata& trace_metadata;
+#endif
 
   public:
     MapAccess(
@@ -95,13 +98,34 @@ namespace ccf::kv::rust_test
       NativeTx* native_tx_,
       const std::string& name_,
       const bool& committed_,
-      bool read_only_) :
+      bool read_only_
+#ifdef CCF_KV_TRACING
+      ,
+      trace::MapMetadata& trace_metadata_
+#endif
+      ) :
       store(store_),
       native_tx(native_tx_),
       name(name_),
       committed(committed_),
       read_only(read_only_)
+#ifdef CCF_KV_TRACING
+      ,
+      trace_metadata(trace_metadata_)
+#endif
     {}
+
+    const std::string& map_name() const
+    {
+      return name;
+    }
+
+#ifdef CCF_KV_TRACING
+    trace::MapMetadata& trace_meta()
+    {
+      return trace_metadata;
+    }
+#endif
 
     void write(ByteView key, ByteView value = {})
     {
@@ -117,6 +141,18 @@ namespace ccf::kv::rust_test
           "Unexpected Rust KV status " +
           std::to_string(static_cast<unsigned>(status)));
       }
+      KV_TRACE(
+        const auto k = copy(key); if (value.data != nullptr) {
+          const auto v = copy(value);
+          trace::operation(
+            trace_metadata,
+            "put",
+            name,
+            {{"key", ccf::ds::to_hex(k)}, {"value", ccf::ds::to_hex(v)}});
+        } else {
+          trace::operation(
+            trace_metadata, "remove", name, {{"key", ccf::ds::to_hex(k)}});
+        });
     }
 
     std::optional<Bytes> get_bytes(ByteView key, bool global)
@@ -144,6 +180,12 @@ namespace ccf::kv::rust_test
       }
       if (status == Status::MISSING)
       {
+        KV_TRACE(
+          const auto k = copy(key); trace::operation(
+            trace_metadata,
+            global ? "get_global" : "get",
+            name,
+            {{"key", ccf::ds::to_hex(k)}, {"value", trace::Json(nullptr)}}));
         return std::nullopt;
       }
       if (status != Status::OK)
@@ -152,6 +194,11 @@ namespace ccf::kv::rust_test
           "Unexpected Rust KV status " +
           std::to_string(static_cast<unsigned>(status)));
       }
+      KV_TRACE(const auto k = copy(key); trace::operation(
+                 trace_metadata,
+                 global ? "get_global" : "get",
+                 name,
+                 {{"key", ccf::ds::to_hex(k)}, {"value", trace::bytes(&out)}}));
       return out;
     }
 
@@ -169,7 +216,13 @@ namespace ccf::kv::rust_test
           key));
       }();
       r.require();
-      return r.number != 0;
+      const bool found = r.number != 0;
+      KV_TRACE(const auto k = copy(key); trace::operation(
+                 trace_metadata,
+                 global ? "has_global" : "has",
+                 name,
+                 {{"key", ccf::ds::to_hex(k)}, {"value", found}}));
+      return found;
     }
 
     std::optional<Version> previous_bytes(ByteView key)
@@ -186,9 +239,21 @@ namespace ccf::kv::rust_test
       }();
       if (r.status == Status::MISSING)
       {
+        KV_TRACE(
+          const auto k = copy(key); trace::operation(
+            trace_metadata,
+            "previous_write",
+            name,
+            {{"key", ccf::ds::to_hex(k)}, {"value", trace::Json(nullptr)}}));
         return std::nullopt;
       }
       r.require();
+      KV_TRACE(
+        const auto k = copy(key); trace::operation(
+          trace_metadata,
+          "previous_write",
+          name,
+          {{"key", ccf::ds::to_hex(k)}, {"value", trace::Json(r.number)}}));
       return r.number;
     }
 
@@ -266,6 +331,8 @@ namespace ccf::kv::rust_test
     {
       auto r = access.operate(Opcode::SIZE);
       r.require();
+      KV_TRACE(trace::operation(
+        access.trace_meta(), "size", access.map_name(), {{"value", r.size}}));
       return r.size;
     }
 
@@ -274,6 +341,58 @@ namespace ccf::kv::rust_test
     {
       auto r = access.operate(Opcode::SCAN);
       r.require();
+#ifdef CCF_KV_TRACING
+      if (trace::enabled() && access.trace_meta().suppressed == 0)
+      {
+        auto& metadata = access.trace_meta();
+        const auto iteration = ++metadata.iteration;
+        trace::operation(
+          metadata,
+          "foreach_begin",
+          access.map_name(),
+          {{"iteration", iteration}});
+        try
+        {
+          for (size_t i = 0; i < r.size; ++i)
+          {
+            const auto row = r.entry(i);
+            const auto k = copy(row.key);
+            const auto v = copy(row.value);
+            trace::operation(
+              metadata,
+              "foreach_entry",
+              access.map_name(),
+              {{"iteration", iteration},
+               {"key", ccf::ds::to_hex(k)},
+               {"value", ccf::ds::to_hex(v)}});
+            const auto cont = f(row);
+            trace::operation(
+              metadata,
+              "foreach_continue",
+              access.map_name(),
+              {{"iteration", iteration}, {"value", cont}});
+            if (!cont)
+            {
+              break;
+            }
+          }
+        }
+        catch (...)
+        {
+          trace::transaction(
+            metadata.id,
+            "unsupported",
+            {{"operation", "foreach callback exception"}});
+          throw;
+        }
+        trace::operation(
+          metadata,
+          "foreach_end",
+          access.map_name(),
+          {{"iteration", iteration}});
+        return;
+      }
+#endif
       // The Rust reply owns the scan image, even if f modifies this map.
       for (size_t i = 0; i < r.size; ++i)
       {
@@ -318,6 +437,32 @@ namespace ccf::kv::rust_test
       auto run = [&](ByteView from, ByteView to) {
         auto r = access.operate(Opcode::RANGE, from, to);
         r.require();
+#ifdef CCF_KV_TRACING
+        if (trace::enabled())
+        {
+          auto observed = trace::Json::array();
+          for (size_t i = 0; i < r.size; ++i)
+          {
+            const auto row = r.entry(i);
+            const auto k = copy(row.key);
+            const auto v = copy(row.value);
+            observed.push_back(
+              {{"key", ccf::ds::to_hex(k)}, {"value", ccf::ds::to_hex(v)}});
+          }
+          const auto from_b = from.data != nullptr ?
+            std::make_optional(copy(from)) :
+            std::nullopt;
+          const auto to_b =
+            to.data != nullptr ? std::make_optional(copy(to)) : std::nullopt;
+          trace::operation(
+            access.trace_meta(),
+            "range",
+            access.map_name(),
+            {{"from", trace::bytes(from_b.has_value() ? &*from_b : nullptr)},
+             {"to", trace::bytes(to_b.has_value() ? &*to_b : nullptr)},
+             {"entries", std::move(observed)}});
+        }
+#endif
         for (size_t i = 0; i < r.size; ++i)
         {
           const auto row = r.entry(i);
@@ -374,6 +519,8 @@ namespace ccf::kv::rust_test
 
     void clear()
     {
+      KV_TRACE(
+        trace::operation(access.trace_meta(), "clear", access.map_name()));
       access.operate(Opcode::CLEAR).require();
     }
   };
@@ -387,8 +534,23 @@ namespace ccf::kv::rust_test
       NativeTx* native_tx,
       const std::string& name,
       const bool& committed,
-      bool read_only) :
-      MapAccess(store, native_tx, name, committed, read_only),
+      bool read_only
+#ifdef CCF_KV_TRACING
+      ,
+      trace::MapMetadata& trace_metadata
+#endif
+      ) :
+      MapAccess(
+        store,
+        native_tx,
+        name,
+        committed,
+        read_only
+#ifdef CCF_KV_TRACING
+        ,
+        trace_metadata
+#endif
+        ),
       ReadHandle<M>(static_cast<MapAccess&>(*this)),
       WriteHandle<M>(static_cast<MapAccess&>(*this))
     {}
@@ -432,13 +594,19 @@ namespace ccf::kv::rust_test
       bool aborted = false;
       std::optional<Version> version;
       CommittableTx::TxFlags flags = 0;
+#ifdef CCF_KV_TRACING
+      trace::Attempt trace_attempt;
+      std::map<std::string, trace::MapMetadata> map_trace_metadata;
+#endif
 
       State(Store& store_, uint64_t id_, bool read_only_) :
         store(store_),
         id(id_),
         native_tx(ccf_rust_kv_tx_new(id_)),
         read_only(read_only_)
-      {}
+      {
+        KV_TRACE(trace_attempt.bind(&store));
+      }
 
       ~State()
       {
@@ -472,7 +640,12 @@ namespace ccf::kv::rust_test
         .aborted = s.aborted,
         .version = v,
         .commit_view = s.commit_view,
-        .flags = s.flags};
+        .flags = s.flags
+#ifdef CCF_KV_TRACING
+        ,
+        .trace_id = s.trace_attempt.id
+#endif
+      };
       auto info = s.store.commit_tx_impl(params);
       if (s.committed || s.aborted)
       {
@@ -524,14 +697,32 @@ namespace ccf::kv::rust_test
               s.reserved,
               /*explicit_read_txid=*/false,
               s.read_txid,
-              s.commit_view))
+              s.commit_view
+#ifdef CCF_KV_TRACING
+              ,
+              s.trace_attempt.id
+#endif
+              ))
         {
           throw CompactedVersionConflict(
             "Cannot acquire a compacted Rust KV map: " + name);
         }
       }
+#ifdef CCF_KV_TRACING
+      auto& meta = s.map_trace_metadata[name];
+      meta.id = s.trace_attempt.id;
+#endif
       auto handle = std::make_unique<Full>(
-        s.store, s.native_tx, name, s.committed, s.read_only);
+        s.store,
+        s.native_tx,
+        name,
+        s.committed,
+        s.read_only
+#ifdef CCF_KV_TRACING
+        ,
+        meta
+#endif
+      );
       auto* raw = handle.get();
       s.handles.push_back({name, type, std::move(handle)});
       return raw;

@@ -11,6 +11,56 @@
 
 namespace ccf::kv::untyped
 {
+#ifdef CCF_KV_TRACING
+  namespace
+  {
+    // Traces one iteration: its start, every visited entry followed by the
+    // callback's decision to continue, and its end. iterate runs the
+    // untraced iteration with the given visitor.
+    template <typename Iterate>
+    void traced_foreach(
+      trace::MapMetadata& metadata,
+      const std::string& map_name,
+      const MapHandle::ElementVisitorWithEarlyOut& f,
+      Iterate&& iterate)
+    {
+      const auto iteration = ++metadata.iteration;
+      trace::operation(
+        metadata, "foreach_begin", map_name, {{"iteration", iteration}});
+      try
+      {
+        iterate(
+          [&](const MapHandle::KeyType& k, const MapHandle::ValueType& v) {
+            trace::operation(
+              metadata,
+              "foreach_entry",
+              map_name,
+              {{"iteration", iteration},
+               {"key", ccf::ds::to_hex(k)},
+               {"value", ccf::ds::to_hex(v)}});
+            const auto result = f(k, v);
+            trace::operation(
+              metadata,
+              "foreach_continue",
+              map_name,
+              {{"iteration", iteration}, {"value", result}});
+            return result;
+          });
+      }
+      catch (...)
+      {
+        trace::transaction(
+          metadata.id,
+          "unsupported",
+          {{"operation", "foreach callback exception"}});
+        throw;
+      }
+      trace::operation(
+        metadata, "foreach_end", map_name, {{"iteration", iteration}});
+    }
+  }
+#endif
+
 #ifdef CCF_USE_RUST_KV
   namespace
   {
@@ -81,6 +131,11 @@ namespace ccf::kv::untyped
     }
     if (status == rust_ffi::Status::MISSING)
     {
+      KV_TRACE(trace::operation(
+        tx_changes.trace_metadata,
+        "get",
+        map_name,
+        {{"key", ccf::ds::to_hex(key)}, {"value", trace::Json(nullptr)}}));
       return std::nullopt;
     }
     if (status != rust_ffi::Status::OK)
@@ -89,6 +144,11 @@ namespace ccf::kv::untyped
         "Unexpected Rust KV status " +
         std::to_string(static_cast<unsigned>(status)));
     }
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "get",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", trace::bytes(&out)}}));
     return out;
   }
 
@@ -107,9 +167,19 @@ namespace ccf::kv::untyped
     }();
     if (r.status == rust_ffi::Status::MISSING)
     {
+      KV_TRACE(trace::operation(
+        tx_changes.trace_metadata,
+        "previous_write",
+        map_name,
+        {{"key", ccf::ds::to_hex(key)}, {"value", trace::Json(nullptr)}}));
       return std::nullopt;
     }
     r.require();
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "previous_write",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", trace::Json(r.number)}}));
     return r.number;
   }
 
@@ -139,6 +209,11 @@ namespace ccf::kv::untyped
     }
     if (status == rust_ffi::Status::MISSING)
     {
+      KV_TRACE(trace::operation(
+        tx_changes.trace_metadata,
+        "get_global",
+        map_name,
+        {{"key", ccf::ds::to_hex(key)}, {"value", trace::Json(nullptr)}}));
       return std::nullopt;
     }
     if (status != rust_ffi::Status::OK)
@@ -147,6 +222,11 @@ namespace ccf::kv::untyped
         "Unexpected Rust KV status " +
         std::to_string(static_cast<unsigned>(status)));
     }
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "get_global",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", trace::bytes(&out)}}));
     return out;
   }
 
@@ -164,7 +244,13 @@ namespace ccf::kv::untyped
         rust_detail::bytes(key)));
     }();
     r.require();
-    return r.number != 0;
+    const bool found = r.number != 0;
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "has",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", found}}));
+    return found;
   }
 
   bool MapHandle::has_globally_committed(const MapHandle::KeyType& key)
@@ -181,7 +267,13 @@ namespace ccf::kv::untyped
         rust_detail::bytes(key)));
     }();
     r.require();
-    return r.number != 0;
+    const bool found = r.number != 0;
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "has_global",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", found}}));
+    return found;
   }
 
   void MapHandle::put(
@@ -202,6 +294,11 @@ namespace ccf::kv::untyped
         "Unexpected Rust KV status " +
         std::to_string(static_cast<unsigned>(status)));
     }
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "put",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}, {"value", ccf::ds::to_hex(value)}}));
   }
 
   void MapHandle::remove(const MapHandle::KeyType& key)
@@ -221,31 +318,46 @@ namespace ccf::kv::untyped
         "Unexpected Rust KV status " +
         std::to_string(static_cast<unsigned>(status)));
     }
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata,
+      "remove",
+      map_name,
+      {{"key", ccf::ds::to_hex(key)}}));
   }
 
   void MapHandle::clear()
   {
+    KV_TRACE(trace::operation(tx_changes.trace_metadata, "clear", map_name));
     rust_operate(tx_changes, map_name, rust_ffi::Opcode::CLEAR).require();
   }
 
   void MapHandle::foreach(const MapHandle::ElementVisitorWithEarlyOut& f)
   {
-    auto r = rust_operate(tx_changes, map_name, rust_ffi::Opcode::SCAN);
-    r.require();
-    for (size_t i = 0; i < r.size; ++i)
-    {
-      const auto row = r.entry(i);
-      if (!f(rust_detail::copy(row.key), rust_detail::copy(row.value)))
+    auto run = [&](const ElementVisitorWithEarlyOut& visit) {
+      auto r = rust_operate(tx_changes, map_name, rust_ffi::Opcode::SCAN);
+      r.require();
+      for (size_t i = 0; i < r.size; ++i)
       {
-        break;
+        const auto row = r.entry(i);
+        if (!visit(rust_detail::copy(row.key), rust_detail::copy(row.value)))
+        {
+          break;
+        }
       }
-    }
+    };
+    KV_TRACE(if (tx_changes.trace_metadata.suppressed == 0) {
+      traced_foreach(tx_changes.trace_metadata, map_name, f, run);
+      return;
+    });
+    run(f);
   }
 
   size_t MapHandle::size()
   {
     auto r = rust_operate(tx_changes, map_name, rust_ffi::Opcode::SIZE);
     r.require();
+    KV_TRACE(trace::operation(
+      tx_changes.trace_metadata, "size", map_name, {{"value", r.size}}));
     return r.size;
   }
 
@@ -258,6 +370,27 @@ namespace ccf::kv::untyped
       auto r =
         rust_operate(tx_changes, map_name, rust_ffi::Opcode::RANGE, lo, hi);
       r.require();
+#  ifdef CCF_KV_TRACING
+      if (trace::enabled())
+      {
+        auto observed = trace::Json::array();
+        for (size_t i = 0; i < r.size; ++i)
+        {
+          const auto row = r.entry(i);
+          const auto k = rust_detail::copy(row.key);
+          const auto v = rust_detail::copy(row.value);
+          observed.push_back(
+            {{"key", ccf::ds::to_hex(k)}, {"value", ccf::ds::to_hex(v)}});
+        }
+        trace::operation(
+          tx_changes.trace_metadata,
+          "range",
+          map_name,
+          {{"from", trace::bytes(from.has_value() ? &*from : nullptr)},
+           {"to", trace::bytes(to.has_value() ? &*to : nullptr)},
+           {"entries", std::move(observed)}});
+      }
+#  endif
       for (size_t i = 0; i < r.size; ++i)
       {
         const auto row = r.entry(i);
@@ -282,55 +415,6 @@ namespace ccf::kv::untyped
     }
   }
 #else
-#  ifdef CCF_KV_TRACING
-  namespace
-  {
-    // Traces one iteration: its start, every visited entry followed by the
-    // callback's decision to continue, and its end. iterate runs the
-    // untraced iteration with the given visitor.
-    template <typename Iterate>
-    void traced_foreach(
-      trace::MapMetadata& metadata,
-      const std::string& map_name,
-      const MapHandle::ElementVisitorWithEarlyOut& f,
-      Iterate&& iterate)
-    {
-      const auto iteration = ++metadata.iteration;
-      trace::operation(
-        metadata, "foreach_begin", map_name, {{"iteration", iteration}});
-      try
-      {
-        iterate(
-          [&](const MapHandle::KeyType& k, const MapHandle::ValueType& v) {
-            trace::operation(
-              metadata,
-              "foreach_entry",
-              map_name,
-              {{"iteration", iteration},
-               {"key", ccf::ds::to_hex(k)},
-               {"value", ccf::ds::to_hex(v)}});
-            const auto result = f(k, v);
-            trace::operation(
-              metadata,
-              "foreach_continue",
-              map_name,
-              {{"iteration", iteration}, {"value", result}});
-            return result;
-          });
-      }
-      catch (...)
-      {
-        trace::transaction(
-          metadata.id,
-          "unsupported",
-          {{"operation", "foreach callback exception"}});
-        throw;
-      }
-      trace::operation(
-        metadata, "foreach_end", map_name, {{"iteration", iteration}});
-    }
-  }
-#  endif
 
   const MapHandle::ValueType* MapHandle::read_key(const KeyType& key)
   {

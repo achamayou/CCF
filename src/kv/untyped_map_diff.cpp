@@ -23,7 +23,12 @@ namespace ccf::kv::untyped
   MapDiff::MapDiff(ccf::kv::untyped::ChangeSet& cs, std::string map_name_) :
     change_set(cs),
     map_name(std::move(map_name_))
-  {}
+  {
+    KV_TRACE(trace::transaction(
+      change_set.trace_metadata.id,
+      "unsupported",
+      {{"operation", "transaction diff"}}));
+  }
 
   std::optional<std::optional<MapDiff::ValueType>> MapDiff::get(
     const MapDiff::KeyType& key)

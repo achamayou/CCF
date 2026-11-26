@@ -382,6 +382,8 @@ unsafe extern "C" fn ccf_rust_kv_tx_ro_acquire(
     map: ByteView,
     out_root0: *mut u32,
     out_root1: *mut u32,
+    out_local_rev: *mut u64,
+    out_global_rev: *mut u64,
 ) -> Reply {
     let store = unsafe { &*store };
     let tx = unsafe { &mut *tx };
@@ -389,14 +391,26 @@ unsafe extern "C" fn ccf_rust_kv_tx_ro_acquire(
         return Reply::status(Status::InvalidRequest);
     };
     match store.snapshot_and_acquire_readonly(tx, map) {
-        Ok((version, term, Output::Acquired(..), r0, r1)) => {
+        Ok((version, term, Output::Acquired(local_rev, global_rev), r0, r1)) => {
             if !out_root0.is_null() {
                 unsafe { *out_root0 = r0 };
             }
             if !out_root1.is_null() {
                 unsafe { *out_root1 = r1 };
             }
+            if !out_local_rev.is_null() {
+                unsafe { *out_local_rev = local_rev };
+            }
+            if !out_global_rev.is_null() {
+                unsafe { *out_global_rev = global_rev };
+            }
             let mut reply = Reply::status(Status::Ok);
+            reply.number = version;
+            reply.detail = term;
+            reply
+        }
+        Ok((version, term, Output::Unavailable, _, _)) => {
+            let mut reply = Reply::status(Status::Unavailable);
             reply.number = version;
             reply.detail = term;
             reply
@@ -469,6 +483,8 @@ unsafe extern "C" fn ccf_rust_kv_tx_snapshot_and_acquire(
     map: ByteView,
     has_reserved: bool,
     reserved_version: u64,
+    out_local_rev: *mut u64,
+    out_global_rev: *mut u64,
 ) -> Reply {
     let store = unsafe { &mut *store };
     let tx = unsafe { &mut *tx };
@@ -481,8 +497,20 @@ unsafe extern "C" fn ccf_rust_kv_tx_snapshot_and_acquire(
         None
     };
     match store.snapshot_and_acquire_detached(tx, map, reserved) {
-        Ok((version, term, Output::Acquired(..))) => {
+        Ok((version, term, Output::Acquired(local_rev, global_rev))) => {
+            if !out_local_rev.is_null() {
+                unsafe { *out_local_rev = local_rev };
+            }
+            if !out_global_rev.is_null() {
+                unsafe { *out_global_rev = global_rev };
+            }
             let mut reply = Reply::status(Status::Ok);
+            reply.number = version;
+            reply.detail = term;
+            reply
+        }
+        Ok((version, term, Output::Unavailable)) => {
+            let mut reply = Reply::status(Status::Unavailable);
             reply.number = version;
             reply.detail = term;
             reply

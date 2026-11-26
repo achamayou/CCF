@@ -30,6 +30,7 @@ struct MapTypes
 MapTypes::StringString string_map("public:string_map");
 MapTypes::NumNum num_map("public:num_map");
 
+#ifndef CCF_USE_RUST_KV
 namespace
 {
   using MapSnapshots =
@@ -379,6 +380,7 @@ TEST_CASE(
   REQUIRE(tx.ro(string_map)->get("public") == "value");
   REQUIRE(tx.ro(private_map)->get("private") == "secret");
 }
+#endif
 
 namespace
 {

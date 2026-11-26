@@ -24,7 +24,8 @@ local instance : DecidableEq CcfKv.engine.Address :=
 
 /-- `same_opt_cell` checks exact byte-level equality of two optional committed cells. -/
 theorem same_opt_cell_refines (a b : Option CcfKv.engine.Cell)
-    : CcfKv.engine.same_opt_cell a b = .ok (decide (a.map byteCell = b.map byteCell)) := by
+    : CcfKv.engine.same_opt_cell a b
+      = .ok (decide (a.map byteCell = b.map byteCell)) := by
   unfold CcfKv.engine.same_opt_cell
   cases a with
   | none =>
@@ -54,23 +55,28 @@ theorem same_opt_cell_refines (a b : Option CcfKv.engine.Cell)
 /-- Pure survival mask step: keep write `i` active iff it was active and `prev` and `cur`
 agree on the committed cell at `pending[i].1`. -/
 def updateActiveMask (prevDb curDb : DB (List U8) (List U8) (List U8))
-    (pending : List IndexWrite) (mask : List Bool) : List Bool :=
-  (List.range pending.length).map fun i =>
-    mask.getD i false
+    (pending : List IndexWrite) (mask : List Bool)
+    : List Bool :=
+  (List.range pending.length).map
+    fun i =>
+      mask.getD i false
       && match pending[i]? with
-         | none => false
-         | some (a, _) => decide (find prevDb (byteAddr a) = find curDb (byteAddr a))
+          | none => false
+          | some (a, _) => decide (find prevDb (byteAddr a) = find curDb (byteAddr a))
 
 /-- Pure sublist of `pending` selected by a boolean mask of matching length. -/
 def filterByMask (pending : List IndexWrite) (mask : List Bool) : List IndexWrite :=
-  (List.range pending.length).filterMap fun i =>
-    if mask.getD i false then pending[i]? else none
+  (List.range pending.length).filterMap
+    fun i =>
+      if mask.getD i false then pending[i]? else none
 
 private theorem filterByMask_length_le (pending : List IndexWrite) (mask : List Bool)
     : (filterByMask pending mask).length ≤ pending.length := by
   unfold filterByMask
-  calc ((List.range pending.length).filterMap _).length
-      ≤ (List.range pending.length).length := List.length_filterMap_le _ _
+  calc
+    ((List.range pending.length).filterMap _).length
+        ≤ (List.range pending.length).length :=
+      List.length_filterMap_le _ _
     _ = pending.length := List.length_range
 
 private theorem filterByMask_subset (pending : List IndexWrite) (mask : List Bool)
@@ -86,16 +92,17 @@ private theorem filterByMask_subset (pending : List IndexWrite) (mask : List Boo
 `pending[i].1` changed between `prev` and `current`. -/
 theorem filter_overwritten_writes_refines (index : CellIndex)
     (prev current : CcfKv.radix.RadixRoot) (prevRows curRows : CellRows)
-    (hprevView : IndexView index prev prevRows) (hcurView : IndexView index current curRows)
+    (hprevView : IndexView index prev prevRows)
+    (hcurView : IndexView index current curRows)
     (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
-    (active : alloc.vec.Vec Bool)
-    (hlen : active.val.length = pending.val.length)
+    (active : alloc.vec.Vec Bool) (hlen : active.val.length = pending.val.length)
     (addresses : ∀ row ∈ pending.val, IndexKeyRoom row)
     : WP.spec (CcfKv.engine.filter_overwritten_writes index prev current pending active)
         (fun after =>
           after.val.length = pending.val.length
-          ∧ after.val = updateActiveMask (indexedCellData prevRows) (indexedCellData curRows)
-              pending.val active.val) := by
+          ∧ after.val
+            = updateActiveMask (indexedCellData prevRows) (indexedCellData curRows)
+                pending.val active.val) := by
   let n := pending.val.length
   let target := updateActiveMask (indexedCellData prevRows) (indexedCellData curRows)
     pending.val active.val
@@ -181,9 +188,11 @@ theorem filter_overwritten_writes_refines (index : CellIndex)
               have hr := addresses (addr, w) hrowMem
               dsimp only [IndexKeyRoom] at hr
               omega
-            apply WP.spec_bind (index_data_lookup index prev prevRows hprevView addr hkeyRoom)
+            apply WP.spec_bind
+              (index_data_lookup index prev prevRows hprevView addr hkeyRoom)
             intro before hbefore
-            apply WP.spec_bind (index_data_lookup index current curRows hcurView addr hkeyRoom)
+            apply WP.spec_bind
+              (index_data_lookup index current curRows hcurView addr hkeyRoom)
             intro after hafter
             rw [same_opt_cell_refines before after, hbefore, hafter, bind_ok]
             by_cases hsame : find (indexedCellData prevRows) (byteAddr addr)
@@ -279,7 +288,8 @@ theorem collect_active_writes_refines
         simp [List.getD, h1]
       have hfiltLen : filt.val.length ≤ wi.val := by
         rw [hfilt]
-        calc (pre wi.val).length ≤ (List.range wi.val).length := List.length_filterMap_le _ _
+        calc
+          (pre wi.val).length ≤ (List.range wi.val).length := List.length_filterMap_le _ _
           _ = wi.val := List.length_range
       have hstep : WP.spec
           (if b then do
@@ -371,8 +381,9 @@ theorem backfill_stamps_refines
         simp only [bind_ok, clone_bytes]
         apply WP.spec_bind
           (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-            CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-            revisions a.map stamp (fun k => key_same k a.map) clone_bytes hstampClone hrevRoom)
+            CcfKv.engine.Bytes.Insts.CoreCloneClone
+            CcfKv.engine.Stamp.Insts.CoreCloneClone revisions a.map stamp
+            (fun k => key_same k a.map) clone_bytes hstampClone hrevRoom)
         intro rev1 hrev1
         rw [WP.spec_ok]
         have hle : rev1.val.length ≤ revisions.val.length + 1 := by
@@ -430,8 +441,9 @@ theorem backfill_stamps_refines
         simp only [bind_ok, clone_bytes]
         apply WP.spec_bind
           (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-            CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-            births a.map stamp (fun k => key_same k a.map) clone_bytes hstampClone hbirthRoom)
+            CcfKv.engine.Bytes.Insts.CoreCloneClone
+            CcfKv.engine.Stamp.Insts.CoreCloneClone births a.map stamp
+            (fun k => key_same k a.map) clone_bytes hstampClone hbirthRoom)
         intro birth1 hbirth1
         rw [WP.spec_ok]
         have hle : birth1.val.length ≤ births.val.length + 1 := by
@@ -588,7 +600,8 @@ theorem apply_backfill_stamps_refines
     (hrevRoom : revisions.val.length + filtered.val.length ≤ Usize.max)
     (hbirthRoom : births.val.length + filtered.val.length ≤ Usize.max)
     (addresses : ∀ row ∈ filtered.val, IndexKeyRoom row)
-    : WP.spec (CcfKv.engine.apply_backfill_stamps revisions births index oldRoot filtered stamp)
+    : WP.spec
+        (CcfKv.engine.apply_backfill_stamps revisions births index oldRoot filtered stamp)
         (fun (rev1, birth1) =>
           rev1.val.length ≤ revisions.val.length + filtered.val.length
           ∧ birth1.val.length ≤ births.val.length + filtered.val.length) := by
@@ -639,8 +652,8 @@ theorem apply_backfill_stamps_refines
 `dbs = [db_0, db_1, ..., db_k]`: write `i` survives at offset `k` iff its committed
 cell never changed between any adjacent pre-backfill frames `db_j` and `db_{j+1}`
 for `0 ≤ j < k`. -/
-def maskAtStep (pending : List IndexWrite)
-    (dbs : List (DB (List U8) (List U8) (List U8))) : Nat → List Bool
+def maskAtStep (pending : List IndexWrite) (dbs : List (DB (List U8) (List U8) (List U8)))
+    : Nat → List Bool
   | 0 => List.replicate pending.length true
   | k + 1 =>
       match dbs[k]?, dbs[k + 1]? with
@@ -659,7 +672,8 @@ a later commit `(v, ws)` does not perform a silent `Remove` (erasing a key that 
 already absent in the pre-backfill database `prevDb`) on any address written by `W_0`. -/
 def NoSilentRemove (w0 : Writes (List U8) (List U8) (List U8))
     (prevDb : DB (List U8) (List U8) (List U8))
-    (ws : Writes (List U8) (List U8) (List U8)) : Prop :=
+    (ws : Writes (List U8) (List U8) (List U8))
+    : Prop :=
   ∀ a, (find w0 a).isSome → find ws a = some none → find prevDb a ≠ none
 
 /-- Every cell stored in a byte-level database was written at version `≤ bound`. -/
@@ -680,7 +694,8 @@ private theorem find_mem_of_some {K V : Type} [DecidableEq K]
         exact List.mem_cons_of_mem _ (ih h)
 
 private theorem findIdx?_lt {α : Type} {xs : List α} {p : α → Bool} {i : Nat}
-    (h : xs.findIdx? p = some i) : i < xs.length :=
+    (h : xs.findIdx? p = some i)
+    : i < xs.length :=
   (List.findIdx?_eq_some_iff_getElem.mp h).1
 
 private theorem indexedCellData_unique {index : CellIndex} {root : CcfKv.radix.RadixRoot}
@@ -705,17 +720,21 @@ private theorem maskAtStep_length (pending : List IndexWrite)
       unfold maskAtStep
       cases dbs[k]? <;> cases dbs[k + 1]? <;> simp [updateActiveMask, ih]
 
-private theorem find_byteWrites_filterByMask (pending : List IndexWrite) (mask : List Bool)
-    (hUnique : Kv.Properties.Unique (byteWrites pending))
+private theorem find_byteWrites_filterByMask (pending : List IndexWrite)
+    (mask : List Bool) (hUnique : Kv.Properties.Unique (byteWrites pending))
     (a : Addr (List U8) (List U8))
     : find (byteWrites (filterByMask pending mask)) a
       = match pending.findIdx? (fun row => decide (byteAddr row.1 = a)) with
         | none => none
         | some i =>
             if mask.getD i false then
-              (pending[i]?).map fun row =>
-                match row.2 with | .Put v => some v.val | .Remove => none
-            else none := by
+              (pending[i]?).map
+                fun row =>
+                  match row.2 with
+                  | .Put v => some v.val
+                  | .Remove => none
+            else
+              none := by
   have hbyte : ∀ (xs : List IndexWrite),
       Kv.Properties.Unique (byteWrites xs) →
       ∀ (x : Addr (List U8) (List U8)) (w : Option (List U8)),
@@ -814,13 +833,16 @@ private theorem find_byteWrites_filterByMask (pending : List IndexWrite) (mask :
                   have hjAddr : byteAddr (pending[j]'hjlt).1 = a := congrArg Prod.fst hrowEq
                   have heqIdx : j = i := by
                     have hnodup : (pending.map (fun r => byteAddr r.1)).Nodup := by
-                      simpa [Kv.Properties.Unique, byteWrites, List.map_map, Function.comp_def] using hUnique
+                      simpa [Kv.Properties.Unique, byteWrites, List.map_map,
+                        Function.comp_def]
+                        using hUnique
                     have h1 : (pending.map (fun r => byteAddr r.1))[j]'(by simpa using hjlt)
                         = (pending.map (fun r => byteAddr r.1))[i]'(by simpa using hilt) := by
                       simp [hjAddr, hrow]
                     exact congrArg Fin.val
                       ((List.nodup_iff_injective_getElem.mp hnodup)
-                        (a₁ := ⟨j, by simpa using hjlt⟩) (a₂ := ⟨i, by simpa using hilt⟩) h1)
+                        (a₁ := ⟨j, by simpa using hjlt⟩) (a₂ := ⟨i, by simpa using hilt⟩)
+                        h1)
                   subst heqIdx
                   rw [hmask] at hmj
                   cases hmj
@@ -838,12 +860,13 @@ theorem backfill_model_linearizes
     (commits : List (Nat × Writes (List U8) (List U8) (List U8)))
     (hUnique0 : Kv.Properties.Unique (byteWrites pending))
     (hlen : dbs.length = commits.length + 1)
-    (hsteps : ∀ k (hk : k < commits.length),
-      dbs[k + 1]'(by omega)
-        = Kv.Model.publish (dbs[k]'(by omega)) (commits[k]'hk).1 (commits[k]'hk).2
-      ∧ reservedVer < (commits[k]'hk).1
-      ∧ ByteCellsBounded (dbs[k]'(by omega)) ((commits[k]'hk).1 - 1)
-      ∧ NoSilentRemove (byteWrites pending) (dbs[k]'(by omega)) (commits[k]'hk).2)
+    (hsteps
+      : ∀ k (hk : k < commits.length),
+          dbs[k + 1]'(by omega)
+            = Kv.Model.publish (dbs[k]'(by omega)) (commits[k]'hk).1 (commits[k]'hk).2
+          ∧ reservedVer < (commits[k]'hk).1
+          ∧ ByteCellsBounded (dbs[k]'(by omega)) ((commits[k]'hk).1 - 1)
+          ∧ NoSilentRemove (byteWrites pending) (dbs[k]'(by omega)) (commits[k]'hk).2)
     (k : Nat) (hk : k ≤ commits.length) (a : Addr (List U8) (List U8))
     : find
         (Kv.Model.publish (dbs[k]'(by omega)) reservedVer
@@ -883,8 +906,10 @@ theorem backfill_model_linearizes
       obtain ⟨hpub, hverGt, hbound, hnoSilent⟩ := hsteps k hkLt
       have htakeSucc : commits.take (k + 1) = commits.take k ++ [commits[k]'hkLt] := by
         rw [List.take_add_one, List.getElem?_eq_getElem hkLt]; simp
-      have hreplayAppend : ∀ base xs step,
-          replayPublish base (xs ++ [step]) = Kv.Model.publish (replayPublish base xs) step.1 step.2 := by
+      have hreplayAppend
+          : ∀ base xs step,
+              replayPublish base (xs ++ [step])
+              = Kv.Model.publish (replayPublish base xs) step.1 step.2 := by
         intro base xs step
         induction xs generalizing base with
         | nil => rfl
@@ -987,10 +1012,13 @@ theorem silent_remove_counterexample (a : CcfKv.engine.Address) (v : CcfKv.engin
       let db0 : DB (List U8) (List U8) (List U8) := []
       let w1 : Writes (List U8) (List U8) (List U8) := [(byteAddr a, none)]
       let db1 := Kv.Model.publish db0 2 w1
-      find (Kv.Model.publish db1 1 (byteWrites (filterByMask pending (maskAtStep pending [db0, db1] 1))))
+      find
+          (Kv.Model.publish db1 1
+            (byteWrites (filterByMask pending (maskAtStep pending [db0, db1] 1))))
           (byteAddr a)
         = some { value := v.val, version := 1 }
-      ∧ find (replayPublish (Kv.Model.publish db0 1 (byteWrites pending)) [(2, w1)]) (byteAddr a)
+      ∧ find (replayPublish (Kv.Model.publish db0 1 (byteWrites pending)) [(2, w1)])
+          (byteAddr a)
         = none := by
   simp [maskAtStep, updateActiveMask, filterByMask, replayPublish, Kv.Model.publish,
     byteWrites, Kv.Model.set, erase, find]
@@ -1000,38 +1028,47 @@ theorem silent_remove_counterexample (a : CcfKv.engine.Address) (v : CcfKv.engin
 /-- Capacity bounds ensuring `apply_backfill_ccf` completes without overflow across
 every frame in `startOff ..< activeFrames.length`. -/
 structure BackfillRoom (s : CcfKv.engine.Store) (pending : List IndexWrite)
-    (extraPins : List U32) (startOff : Nat) : Prop where
+    (extraPins : List U32) (startOff : Nat)
+    : Prop where
   startLt : startOff < s.history.activeFrames.length
   nextId : s.history.next_identity.val < U64.max
   addresses : ∀ row ∈ pending, IndexKeyRoom row
   stampsRoom
     : ∀ j (hj : j < s.history.activeFrames.length),
-        startOff ≤ j →
-        (s.history.activeFrames[j]'hj).revisions.val.length + pending.length ≤ Usize.max
-        ∧ (s.history.activeFrames[j]'hj).births.val.length + pending.length ≤ Usize.max
+        startOff ≤ j
+        → (s.history.activeFrames[j]'hj).revisions.val.length + pending.length ≤ Usize.max
+          ∧ (s.history.activeFrames[j]'hj).births.val.length + pending.length ≤ Usize.max
   indexDirs
     : ∀ (peakRows : Nat),
         (∀ j (hj : j < s.history.activeFrames.length),
-          (indexRows s.history.index (s.history.activeFrames[j]'hj).data).length ≤ peakRows) →
-        let span := s.history.activeFrames.length - startOff
-        let perStepDirs := pending.length * (peakRows + pending.length + 1)
-        let totalDirs := span * perStepDirs
-        let totalRows := span * pending.length
-        s.history.index.values.dirs.val.length + totalDirs + (peakRows + pending.length + 1)
-          ≤ 2147483647
-        ∧ s.history.index.values.rows.val.length + totalRows ≤ 2147483647
-        ∧ (s.history.activeFrames.length + extraPins.length)
-            + 17 * (s.history.index.values.dirs.val.length + totalDirs + 2) + 2
-          ≤ U32.max
-        ∧ 2 * ((s.history.index.values.dirs.val.length + totalDirs)
-              + (s.history.index.values.rows.val.length + totalRows)) + 1
-          ≤ Usize.max
+          (indexRows s.history.index (s.history.activeFrames[j]'hj).data).length
+          ≤ peakRows)
+        → let span := s.history.activeFrames.length - startOff
+          let perStepDirs := pending.length * (peakRows + pending.length + 1)
+          let totalDirs := span * perStepDirs
+          let totalRows := span * pending.length
+          s.history.index.values.dirs.val.length
+              + totalDirs
+              + (peakRows + pending.length + 1)
+            ≤ 2147483647
+          ∧ s.history.index.values.rows.val.length + totalRows ≤ 2147483647
+          ∧ (s.history.activeFrames.length + extraPins.length)
+              + 17 * (s.history.index.values.dirs.val.length + totalDirs + 2)
+              + 2
+            ≤ U32.max
+          ∧ 2
+                * ((s.history.index.values.dirs.val.length + totalDirs)
+                    + (s.history.index.values.rows.val.length + totalRows))
+              + 1
+            ≤ Usize.max
 
 private theorem framePins_set_perm (frames : List CcfKv.engine.Frame) (k : Nat)
     (old new : CcfKv.engine.Frame) (hget : frames[k]? = some old)
     : (if new.data = 0#u32 then framePins frames else new.data :: framePins frames).Perm
-        (if old.data = 0#u32 then framePins (frames.set k new)
-         else old.data :: framePins (frames.set k new)) := by
+        (if old.data = 0#u32 then
+            framePins (frames.set k new)
+          else
+            old.data :: framePins (frames.set k new)) := by
   induction frames generalizing k with
   | nil => simp at hget
   | cons hd tl ih =>
@@ -1076,8 +1113,10 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
     : WP.spec (CcfKv.engine.Store.apply_backfill_ccf s pending reservedVer startOff)
         (fun after =>
           let origFrames := s.history.activeFrames
-          let dbs := (origFrames.drop startOff.val).map fun f =>
-            indexedCellData (indexRows s.history.index f.data)
+          let dbs :=
+            (origFrames.drop startOff.val).map
+              fun f =>
+                indexedCellData (indexRows s.history.index f.data)
           after.history.activeFrames.length = origFrames.length
           ∧ after.history.retained = s.history.retained
           ∧ after.history.global = s.history.global
@@ -1087,7 +1126,8 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
           ∧ after.txs = s.txs
           ∧ BranchValid after.history.log
           ∧ HistoryIndexValid after.history
-          ∧ IndexLiveness after.history.index (framePins after.history.activeFrames ++ extraPins)
+          ∧ IndexLiveness after.history.index
+              (framePins after.history.activeFrames ++ extraPins)
           ∧ IndexPreservesPins s.history.index after.history.index extraPins
           ∧ (∀ j, j < startOff.val → after.history.activeFrames[j]? = origFrames[j]?)
           ∧ (∀ d (hd : startOff.val + d < origFrames.length),
@@ -1099,7 +1139,9 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
                     (Kv.Model.publish
                       (indexedCellData (indexRows s.history.index origF.data))
                       reservedVer.val
-                      (byteWrites (filterByMask pending.val (maskAtStep pending.val dbs d)))))) := by
+                      (byteWrites
+                        (filterByMask pending.val
+                          (maskAtStep pending.val dbs d)))))) := by
   let origFrames := s.history.activeFrames
   let origLen := origFrames.length
   let dbs : List (DB (List U8) (List U8) (List U8)) :=
@@ -1206,9 +1248,11 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
         ∧ IndexLiveness ai (optPin prevOpt ++ (framePins (branchValues bl) ++ extraPins))
         ∧ IndexKeeps s.history.index ai
         ∧ (∀ f ∈ branchValues bl, IndexView ai f.data (indexRows ai f.data))
-        ∧ ai.values.dirs.val.length ≤ s.history.index.values.dirs.val.length
+        ∧ ai.values.dirs.val.length
+          ≤ s.history.index.values.dirs.val.length
             + (off.val - startOff.val) * perStepDirs
-        ∧ ai.values.rows.val.length ≤ s.history.index.values.rows.val.length
+        ∧ ai.values.rows.val.length
+          ≤ s.history.index.values.rows.val.length
             + (off.val - startOff.val) * pending.val.length
         ∧ (∀ j, j < startOff.val → (branchValues bl)[j]? = origFrames[j]?)
         ∧ (∀ j, off.val ≤ j → (branchValues bl)[j]? = origFrames[j]?)
@@ -1221,13 +1265,14 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
                   (Kv.Model.publish
                     (indexedCellData (indexRows s.history.index origF.data))
                     reservedVer.val
-                    (byteWrites (filterByMask pending.val (maskAtStep pending.val dbs d)))))
+                    (byteWrites
+                      (filterByMask pending.val (maskAtStep pending.val dbs d)))))
         ∧ (if off.val = startOff.val then
-            prevOpt = none ∧ aw.val = List.replicate pending.val.length true
-          else
-            ∃ hprev : off.val - 1 < origLen,
-              prevOpt = some (origFrames[off.val - 1]'hprev).data
-              ∧ aw.val = maskAtStep pending.val dbs (off.val - 1 - startOff.val)))
+              prevOpt = none ∧ aw.val = List.replicate pending.val.length true
+            else
+              ∃ hprev : off.val - 1 < origLen,
+                prevOpt = some (origFrames[off.val - 1]'hprev).data
+                ∧ aw.val = maskAtStep pending.val dbs (off.val - 1 - startOff.val)))
       _ _ _
     · rintro ⟨bl, ai, aw, prevOpt, off⟩
         ⟨hgeStart, hleEnd, hblValid, hblLenEq, hbvLen, haiLive, haiKeeps, haiViews,
@@ -1381,10 +1426,19 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
             rw [hmono d hdGe i hi] at hiSpec
             simp at hiSpec
           have hleSpan : off.val - startOff.val ≤ origLen - startOff.val := by omega
-          refine ⟨hblValid, hbvLen, by simpa [optPin] using hai1Live, hai1Keeps, ?_,
-            by rw [hai1Vals]; exact le_trans hdirsB (Nat.add_le_add_left (Nat.mul_le_mul_right _ hleSpan) _),
-            by rw [hai1Vals]; exact le_trans hrowsB (Nat.add_le_add_left (Nat.mul_le_mul_right _ hleSpan) _),
-            hpreEq, ?_⟩
+          refine ⟨
+            hblValid,
+            hbvLen,
+            by simpa [optPin] using hai1Live,
+            hai1Keeps,
+            ?_,
+            by
+              rw [hai1Vals]; exact le_trans hdirsB (Nat.add_le_add_left (Nat.mul_le_mul_right _ hleSpan) _),
+            by
+              rw [hai1Vals]; exact le_trans hrowsB (Nat.add_le_add_left (Nat.mul_le_mul_right _ hleSpan) _),
+            hpreEq,
+            ?_
+          ⟩
           · intro f hf
             have hv := index_keeps_view (by unfold IndexKeeps; rw [hai1Vals]; exact .refl _ : IndexKeeps ai ai1)
               f.data _ (haiViews f hf)
@@ -1418,7 +1472,8 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
           obtain ⟨hrevRm, hbrtRm⟩ := room.stampsRoom off.val hoffLt hgeStart
           apply WP.spec_bind
             (apply_backfill_stamps_refines origF.revisions origF.births ai1 origF.data
-              (indexRows s.history.index origF.data) hcurView1 filtered
+              (indexRows s.history.index origF.data)
+              hcurView1 filtered
               { version := reservedVer, identity := s.history.next_identity }
               (by dsimp only [origF, origFrames] at *; omega)
               (by dsimp only [origF, origFrames] at *; omega)
@@ -1436,7 +1491,9 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
             rw [List.length_append]
             have : (framePins (branchValues bl)).length ≤ origLen := by
               unfold framePins
-              calc ((branchValues bl).filterMap _).length ≤ (branchValues bl).length := List.length_filterMap_le _ _
+              calc
+                ((branchValues bl).filterMap _).length ≤ (branchValues bl).length :=
+                  List.length_filterMap_le _ _
                 _ = origLen := hbvLen
             omega
           have hbatchRoom : IndexBatchRoom ai1 (framePins (branchValues bl) ++ extraPins).length
@@ -1471,14 +1528,16 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
             · omega
             · omega
           apply WP.spec_bind
-            (indexed_publication_refines ai1 origF.data (indexRows s.history.index origF.data)
-              filtered reservedVer (framePins (branchValues bl) ++ extraPins) hcurView1 hai1Live
-              hrootPin hbatchRoom (fun r hr => room.addresses r (hfiltSub r hr)))
+            (indexed_publication_refines ai1 origF.data
+              (indexRows s.history.index origF.data) filtered reservedVer
+              (framePins (branchValues bl) ++ extraPins) hcurView1 hai1Live hrootPin
+              hbatchRoom (fun r hr => room.addresses r (hfiltSub r hr)))
           rintro ⟨newRoot, ai2⟩ ⟨⟨outRows, houtView, houtPerm⟩, hai2Live, hai2Keeps, hai2Growth⟩
           let newF : CcfKv.engine.Frame :=
             { origF with data := newRoot, revisions := rev1, births := brt1 }
           have hoffBlLt : off.val < bl.len.val := by rw [hblLenEq, hlogLen]; exact hoffLt
-          apply WP.spec_bind (branch_replace_active_at_refines bl off newF hblValid hoffBlLt)
+          apply WP.spec_bind
+            (branch_replace_active_at_refines bl off newF hblValid hoffBlLt)
           rintro ⟨oldFrame, bl1⟩ ⟨holdGet, hbl1Valid, hbl1Len, _, _, hbl1Vals⟩
           have holdEq : oldFrame = origF := Option.some.inj (holdGet.symm.trans hblGet)
           subst holdEq
@@ -1547,8 +1606,25 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
             have hg := hai2Growth.2
             rw [hai1Vals] at hg
             omega
-          refine ⟨⟨by omega, by omega, hbl1Valid, hbl1Len.trans hblLenEq, hbv1Len, hliveAfter,
-            hai2KeepsS, hviewsAfter, hdirsAfter, hrowsAfter, ?_, ?_, ?_, ?_⟩, by omega⟩
+          refine ⟨
+            ⟨
+              by omega,
+              by omega,
+              hbl1Valid,
+              hbl1Len.trans hblLenEq,
+              hbv1Len,
+              hliveAfter,
+              hai2KeepsS,
+              hviewsAfter,
+              hdirsAfter,
+              hrowsAfter,
+              ?_,
+              ?_,
+              ?_,
+              ?_
+            ⟩,
+            by omega
+          ⟩
           · intro j hj
             rw [hbl1Vals, List.getElem?_set_ne (by omega)]
             exact hpreEq j hj
@@ -1628,7 +1704,9 @@ theorem apply_backfill_ccf_refines (s : CcfKv.engine.Store)
   apply WP.spec_bind hrelFinal
   rintro ai1 ⟨hai1Vals, hai1Live⟩
   have hone64 : (1#u64 : U64).val = 1 := rfl
-  apply WP.spec_bind (U64.add_spec (x := s.history.next_identity) (y := 1#u64) (by have := room.nextId; omega))
+  apply WP.spec_bind
+    (U64.add_spec (x := s.history.next_identity) (y := 1#u64)
+      (by have := room.nextId; omega))
   intro nextId hnextId
   have hqAi1 : 2 * (ai1.values.dirs.val.length + ai1.values.rows.val.length) + 1 ≤ Usize.max := by
     rw [hai1Vals]; exact hqAi
@@ -1702,23 +1780,30 @@ theorem apply_backfill_ccf_linearizes (s : CcfKv.engine.Store)
     (room : BackfillRoom s pending.val extraPins startOff.val)
     (hUnique0 : Kv.Properties.Unique (byteWrites pending.val))
     (hSpan : s.history.activeFrames.length - startOff.val = commits.length + 1)
-    (hSteps :
-      let dbs := (s.history.activeFrames.drop startOff.val).map fun f =>
-        indexedCellData (indexRows s.history.index f.data)
-      ∀ k (hk : k < commits.length),
-        dbs[k + 1]'(by simp [dbs]; omega)
-          = Kv.Model.publish (dbs[k]'(by simp [dbs]; omega)) (commits[k]'hk).1 (commits[k]'hk).2
-        ∧ reservedVer.val < (commits[k]'hk).1
-        ∧ ByteCellsBounded (dbs[k]'(by simp [dbs]; omega)) ((commits[k]'hk).1 - 1)
-        ∧ NoSilentRemove (byteWrites pending.val) (dbs[k]'(by simp [dbs]; omega)) (commits[k]'hk).2)
+    (hSteps
+      : let dbs :=
+          (s.history.activeFrames.drop startOff.val).map
+            fun f =>
+              indexedCellData (indexRows s.history.index f.data)
+        ∀ k (hk : k < commits.length),
+          dbs[k + 1]'(by simp [dbs]; omega)
+            = Kv.Model.publish (dbs[k]'(by simp [dbs]; omega)) (commits[k]'hk).1
+                (commits[k]'hk).2
+          ∧ reservedVer.val < (commits[k]'hk).1
+          ∧ ByteCellsBounded (dbs[k]'(by simp [dbs]; omega)) ((commits[k]'hk).1 - 1)
+          ∧ NoSilentRemove (byteWrites pending.val) (dbs[k]'(by simp [dbs]; omega))
+              (commits[k]'hk).2)
     : WP.spec (CcfKv.engine.Store.apply_backfill_ccf s pending reservedVer startOff)
         (fun after =>
-          let dbs := (s.history.activeFrames.drop startOff.val).map fun f =>
-            indexedCellData (indexRows s.history.index f.data)
+          let dbs :=
+            (s.history.activeFrames.drop startOff.val).map
+              fun f =>
+                indexedCellData (indexRows s.history.index f.data)
           after.history.activeFrames.length = s.history.activeFrames.length
           ∧ BranchValid after.history.log
           ∧ HistoryIndexValid after.history
-          ∧ IndexLiveness after.history.index (framePins after.history.activeFrames ++ extraPins)
+          ∧ IndexLiveness after.history.index
+              (framePins after.history.activeFrames ++ extraPins)
           ∧ ∀ d (_ : d ≤ commits.length) (a : Addr (List U8) (List U8)),
               ∃ newF,
                 after.history.activeFrames[startOff.val + d]? = some newF
@@ -1730,7 +1815,8 @@ theorem apply_backfill_ccf_linearizes (s : CcfKv.engine.Store)
                         (commits.take d))
                       a) := by
   apply WP.spec_mono
-    (apply_backfill_ccf_refines s pending reservedVer startOff extraPins valid idxValid live room)
+    (apply_backfill_ccf_refines s pending reservedVer startOff extraPins valid idxValid
+      live room)
   intro after ⟨hlen, _, _, _, _, _, _, hblValid, hidxValid, hlive, _, _, hframes⟩
   refine ⟨hlen, hblValid, hidxValid, hlive, ?_⟩
   intro d hd a
@@ -1761,6 +1847,7 @@ theorem apply_backfill_ccf_linearizes (s : CcfKv.engine.Store)
     simp [dbs]
   refine ⟨newF, hnewGet, ?_⟩
   rw [hfindPerm, ← hdbsAt]
-  exact backfill_model_linearizes pending.val reservedVer.val dbs commits hUnique0 hdbsLen hSteps d hd a
+  exact backfill_model_linearizes pending.val reservedVer.val dbs commits hUnique0 hdbsLen
+    hSteps d hd a
 
 end KvRust

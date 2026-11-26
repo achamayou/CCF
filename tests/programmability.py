@@ -137,15 +137,21 @@ def test_custom_endpoints(network, args):
             return {**module_def, "name": f"/{module_def['name']}"}
 
     def same_modulo_normalisation(expected, actual):
-        # Normalise expected (in the same way that CCF will) so we can do direct comparison
+        # Normalise expected (in the same way that CCF will) so we can do direct comparison.
+        # Module order comes from KV map iteration, which is backend-dependent.
         expected["metadata"]["endpoints"] = {
             path: upper_cased_keys(op)
             for path, op in expected["metadata"]["endpoints"].items()
         }
-        expected["modules"] = [
-            prefixed_module_name(module_def) for module_def in expected["modules"]
-        ]
-        return expected == actual
+        expected["modules"] = sorted(
+            (prefixed_module_name(module_def) for module_def in expected["modules"]),
+            key=lambda m: m["name"],
+        )
+        actual_normalised = {
+            **actual,
+            "modules": sorted(actual["modules"], key=lambda m: m["name"]),
+        }
+        return expected == actual_normalised
 
     def test_getters(c, expected_body):
         r = c.get("/app/custom_endpoints")

@@ -348,6 +348,7 @@ namespace ccf::kv
     bool public_only,
     const std::optional<TxID>& expected_txid)
   {
+    KV_TRACE(trace::unsupported(this, "deserialisation"));
     return std::make_unique<RustReplayEntry>(
       *this, data, public_only, expected_txid);
   }
@@ -569,6 +570,8 @@ namespace ccf::kv
 
   void RustStore::swap_private_maps(RustStore& source)
   {
+    KV_TRACE(trace::unsupported(this, "swap private maps"));
+    KV_TRACE(trace::unsupported(&source, "swap private maps"));
     if (this == &source)
     {
       throw std::logic_error("Cannot swap a Rust KV store with itself");
@@ -677,6 +680,7 @@ namespace ccf::kv
     std::optional<SnapshotPublicMaps>* capture,
     const SnapshotPublicMaps* reuse)
   {
+    KV_TRACE(trace::unsupported(this, "snapshot import"));
     std::scoped_lock lock(maps_lock, state_lock);
     RawKvStoreDeserialiser decoder(
       encryptor, public_only ? std::make_optional(PUBLIC) : std::nullopt);
@@ -839,8 +843,40 @@ namespace ccf::kv
     const std::optional<TxID>& reserved,
     bool explicit_read_txid,
     std::optional<TxID>& read_txid,
-    View& commit_view)
+    View& commit_view
+#ifdef CCF_KV_TRACING
+    ,
+    trace::Identity trace_id
+#endif
+  )
   {
+#ifdef CCF_KV_TRACING
+    const bool had_snapshot = read_txid.has_value();
+    auto emit_acquire_trace =
+      [&](const Response& res, uint64_t local_rev, uint64_t global_rev) {
+        if (!trace::enabled())
+        {
+          return;
+        }
+        trace::Context trace_context(trace_id);
+        if (!had_snapshot)
+        {
+          trace::snapshot(this, res.number, res.detail);
+        }
+        if (res.status == Status::OK)
+        {
+          trace::operation(
+            trace_id,
+            "map_acquire",
+            map_name,
+            {{"version", local_rev}, {"global", global_rev}});
+        }
+        else
+        {
+          trace::operation(trace_id, "map_unavailable", map_name);
+        }
+      };
+#endif
     bool acquired = false;
     if (!registered && !reserved.has_value() && !explicit_read_txid)
     {
@@ -863,10 +899,18 @@ namespace ccf::kv
         {
           uint32_t r0 = 0;
           uint32_t r1 = 0;
+          uint64_t local_rev = 0;
+          uint64_t global_rev = 0;
           auto r = [&]() {
             ShardedRwLock::ReadGuard guard(native_lock);
             auto res = wrap_reply(ccf_rust_kv_tx_ro_acquire(
-              native.get(), tx, bytes(map_name), &r0, &r1));
+              native.get(),
+              tx,
+              bytes(map_name),
+              &r0,
+              &r1,
+              &local_rev,
+              &global_rev));
             if (res.status == Status::OK)
             {
               auto add_root = [&](uint32_t root) {
@@ -896,6 +940,10 @@ namespace ccf::kv
                   res.number + 1, std::memory_order_release);
               }
             }
+            if (res.status == Status::OK || res.status == Status::UNAVAILABLE)
+            {
+              KV_TRACE(emit_acquire_trace(res, local_rev, global_rev));
+            }
             return res;
           }();
           if (r.status == Status::UNAVAILABLE)
@@ -918,6 +966,8 @@ namespace ccf::kv
         }
         else
         {
+          uint64_t local_rev = 0;
+          uint64_t global_rev = 0;
           ShardedRwLock::WriteGuard guard(native_lock);
           const auto pstatus = ccf_rust_kv_tx_promote(native.get(), tx);
           if (pstatus != Status::OK)
@@ -930,7 +980,17 @@ namespace ccf::kv
           release_hazard_slot(hazard_slot);
           hazard_slot = -1;
           auto r = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-            native.get(), tx, bytes(map_name), false, 0));
+            native.get(),
+            tx,
+            bytes(map_name),
+            false,
+            0,
+            &local_rev,
+            &global_rev));
+          if (r.status == Status::OK || r.status == Status::UNAVAILABLE)
+          {
+            KV_TRACE(emit_acquire_trace(r, local_rev, global_rev));
+          }
           if (r.status == Status::UNAVAILABLE)
           {
             return false;
@@ -946,10 +1006,23 @@ namespace ccf::kv
       const Version explicit_ver = reserved.has_value() ?
         reserved->seqno - 1 :
         (read_txid.has_value() ? read_txid->seqno : 0);
+      uint64_t local_rev = 0;
+      uint64_t global_rev = 0;
       auto r = [&]() {
         ShardedRwLock::WriteGuard guard(native_lock);
-        return wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-          native.get(), tx, bytes(map_name), has_explicit_ver, explicit_ver));
+        auto res = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+          native.get(),
+          tx,
+          bytes(map_name),
+          has_explicit_ver,
+          explicit_ver,
+          &local_rev,
+          &global_rev));
+        if (res.status == Status::OK || res.status == Status::UNAVAILABLE)
+        {
+          KV_TRACE(emit_acquire_trace(res, local_rev, global_rev));
+        }
+        return res;
       }();
       registered = true;
       if (
@@ -957,6 +1030,10 @@ namespace ccf::kv
         (explicit_read_txid && r.status == Status::DISABLED &&
          explicit_ver < compacted_version()))
       {
+        if (r.status != Status::UNAVAILABLE)
+        {
+          KV_TRACE(emit_acquire_trace(r, local_rev, global_rev));
+        }
         return false;
       }
       r.require();
@@ -989,11 +1066,27 @@ namespace ccf::kv
     {
       throw std::logic_error("Use the commit method for this transaction kind");
     }
-    if (!params.is_reserved && !params.has_any_changes)
+#ifdef CCF_KV_TRACING
+    std::optional<trace::Commit> trace_commit;
+    if (params.is_reserved)
     {
+      KV_TRACE(trace::unsupported(this, "reserved transaction"));
+    }
+    else
+    {
+      trace_commit.emplace(params.trace_id);
+    }
+#endif
+    if (!params.has_any_changes || params.rust_tx == nullptr)
+    {
+      if (params.is_reserved)
+      {
+        throw std::logic_error("Reserved transaction cannot be empty");
+      }
       params.committed = true;
       params.success = true;
       params.committing = true;
+      KV_TRACE(trace_commit->result("success", 0));
       return result_only(CommitResult::SUCCESS);
     }
 
@@ -1119,13 +1212,55 @@ namespace ccf::kv
       }
 
       params.committing = true;
+#ifdef CCF_KV_TRACING
+      trace::Json trace_writes;
+      if (!params.is_reserved && trace::enabled())
+      {
+        trace_writes = trace::Json::array();
+        for (const auto& [name, rows] : writes)
+        {
+          for (const auto& [key, val] : rows)
+          {
+            trace_writes.push_back(
+              {{"map", name},
+               {"key", ccf::ds::to_hex(key)},
+               {"value", trace::bytes(val.has_value() ? &*val : nullptr)}});
+          }
+        }
+      }
+      std::optional<trace::Context> trace_context;
+      if (!params.is_reserved)
+      {
+        trace_context.emplace(params.trace_id, &trace_writes, &*trace_commit);
+      }
+#endif
       auto applied = [&]() {
         ShardedRwLock::WriteGuard native_guard(native_lock);
-        return params.is_reserved ?
+        auto res = params.is_reserved ?
           wrap_reply(ccf_rust_kv_tx_commit_reserved(
             native.get(), params.rust_tx, params.reserved->seqno)) :
           wrap_reply(
             ccf_rust_kv_tx_prepare_commit(native.get(), params.rust_tx));
+        if (!params.is_reserved)
+        {
+          if (res.status == Status::CONFLICT)
+          {
+            KV_TRACE(trace::local_result("conflict", 0));
+          }
+          else if (res.status == Status::STALE_TERM)
+          {
+            KV_TRACE(trace::local_result("no_replicate", 0));
+          }
+          else if (res.status == Status::READ_ONLY)
+          {
+            KV_TRACE(trace::local_result("success", 0));
+          }
+          else if (res.status == Status::OK)
+          {
+            KV_TRACE(trace::apply(this, res.number, res.detail));
+          }
+        }
+        return res;
       }();
       if (applied.status == Status::CONFLICT)
       {
@@ -1134,11 +1269,13 @@ namespace ccf::kv
           throw std::logic_error("Failed to commit reserved transaction");
         }
         params.success = false;
+        KV_TRACE(trace_commit->result("conflict", 0));
         return result_only(CommitResult::FAIL_CONFLICT);
       }
       if (applied.status == Status::STALE_TERM)
       {
         params.success = false;
+        KV_TRACE(trace_commit->result("no_replicate", 0));
         return result_only(CommitResult::FAIL_NO_REPLICATE);
       }
       if (applied.status == Status::READ_ONLY)
@@ -1153,6 +1290,7 @@ namespace ccf::kv
         params.version = NoVersion;
         params.committed = true;
         params.success = true;
+        KV_TRACE(trace_commit->result("success", 0));
         return result_only(CommitResult::SUCCESS);
       }
       applied.require();
@@ -1218,8 +1356,17 @@ namespace ccf::kv
         std::move(hooks)};
     }
 
+    // Match the C++ CommittableTx contract: once local application and
+    // serialisation succeed, the assigned TxID is observable (including from
+    // write_set_observer callbacks) before consensus replication completes.
+    params.version = id.seqno;
+    params.commit_view = id.view;
+    params.committed = true;
+    params.success = true;
+
     if (params.observer)
     {
+      KV_TRACE(trace::unsupported(this, "write set observer"));
       const auto digest = ccf::crypto::Sha256Hash(data.data(), data.size());
       params.observer(digest, evidence);
     }
@@ -1248,10 +1395,9 @@ namespace ccf::kv
     auto output = wrap_reply(
       ccf_rust_kv_tx_finish(params.rust_tx, static_cast<uint64_t>(outcome)));
     output.require();
-    params.version = output.number;
-    params.commit_view = id.view;
-    params.committed = true;
-    params.success = true;
+    KV_TRACE(trace_commit->result(
+      commit_result == CommitResult::SUCCESS ? "success" : "no_replicate",
+      output.number));
     return result_only(commit_result);
   }
 
@@ -1277,7 +1423,12 @@ namespace ccf::kv
       .aborted = pimpl->rust_aborted,
       .version = version,
       .commit_view = pimpl->commit_view,
-      .flags = flags};
+      .flags = flags
+#  ifdef CCF_KV_TRACING
+      ,
+      .trace_id = pimpl->trace_attempt.id
+#  endif
+    };
     auto info = store.commit_tx_impl(params);
     if (committed)
     {

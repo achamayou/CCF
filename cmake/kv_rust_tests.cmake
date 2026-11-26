@@ -14,6 +14,9 @@ add_unit_test(
   ${CCF_DIR}/src/kv/test/kv_rust_test_main.cpp
   ${CCF_DIR}/src/kv/test/kv_trace.cpp
 )
+if(CCF_KV_TRACING)
+  target_sources(kv_rust_test PRIVATE ${CCF_DIR}/src/kv/trace.cpp)
+endif()
 target_compile_definitions(kv_rust_test PRIVATE CCF_KV_RUST_TEST_BACKEND)
 target_link_libraries(
   kv_rust_test

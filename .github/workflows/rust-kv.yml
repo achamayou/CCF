@@ -1,0 +1,159 @@
+name: "Rust KV"
+
+# Path-triggered CI for the verified Rust KV backend: builds and tests both
+# standalone FFI/trace validation (-DBUILD_RUST_KV_TESTS=ON) and full CCF
+# integration (-DUSE_RUST_KV=ON).
+on:
+  pull_request:
+    paths:
+      - "src/rust/ccf-kv/**"
+      - "src/kv/**"
+      - "include/ccf/kv/**"
+      - "cmake/ccf_kv_rust.cmake"
+      - "cmake/kv_rust_tests.cmake"
+      - "CMakeLists.txt"
+      - "tests/kv_trace_validation*.py"
+      - ".github/workflows/rust-kv.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  rust_kv_tests_and_traces:
+    name: Rust KV crate, FFI tests, and Lean trace replay
+    runs-on: [gha-vmss-d16av7-ci]
+    container:
+      image: mcr.microsoft.com/azurelinux/core:4
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout dependencies
+        run: |
+          set -euo pipefail
+          dnf -y update
+          dnf -y install ca-certificates git tar zstd
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install CI dependencies
+        uses: ./.github/actions/install-ci-dependencies
+        with:
+          cache-python-packages: "false"
+
+      - name: Install Lean
+        uses: ./.github/actions/install-lean
+
+      - name: Run Rust KV crate and FFI unit tests
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src/rust/ccf-kv/Cargo.toml --locked
+          cargo test --manifest-path src/rust/ccf-kv/ffi/Cargo.toml --locked
+
+      - name: Build Lean KV trace checker
+        working-directory: lean/kv
+        run: |
+          set -euo pipefail
+          lake build --wfail kv-replay
+
+      - name: Build and run Rust KV FFI, interop, and trace validation tests
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cmake -S . -B "$RUNNER_TEMP/rust-kv-tests" -GNinja \
+            -DBUILD_RUST_KV_TESTS=ON -DCCF_KV_TRACING=ON
+          cmake --build "$RUNNER_TEMP/rust-kv-tests" \
+            --target kv_rust_test kv_rust_interop_test kv_backend_bench \
+            --parallel "$(( ($(nproc) + 1) >> 1 ))"
+          ctest --test-dir "$RUNNER_TEMP/rust-kv-tests" --output-on-failure \
+            -R "^(kv_rust_test|kv_rust_interop_test)$" --no-tests=error
+          rm -rf "$RUNNER_TEMP/rust-kv-tests/kv-traces"
+          python3 tests/kv_trace_validation.py \
+            --binary "$RUNNER_TEMP/rust-kv-tests/kv_rust_test" \
+            --checker "$GITHUB_WORKSPACE/lean/kv/.lake/build/bin/kv-replay" \
+            --output "$RUNNER_TEMP/rust-kv-tests/kv-traces" \
+            --seeds 8 --timeout 900
+
+      - name: Upload trace diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-kv-trace-diagnostics
+          path: |
+            ${{ runner.temp }}/rust-kv-tests/kv-traces/
+            ${{ runner.temp }}/rust-kv-tests/Testing/
+          if-no-files-found: ignore
+          retention-days: 1
+          overwrite: true
+
+  use_rust_kv_full:
+    name: CCF with USE_RUST_KV=ON (unit + core e2e)
+    runs-on: [gha-vmss-d16av7-ci]
+    container:
+      image: mcr.microsoft.com/azurelinux/core:4
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      options: --user root --publish-all --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_PTRACE --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.default.disable_ipv6=0 --sysctl net.ipv6.conf.lo.disable_ipv6=0
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout dependencies
+        run: |
+          set -euo pipefail
+          dnf -y update
+          dnf -y install ca-certificates git tar zstd
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install CI dependencies
+        uses: ./.github/actions/install-ci-dependencies
+
+      - name: Build CCF with USE_RUST_KV=ON
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cmake -S . -B build -GNinja -DUSE_RUST_KV=ON
+          cmake --build build --parallel "$(( ($(nproc) + 1) >> 1 ))"
+
+      - name: Run all unit tests
+        run: |
+          set -euo pipefail
+          cd build
+          ./tests.sh --output-on-failure -L '^unit$' -j "$(nproc --all)" --no-tests=error
+
+      - name: Run core e2e tests
+        run: |
+          set -euo pipefail
+          cd build
+          ./tests.sh --timeout 360 --output-on-failure --no-tests=error -j 2 \
+            -R '^(e2e_basic_rust|e2e_forwarding_smoke|e2e_logging|e2e_limits|e2e_redirects|auth|modules_test|governance_test|recovery_test|recovery_stale_snapshot_join_test|recovery_intermediate_snapshot_join_test|reconfiguration_test_suite|code_update_test|programmability_and_jwt|nodes_test)$'
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-rust-kv
+          path: |
+            build/workspace/*/*.config.json
+            build/workspace/*/out
+            build/workspace/*/err
+            build/workspace/*/stack_trace
+          if-no-files-found: ignore
+          retention-days: 1
+          overwrite: true

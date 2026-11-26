@@ -21,8 +21,23 @@ namespace ccf::kv::rust_test
       NativeTx* native_tx,
       const std::string& name,
       const bool& committed,
-      bool read_only = false) :
-      MapAccess(store, native_tx, name, committed, read_only),
+      bool read_only
+#ifdef CCF_KV_TRACING
+      ,
+      trace::MapMetadata& trace_metadata
+#endif
+      ) :
+      MapAccess(
+        store,
+        native_tx,
+        name,
+        committed,
+        read_only
+#ifdef CCF_KV_TRACING
+        ,
+        trace_metadata
+#endif
+        ),
       Read(static_cast<MapAccess&>(*this)),
       Write(static_cast<MapAccess&>(*this))
     {}

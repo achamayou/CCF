@@ -92,6 +92,9 @@ namespace ccf::kv
     {
       if (!s.read_txid.has_value())
       {
+#  ifdef CCF_KV_TRACING
+        trace::Context trace_context(s.trace_attempt.id);
+#  endif
         auto p = s.store->current_txid_and_commit_term();
         s.read_txid = p.first;
         s.commit_view = p.second;
@@ -115,6 +118,9 @@ namespace ccf::kv
     const bool subclass_store = (typeid(*s.store) != typeid(Store));
     if (subclass_store && !s.read_txid.has_value() && !s.rust_reserved)
     {
+#  ifdef CCF_KV_TRACING
+      trace::Context trace_context(s.trace_attempt.id);
+#  endif
       auto p = s.store->current_txid_and_commit_term();
       s.read_txid = p.first;
       s.commit_view = p.second;
@@ -129,15 +135,20 @@ namespace ccf::kv
           s.rust_reserved,
           s.rust_explicit_read_txid,
           s.read_txid,
-          s.commit_view))
+          s.commit_view
+#  ifdef CCF_KV_TRACING
+          ,
+          s.trace_attempt.id
+#  endif
+          ))
     {
       return {nullptr, nullptr};
     }
 
-    return {
-      nullptr,
-      std::make_unique<untyped::ChangeSet>(
-        &store, s.rust_tx, &s.rust_committed, is_read_only)};
+    auto cs = std::make_unique<untyped::ChangeSet>(
+      &store, s.rust_tx, &s.rust_committed, is_read_only);
+    KV_TRACE(cs->trace_metadata.id = s.trace_attempt.id);
+    return {nullptr, std::move(cs)};
 #else
     auto& read_txid = pimpl->read_txid;
 #  ifdef CCF_KV_TRACING

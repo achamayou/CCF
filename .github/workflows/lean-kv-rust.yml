@@ -1,0 +1,139 @@
+name: "Lean Rust KV verification"
+
+# Re-extracts src/rust/ccf-kv via Charon and Aeneas, checks all KvRust proofs
+# against lean/kv with lake and leanchecker, and checks Lean formatting.
+on:
+  pull_request:
+    paths:
+      - "src/rust/ccf-kv/Cargo.toml"
+      - "src/rust/ccf-kv/Cargo.lock"
+      - "src/rust/ccf-kv/src/**"
+      - "lean/kv/**"
+      - "lean/kv-rust/**"
+      - "lean/common/**"
+      - "lean/lean-toolchain"
+      - "scripts/lean-format-checks.sh"
+      - ".github/workflows/lean-kv-rust.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Extract and verify Rust KV proofs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pinned Aeneas revision
+        id: pin
+        run: |
+          set -euo pipefail
+          rev=$(sed -n 's/^rev = "\([0-9a-f]\{40\}\)"$/\1/p' lean/kv-rust/lakefile.toml)
+          if [[ -z "$rev" ]]; then
+            echo "::error::Could not read pinned Aeneas revision from lean/kv-rust/lakefile.toml"
+            exit 1
+          fi
+          echo "aeneas_rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "AENEAS_DIR=$HOME/.cache/ccf-aeneas/$rev" >> "$GITHUB_ENV"
+
+      - name: Install system prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            bubblewrap \
+            curl \
+            elan \
+            git \
+            libgmp-dev \
+            m4 \
+            opam \
+            perl \
+            pkg-config \
+            rsync \
+            unzip
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Lean
+        run: |
+          set -euo pipefail
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          elan run --install "$(cat lean/lean-toolchain)" lean --version
+
+      - name: Run Rust KV crate unit tests
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src/rust/ccf-kv/Cargo.toml --locked
+          cargo test --manifest-path src/rust/ccf-kv/ffi/Cargo.toml --locked
+
+      - name: Restore pinned Aeneas and Charon
+        id: aeneas-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AENEAS_DIR }}
+          key: aeneas-v1-ubuntu-26.04-${{ runner.arch }}-${{ steps.pin.outputs.aeneas_rev }}
+
+      - name: Build pinned Aeneas and Charon on cache miss
+        if: steps.aeneas-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$AENEAS_DIR")"
+          git clone https://github.com/AeneasVerif/aeneas.git "$AENEAS_DIR"
+          git -C "$AENEAS_DIR" checkout "${{ steps.pin.outputs.aeneas_rev }}"
+          cd "$AENEAS_DIR"
+          make setup-charon
+          opam init --disable-sandboxing --bare -y
+          opam switch create 5.3.0 -y
+          eval "$(opam env --switch=5.3.0)"
+          opam install -y ppx_deriving visitors easy_logging zarith yojson core_unix odoc ocamlgraph menhir ocamlformat unionFind progress terminal dune
+          (
+            cd charon
+            make build-charon-rust
+            make build-charon-ocaml
+          )
+          make build-dev
+          # Drop bulky build intermediates before saving the cache; keep binaries and git metadata.
+          rm -rf charon/target charon/charon/target src/_build tests/test_runner/_build
+
+      - name: Ensure Charon nightly rustc sysroot is installed
+        run: |
+          set -euo pipefail
+          (
+            cd "$AENEAS_DIR/charon"
+            rustc --version
+          )
+
+      - name: Restore Lean dependency builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: lean/kv-rust/.lake/packages
+          key: lean-deps-v1-ubuntu-26.04-${{ runner.arch }}-kv-rust-${{ hashFiles('lean/lean-toolchain', 'lean/kv-rust/lake-manifest.json', 'lean/kv-rust/lakefile.toml', 'lean/kv/lake-manifest.json', 'lean/kv/lakefile.toml', 'lean/common/lake-manifest.json', 'lean/common/lakefile.toml', '.github/workflows/lean-kv-rust.yml') }}
+
+      - name: Extract, build, and kernel-check KvRust proofs
+        run: |
+          set -euo pipefail
+          bash lean/kv-rust/verify.sh "$AENEAS_DIR"
+
+      - name: Check Lean formatting
+        run: |
+          set -euo pipefail
+          ./scripts/lean-format-checks.sh kv-rust

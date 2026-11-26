@@ -4,10 +4,7 @@
 if(NOT TARGET cargo-build_ccf_kv_rust)
   set(CCF_KV_RUST_CRATE "${CCF_DIR}/src/rust/ccf-kv/ffi")
   set(CCF_KV_RUST_CARGO_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo/ccf-kv-rust")
-  set(
-    CCF_KV_RUST_CARGO_LIB
-    "${CCF_KV_RUST_CARGO_DIR}/release/libccf_kv_ffi.a"
-  )
+  set(CCF_KV_RUST_CARGO_LIB "${CCF_KV_RUST_CARGO_DIR}/release/libccf_kv_ffi.a")
   set(
     CCF_KV_RUST_COMBINED_OBJECT
     "${CCF_KV_RUST_CARGO_DIR}/ccf_kv_rust_combined.o"

@@ -67,6 +67,7 @@ TEST_CASE("Map name parsing")
   REQUIRE(parse("public:ccf_foo") == mp(SD::PUBLIC, AC::APPLICATION));
 }
 
+#ifndef CCF_USE_RUST_KV
 namespace
 {
   // A minimal AbstractMap which is not a ccf::kv::untyped::Map, used only to
@@ -115,6 +116,7 @@ namespace
     void clear() override {}
   };
 }
+#endif
 
 TEST_CASE("Store error handling")
 {
@@ -137,6 +139,7 @@ TEST_CASE("Store error handling")
     REQUIRE(kv_store.is_ready());
   }
 
+#ifndef CCF_USE_RUST_KV
   SUBCASE("add_dynamic_map rejects a map of the wrong type")
   {
     auto fake = std::make_shared<FakeMap>("public:fake");
@@ -161,6 +164,7 @@ TEST_CASE("Store error handling")
       "Can't add dynamic map - already have a map named public:map",
       std::logic_error);
   }
+#endif
 
   SUBCASE("snapshot version must not be earlier than the compacted version")
   {

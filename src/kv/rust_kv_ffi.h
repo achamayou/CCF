@@ -154,7 +154,9 @@ namespace ccf::kv::rust_ffi
       NativeTx* tx,
       ByteView map,
       uint32_t* out_root0,
-      uint32_t* out_root1);
+      uint32_t* out_root1,
+      uint64_t* out_local_rev,
+      uint64_t* out_global_rev);
     Status ccf_rust_kv_tx_promote(NativeStore* store, NativeTx* tx);
     void ccf_rust_kv_retain_root(NativeStore* store, uint32_t root);
     void ccf_rust_kv_release_root(NativeStore* store, uint32_t root);
@@ -168,7 +170,9 @@ namespace ccf::kv::rust_ffi
       NativeTx* tx,
       ByteView map,
       bool has_reserved,
-      uint64_t reserved_version);
+      uint64_t reserved_version,
+      uint64_t* out_local_rev,
+      uint64_t* out_global_rev);
     Reply ccf_rust_kv_reserve_version(NativeStore* store);
     Reply ccf_rust_kv_tx_commit_reserved(
       NativeStore* store, NativeTx* tx, uint64_t version);

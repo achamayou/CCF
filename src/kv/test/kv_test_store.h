@@ -30,7 +30,7 @@ namespace ccf::kv::test
   inline bool has_map_at(
     TestStoreBase& store, Version version, const std::string& name)
   {
-#ifdef CCF_KV_RUST_TEST_BACKEND
+#if defined(CCF_KV_RUST_TEST_BACKEND) || defined(CCF_USE_RUST_KV)
     return store.has_map_at(version, name);
 #else
     return store.get_map(version, name) != nullptr;

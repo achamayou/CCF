@@ -16,6 +16,7 @@
 #include "kv/rust_kv_ffi.h"
 #include "kv/snapshot.h"
 #include "kv/store_readiness.h"
+#include "kv/trace.h"
 #include "kv/untyped_map.h"
 #include "kv/version_v.h"
 
@@ -190,6 +191,9 @@ namespace ccf::kv
       Version& version;
       View& commit_view;
       CommittableTx::TxFlags& flags;
+#ifdef CCF_KV_TRACING
+      trace::Identity trace_id{};
+#endif
     };
 
     class ShardedRwLock
@@ -667,7 +671,9 @@ namespace ccf::kv
   public:
     explicit RustStore(bool is_historical_ = false) :
       is_historical(is_historical_)
-    {}
+    {
+      KV_TRACE(trace::store_create(this));
+    }
 
     bool has_map_at(Version version, const std::string& name)
     {
@@ -696,7 +702,12 @@ namespace ccf::kv
       const std::optional<TxID>& reserved,
       bool explicit_read_txid,
       std::optional<TxID>& read_txid,
-      View& commit_view);
+      View& commit_view
+#ifdef CCF_KV_TRACING
+      ,
+      trace::Identity trace_id = {}
+#endif
+    );
 
     PendingTxInfo commit_tx_impl(TxCommitParams& params);
 
@@ -729,7 +740,11 @@ namespace ccf::kv
         rust_ffi::ccf_rust_kv_tx_operate(native.get(), tx, request));
     }
 
-    ~RustStore() override = default;
+    ~RustStore() override
+    {
+      KV_TRACE(trace::store_end(this));
+    }
+
     RustStore(const RustStore&) = delete;
     RustStore& operator=(const RustStore&) = delete;
 
@@ -768,6 +783,8 @@ namespace ccf::kv
 
     void set_history(const std::shared_ptr<TxHistory>& h)
     {
+      KV_TRACE(
+        if (h) { trace::unsupported(this, "transaction history machinery"); });
       std::lock_guard lock(state_lock);
       history = h;
     }
@@ -780,6 +797,7 @@ namespace ccf::kv
 
     void set_chunker(const std::shared_ptr<ILedgerChunker>& c)
     {
+      KV_TRACE(if (c) { trace::unsupported(this, "ledger chunk machinery"); });
       std::lock_guard lock(state_lock);
       chunker = c;
     }
@@ -798,6 +816,7 @@ namespace ccf::kv
 
     void set_snapshotter(const SnapshotterPtr& s)
     {
+      KV_TRACE(if (s) { trace::unsupported(this, "snapshot machinery"); });
       std::lock_guard lock(state_lock);
       snapshotter = s;
     }
@@ -874,6 +893,7 @@ namespace ccf::kv
     std::pair<TxID, Term> current_txid_and_commit_term() override
     {
       std::lock_guard lock(state_lock);
+      KV_TRACE(trace::snapshot(this, head, term));
       return {{last_view.load(std::memory_order_acquire), head}, term};
     }
 
@@ -894,11 +914,12 @@ namespace ccf::kv
       std::lock_guard lock(state_lock);
       if (term != 0)
       {
-        throw std::logic_error("Commit term is already initialised");
+        throw std::logic_error("term_of_next_version is already initialised");
       }
       dispatch_write({.op = rust_ffi::Opcode::SET_TERM, .number = view})
         .require();
       term = view;
+      KV_TRACE(trace::initialise_term(this));
       if (history)
       {
         history->set_term(view);
@@ -908,6 +929,7 @@ namespace ccf::kv
     std::optional<std::tuple<Version, Version>> next_version(
       Term expected_commit_term) override
     {
+      KV_TRACE(trace::unsupported(this, "reserved transaction ID"));
       std::scoped_lock lock(maps_lock, state_lock);
       if (term != expected_commit_term)
       {
@@ -931,6 +953,7 @@ namespace ccf::kv
 
     TxID next_txid() override
     {
+      KV_TRACE(trace::unsupported(this, "reserved transaction ID"));
       std::scoped_lock lock(maps_lock, state_lock);
       auto r = [&]() {
         ShardedRwLock::WriteGuard native_guard(native_lock);
@@ -1044,6 +1067,7 @@ namespace ccf::kv
 
     void clear()
     {
+      KV_TRACE(trace::unsupported(nullptr, "store clear"));
       std::scoped_lock lock(
         commit_lock, compaction_lock, maps_lock, state_lock);
       {
@@ -1069,6 +1093,7 @@ namespace ccf::kv
     void set_map_hook(
       const std::string& name, const ccf::kv::untyped::Map::MapHook& hook)
     {
+      KV_TRACE(if (hook) { trace::unsupported(this, "local hook"); });
       std::lock_guard lock(state_lock);
       local_hooks.insert_or_assign(name, hook);
     }
@@ -1082,6 +1107,7 @@ namespace ccf::kv
     void set_global_hook(
       const std::string& name, const ccf::kv::untyped::Map::CommitHook& hook)
     {
+      KV_TRACE(if (hook) { trace::unsupported(this, "global hook"); });
       std::lock_guard lock(state_lock);
       global_hooks.insert_or_assign(name, hook);
     }
@@ -1095,6 +1121,9 @@ namespace ccf::kv
     void compact(Version v) override
     {
       std::lock_guard ordered(compaction_lock);
+#ifdef CCF_KV_TRACING
+      trace::Environment trace_environment;
+#endif
       SnapshotterPtr snap;
       std::shared_ptr<Consensus> cons;
       std::shared_ptr<ILedgerChunker> ch;
@@ -1125,6 +1154,10 @@ namespace ccf::kv
           auto res = dispatch_write_locked(
             {.op = rust_ffi::Opcode::COMPACT, .number = compact_target});
           sync_hazards_locked();
+          if (res.status == rust_ffi::Status::OK)
+          {
+            KV_TRACE(trace::compact(this, res.number, v));
+          }
           return res;
         }();
         r.require();
@@ -1172,6 +1205,10 @@ namespace ccf::kv
     void rollback(const TxID& txid, View new_term) override
     {
       std::scoped_lock lock(maps_lock, state_lock);
+#ifdef CCF_KV_TRACING
+      trace::Environment trace_environment;
+      trace::Rollback trace_rollback(this);
+#endif
       auto r = [&]() {
         ShardedRwLock::WriteGuard native_guard(native_lock);
         sync_hazards_locked();
@@ -1180,11 +1217,22 @@ namespace ccf::kv
            .attempt = new_term,
            .number = txid.seqno});
         sync_hazards_locked();
+        if (res.status == rust_ffi::Status::ROLLBACK_REJECTED)
+        {
+          KV_TRACE(trace_rollback.rejected(txid.seqno, new_term));
+        }
+        else if (res.status == rust_ffi::Status::OK)
+        {
+          KV_TRACE(trace_rollback.result(res.number, txid.seqno, new_term));
+        }
         return res;
       }();
       if (r.status == rust_ffi::Status::ROLLBACK_REJECTED)
       {
-        throw std::logic_error("Cannot roll back compacted Rust KV history");
+        throw std::logic_error(std::format(
+          "Attempting rollback to {}, earlier than commit version {}",
+          txid.seqno,
+          global));
       }
       r.require();
       const auto old_head = head;

@@ -10,7 +10,7 @@
 #include <doctest/doctest.h>
 #include <thread>
 
-#if defined(CCF_KV_TRACING) && !defined(CCF_KV_RUST_TEST_BACKEND)
+#ifdef CCF_KV_TRACING
 namespace
 {
   class KVTraceReporter : public doctest::IReporter
