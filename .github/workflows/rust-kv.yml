@@ -10,6 +10,7 @@ on:
       - "src/kv/**"
       - "include/ccf/kv/**"
       - "cmake/ccf_kv_rust.cmake"
+      - "cmake/verify_ccf_kv_rust_exports.cmake"
       - "cmake/kv_rust_tests.cmake"
       - "CMakeLists.txt"
       - "tests/kv_trace_validation*.py"

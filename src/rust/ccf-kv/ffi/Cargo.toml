@@ -12,3 +12,7 @@ ccf-kv = { path = ".." }
 
 [lints.rust]
 warnings = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1

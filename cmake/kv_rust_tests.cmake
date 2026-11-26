@@ -18,11 +18,7 @@ if(CCF_KV_TRACING)
   target_sources(kv_rust_test PRIVATE ${CCF_DIR}/src/kv/trace.cpp)
 endif()
 target_compile_definitions(kv_rust_test PRIVATE CCF_KV_RUST_TEST_BACKEND)
-target_link_libraries(
-  kv_rust_test
-  PRIVATE "${CCF_KV_RUST_LIBRARY}" ccfcrypto ${CMAKE_DL_LIBS} m
-)
-add_dependencies(kv_rust_test cargo-build_ccf_kv_rust)
+target_link_libraries(kv_rust_test PRIVATE ccf_kv_rust ccfcrypto)
 
 add_unit_test(
   kv_rust_interop_test
@@ -31,15 +27,8 @@ add_unit_test(
 )
 target_link_libraries(
   kv_rust_interop_test
-  PRIVATE
-    "${CCF_KV_RUST_LIBRARY}"
-    ccfcrypto
-    ${CMAKE_DL_LIBS}
-    m
-    ccf_kv
-    http_parser
+  PRIVATE ccf_kv_rust ccfcrypto ccf_kv http_parser
 )
-add_dependencies(kv_rust_interop_test cargo-build_ccf_kv_rust)
 
 add_test_bin(
   kv_backend_bench
@@ -48,12 +37,5 @@ add_test_bin(
 )
 target_link_libraries(
   kv_backend_bench
-  PRIVATE
-    "${CCF_KV_RUST_LIBRARY}"
-    ccfcrypto
-    ${CMAKE_DL_LIBS}
-    m
-    ccf_kv
-    http_parser
+  PRIVATE ccf_kv_rust ccfcrypto ccf_kv http_parser
 )
-add_dependencies(kv_backend_bench cargo-build_ccf_kv_rust)

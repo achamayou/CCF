@@ -369,11 +369,7 @@ if(CCF_KV_TRACING)
 endif()
 if(USE_RUST_KV)
   target_sources(ccf_kv PRIVATE ${CCF_DIR}/src/kv/rust_kv_backend.cpp)
-  target_link_libraries(
-    ccf_kv
-    PUBLIC ccfcrypto "${CCF_KV_RUST_LIBRARY}" ${CMAKE_DL_LIBS} m
-  )
-  add_dependencies(ccf_kv cargo-build_ccf_kv_rust)
+  target_link_libraries(ccf_kv PUBLIC ccfcrypto ccf_kv_rust)
 endif()
 
 # CCF endpoints lib
