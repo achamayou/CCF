@@ -356,6 +356,15 @@ namespace ccf::kv
   CommitResult RustStore::commit(
     const TxID& id, std::unique_ptr<PendingTx> entry, bool committable)
   {
+    return commit_internal(id, std::move(entry), committable, std::nullopt);
+  }
+
+  CommitResult RustStore::commit_internal(
+    const TxID& id,
+    std::unique_ptr<PendingTx> entry,
+    bool committable,
+    std::optional<size_t> expected_rollback_count)
+  {
     std::lock_guard ordered(commit_lock);
 
     std::vector<std::tuple<std::unique_ptr<PendingTx>, bool>>
@@ -370,7 +379,10 @@ namespace ccf::kv
 
     {
       std::lock_guard lock(state_lock);
-      if (term != id.view)
+      if (
+        term != id.view ||
+        (expected_rollback_count.has_value() &&
+         rollback_count != *expected_rollback_count))
       {
         return CommitResult::FAIL_NO_REPLICATE;
       }
@@ -824,7 +836,9 @@ namespace ccf::kv
             hooks.push_back(std::move(hook));
           }
         }
-        map_deltas[name].emplace(image.revision, MapDelta{std::move(writes)});
+        map_deltas[name].emplace(
+          image.revision,
+          MapDelta{std::make_shared<const untyped::Write>(std::move(writes))});
       }
     }
     if (view_history)
@@ -1105,7 +1119,8 @@ namespace ccf::kv
       throw std::logic_error("Reserved transaction cannot be empty");
     }
 
-    MapWrites writes;
+    std::vector<std::pair<std::string, std::shared_ptr<const untyped::Write>>>
+      shared_writes;
     EncryptorPtr enc;
     size_t max_size = max_serialised_entry_size;
     if (pending.size != 0)
@@ -1123,7 +1138,7 @@ namespace ccf::kv
       {
         throw KvSerialiserException("No encryptor set");
       }
-      writes = collect_writes(pending);
+      auto writes = collect_writes(pending);
       pending.data.reset();
       if (!params.is_reserved)
       {
@@ -1182,6 +1197,12 @@ namespace ccf::kv
           }
         }
       }
+      shared_writes.reserve(writes.size());
+      for (auto& [name, rows] : writes)
+      {
+        shared_writes.emplace_back(
+          name, std::make_shared<const untyped::Write>(std::move(rows)));
+      }
     }
 
     TxID id{};
@@ -1209,7 +1230,7 @@ namespace ccf::kv
         }
       }
 
-      if (!writes.empty())
+      if (!shared_writes.empty())
       {
         enc = encryptor;
         max_size = max_entry_size;
@@ -1225,9 +1246,9 @@ namespace ccf::kv
       if (!params.is_reserved && trace::enabled())
       {
         trace_writes = trace::Json::array();
-        for (const auto& [name, rows] : writes)
+        for (const auto& [name, rows_ptr] : shared_writes)
         {
-          for (const auto& [key, val] : rows)
+          for (const auto& [key, val] : *rows_ptr)
           {
             trace_writes.push_back(
               {{"map", name},
@@ -1330,7 +1351,7 @@ namespace ccf::kv
         local_entry_flags |= EntryFlags::FORCE_LEDGER_CHUNK_AFTER;
       }
 
-      hooks = record_commit_locked(id.seqno, writes);
+      hooks = record_commit_shared_locked(id.seqno, shared_writes);
     }
 
     const auto evidence = enc->get_commit_evidence(id);
@@ -1344,7 +1365,42 @@ namespace ccf::kv
       params.claims,
       false,
       params.is_reserved ? max_serialised_entry_size : max_size);
-    serialise_writes(serialiser, writes);
+    for (const auto domain : {SecurityDomain::PUBLIC, SecurityDomain::PRIVATE})
+    {
+      for (const auto& [name, rows_ptr] : shared_writes)
+      {
+        const auto& rows = *rows_ptr;
+        if (rows.empty() || get_security_domain(name) != domain)
+        {
+          continue;
+        }
+        serialiser.start_map(name, domain);
+        serialiser.serialise_entry_version(NoVersion);
+        serialiser.serialise_count_header(0);
+        uint64_t puts = 0;
+        uint64_t removes = 0;
+        for (const auto& [_, value] : rows)
+        {
+          ++(value.has_value() ? puts : removes);
+        }
+        serialiser.serialise_count_header(puts);
+        for (const auto& [key, value] : rows)
+        {
+          if (value.has_value())
+          {
+            serialiser.serialise_write(key, *value);
+          }
+        }
+        serialiser.serialise_count_header(removes);
+        for (const auto& [key, value] : rows)
+        {
+          if (!value.has_value())
+          {
+            serialiser.serialise_remove(key);
+          }
+        }
+      }
+    }
     auto data = serialiser.get_raw_data();
 
     if (params.is_reserved)
@@ -1379,23 +1435,16 @@ namespace ccf::kv
       params.observer(digest, evidence);
     }
 
-    bool survived_pre_commit = true;
-    {
-      std::lock_guard lock(state_lock);
-      survived_pre_commit = (rollback_count == epoch && term == id.view);
-    }
-
     ClaimsDigest claims_copy = params.claims;
-    const auto commit_result = survived_pre_commit ?
-      commit(
-        id,
-        std::make_unique<MovePendingTx>(
-          std::move(data),
-          std::move(claims_copy),
-          std::move(evidence_digest),
-          std::move(hooks)),
-        false) :
-      CommitResult::FAIL_NO_REPLICATE;
+    const auto commit_result = commit_internal(
+      id,
+      std::make_unique<MovePendingTx>(
+        std::move(data),
+        std::move(claims_copy),
+        std::move(evidence_digest),
+        std::move(hooks)),
+      false,
+      epoch);
 
     const auto outcome = commit_result == CommitResult::SUCCESS ?
       Outcome::SUCCESS :

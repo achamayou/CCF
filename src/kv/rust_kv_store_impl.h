@@ -23,19 +23,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <format>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <pthread.h>
 #include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -196,37 +195,118 @@ namespace ccf::kv
 #endif
     };
 
+    class alignas(64) AdaptiveMutex
+    {
+      static constexpr uint32_t SPIN_LIMIT = 2048;
+      std::mutex m;
+      std::atomic<bool> held{false};
+
+      static inline void cpu_relax()
+      {
+#if defined(__x86_64__) || defined(_M_X64)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield" ::: "memory");
+#endif
+      }
+
+    public:
+      AdaptiveMutex() = default;
+
+      void lock()
+      {
+        if (!held.load(std::memory_order_relaxed) && m.try_lock())
+        {
+          held.store(true, std::memory_order_relaxed);
+          return;
+        }
+        for (uint32_t i = 0; i < SPIN_LIMIT; ++i)
+        {
+          if (!held.load(std::memory_order_relaxed) && m.try_lock())
+          {
+            held.store(true, std::memory_order_relaxed);
+            return;
+          }
+          cpu_relax();
+        }
+        m.lock();
+        held.store(true, std::memory_order_relaxed);
+      }
+
+      bool try_lock()
+      {
+        if (!held.load(std::memory_order_relaxed) && m.try_lock())
+        {
+          held.store(true, std::memory_order_relaxed);
+          return true;
+        }
+        return false;
+      }
+
+      void unlock()
+      {
+        held.store(false, std::memory_order_relaxed);
+        m.unlock();
+      }
+
+      AdaptiveMutex(const AdaptiveMutex&) = delete;
+      AdaptiveMutex& operator=(const AdaptiveMutex&) = delete;
+    };
+
     class ShardedRwLock
     {
       static constexpr size_t NUM_STRIPES = 8;
+      static constexpr uint32_t WRITER_BIT = 0x80000000u;
+      static constexpr uint32_t READER_MASK = 0x7fffffffu;
+      static constexpr uint32_t SPIN_LIMIT = 512;
+
+      static inline void cpu_relax()
+      {
+#if defined(__x86_64__) || defined(_M_X64)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield" ::: "memory");
+#endif
+      }
 
       struct alignas(64) Stripe
       {
-        mutable pthread_rwlock_t rwlock;
+        mutable std::atomic<uint32_t> state{0};
 
-        Stripe()
-        {
-          pthread_rwlockattr_t attr;
-          pthread_rwlockattr_init(&attr);
-#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
-          pthread_rwlockattr_setkind_np(
-            &attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
-#endif
-          pthread_rwlock_init(&rwlock, &attr);
-          pthread_rwlockattr_destroy(&attr);
-        }
-
-        ~Stripe()
-        {
-          pthread_rwlock_destroy(&rwlock);
-        }
-
+        Stripe() = default;
         Stripe(const Stripe&) = delete;
         Stripe& operator=(const Stripe&) = delete;
       };
 
-      mutable std::mutex write_gate;
+      alignas(64) mutable std::atomic<bool> write_gate{false};
       std::array<Stripe, NUM_STRIPES> stripes;
+
+      void lock_write_gate() const
+      {
+        uint32_t spins = 0;
+        for (;;)
+        {
+          if (
+            !write_gate.load(std::memory_order_relaxed) &&
+            !write_gate.exchange(true, std::memory_order_acquire))
+          {
+            return;
+          }
+          if (++spins < SPIN_LIMIT)
+          {
+            cpu_relax();
+          }
+          else
+          {
+            std::this_thread::yield();
+          }
+        }
+      }
+
+      void unlock_write_gate() const
+      {
+        write_gate.store(false, std::memory_order_release);
+      }
 
       static size_t thread_stripe()
       {
@@ -240,18 +320,39 @@ namespace ccf::kv
     public:
       class ReadGuard
       {
-        pthread_rwlock_t& rwlock;
+        std::atomic<uint32_t>& state;
 
       public:
         explicit ReadGuard(const ShardedRwLock& lock) :
-          rwlock(lock.stripes[thread_stripe()].rwlock)
+          state(lock.stripes[thread_stripe()].state)
         {
-          pthread_rwlock_rdlock(&rwlock);
+          uint32_t spins = 0;
+          for (;;)
+          {
+            if ((state.load(std::memory_order_relaxed) & WRITER_BIT) == 0)
+            {
+              const uint32_t prev =
+                state.fetch_add(1, std::memory_order_acq_rel);
+              if ((prev & WRITER_BIT) == 0)
+              {
+                return;
+              }
+              state.fetch_sub(1, std::memory_order_release);
+            }
+            if (++spins < SPIN_LIMIT)
+            {
+              cpu_relax();
+            }
+            else
+            {
+              std::this_thread::yield();
+            }
+          }
         }
 
         ~ReadGuard()
         {
-          pthread_rwlock_unlock(&rwlock);
+          state.fetch_sub(1, std::memory_order_release);
         }
 
         ReadGuard(const ReadGuard&) = delete;
@@ -265,10 +366,29 @@ namespace ccf::kv
       public:
         explicit WriteGuard(const ShardedRwLock& lock_) : lock(lock_)
         {
-          lock.write_gate.lock();
+          lock.lock_write_gate();
+          // Set WRITER_BIT across all stripes first so readers stop entering
+          // and drain in parallel across every stripe.
           for (size_t i = 0; i < NUM_STRIPES; ++i)
           {
-            pthread_rwlock_wrlock(&lock.stripes[i].rwlock);
+            lock.stripes[i].state.fetch_or(
+              WRITER_BIT, std::memory_order_acq_rel);
+          }
+          for (size_t i = 0; i < NUM_STRIPES; ++i)
+          {
+            uint32_t spins = 0;
+            while ((lock.stripes[i].state.load(std::memory_order_acquire) &
+                    READER_MASK) != 0)
+            {
+              if (++spins < SPIN_LIMIT)
+              {
+                cpu_relax();
+              }
+              else
+              {
+                std::this_thread::yield();
+              }
+            }
           }
         }
 
@@ -276,9 +396,10 @@ namespace ccf::kv
         {
           for (size_t i = NUM_STRIPES; i > 0; --i)
           {
-            pthread_rwlock_unlock(&lock.stripes[i - 1].rwlock);
+            lock.stripes[i - 1].state.fetch_and(
+              ~WRITER_BIT, std::memory_order_release);
           }
-          lock.write_gate.unlock();
+          lock.unlock_write_gate();
         }
 
         WriteGuard(const WriteGuard&) = delete;
@@ -331,19 +452,19 @@ namespace ccf::kv
     friend class untyped::MapDiff;
     friend class RustReplayEntry;
 
-    std::mutex commit_lock;
+    AdaptiveMutex commit_lock;
     std::mutex compaction_lock;
-    std::mutex maps_lock;
-    mutable std::mutex state_lock;
+    AdaptiveMutex maps_lock;
+    mutable AdaptiveMutex state_lock;
     mutable ShardedRwLock native_lock;
     std::
       unique_ptr<rust_ffi::NativeStore, decltype(&rust_ffi::ccf_rust_kv_delete)>
         native{rust_ffi::ccf_rust_kv_new(0), &rust_ffi::ccf_rust_kv_delete};
     std::array<HazardSlot, NUM_HAZARD_SLOTS> hazard_slots;
-    std::atomic<uint64_t> hazard_active_mask{0};
     std::vector<uint32_t> hazard_retained_roots;
     std::vector<std::pair<Version, uint64_t>> hazard_pinned_snaps;
     uint64_t next_hazard_pin_id = (uint64_t(1) << 63);
+    const uint64_t store_instance_id = next_store_instance_id();
     std::atomic<uint64_t> next_attempt{0};
     Version head = 0;
     std::set<Version> open_reservations;
@@ -369,21 +490,43 @@ namespace ccf::kv
 
     struct MapDelta
     {
-      untyped::Write writes;
+      std::shared_ptr<const untyped::Write> writes;
       bool delivered = false;
     };
 
     std::map<std::string, std::map<Version, MapDelta>> map_deltas;
 
+    static uint64_t next_store_instance_id()
+    {
+      static std::atomic<uint64_t> counter{0};
+      return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
     uint64_t allocate_attempt_id()
     {
-      const auto previous =
-        next_attempt.fetch_add(1, std::memory_order_relaxed);
-      if (previous == std::numeric_limits<uint64_t>::max())
+      static constexpr uint64_t BATCH = 1024;
+
+      struct LocalAttemptRange
       {
-        throw std::overflow_error("Rust KV attempt counter exhausted");
+        uint64_t store_id = 0;
+        uint64_t next = 0;
+        uint64_t end = 0;
+      };
+
+      thread_local LocalAttemptRange local;
+      if (local.store_id != store_instance_id || local.next == local.end)
+      {
+        const auto base =
+          next_attempt.fetch_add(BATCH, std::memory_order_relaxed);
+        if (base >= std::numeric_limits<uint64_t>::max() - BATCH)
+        {
+          throw std::overflow_error("Rust KV attempt counter exhausted");
+        }
+        local.store_id = store_instance_id;
+        local.next = base + 1;
+        local.end = base + BATCH + 1;
       }
-      return previous + 1;
+      return local.next++;
     }
 
     int try_claim_hazard_slot()
@@ -397,8 +540,6 @@ namespace ccf::kv
         if (hazard_slots[idx].claimed.compare_exchange_strong(
               expected, true, std::memory_order_acq_rel))
         {
-          hazard_active_mask.fetch_or(
-            uint64_t(1) << idx, std::memory_order_release);
           return static_cast<int>(idx);
         }
       }
@@ -411,19 +552,31 @@ namespace ccf::kv
       auto& h = hazard_slots[idx];
       for (auto& r : h.roots)
       {
-        r.store(0, std::memory_order_release);
+        if (r.load(std::memory_order_relaxed) != 0)
+        {
+          r.store(0, std::memory_order_release);
+        }
       }
-      h.snap_plus_one.store(0, std::memory_order_release);
-      hazard_active_mask.fetch_and(
-        ~(uint64_t(1) << idx), std::memory_order_release);
+      if (h.snap_plus_one.load(std::memory_order_relaxed) != 0)
+      {
+        h.snap_plus_one.store(0, std::memory_order_release);
+      }
       h.claimed.store(false, std::memory_order_release);
     }
 
     void sync_hazards_locked()
     {
-      uint64_t mask = hazard_active_mask.load(std::memory_order_acquire);
+      bool any_claimed = false;
+      for (const auto& slot : hazard_slots)
+      {
+        if (slot.claimed.load(std::memory_order_acquire))
+        {
+          any_claimed = true;
+          break;
+        }
+      }
       if (
-        mask == 0 && hazard_retained_roots.empty() &&
+        !any_claimed && hazard_retained_roots.empty() &&
         hazard_pinned_snaps.empty())
       {
         return;
@@ -454,11 +607,12 @@ namespace ccf::kv
         return false;
       };
 
-      while (mask != 0)
+      for (const auto& slot : hazard_slots)
       {
-        const auto idx = static_cast<size_t>(std::countr_zero(mask));
-        mask &= (mask - 1);
-        const auto& slot = hazard_slots[idx];
+        if (!slot.claimed.load(std::memory_order_acquire))
+        {
+          continue;
+        }
         const auto sp = slot.snap_plus_one.load(std::memory_order_acquire);
         if (sp != 0 && !contains_snap(sp - 1))
         {
@@ -605,7 +759,42 @@ namespace ccf::kv
         }
         if (has_put || map_revision_at(version, name) == version)
         {
-          map_deltas[name].emplace(version, MapDelta{writes});
+          map_deltas[name].emplace(
+            version, MapDelta{std::make_shared<const untyped::Write>(writes)});
+        }
+      }
+      return hooks;
+    }
+
+    ConsensusHookPtrs record_commit_shared_locked(
+      Version version,
+      const std::vector<
+        std::pair<std::string, std::shared_ptr<const untyped::Write>>>& maps)
+    {
+      ConsensusHookPtrs hooks;
+      for (const auto& [name, writes_ptr] : maps)
+      {
+        const auto& writes = *writes_ptr;
+        if (auto it = local_hooks.find(name);
+            it != local_hooks.end() && it->second)
+        {
+          if (auto hook = it->second(version, writes); hook != nullptr)
+          {
+            hooks.push_back(std::move(hook));
+          }
+        }
+        bool has_put = false;
+        for (const auto& [_, value] : writes)
+        {
+          if (value.has_value())
+          {
+            has_put = true;
+            break;
+          }
+        }
+        if (has_put || map_revision_at(version, name) == version)
+        {
+          map_deltas[name].emplace(version, MapDelta{writes_ptr});
         }
       }
       return hooks;
@@ -655,8 +844,14 @@ namespace ccf::kv
       {
         return {};
       }
-      return std::prev(upper)->second.writes;
+      return *std::prev(upper)->second.writes;
     }
+
+    CommitResult commit_internal(
+      const TxID& id,
+      std::unique_ptr<PendingTx> entry,
+      bool committable,
+      std::optional<size_t> expected_rollback_count);
 
     ApplyResult deserialise_snapshot_internal(
       const uint8_t* data,
@@ -688,7 +883,7 @@ namespace ccf::kv
       {
         if (!changes.empty())
         {
-          writes.emplace(name, changes.rbegin()->second.writes);
+          writes.emplace(name, *changes.rbegin()->second.writes);
         }
       }
       return writes;
@@ -1185,11 +1380,14 @@ namespace ccf::kv
               if (!it->second.delivered)
               {
                 callbacks.emplace_back(
-                  hook->second, it->first, it->second.writes);
+                  hook->second, it->first, *it->second.writes);
                 it->second.delivered = true;
-                std::erase_if(it->second.writes, [](const auto& row) {
+                auto filtered =
+                  std::make_shared<untyped::Write>(*it->second.writes);
+                std::erase_if(*filtered, [](const auto& row) {
                   return !row.second.has_value();
                 });
+                it->second.writes = std::move(filtered);
               }
             }
           }
