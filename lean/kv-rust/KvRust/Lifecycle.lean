@@ -216,7 +216,7 @@ private theorem move_other_attempt_matches (kept : AttemptRows)
     simp [he, erase, same]
 
 /-- Ending an attempt moves untouched rows without copying their observations or values. -/
-private theorem erase_attempt_matches (rows : AttemptRows) (id : U64)
+theorem erase_attempt_matches (rows : alloc.vec.Vec (U64 × CcfKv.engine.Tx)) (id : U64)
     : WP.spec (CcfKv.engine.erase_attempt rows id)
         (fun next => next.val = erase rows.val id) := by
   unfold CcfKv.engine.erase_attempt

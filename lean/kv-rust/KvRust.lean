@@ -10,6 +10,7 @@ public import KvRust.Apply
 public import KvRust.ApplyRefinement
 public import KvRust.Assoc
 public import KvRust.BranchLog
+public import KvRust.Detached
 public import KvRust.Environment
 public import KvRust.History
 public import KvRust.IndexedHistory
