@@ -105,7 +105,7 @@ namespace ccf::kv::rust_test
       h = history;
       c = consensus;
     }
-    auto r = dispatch({.op = Opcode::SNAPSHOT_MAPS, .number = version});
+    auto r = dispatch_read({.op = Opcode::SNAPSHOT_MAPS, .number = version});
     r.require();
     auto snapshot = std::make_unique<StoreSnapshot>(version);
     if (h)
@@ -172,8 +172,14 @@ namespace ccf::kv::rust_test
     {
       throw std::logic_error("Cannot swap maps with outstanding reservations");
     }
-    auto response =
-      source.dispatch({.op = Opcode::SNAPSHOT_MAPS, .number = source.head});
+    auto* first = this < &source ? this : &source;
+    auto* second = this < &source ? &source : this;
+    ShardedRwLock::WriteGuard first_guard(first->native_lock);
+    ShardedRwLock::WriteGuard second_guard(second->native_lock);
+    sync_hazards_locked();
+    source.sync_hazards_locked();
+    auto response = source.dispatch_read_locked(
+      {.op = Opcode::SNAPSHOT_MAPS, .number = source.head});
     response.require();
     std::vector<std::string> names;
     for (size_t i = 0; i < response.size; ++i)
@@ -346,8 +352,13 @@ namespace ccf::kv::rust_test
         {{bytes(name), image.revision, image.views.size()},
          image.views.data()});
     }
-    const auto status = ccf_rust_kv_install_snapshot(
-      native.get(), *version, inputs.data(), inputs.size());
+    Status status;
+    {
+      ShardedRwLock::WriteGuard native_guard(native_lock);
+      sync_hazards_locked();
+      status = ccf_rust_kv_install_snapshot(
+        native.get(), *version, inputs.data(), inputs.size());
+    }
     if (status != Status::OK)
     {
       LOG_FAIL_FMT(

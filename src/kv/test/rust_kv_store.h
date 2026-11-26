@@ -13,12 +13,15 @@
 #include "kv/test/rust_kv_ffi.h"
 #include "kv/version_v.h"
 
+#include <array>
 #include <atomic>
+#include <bit>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -150,10 +153,115 @@ namespace ccf::kv::rust_test
   //   3. maps_lock       - store-wide structural barriers (lock_maps/apply/
   //                        compact/rollback/replay/snapshot)
   //   4. state_lock      - C++ metadata fields (versions, hooks, pending_txs)
-  //   5. Rust RwLock     - innermost lock inside NativeStore
+  //   5. native_lock     - sharded shared_mutex guarding NativeStore
   class Store : public AbstractStore
   {
   public:
+    class ShardedRwLock
+    {
+      static constexpr size_t NUM_STRIPES = 8;
+
+      struct alignas(64) Stripe
+      {
+        mutable pthread_rwlock_t rwlock;
+
+        Stripe()
+        {
+          pthread_rwlockattr_t attr;
+          pthread_rwlockattr_init(&attr);
+#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+          pthread_rwlockattr_setkind_np(
+            &attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+#endif
+          pthread_rwlock_init(&rwlock, &attr);
+          pthread_rwlockattr_destroy(&attr);
+        }
+
+        ~Stripe()
+        {
+          pthread_rwlock_destroy(&rwlock);
+        }
+
+        Stripe(const Stripe&) = delete;
+        Stripe& operator=(const Stripe&) = delete;
+      };
+
+      mutable std::mutex write_gate;
+      std::array<Stripe, NUM_STRIPES> stripes;
+
+      static size_t thread_stripe()
+      {
+        static std::atomic<size_t> next_stripe{0};
+        thread_local const size_t idx =
+          next_stripe.fetch_add(1, std::memory_order_relaxed) &
+          (NUM_STRIPES - 1);
+        return idx;
+      }
+
+    public:
+      class ReadGuard
+      {
+        pthread_rwlock_t& rwlock;
+
+      public:
+        explicit ReadGuard(const ShardedRwLock& lock) :
+          rwlock(lock.stripes[thread_stripe()].rwlock)
+        {
+          pthread_rwlock_rdlock(&rwlock);
+        }
+
+        ~ReadGuard()
+        {
+          pthread_rwlock_unlock(&rwlock);
+        }
+
+        ReadGuard(const ReadGuard&) = delete;
+        ReadGuard& operator=(const ReadGuard&) = delete;
+      };
+
+      class WriteGuard
+      {
+        const ShardedRwLock& lock;
+
+      public:
+        explicit WriteGuard(const ShardedRwLock& lock_) : lock(lock_)
+        {
+          lock.write_gate.lock();
+          for (size_t i = 0; i < NUM_STRIPES; ++i)
+          {
+            pthread_rwlock_wrlock(&lock.stripes[i].rwlock);
+          }
+        }
+
+        ~WriteGuard()
+        {
+          for (size_t i = NUM_STRIPES; i > 0; --i)
+          {
+            pthread_rwlock_unlock(&lock.stripes[i - 1].rwlock);
+          }
+          lock.write_gate.unlock();
+        }
+
+        WriteGuard(const WriteGuard&) = delete;
+        WriteGuard& operator=(const WriteGuard&) = delete;
+      };
+
+      static size_t current_thread_stripe()
+      {
+        return thread_stripe();
+      }
+    };
+
+    static constexpr size_t NUM_HAZARD_SLOTS = 64;
+    static constexpr size_t ROOTS_PER_HAZARD = 12;
+
+    struct alignas(64) HazardSlot
+    {
+      std::atomic<bool> claimed{false};
+      std::atomic<uint64_t> snap_plus_one{0};
+      std::array<std::atomic<uint32_t>, ROOTS_PER_HAZARD> roots{};
+    };
+
     class SnapshotPublicMaps
     {
       struct CapturedMap
@@ -182,15 +290,21 @@ namespace ccf::kv::rust_test
     std::mutex compaction_lock;
     std::mutex maps_lock;
     mutable std::mutex state_lock;
+    mutable ShardedRwLock native_lock;
     std::unique_ptr<NativeStore, decltype(&ccf_rust_kv_delete)> native{
       ccf_rust_kv_new(0), &ccf_rust_kv_delete};
+    std::array<HazardSlot, NUM_HAZARD_SLOTS> hazard_slots;
+    std::atomic<uint64_t> hazard_active_mask{0};
+    std::vector<uint32_t> hazard_retained_roots;
+    std::vector<std::pair<Version, uint64_t>> hazard_pinned_snaps;
+    uint64_t next_hazard_pin_id = (uint64_t(1) << 63);
     std::atomic<uint64_t> next_attempt{0};
     Version head = 0;
     std::set<Version> open_reservations;
     Version last_replicated = 0;
     Version global = 0;
     View term = 0;
-    View last_view = 0;
+    std::atomic<View> last_view{0};
     size_t rollback_count = 0;
     Version last_committable = NoVersion;
     EncryptorPtr encryptor;
@@ -223,15 +337,189 @@ namespace ccf::kv::rust_test
         {reply.data, &ccf_rust_kv_reply_delete}};
     }
 
-    Response dispatch(Request request) const
+    int try_claim_hazard_slot()
+    {
+      const size_t start =
+        (ShardedRwLock::current_thread_stripe() * 8) % NUM_HAZARD_SLOTS;
+      for (size_t i = 0; i < NUM_HAZARD_SLOTS; ++i)
+      {
+        const size_t idx = (start + i) % NUM_HAZARD_SLOTS;
+        bool expected = false;
+        if (hazard_slots[idx].claimed.compare_exchange_strong(
+              expected, true, std::memory_order_acq_rel))
+        {
+          hazard_active_mask.fetch_or(
+            uint64_t(1) << idx, std::memory_order_release);
+          return static_cast<int>(idx);
+        }
+      }
+      return -1;
+    }
+
+    void release_hazard_slot(int slot)
+    {
+      const auto idx = static_cast<size_t>(slot);
+      auto& h = hazard_slots[idx];
+      for (auto& r : h.roots)
+      {
+        r.store(0, std::memory_order_release);
+      }
+      h.snap_plus_one.store(0, std::memory_order_release);
+      hazard_active_mask.fetch_and(
+        ~(uint64_t(1) << idx), std::memory_order_release);
+      h.claimed.store(false, std::memory_order_release);
+    }
+
+    // Must be called while holding ShardedRwLock::WriteGuard. Reconciles
+    // lock-free hazard slots against Rust root refcounts and snapshot stubs
+    // before/after compaction, rollback, replay, snapshot install, or swaps.
+    void sync_hazards_locked()
+    {
+      uint64_t mask = hazard_active_mask.load(std::memory_order_acquire);
+      if (
+        mask == 0 && hazard_retained_roots.empty() &&
+        hazard_pinned_snaps.empty())
+      {
+        return;
+      }
+      std::array<uint32_t, NUM_HAZARD_SLOTS * ROOTS_PER_HAZARD> active_roots{};
+      size_t active_root_count = 0;
+      std::array<Version, NUM_HAZARD_SLOTS> active_snaps{};
+      size_t active_snap_count = 0;
+
+      auto contains_root = [&](uint32_t v) {
+        for (size_t i = 0; i < active_root_count; ++i)
+        {
+          if (active_roots[i] == v)
+          {
+            return true;
+          }
+        }
+        return false;
+      };
+      auto contains_snap = [&](Version v) {
+        for (size_t i = 0; i < active_snap_count; ++i)
+        {
+          if (active_snaps[i] == v)
+          {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      while (mask != 0)
+      {
+        const auto idx = static_cast<size_t>(std::countr_zero(mask));
+        mask &= (mask - 1);
+        const auto& slot = hazard_slots[idx];
+        const auto sp = slot.snap_plus_one.load(std::memory_order_acquire);
+        if (sp != 0 && !contains_snap(sp - 1))
+        {
+          active_snaps[active_snap_count++] = sp - 1;
+        }
+        for (const auto& r : slot.roots)
+        {
+          const auto root = r.load(std::memory_order_acquire);
+          if (root != 0 && !contains_root(root))
+          {
+            active_roots[active_root_count++] = root;
+          }
+        }
+      }
+
+      for (size_t i = 0; i < active_root_count; ++i)
+      {
+        const auto root = active_roots[i];
+        bool already = false;
+        for (const auto existing : hazard_retained_roots)
+        {
+          if (existing == root)
+          {
+            already = true;
+            break;
+          }
+        }
+        if (!already)
+        {
+          ccf_rust_kv_retain_root(native.get(), root);
+          hazard_retained_roots.push_back(root);
+        }
+      }
+      for (size_t i = 0; i < hazard_retained_roots.size();)
+      {
+        if (!contains_root(hazard_retained_roots[i]))
+        {
+          ccf_rust_kv_release_root(native.get(), hazard_retained_roots[i]);
+          hazard_retained_roots[i] = hazard_retained_roots.back();
+          hazard_retained_roots.pop_back();
+        }
+        else
+        {
+          ++i;
+        }
+      }
+      for (size_t i = 0; i < active_snap_count; ++i)
+      {
+        const auto ver = active_snaps[i];
+        bool already = false;
+        for (const auto& [existing_ver, _] : hazard_pinned_snaps)
+        {
+          if (existing_ver == ver)
+          {
+            already = true;
+            break;
+          }
+        }
+        if (!already)
+        {
+          const auto pin_id = next_hazard_pin_id++;
+          ccf_rust_kv_pin_snapshot(native.get(), pin_id, ver);
+          hazard_pinned_snaps.emplace_back(ver, pin_id);
+        }
+      }
+      for (size_t i = 0; i < hazard_pinned_snaps.size();)
+      {
+        if (!contains_snap(hazard_pinned_snaps[i].first))
+        {
+          ccf_rust_kv_unpin_snapshot(
+            native.get(), hazard_pinned_snaps[i].second);
+          hazard_pinned_snaps[i] = hazard_pinned_snaps.back();
+          hazard_pinned_snaps.pop_back();
+        }
+        else
+        {
+          ++i;
+        }
+      }
+    }
+
+    Response dispatch_read_locked(Request request) const
+    {
+      return wrap_reply(ccf_rust_kv_execute_read(native.get(), request));
+    }
+
+    Response dispatch_read(Request request) const
+    {
+      ShardedRwLock::ReadGuard guard(native_lock);
+      return dispatch_read_locked(request);
+    }
+
+    Response dispatch_write_locked(Request request)
     {
       return wrap_reply(ccf_rust_kv_execute(native.get(), request));
+    }
+
+    Response dispatch_write(Request request)
+    {
+      ShardedRwLock::WriteGuard guard(native_lock);
+      return dispatch_write_locked(request);
     }
 
     std::optional<Version> map_revision_at(
       Version version, const std::string& name) const
     {
-      auto r = dispatch(
+      auto r = dispatch_read(
         {.op = Opcode::MAP_REVISION, .number = version, .map = bytes(name)});
       if (r.status == Status::MISSING)
       {
@@ -463,14 +751,17 @@ namespace ccf::kv::rust_test
       {
         return std::nullopt;
       }
-      auto r = wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      Response r = [&]() {
+        ShardedRwLock::WriteGuard native_guard(native_lock);
+        return wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      }();
       if (r.status == Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV test version counter exhausted");
       }
       r.require();
       head = r.number;
-      last_view = term;
+      last_view.store(term, std::memory_order_release);
       open_reservations.insert(head);
       return std::make_tuple(head, rollback_count);
     }
@@ -482,7 +773,7 @@ namespace ccf::kv::rust_test
       {
         throw std::logic_error("Commit term is already initialised");
       }
-      dispatch({.op = Opcode::SET_TERM, .number = view}).require();
+      dispatch_write({.op = Opcode::SET_TERM, .number = view}).require();
       term = view;
       if (history)
       {
@@ -595,14 +886,17 @@ namespace ccf::kv::rust_test
     TxID next_txid() override
     {
       std::scoped_lock lock(maps_lock, state_lock);
-      auto r = wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      Response r = [&]() {
+        ShardedRwLock::WriteGuard native_guard(native_lock);
+        return wrap_reply(ccf_rust_kv_reserve_version(native.get()));
+      }();
       if (r.status == Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV test version counter exhausted");
       }
       r.require();
       head = r.number;
-      last_view = term;
+      last_view.store(term, std::memory_order_release);
       open_reservations.insert(head);
       return {term, head};
     }
@@ -646,14 +940,20 @@ namespace ccf::kv::rust_test
     {
       std::scoped_lock lock(
         commit_lock, compaction_lock, maps_lock, state_lock);
-      dispatch({.op = Opcode::CLEAR_STORE}).require();
+      {
+        ShardedRwLock::WriteGuard native_guard(native_lock);
+        sync_hazards_locked();
+        dispatch_write_locked({.op = Opcode::CLEAR_STORE}).require();
+        hazard_retained_roots.clear();
+        hazard_pinned_snaps.clear();
+      }
       head = NoVersion;
       global = NoVersion;
       open_reservations.clear();
       last_replicated = NoVersion;
       last_committable = NoVersion;
       term = 0;
-      last_view = 0;
+      last_view.store(0, std::memory_order_release);
       ++rollback_count;
       snapshot_requested.store(false, std::memory_order_release);
       pending_txs.clear();
@@ -702,7 +1002,14 @@ namespace ccf::kv::rust_test
         const auto compact_target = open_reservations.empty() ?
           v :
           std::min(v, *open_reservations.begin() - 1);
-        auto r = dispatch({.op = Opcode::COMPACT, .number = compact_target});
+        Response r = [&]() {
+          ShardedRwLock::WriteGuard native_guard(native_lock);
+          sync_hazards_locked();
+          auto res = dispatch_write_locked(
+            {.op = Opcode::COMPACT, .number = compact_target});
+          sync_hazards_locked();
+          return res;
+        }();
         r.require();
         global = r.number;
         if (compact_target > head || compact_target < global)
@@ -748,8 +1055,14 @@ namespace ccf::kv::rust_test
     void rollback(const TxID& txid, View new_term) override
     {
       std::scoped_lock lock(maps_lock, state_lock);
-      auto r = dispatch(
-        {.op = Opcode::ROLLBACK, .attempt = new_term, .number = txid.seqno});
+      Response r = [&]() {
+        ShardedRwLock::WriteGuard native_guard(native_lock);
+        sync_hazards_locked();
+        auto res = dispatch_write_locked(
+          {.op = Opcode::ROLLBACK, .attempt = new_term, .number = txid.seqno});
+        sync_hazards_locked();
+        return res;
+      }();
       if (r.status == Status::ROLLBACK_REJECTED)
       {
         throw std::logic_error("Cannot roll back compacted Rust KV history");
@@ -760,7 +1073,7 @@ namespace ccf::kv::rust_test
       open_reservations.erase(
         open_reservations.upper_bound(head), open_reservations.end());
       term = new_term;
-      last_view = txid.view;
+      last_view.store(txid.view, std::memory_order_release);
       if (history)
       {
         history->rollback(txid, new_term);
@@ -834,17 +1147,20 @@ namespace ccf::kv::rust_test
     NativeTx* native_tx;
     std::string name;
     const bool& committed;
+    bool read_only;
 
   public:
     MapAccess(
       Store& store_,
       NativeTx* native_tx_,
       const std::string& name_,
-      const bool& committed_) :
+      const bool& committed_,
+      bool read_only_) :
       store(store_),
       native_tx(native_tx_),
       name(name_),
-      committed(committed_)
+      committed(committed_),
+      read_only(read_only_)
     {}
 
     void write(ByteView key, ByteView value = {})
@@ -866,21 +1182,26 @@ namespace ccf::kv::rust_test
     std::optional<Bytes> get_bytes(ByteView key, bool global)
     {
       Bytes out;
-      const auto status = ccf_rust_kv_tx_get(
-        store.native.get(),
-        native_tx,
-        committed,
-        global,
-        bytes(name),
-        key,
-        &out,
-        +[](void* ctx, const uint8_t* ptr, size_t len) {
-          auto* dst = static_cast<Bytes*>(ctx);
-          if (len != 0)
-          {
-            *dst = Bytes(ptr, ptr + len);
-          }
-        });
+      Status status;
+      {
+        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
+        status = ccf_rust_kv_tx_get(
+          store.native.get(),
+          native_tx,
+          committed,
+          read_only,
+          global,
+          bytes(name),
+          key,
+          &out,
+          +[](void* ctx, const uint8_t* ptr, size_t len) {
+            auto* dst = static_cast<Bytes*>(ctx);
+            if (len != 0)
+            {
+              *dst = Bytes(ptr, ptr + len);
+            }
+          });
+      }
       if (status == Status::MISSING)
       {
         return std::nullopt;
@@ -896,16 +1217,33 @@ namespace ccf::kv::rust_test
 
     bool has_bytes(ByteView key, bool global)
     {
-      auto r = Store::wrap_reply(ccf_rust_kv_tx_has(
-        store.native.get(), native_tx, committed, global, bytes(name), key));
+      auto r = [&]() {
+        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
+        return Store::wrap_reply(ccf_rust_kv_tx_has(
+          store.native.get(),
+          native_tx,
+          committed,
+          read_only,
+          global,
+          bytes(name),
+          key));
+      }();
       r.require();
       return r.number != 0;
     }
 
     std::optional<Version> previous_bytes(ByteView key)
     {
-      auto r = Store::wrap_reply(ccf_rust_kv_tx_previous(
-        store.native.get(), native_tx, committed, bytes(name), key));
+      auto r = [&]() {
+        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
+        return Store::wrap_reply(ccf_rust_kv_tx_previous(
+          store.native.get(),
+          native_tx,
+          committed,
+          read_only,
+          bytes(name),
+          key));
+      }();
       if (r.status == Status::MISSING)
       {
         return std::nullopt;
@@ -917,6 +1255,7 @@ namespace ccf::kv::rust_test
     Response operate(
       Opcode op, ByteView key = {}, ByteView value = {}, bool global = false)
     {
+      Store::ShardedRwLock::ReadGuard guard(store.native_lock);
       return Store::wrap_reply(ccf_rust_kv_tx_operate(
         store.native.get(),
         native_tx,
@@ -1107,8 +1446,9 @@ namespace ccf::kv::rust_test
       Store& store,
       NativeTx* native_tx,
       const std::string& name,
-      const bool& committed) :
-      MapAccess(store, native_tx, name, committed),
+      const bool& committed,
+      bool read_only) :
+      MapAccess(store, native_tx, name, committed, read_only),
       ReadHandle<M>(static_cast<MapAccess&>(*this)),
       WriteHandle<M>(static_cast<MapAccess&>(*this))
     {}
@@ -1143,21 +1483,38 @@ namespace ccf::kv::rust_test
       std::optional<TxID> read_txid;
       std::optional<TxID> reserved;
       size_t reserve_epoch = 0;
+      bool read_only = false;
+      bool registered = false;
+      int hazard_slot = -1;
       bool committing = false;
       bool committed = false;
       bool aborted = false;
       std::optional<Version> version;
       CommittableTx::TxFlags flags = 0;
 
-      State(Store& store_, uint64_t id_) :
+      State(Store& store_, uint64_t id_, bool read_only_) :
         store(store_),
         id(id_),
-        native_tx(ccf_rust_kv_tx_new(id_))
+        native_tx(ccf_rust_kv_tx_new(id_)),
+        read_only(read_only_)
       {}
 
       ~State()
       {
-        ccf_rust_kv_tx_delete(store.native.get(), native_tx);
+        if (hazard_slot >= 0)
+        {
+          store.release_hazard_slot(hazard_slot);
+          hazard_slot = -1;
+        }
+        if (registered)
+        {
+          Store::ShardedRwLock::WriteGuard guard(store.native_lock);
+          ccf_rust_kv_tx_delete(store.native.get(), native_tx);
+        }
+        else
+        {
+          ccf_rust_kv_tx_delete(nullptr, native_tx);
+        }
       }
     };
 
@@ -1169,7 +1526,9 @@ namespace ccf::kv::rust_test
       bool reserved);
 
   public:
-    Tx(Store& store, uint64_t id) : state(std::make_unique<State>(store, id)) {}
+    Tx(Store& store, uint64_t id, bool read_only = false) :
+      state(std::make_unique<State>(store, id, read_only))
+    {}
 
     template <typename M>
     typename HandleFamily<M>::Full* rw(const std::string& name)
@@ -1201,27 +1560,134 @@ namespace ccf::kv::rust_test
       // Typed and untyped handles share the single native acquisition.
       if (!map_acquired)
       {
-        std::lock_guard lock(s.store.state_lock);
-        auto r = Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-          s.store.native.get(),
-          s.native_tx,
-          bytes(name),
-          s.reserved.has_value(),
-          s.reserved ? s.reserved->seqno - 1 : 0));
-        if (r.status == Status::UNAVAILABLE)
+        bool acquired = false;
+        if (!s.registered && !s.reserved.has_value())
         {
-          throw CompactedVersionConflict(
-            "Cannot acquire a compacted Rust KV map: " + name);
+          if (s.hazard_slot < 0)
+          {
+            s.hazard_slot = s.store.try_claim_hazard_slot();
+          }
+          if (s.hazard_slot >= 0)
+          {
+            auto& slot =
+              s.store.hazard_slots[static_cast<size_t>(s.hazard_slot)];
+            size_t free_entries = 0;
+            for (const auto& existing : slot.roots)
+            {
+              if (existing.load(std::memory_order_relaxed) == 0)
+              {
+                ++free_entries;
+              }
+            }
+            if (free_entries >= 2)
+            {
+              uint32_t r0 = 0;
+              uint32_t r1 = 0;
+              auto r = [&]() {
+                Store::ShardedRwLock::ReadGuard guard(s.store.native_lock);
+                auto res = Store::wrap_reply(ccf_rust_kv_tx_ro_acquire(
+                  s.store.native.get(), s.native_tx, bytes(name), &r0, &r1));
+                if (res.status == Status::OK)
+                {
+                  auto add_root = [&](uint32_t root) {
+                    if (root == 0)
+                    {
+                      return;
+                    }
+                    for (auto& existing : slot.roots)
+                    {
+                      const auto cur = existing.load(std::memory_order_relaxed);
+                      if (cur == root)
+                      {
+                        return;
+                      }
+                      if (cur == 0)
+                      {
+                        existing.store(root, std::memory_order_release);
+                        return;
+                      }
+                    }
+                  };
+                  add_root(r0);
+                  add_root(r1);
+                  if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
+                  {
+                    slot.snap_plus_one.store(
+                      res.number + 1, std::memory_order_release);
+                  }
+                }
+                return res;
+              }();
+              if (r.status == Status::UNAVAILABLE)
+              {
+                throw CompactedVersionConflict(
+                  "Cannot acquire a compacted Rust KV map: " + name);
+              }
+              r.require();
+              if (!s.captured_term.has_value())
+              {
+                s.captured_term = r.detail;
+                s.read_txid = TxID{
+                  s.store.last_view.load(std::memory_order_acquire), r.number};
+              }
+              acquired = true;
+            }
+            else
+            {
+              // Slot is nearly full after many compactions: promote existing
+              // views atomically under WriteGuard before releasing the slot.
+              Store::ShardedRwLock::WriteGuard guard(s.store.native_lock);
+              const auto pstatus =
+                ccf_rust_kv_tx_promote(s.store.native.get(), s.native_tx);
+              if (pstatus != Status::OK)
+              {
+                throw std::logic_error(
+                  "Unexpected Rust KV promote status " +
+                  std::to_string(static_cast<unsigned>(pstatus)));
+              }
+              s.registered = true;
+              s.store.release_hazard_slot(s.hazard_slot);
+              s.hazard_slot = -1;
+              auto r = Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+                s.store.native.get(), s.native_tx, bytes(name), false, 0));
+              if (r.status == Status::UNAVAILABLE)
+              {
+                throw CompactedVersionConflict(
+                  "Cannot acquire a compacted Rust KV map: " + name);
+              }
+              r.require();
+              acquired = true;
+            }
+          }
         }
-        r.require();
-        if (!s.captured_term.has_value())
+        if (!acquired)
         {
-          s.captured_term = r.detail;
-          s.read_txid = TxID{s.store.last_view, r.number};
+          auto r = [&]() {
+            Store::ShardedRwLock::WriteGuard guard(s.store.native_lock);
+            return Store::wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
+              s.store.native.get(),
+              s.native_tx,
+              bytes(name),
+              s.reserved.has_value(),
+              s.reserved ? s.reserved->seqno - 1 : 0));
+          }();
+          s.registered = true;
+          if (r.status == Status::UNAVAILABLE)
+          {
+            throw CompactedVersionConflict(
+              "Cannot acquire a compacted Rust KV map: " + name);
+          }
+          r.require();
+          if (!s.captured_term.has_value())
+          {
+            s.captured_term = r.detail;
+            s.read_txid =
+              TxID{s.store.last_view.load(std::memory_order_acquire), r.number};
+          }
         }
       }
-      auto handle =
-        std::make_unique<Full>(s.store, s.native_tx, name, s.committed);
+      auto handle = std::make_unique<Full>(
+        s.store, s.native_tx, name, s.committed, s.read_only);
       auto* raw = handle.get();
       s.handles.push_back({name, type, std::move(handle)});
       return raw;
@@ -1339,6 +1805,11 @@ namespace ccf::kv::rust_test
 
   inline ReadOnlyTx Store::create_read_only_tx()
   {
-    return ReadOnlyTx(create_tx());
+    const auto previous = next_attempt.fetch_add(1, std::memory_order_relaxed);
+    if (previous == std::numeric_limits<uint64_t>::max())
+    {
+      throw std::overflow_error("Rust KV test attempt counter exhausted");
+    }
+    return ReadOnlyTx(Tx(*this, previous + 1, /*read_only=*/true));
   }
 }

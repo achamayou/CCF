@@ -119,7 +119,7 @@ namespace ccf::kv::rust_test
     NativeStore* ccf_rust_kv_new(uint64_t term);
     void ccf_rust_kv_delete(NativeStore* store);
     NativeTx* ccf_rust_kv_tx_new(uint64_t attempt);
-    void ccf_rust_kv_tx_delete(const NativeStore* store, NativeTx* tx);
+    void ccf_rust_kv_tx_delete(NativeStore* store, NativeTx* tx);
     using CopyValueFn = void (*)(void*, const uint8_t*, size_t);
     Status ccf_rust_kv_tx_write(
       NativeTx* tx, ByteView map, ByteView key, ByteView value);
@@ -127,6 +127,7 @@ namespace ccf::kv::rust_test
       const NativeStore* store,
       NativeTx* tx,
       bool inspect_finished,
+      bool read_only,
       bool global,
       ByteView map,
       ByteView key,
@@ -136,6 +137,7 @@ namespace ccf::kv::rust_test
       const NativeStore* store,
       NativeTx* tx,
       bool inspect_finished,
+      bool read_only,
       bool global,
       ByteView map,
       ByteView key);
@@ -143,37 +145,51 @@ namespace ccf::kv::rust_test
       const NativeStore* store,
       NativeTx* tx,
       bool inspect_finished,
+      bool read_only,
       ByteView map,
       ByteView key);
+    Reply ccf_rust_kv_tx_ro_acquire(
+      const NativeStore* store,
+      NativeTx* tx,
+      ByteView map,
+      uint32_t* out_root0,
+      uint32_t* out_root1);
+    Status ccf_rust_kv_tx_promote(NativeStore* store, NativeTx* tx);
+    void ccf_rust_kv_retain_root(NativeStore* store, uint32_t root);
+    void ccf_rust_kv_release_root(NativeStore* store, uint32_t root);
+    void ccf_rust_kv_pin_snapshot(
+      NativeStore* store, uint64_t id, uint64_t version);
+    void ccf_rust_kv_unpin_snapshot(NativeStore* store, uint64_t id);
     Reply ccf_rust_kv_tx_pending_writes(const NativeTx* tx);
     Reply ccf_rust_kv_tx_finish(NativeTx* tx, uint64_t outcome);
     Reply ccf_rust_kv_tx_snapshot_and_acquire(
-      const NativeStore* store,
+      NativeStore* store,
       NativeTx* tx,
       ByteView map,
       bool has_reserved,
       uint64_t reserved_version);
-    Reply ccf_rust_kv_reserve_version(const NativeStore* store);
+    Reply ccf_rust_kv_reserve_version(NativeStore* store);
     Reply ccf_rust_kv_tx_commit_reserved(
-      const NativeStore* store, NativeTx* tx, uint64_t version);
-    Reply ccf_rust_kv_tx_prepare_commit(const NativeStore* store, NativeTx* tx);
+      NativeStore* store, NativeTx* tx, uint64_t version);
+    Reply ccf_rust_kv_tx_prepare_commit(NativeStore* store, NativeTx* tx);
     Reply ccf_rust_kv_tx_operate(
       const NativeStore* store, NativeTx* tx, Request request);
-    Reply ccf_rust_kv_execute(const NativeStore* store, Request request);
+    Reply ccf_rust_kv_execute_read(const NativeStore* store, Request request);
+    Reply ccf_rust_kv_execute(NativeStore* store, Request request);
     Status ccf_rust_kv_replay(
-      const NativeStore* store,
+      NativeStore* store,
       uint64_t version,
       const Entry* entries,
       size_t size,
       bool track_deletes);
     Status ccf_rust_kv_install_snapshot(
-      const NativeStore* store,
+      NativeStore* store,
       uint64_t version,
       const SnapshotInput* maps,
       size_t size);
     Status ccf_rust_kv_swap_recovery_maps(
-      const NativeStore* target,
-      const NativeStore* source,
+      NativeStore* target,
+      NativeStore* source,
       const ByteView* names,
       size_t size);
     void ccf_rust_kv_reply_delete(ReplyData* data);

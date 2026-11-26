@@ -2684,6 +2684,197 @@ impl Store {
         Ok(CommitPreparation::Applied(version, self.history.term))
     }
 
+    /// Capture a snapshot (if not yet captured) and acquire `map` for a
+    /// read-only `DetachedTx` using only shared (`&self`) access. Returns
+    /// `(snapshot_version, term, output, local_root, global_root)` where
+    /// `local_root` and `global_root` are the raw radix root IDs (0 if empty
+    /// or recovered) that the caller keeps alive via external hazard pinning
+    /// across concurrent compactions/rollbacks.
+    fn readonly_pins(
+        reuse_compacted: bool,
+        snap_version: Version,
+        global_version: Version,
+        local_data: RadixRoot,
+        global_data: RadixRoot,
+    ) -> (PinnedImage, Option<PinnedImage>, u32, u32) {
+        if reuse_compacted && snap_version < global_version {
+            return (PinnedImage::Root(global_data), None, global_data.0, 0);
+        }
+        if snap_version == global_version {
+            return (PinnedImage::Root(local_data), None, local_data.0, 0);
+        }
+        (
+            PinnedImage::Root(local_data),
+            Some(PinnedImage::Root(global_data)),
+            local_data.0,
+            global_data.0,
+        )
+    }
+
+    pub fn snapshot_and_acquire_readonly(
+        &self,
+        tx: &mut DetachedTx,
+        map: Bytes,
+    ) -> Result<(Version, Term, Output, u32, u32), Error> {
+        if !matches!(tx.tx.phase, Phase::Active) || tx.registered {
+            return Err(Error::Disabled);
+        }
+        if tx.tx.snapshot.is_none() {
+            let snap = Snapshot {
+                version: self.history.head().version,
+                term: self.history.term,
+            };
+            tx.tx.snapshot = Some(snap);
+        }
+        let Some(snap) = tx.tx.snapshot else {
+            return Err(Error::Disabled);
+        };
+        if tx.tx.views.index(&map).is_some() {
+            return Err(Error::Disabled);
+        }
+        let Some(local_ref) = self.history.resolve_cut(snap.version) else {
+            tx.tx.unavailable = true;
+            return Ok((snap.version, snap.term, Output::Unavailable, 0, 0));
+        };
+        if let Some(global) = self.recovery_views.get(&map) {
+            let local = self.history.read_cut(local_ref);
+            let birth = local.births.get(&map);
+            if birth.is_some() {
+                let revision = local.revision(&map);
+                let local_data = local.data;
+                if revision.version < global.revision {
+                    tx.tx.unavailable = true;
+                    return Ok((snap.version, snap.term, Output::Unavailable, 0, 0));
+                }
+                let local_root = self.history.retained_data(snap.version, local_data);
+                tx.tx.views.set(
+                    map,
+                    View {
+                        birth,
+                        revision,
+                        local: PinnedImage::Root(local_root),
+                        global: Some(PinnedImage::Recovered(global.image)),
+                    },
+                );
+                return Ok((
+                    snap.version,
+                    snap.term,
+                    Output::Acquired(revision.version, global.revision),
+                    local_root.0,
+                    0,
+                ));
+            }
+        }
+        let local = self.history.read_cut(local_ref);
+        let birth = local.births.get(&map);
+        if birth.is_none() {
+            tx.tx.views.set(
+                map,
+                View {
+                    birth: None,
+                    revision: Stamp::zero(),
+                    local: PinnedImage::Empty,
+                    global: None,
+                },
+            );
+            return Ok((snap.version, snap.term, Output::Acquired(0, 0), 0, 0));
+        }
+        let global_offset = self
+            .history
+            .log
+            .at_cut(self.history.relative_cut(self.history.global));
+        let global = self.history.log.active_at(global_offset);
+        let revision = local.revision(&map);
+        let global_revision = global.revision(&map);
+        if revision.version < global_revision.version {
+            tx.tx.unavailable = true;
+            return Ok((snap.version, snap.term, Output::Unavailable, 0, 0));
+        }
+        let local_data = local.data;
+        let global_data = global.data;
+        let (local_image, global_image, r0, r1) = Self::readonly_pins(
+            self.history.reuse_compacted_images,
+            snap.version,
+            self.history.global,
+            local_data,
+            global_data,
+        );
+        tx.tx.views.set(
+            map,
+            View {
+                birth,
+                revision,
+                local: local_image,
+                global: global_image,
+            },
+        );
+        Ok((
+            snap.version,
+            snap.term,
+            Output::Acquired(revision.version, global_revision.version),
+            r0,
+            r1,
+        ))
+    }
+
+    /// Promote a hazard-pinned `DetachedTx` into a store-registered transaction
+    /// by retaining all currently held view roots and inserting its metadata
+    /// stub into `self.txs`.
+    pub fn promote_detached_tx(&mut self, tx: &mut DetachedTx) -> Result<(), Error> {
+        if tx.registered || self.txs.index(&tx.id).is_some() {
+            return Err(Error::Disabled);
+        }
+        let mut stub = Tx::new();
+        stub.snapshot = tx.tx.snapshot;
+        let mut i = 0;
+        while i < tx.tx.views.0.len() {
+            let (m_ref, v_ref) = &tx.tx.views.0[i];
+            if let PinnedImage::Root(root) = v_ref.local {
+                self.history.index.retain_root(root);
+            }
+            if let Some(PinnedImage::Root(root)) = v_ref.global {
+                self.history.index.retain_root(root);
+            }
+            stub.views.set(
+                m_ref.clone(),
+                View {
+                    birth: v_ref.birth,
+                    revision: v_ref.revision,
+                    local: PinnedImage::Empty,
+                    global: None,
+                },
+            );
+            i += 1;
+        }
+        self.txs.set(tx.id, stub);
+        tx.registered = true;
+        Ok(())
+    }
+
+    pub fn retain_root_raw(&mut self, root: u32) {
+        self.history.index.retain_root(RadixRoot(root));
+    }
+
+    pub fn release_root_raw(&mut self, root: u32) {
+        self.history.index.release_root(RadixRoot(root));
+        self.history.index.retire_budget(RETIRE_BUDGET);
+    }
+
+    pub fn pin_snapshot_stub(&mut self, id: Attempt, version: Version) {
+        let mut stub = Tx::new();
+        stub.snapshot = Some(Snapshot {
+            version,
+            term: self.history.term,
+        });
+        self.txs.set(id, stub);
+    }
+
+    pub fn unpin_snapshot_stub(&mut self, id: Attempt) {
+        erase_attempt(&mut self.txs, id);
+        self.history.prune_retained(&self.txs);
+        self.history.index.retire_budget(RETIRE_BUDGET);
+    }
+
     /// Release all pinned roots held by `tx`, unregister its metadata stub,
     /// prune unneeded retained frames, and drain the retirement budget.
     pub fn end_detached(&mut self, tx: &mut DetachedTx) {

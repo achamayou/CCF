@@ -20,8 +20,9 @@ namespace ccf::kv::rust_test
       Store& store,
       NativeTx* native_tx,
       const std::string& name,
-      const bool& committed) :
-      MapAccess(store, native_tx, name, committed),
+      const bool& committed,
+      bool read_only = false) :
+      MapAccess(store, native_tx, name, committed, read_only),
       Read(static_cast<MapAccess&>(*this)),
       Write(static_cast<MapAccess&>(*this))
     {}

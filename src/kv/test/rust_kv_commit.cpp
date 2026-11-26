@@ -320,11 +320,14 @@ namespace ccf::kv::rust_test
       }
 
       s.committing = true;
-      auto applied = reserved ?
-        Store::wrap_reply(ccf_rust_kv_tx_commit_reserved(
-          store.native.get(), s.native_tx, s.reserved->seqno)) :
-        Store::wrap_reply(
-          ccf_rust_kv_tx_prepare_commit(store.native.get(), s.native_tx));
+      auto applied = [&]() {
+        Store::ShardedRwLock::WriteGuard native_guard(store.native_lock);
+        return reserved ?
+          Store::wrap_reply(ccf_rust_kv_tx_commit_reserved(
+            store.native.get(), s.native_tx, s.reserved->seqno)) :
+          Store::wrap_reply(
+            ccf_rust_kv_tx_prepare_commit(store.native.get(), s.native_tx));
+      }();
       if (applied.status == Status::CONFLICT)
       {
         if (reserved)

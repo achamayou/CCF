@@ -127,12 +127,18 @@ namespace ccf::kv::rust_test
         }
       }
       const bool replace = id.seqno <= store.head;
-      const auto status = ccf_rust_kv_replay(
-        store.native.get(),
-        id.seqno,
-        entries.data(),
-        entries.size(),
-        track_deletes_on_missing_keys);
+      Status status;
+      {
+        Store::ShardedRwLock::WriteGuard native_guard(store.native_lock);
+        store.sync_hazards_locked();
+        status = ccf_rust_kv_replay(
+          store.native.get(),
+          id.seqno,
+          entries.data(),
+          entries.size(),
+          track_deletes_on_missing_keys);
+        store.sync_hazards_locked();
+      }
       if (status != Status::OK)
       {
         LOG_FAIL_FMT(
