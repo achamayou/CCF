@@ -44,7 +44,8 @@ theorem compare_address_order_lt_ne (a b : CcfKv.engine.Address)
     simp [alloc.vec.Vec.deref]
   have hmb : (Slice.len (alloc.vec.Vec.deref b.map)).val = b.map.val.length := by
     simp [alloc.vec.Vec.deref]
-  by_cases hlt : Slice.len (alloc.vec.Vec.deref a.map) < Slice.len (alloc.vec.Vec.deref b.map)
+  by_cases hlt :
+    Slice.len (alloc.vec.Vec.deref a.map) < Slice.len (alloc.vec.Vec.deref b.map)
   · rw [ite_eq_left hlt, WP.spec_ok]
     intro _ heq
     subst heq
@@ -232,13 +233,15 @@ theorem collect_replay_put_batch_spec
               ∃ rows : List SnapshotBatchRow,
                 batch.val = rows.map some
                 ∧ rows.length = pending.val.length
-                ∧ (∀ i, i < pending.val.length →
-                    ∃ a val r,
-                      pending.val[i]? = some (a, .Put val)
-                      ∧ rows[i]? = some r
-                      ∧ r.key.val = packedAddress a
-                      ∧ r.value = { address := a, value := { value := val, version } }
-                      ∧ r.key.val.length = 8 + a.map.val.length + a.key.val.length)) := by
+                ∧ (∀ i,
+                    i < pending.val.length
+                    → ∃ a val r,
+                        pending.val[i]? = some (a, .Put val)
+                        ∧ rows[i]? = some r
+                        ∧ r.key.val = packedAddress a
+                        ∧ r.value = { address := a, value := { value := val, version } }
+                        ∧ r.key.val.length
+                          = 8 + a.map.val.length + a.key.val.length)) := by
   unfold CcfKv.engine.collect_replay_put_batch
   have hlen : (alloc.vec.Vec.len pending).val = pending.val.length :=
     alloc.vec.Vec.len_val pending
@@ -282,7 +285,8 @@ theorem collect_replay_put_batch_spec
             have hpackRoom : 8 + addr.map.val.length + addr.key.val.length ≤ Usize.max := by
               omega
             apply WP.spec_bind
-              (index_batch_row_refines addr ({ value := val, version } : CcfKv.engine.Cell) hpackRoom)
+              (index_batch_row_refines addr
+                ({ value := val, version } : CcfKv.engine.Cell) hpackRoom)
             intro rr ⟨hrKey, hrVal, hrLen⟩
             have hbatchLen : batch.val.length < Usize.max := by
               rw [hbatch, List.length_map, hrowsLen]; omega
@@ -330,21 +334,24 @@ theorem advance_replay_stamps_put_only_spec (encode : List U8 → String)
         (fun (revOut, birthOut) =>
           (∀ m,
             find (revOut.val.map fun (k, s) => (encode k.val, modelStamp s)) m
-              = find
-                  ((encodeWrites encode (byteWrites pending.val)).foldl
-                    (fun rs (a, value) =>
-                      if value.isSome || (find ([] : Data) a).isSome then
-                        set rs a.1 (modelStamp stamp)
-                      else rs)
-                    (revisions.val.map fun (k, s) => (encode k.val, modelStamp s)))
-                  m)
+            = find
+                ((encodeWrites encode (byteWrites pending.val)).foldl
+                  (fun rs (a, value) =>
+                    if value.isSome || (find ([] : Data) a).isSome then
+                      set rs a.1 (modelStamp stamp)
+                    else
+                      rs)
+                  (revisions.val.map fun (k, s) => (encode k.val, modelStamp s)))
+                m)
           ∧ (∀ m,
-            find (birthOut.val.map fun (k, s) => (encode k.val, modelStamp s)) m
+              find (birthOut.val.map fun (k, s) => (encode k.val, modelStamp s)) m
               = find
                   ((encodeWrites encode (byteWrites pending.val)).foldl
                     (fun bs (a, _) =>
-                      if (find bs a.1).isSome then bs
-                      else set bs a.1 (modelStamp stamp))
+                      if (find bs a.1).isSome then
+                        bs
+                      else
+                        set bs a.1 (modelStamp stamp))
                     (births.val.map fun (k, s) => (encode k.val, modelStamp s)))
                   m)) := by
   let enc : CcfKv.engine.Bytes → String := fun b => encode b.val
@@ -458,9 +465,9 @@ theorem advance_replay_stamps_put_only_spec (encode : List U8 → String)
         simp only [clone_bytes, bind_ok]
         apply WP.spec_bind
           (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-            CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-            curRev a.map stamp (fun k => hbyteSame k a.map) clone_bytes (fun _ => rfl)
-            (by omega))
+            CcfKv.engine.Bytes.Insts.CoreCloneClone
+            CcfKv.engine.Stamp.Insts.CoreCloneClone curRev a.map stamp
+            (fun k => hbyteSame k a.map) clone_bytes (fun _ => rfl) (by omega))
         intro rev1 hrev1
         have hrev1Len : rev1.val.length ≤ curRev.val.length + 1 := by
           rw [hrev1, Kv.Model.set, List.length_cons]
@@ -494,9 +501,9 @@ theorem advance_replay_stamps_put_only_spec (encode : List U8 → String)
             simp only [ite_true, clone_bytes, bind_ok]
             apply WP.spec_bind
               (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-                CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-                curBirth a.map stamp (fun k => hbyteSame k a.map) clone_bytes (fun _ => rfl)
-                (by omega))
+                CcfKv.engine.Bytes.Insts.CoreCloneClone
+                CcfKv.engine.Stamp.Insts.CoreCloneClone curBirth a.map stamp
+                (fun k => hbyteSame k a.map) clone_bytes (fun _ => rfl) (by omega))
             intro birth1 hbirth1
             rw [WP.spec_ok]
             have hbirth1Len : birth1.val.length ≤ curBirth.val.length + 1 := by
@@ -617,7 +624,9 @@ theorem advance_replay_stamps_put_only_spec (encode : List U8 → String)
         constructor
         · rw [hr1Eq (enc a.map), hrevStepEq, hfindSet, ite_eq_left rfl]
         · rw [hb1Eq (enc a.map), hbirthStepEq]
-          cases hf : find (((pending.val.take i.val).map encW).foldl birthStep (proj births)) (enc a.map) with
+          cases hf
+                : find (((pending.val.take i.val).map encW).foldl birthStep (proj births))
+                    (enc a.map) with
           | some _ => simp only [Option.isSome_some, ite_true, hf]
           | none => simp [hfindSet]
     · have hge : pending.val.length ≤ i.val := by
@@ -825,9 +834,10 @@ private theorem validate_snapshot_map_spec (frame : CcfKv.engine.Frame)
         simp only [clone_bytes, bind_ok]
         apply WP.spec_bind
           (assoc_set CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-            CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-            frame.births sm.name { version := sm.revision, identity }
-            (fun k => hbyteSame k sm.name) clone_bytes (fun _ => rfl) hB)
+            CcfKv.engine.Bytes.Insts.CoreCloneClone
+            CcfKv.engine.Stamp.Insts.CoreCloneClone frame.births sm.name
+            { version := sm.revision, identity } (fun k => hbyteSame k sm.name)
+            clone_bytes (fun _ => rfl) hB)
         intro a ha
         have haLen : a.val.length ≤ frame.births.val.length + 1 := by
           rw [ha, Kv.Model.set, List.length_cons]
@@ -995,14 +1005,18 @@ private theorem validate_snapshot_maps_spec (frame : CcfKv.engine.Frame)
           have hsmLen : (alloc.vec.Vec.len sm.cells).val = sm.cells.val.length :=
             alloc.vec.Vec.len_val sm.cells
           rw [htakeSucc, snapshotCellCount_append] at hsumLe
-          apply WP.spec_bind (Usize.add_spec (x := total) (y := alloc.vec.Vec.len sm.cells) (by omega))
+          apply WP.spec_bind
+            (Usize.add_spec (x := total) (y := alloc.vec.Vec.len sm.cells) (by omega))
           intro total1 htotal1
           have hone : (1#usize : Usize).val = 1 := rfl
           apply WP.spec_bind (Usize.add_spec (x := i) (y := 1#usize) (by omega))
           intro i1 hi1
           rw [WP.spec_ok]
           dsimp only
-          refine ⟨⟨by omega, hver1.trans hver, hdat1.trans hdat, by omega, by omega, ?_⟩, by omega⟩
+          refine ⟨
+            ⟨by omega, hver1.trans hver, hdat1.trans hdat, by omega, by omega, ?_⟩,
+            by omega
+          ⟩
           rw [show i1.val = i.val + 1 by omega, htakeSucc, snapshotCellCount_append]
           omega
       | false =>
@@ -1024,7 +1038,8 @@ private theorem collect_preserved_snapshot_rows_spec
     (hView : IndexView index frame.data frameRows) (hValid : IndexValid index)
     (hScanRoom : 18 * frameRows.length ≤ Usize.max)
     (hBatchRoom : initRows.length + frameRows.length ≤ Usize.max)
-    (hKeys : ∀ row ∈ frameRows, 8 + row.1.map.val.length + row.1.key.val.length ≤ Usize.max)
+    (hKeys
+      : ∀ row ∈ frameRows, 8 + row.1.map.val.length + row.1.key.val.length ≤ Usize.max)
     (hRowDepth : ∀ row ∈ frameRows, 8 + row.1.map.val.length + row.1.key.val.length ≤ 56)
     (hInitDepth : ∀ r ∈ initRows, r.key.val.length ≤ 56)
     (hInitPacked : ∀ r ∈ initRows, r.key.val = packedAddress r.value.address)
@@ -1044,13 +1059,15 @@ private theorem collect_preserved_snapshot_rows_spec
   · rw [ite_eq_left (by simp [hz]), WP.spec_ok]
     exact ⟨initRows, hOwned, Nat.le_add_right _ _, hInitDepth, hInitPacked⟩
   · rw [ite_eq_right (by simp [hz])]
-    apply WP.spec_bind (index_scan_refines index frame.data frameRows hView hValid hScanRoom)
+    apply WP.spec_bind
+      (index_scan_refines index frame.data frameRows hView hValid hScanRoom)
     intro links ⟨hlinksLen, hlinksAt⟩
     unfold CcfKv.engine.collect_preserved_snapshot_rows_loop
     have hllen : (alloc.vec.Vec.len links).val = links.val.length := alloc.vec.Vec.len_val links
     have hlcap := alloc.vec.Vec.len_ineq links
     apply loop.spec_decr_nat
-      (fun p : alloc.vec.Vec (Option SnapshotBatchRow) × Usize => links.val.length - p.2.val)
+      (fun p : alloc.vec.Vec (Option SnapshotBatchRow) × Usize =>
+        links.val.length - p.2.val)
       (fun (cur, i) =>
         i.val ≤ links.val.length
         ∧ ∃ curRows : List SnapshotBatchRow,
@@ -1085,8 +1102,9 @@ private theorem collect_preserved_snapshot_rows_spec
           unfold CcfKv.engine.push_preserved_snapshot_row
           apply WP.spec_bind
             (assoc_get CcfKv.engine.Bytes.Insts.Ccf_kvEngineKey
-              CcfKv.engine.Bytes.Insts.CoreCloneClone CcfKv.engine.Stamp.Insts.CoreCloneClone
-              frame.births addr.map (fun k => hbyteSame k addr.map) (fun _ => rfl))
+              CcfKv.engine.Bytes.Insts.CoreCloneClone
+              CcfKv.engine.Stamp.Insts.CoreCloneClone frame.births addr.map
+              (fun k => hbyteSame k addr.map) (fun _ => rfl))
           intro found _
           have hbranch : ∀ (replaced : Bool), WP.spec
               (if replaced then Result.ok cur
@@ -1115,8 +1133,13 @@ private theorem collect_preserved_snapshot_rows_spec
                   rw [hcur, List.length_map]; omega
                 apply WP.spec_mono (alloc.vec.Vec.push_spec cur (some rr) hcurRoom)
                 intro cur1 hcur1
-                refine ⟨curRows ++ [rr], by rw [hcur1, hcur, List.map_append]; rfl,
-                  by rw [List.length_append, List.length_singleton], ?_, ?_⟩
+                refine ⟨
+                  curRows ++ [rr],
+                  by rw [hcur1, hcur, List.map_append]; rfl,
+                  by rw [List.length_append, List.length_singleton],
+                  ?_,
+                  ?_
+                ⟩
                 · intro r hr
                   rcases List.mem_append.mp hr with h1 | h2
                   · exact hcurDepth r h1
@@ -1129,7 +1152,8 @@ private theorem collect_preserved_snapshot_rows_spec
                     rw [hrKey, hrVal]
           cases found with
           | none => simp only [bind_ok]; exact hbranch false
-          | some st => simp only [bind_ok]; exact hbranch (decide (st.identity = identity))
+          | some st =>
+              simp only [bind_ok]; exact hbranch (decide (st.identity = identity))
         apply WP.spec_bind hpushSpec
         rintro cur1 ⟨rows1, hcur1, hrows1Len, hrows1Depth, hrows1Packed⟩
         have hone : (1#usize : Usize).val = 1 := rfl
@@ -1162,7 +1186,8 @@ private theorem collect_snapshot_map_rows_spec
   have hclen : (alloc.vec.Vec.len sm.cells).val = sm.cells.val.length := alloc.vec.Vec.len_val sm.cells
   have hccap := alloc.vec.Vec.len_ineq sm.cells
   apply loop.spec_decr_nat
-    (fun p : alloc.vec.Vec (Option SnapshotBatchRow) × Usize => sm.cells.val.length - p.2.val)
+    (fun p : alloc.vec.Vec (Option SnapshotBatchRow) × Usize =>
+      sm.cells.val.length - p.2.val)
     (fun (cur, j) =>
       j.val ≤ sm.cells.val.length
       ∧ ∃ curRows : List SnapshotBatchRow,
@@ -1221,8 +1246,9 @@ private theorem install_snapshot_loop0_spec
     (batch : alloc.vec.Vec (Option SnapshotBatchRow))
     (initRows : List SnapshotBatchRow) (hOwned : batch.val = initRows.map some)
     (hRoom : initRows.length + snapshotCellCount maps.val ≤ Usize.max)
-    (hDepth : ∀ sm ∈ maps.val, ∀ cell ∈ sm.cells.val,
-        8 + sm.name.val.length + cell.1.val.length ≤ 56)
+    (hDepth
+      : ∀ sm ∈ maps.val,
+        ∀ cell ∈ sm.cells.val, 8 + sm.name.val.length + cell.1.val.length ≤ 56)
     (hInitDepth : ∀ r ∈ initRows, r.key.val.length ≤ 56)
     (hInitPacked : ∀ r ∈ initRows, r.key.val = packedAddress r.value.address)
     : WP.spec (CcfKv.engine.Store.install_snapshot_loop0 maps batch 0#usize)
@@ -1339,8 +1365,9 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
     (hScanRoom : 18 * cutRows.length ≤ Usize.max)
     (hTotalRoom : cutRows.length + snapshotCellCount maps.val ≤ Usize.max)
     (hCutDepth : ∀ row ∈ cutRows, 8 + row.1.map.val.length + row.1.key.val.length ≤ 56)
-    (hMapDepth : ∀ sm ∈ maps.val, ∀ cell ∈ sm.cells.val,
-        8 + sm.name.val.length + cell.1.val.length ≤ 56)
+    (hMapDepth
+      : ∀ sm ∈ maps.val,
+        ∀ cell ∈ sm.cells.val, 8 + sm.name.val.length + cell.1.val.length ≤ 56)
     (hDirRoom
       : s.history.index.values.dirs.val.length
           + 2 * ((cutRows.length + snapshotCellCount maps.val) * (112 + 1))
@@ -1351,15 +1378,20 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
         ≤ 2147483647)
     (hRefRoom
       : (framePins s.history.activeFrames ++ extraPins).length
-          + 17 * (s.history.index.values.dirs.val.length
-              + 2 * ((cutRows.length + snapshotCellCount maps.val) * (112 + 1)) + 2)
+          + 17
+            * (s.history.index.values.dirs.val.length
+                + 2 * ((cutRows.length + snapshotCellCount maps.val) * (112 + 1))
+                + 2)
           + 1
         ≤ U32.max)
     (hQueueRoom
-      : 2 * ((s.history.index.values.dirs.val.length
-              + 2 * ((cutRows.length + snapshotCellCount maps.val) * (112 + 1)) + 1)
-            + (s.history.index.values.rows.val.length
-              + (cutRows.length + snapshotCellCount maps.val))) + 1
+      : 2
+            * ((s.history.index.values.dirs.val.length
+                  + 2 * ((cutRows.length + snapshotCellCount maps.val) * (112 + 1))
+                  + 1)
+                + (s.history.index.values.rows.val.length
+                    + (cutRows.length + snapshotCellCount maps.val)))
+          + 1
         ≤ Usize.max)
     : WP.spec (CcfKv.engine.Store.install_snapshot s version maps)
         (fun (result, after) =>
@@ -1438,8 +1470,12 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
             (collect_preserved_snapshot_rows_spec
               (alloc.vec.Vec.with_capacity (Option SnapshotBatchRow) totalCells)
               s.history.index frame1 s.history.next_identity [] cutRows
-              (by simp [alloc.vec.Vec.with_capacity]) hCutView1 live.valid hScanRoom
-              (by simp; omega) hcutKeys hCutDepth (by simp) (by simp))
+              (by simp [alloc.vec.Vec.with_capacity])
+              hCutView1 live.valid hScanRoom
+              (by simp; omega)
+              hcutKeys hCutDepth
+              (by simp)
+              (by simp))
           intro batch1 ⟨rows1, hbatch1, hrows1Len, hrows1Depth, hrows1Packed⟩
           apply WP.spec_bind
             (install_snapshot_loop0_spec maps batch1 rows1 hbatch1
@@ -1483,8 +1519,8 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
               rw [Aeneas.Std.bind_assoc]
               apply WP.spec_bind
                 (single_build_sorted_batch_refines s.history.index sorted outRows
-                  (framePins s.history.activeFrames ++ extraPins) live houtOwned houtOrdered 112
-                  hDepth112 hKeysRoom hDirRoom' hRowRoom' hRefRoom')
+                  (framePins s.history.activeFrames ++ extraPins) live houtOwned
+                  houtOrdered 112 hDepth112 hKeysRoom hDirRoom' hRowRoom' hRefRoom')
               rintro ⟨root, ai⟩ ⟨haiLive, _, haiGrowth, bindings, hrootView, hrootBindings⟩
               let newExtra : List U32 := if root = 0#u32 then extraPins else root :: extraPins
               have haiLive' : IndexLiveness ai (framePins s.history.activeFrames ++ newExtra) := by
@@ -1506,8 +1542,8 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
               change WP.spec (Aeneas.Std.bind (Result.ok (root, ai)) _) _
               rw [bind_ok]
               apply WP.spec_bind
-                (history_pop_active_to_zero_refines { s.history with index := ai } newExtra
-                  valid haiLive' haiQueue)
+                (history_pop_active_to_zero_refines { s.history with index := ai }
+                  newExtra valid haiLive' haiQueue)
               intro h1 ⟨_, _, _, _, _, _, hh1Vals, hh1Live⟩
               let baseFrame : CcfKv.engine.Frame := { frame1 with data := root }
               apply WP.spec_bind (branch_reset_branch_refines h1.log baseFrame)
@@ -1580,8 +1616,22 @@ theorem install_snapshot_refines (s : CcfKv.engine.Store) (version : U64)
                 have hp : newExtra.Perm (framePins [baseFrame] ++ extraPins) := by
                   by_cases hz : root = 0#u32 <;> simp [newExtra, framePins, baseFrame, hz]
                 exact hai2Live.perm hp
-              exact Or.inr (Or.inr ⟨rfl, baseFrame, hbl2Vals, hf1Ver, rfl, by simp [alloc.vec.Vec.new],
-                rfl, by dsimp only; omega, rfl, hbl2Valid, hhistValid, hliveFinal⟩)
+              exact Or.inr
+                (Or.inr
+                  ⟨
+                    rfl,
+                    baseFrame,
+                    hbl2Vals,
+                    hf1Ver,
+                    rfl,
+                    by simp [alloc.vec.Vec.new],
+                    rfl,
+                    by dsimp only; omega,
+                    rfl,
+                    hbl2Valid,
+                    hhistValid,
+                    hliveFinal
+                  ⟩)
 
 /-! ## Part 3: End-to-End `Store::replay_indexed_ccf` Refinement -/
 
@@ -1589,8 +1639,9 @@ private theorem publish_nil_nodup_puts
     (v : Nat) (ws : List (Addr String String × Option String))
     (hPuts : ∀ w ∈ ws, ∃ val, w.2 = some val)
     (hNodup : (ws.map Prod.fst).Nodup)
-    : publish [] v ws =
-        ws.filterMap (fun w => w.2.map fun val => (w.1, { value := val, version := v })) := by
+    : publish [] v ws
+      = ws.filterMap
+          (fun w => w.2.map fun val => (w.1, { value := val, version := v })) := by
   induction ws with
   | nil => rfl
   | cons hd tl ih =>
@@ -1645,12 +1696,17 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
     (hKeys : ∀ row ∈ writes.val, IndexKeyRoom (replayRow row))
     (hDepth : ∀ row ∈ writes.val, 8 + row.1.map.val.length + row.1.key.val.length ≤ 56)
     (hDirFast
-      : s.history.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1)) < 2147483647)
+      : s.history.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1))
+        < 2147483647)
     (hRowFast : s.history.index.values.rows.val.length + writes.val.length ≤ 2147483647)
     (hRefFast
       : (storePins s).length
-          + 17 * (s.history.index.values.dirs.val.length
-            + 2 * (writes.val.length * (112 + 1)) + 2) + 1 ≤ U32.max)
+          + 17
+            * (s.history.index.values.dirs.val.length
+                + 2 * (writes.val.length * (112 + 1))
+                + 2)
+          + 1
+        ≤ U32.max)
     (hR : head.revisions.val.length + writes.val.length ≤ Usize.max)
     (hB : head.births.val.length + writes.val.length ≤ Usize.max)
     (valid : BranchValid s.history.log) (indexed : HistoryIndexValid s.history)
@@ -1678,7 +1734,8 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
   have hheadRes := history_head s.history prior head hHead valid
   rw [hheadRes, bind_ok]
   apply WP.spec_bind
-    (prepare_replay_ccf_matches head.version s.history.next_identity version hVersion hI writes)
+    (prepare_replay_ccf_matches head.version s.history.next_identity version hVersion hI
+      writes)
   rintro r (rfl | ⟨pending, rfl, hp⟩)
   · simp [core.result.Result.Insts.CoreOpsTry.branch,
       core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
@@ -1824,7 +1881,8 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
             have hrEq : r = r' := by rw [← hget, hbAt]
             rw [hrEq, hkey, hval]
           rw [Aeneas.Std.bind_assoc]
-          apply WP.spec_bind (sort_and_check_unique_batch_spec batch batchRows hbatchOwned)
+          apply WP.spec_bind
+            (sort_and_check_unique_batch_spec batch batchRows hbatchOwned)
           intro osorted hosorted
           cases osorted with
           | none => exact hFallback
@@ -1836,9 +1894,9 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
               simp only [clone_assoc, bind_ok]
               rw [Aeneas.Std.bind_assoc]
               apply WP.spec_bind
-                (advance_replay_stamps_put_only_spec encode inj head.revisions head.births pending
-                  { version := version, identity := s.history.next_identity } hPutOnly
-                  (by omega) (by omega))
+                (advance_replay_stamps_put_only_spec encode inj head.revisions head.births
+                  pending { version := version, identity := s.history.next_identity }
+                  hPutOnly (by omega) (by omega))
               rintro ⟨revisions1, births1⟩ ⟨hrev1, hbirth1⟩
               change WP.spec (Aeneas.Std.bind
                 (do
@@ -1877,9 +1935,10 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
                 rw [hrEq, hlenEq]
                 exact hkr
               apply WP.spec_bind
-                (single_build_sorted_batch_refines s.history.index sorted outRows (storePins s)
-                  live houtOwned houtOrdered 112 hDepth112 hKeysRoom'
-                  (houtLen.symm ▸ hDirFast) (houtLen.symm ▸ hRowFast) (houtLen.symm ▸ hRefFast))
+                (single_build_sorted_batch_refines s.history.index sorted outRows
+                  (storePins s) live houtOwned houtOrdered 112 hDepth112 hKeysRoom'
+                  (houtLen.symm ▸ hDirFast) (houtLen.symm ▸ hRowFast)
+                  (houtLen.symm ▸ hRefFast))
               rintro ⟨dataRoot, ai⟩ ⟨haiLive, haiKeeps, _, bindings, hrootView, hrootBindings⟩
               let next : CcfKv.engine.Frame :=
                 { version := version
@@ -1945,13 +2004,15 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
               have hEncAddrInj : Function.Injective (fun a : CcfKv.engine.Address =>
                   encodeAddr encode (byteAddr a)) := by
                 intro a1 a2 heq
-                cases a1 with | mk m1 k1 =>
-                cases a2 with | mk m2 k2 =>
-                have hm : encode m1.val = encode m2.val := (Prod.mk.inj heq).1
-                have hk : encode k1.val = encode k2.val := (Prod.mk.inj heq).2
-                have hm' : m1 = m2 := alloc.vec.Vec.ext _ _ (inj hm)
-                have hk' : k1 = k2 := alloc.vec.Vec.ext _ _ (inj hk)
-                subst hm'; subst hk'; rfl
+                cases a1 with
+                | mk m1 k1 =>
+                    cases a2 with
+                    | mk m2 k2 =>
+                        have hm : encode m1.val = encode m2.val := (Prod.mk.inj heq).1
+                        have hk : encode k1.val = encode k2.val := (Prod.mk.inj heq).2
+                        have hm' : m1 = m2 := alloc.vec.Vec.ext _ _ (inj hm)
+                        have hk' : k1 = k2 := alloc.vec.Vec.ext _ _ (inj hk)
+                        subst hm'; subst hk'; rfl
               have hwsNodup :
                   ((encodeWrites encode (byteWrites pending.val)).map Prod.fst).Nodup := by
                 have hmap : (encodeWrites encode (byteWrites pending.val)).map Prod.fst =
@@ -2068,10 +2129,21 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
                   (framePins_append s.history.activeFrames next).symm.append_right (txsPins s.txs.val)
                 by_cases hz : dataRoot = 0#u32 <;> simpa [next, storePins, hz] using hp'
               exact Or.inr
-                ⟨True.intro, next, hModelFrameEq, hf, by omega, True.intro, True.intro, True.intro,
+                ⟨
+                  True.intro,
+                  next,
+                  hModelFrameEq,
+                  hf,
+                  by omega,
+                  True.intro,
+                  True.intro,
+                  True.intro,
                   logValid,
-                  indexed.append haiKeeps haiLive.valid next (index_rows_view ⟨_, hIndexView⟩) hf rfl,
-                  haiLive.perm hpinsPerm, haiKeeps⟩
+                  indexed.append haiKeeps haiLive.valid next
+                    (index_rows_view ⟨_, hIndexView⟩) hf rfl,
+                  haiLive.perm hpinsPerm,
+                  haiKeeps
+                ⟩
     · simp only [hEmpty, decide_false, Bool.false_eq_true, ite_false]
       exact hFallback
 

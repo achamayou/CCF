@@ -11,6 +11,7 @@ public import KvRust.ApplyRefinement
 public import KvRust.Assoc
 public import KvRust.Backfill
 public import KvRust.BranchLog
+public import KvRust.ConcurrencyModel
 public import KvRust.Detached
 public import KvRust.Environment
 public import KvRust.History
