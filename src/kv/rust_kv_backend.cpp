@@ -1318,6 +1318,12 @@ namespace ccf::kv
 #endif
       auto applied = [&]() {
         ShardedRwLock::WriteGuard native_guard(native_lock);
+        if (params.is_reserved)
+        {
+          // Backfill replaces active frames and releases their old radix roots,
+          // so promote any active hazard-slot pins before mutating the branch.
+          sync_hazards_locked();
+        }
         auto res = params.is_reserved ?
           wrap_reply(ccf_rust_kv_tx_commit_reserved(
             native.get(), params.rust_tx, params.reserved->seqno)) :

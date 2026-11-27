@@ -413,3 +413,118 @@ DOCTEST_TEST_CASE(
     }
   }
 }
+
+DOCTEST_TEST_CASE(
+  "Concurrent readers with reserved backfill and compaction" *
+  doctest::test_suite("concurrency"))
+{
+  ccf::kv::test::TestStoreBase kv_store;
+  auto encryptor = std::make_shared<ccf::kv::NullTxEncryptor>();
+  kv_store.set_encryptor(encryptor);
+  constexpr auto term = 2;
+  kv_store.initialise_term(term);
+
+  using DataMap = ccf::kv::Map<size_t, size_t>;
+  DataMap data_map("public:data");
+  DataMap sig_map("public:sig");
+
+  // Seed initial state.
+  {
+    auto tx = kv_store.create_tx();
+    auto dh = tx.rw(data_map);
+    auto sh = tx.rw(sig_map);
+    for (size_t i = 0; i < 64; ++i)
+    {
+      dh->put(i, i);
+    }
+    sh->put(0, 0);
+    DOCTEST_REQUIRE(tx.commit() == ccf::kv::CommitResult::SUCCESS);
+  }
+
+  std::atomic<bool> stop{false};
+  std::atomic<size_t> reserved_commits{0};
+  std::atomic<size_t> reads_done{0};
+
+  // Reader threads hold read-only snapshots across concurrent reserved
+  // backfills and compactions, stressing hazard-slot root liveness.
+  std::vector<std::thread> readers;
+  for (size_t r = 0; r < 4; ++r)
+  {
+    readers.emplace_back([&, r]() {
+      while (!stop.load(std::memory_order_acquire))
+      {
+        try
+        {
+          auto rtx = kv_store.create_read_only_tx();
+          auto dh = rtx.ro(data_map);
+          auto v1 = dh->get(r % 64);
+          DOCTEST_REQUIRE(v1.has_value());
+          std::this_thread::yield();
+          auto v2 = dh->get(r % 64);
+          DOCTEST_REQUIRE(v2 == v1);
+          reads_done.fetch_add(1, std::memory_order_relaxed);
+        }
+        catch (const ccf::kv::CompactedVersionConflict&)
+        {
+          // Expected when compaction advances past a reader's snapshot.
+        }
+      }
+    });
+  }
+
+  // Normal writer threads advance the active branch concurrently with open
+  // reservations so backfill has to rewrite multiple active frames.
+  std::vector<std::thread> writers;
+  for (size_t w = 0; w < 2; ++w)
+  {
+    writers.emplace_back([&, w]() {
+      size_t iter = 0;
+      while (!stop.load(std::memory_order_acquire))
+      {
+        try
+        {
+          auto tx = kv_store.create_tx();
+          auto dh = tx.rw(data_map);
+          dh->put((w * 32) + (iter % 32), iter + 1);
+          tx.commit();
+          ++iter;
+        }
+        catch (const ccf::kv::CompactedVersionConflict&)
+        {
+          // Expected when compaction advances past a writer's snapshot.
+        }
+      }
+    });
+  }
+
+  // Reserved-slot writer reserves a version, lets normal commits and readers
+  // run over it, commits the reserved backfill, and periodically compacts.
+  for (size_t i = 0; i < 60; ++i)
+  {
+    const auto reserved_txid = kv_store.next_txid();
+    std::this_thread::yield();
+    auto rtx = kv_store.create_reserved_tx(reserved_txid);
+    auto sh = rtx.rw(sig_map);
+    sh->put(0, i + 1);
+    const auto res = rtx.commit_reserved().success;
+    DOCTEST_REQUIRE(res == ccf::kv::CommitResult::SUCCESS);
+    reserved_commits.fetch_add(1, std::memory_order_relaxed);
+    if (i % 4 == 3)
+    {
+      kv_store.compact(reserved_txid.seqno);
+    }
+  }
+
+  stop.store(true, std::memory_order_release);
+  for (auto& t : writers)
+  {
+    t.join();
+  }
+  for (auto& t : readers)
+  {
+    t.join();
+  }
+
+  DOCTEST_REQUIRE(reserved_commits.load() == 60);
+  DOCTEST_REQUIRE(reads_done.load() > 0);
+}
