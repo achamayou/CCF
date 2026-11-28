@@ -131,7 +131,8 @@ namespace ccf::kv
 
     ApplyResult apply(bool track_deletes_on_missing_keys) override
     {
-      std::scoped_lock lock(store.maps_lock, store.state_lock);
+      RustStore::AdaptiveMutexGuard maps_guard(store.maps_lock);
+      RustStore::AdaptiveMutexGuard state_guard(store.state_lock);
       RawKvStoreDeserialiser decoder(
         store.encryptor,
         public_only ? std::make_optional(SecurityDomain::PUBLIC) :
@@ -402,7 +403,7 @@ namespace ccf::kv
     bool committable,
     std::optional<size_t> expected_rollback_count)
   {
-    std::lock_guard ordered(commit_lock);
+    AdaptiveMutexGuard ordered(commit_lock);
 
     std::vector<std::tuple<std::unique_ptr<PendingTx>, bool>>
       contiguous_pending_txs;
@@ -415,7 +416,7 @@ namespace ccf::kv
     std::shared_ptr<ILedgerChunker> ch;
 
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (
         term != id.view ||
         (expected_rollback_count.has_value() &&
@@ -496,7 +497,7 @@ namespace ccf::kv
 
         if (ch)
         {
-          std::lock_guard lock(state_lock);
+          AdaptiveMutexGuard lock(state_lock);
           if (
             previous_rollback_count == rollback_count &&
             replication_view == term)
@@ -518,7 +519,7 @@ namespace ccf::kv
     if (c)
     {
       {
-        std::lock_guard lock(state_lock);
+        AdaptiveMutexGuard lock(state_lock);
         if (
           previous_rollback_count != rollback_count || replication_view != term)
         {
@@ -532,7 +533,7 @@ namespace ccf::kv
     }
 
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (
         last_replicated == previous_last_replicated &&
         previous_rollback_count == rollback_count)
@@ -550,7 +551,7 @@ namespace ccf::kv
     std::shared_ptr<TxHistory> h;
     std::shared_ptr<Consensus> c;
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (version < global)
       {
         throw std::logic_error(std::format(
@@ -602,7 +603,7 @@ namespace ccf::kv
   std::unique_ptr<AbstractStore::AbstractSnapshot> RustStore::snapshot_maps(
     Version version)
   {
-    std::lock_guard lock(maps_lock);
+    AdaptiveMutexGuard lock(maps_lock);
     return snapshot_unsafe_maps(version);
   }
 
@@ -611,7 +612,7 @@ namespace ccf::kv
   {
     EncryptorPtr e;
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       e = encryptor;
     }
     return snapshot->serialise(e);
@@ -625,8 +626,8 @@ namespace ccf::kv
     {
       throw std::logic_error("Cannot swap a Rust KV store with itself");
     }
-    std::scoped_lock maps_guard(maps_lock, source.maps_lock);
-    std::scoped_lock state_guard(state_lock, source.state_lock);
+    DualAdaptiveGuard maps_guard(maps_lock, source.maps_lock);
+    DualAdaptiveGuard state_guard(state_lock, source.state_lock);
     if (source.head > head)
     {
       throw std::runtime_error(std::format(
@@ -724,7 +725,8 @@ namespace ccf::kv
     const SnapshotPublicMaps* reuse)
   {
     KV_TRACE(trace::unsupported(this, "snapshot import"));
-    std::scoped_lock lock(maps_lock, state_lock);
+    AdaptiveMutexGuard maps_guard(maps_lock);
+    AdaptiveMutexGuard state_guard(state_lock);
     RawKvStoreDeserialiser decoder(
       encryptor, public_only ? std::make_optional(PUBLIC) : std::nullopt);
     Term read_term = 0;
@@ -1072,7 +1074,7 @@ namespace ccf::kv
         throw std::logic_error("Missing claims");
       }
       {
-        std::lock_guard lock(state_lock);
+        AdaptiveMutexGuard lock(state_lock);
         enc = encryptor;
         max_size = max_entry_size;
       }
@@ -1147,7 +1149,8 @@ namespace ccf::kv
     ConsensusHookPtrs hooks;
 
     {
-      std::scoped_lock lock(maps_lock, state_lock);
+      AdaptiveMutexGuard maps_guard(maps_lock);
+      AdaptiveMutexGuard state_guard(state_lock);
       if (params.is_reserved)
       {
         const auto reserved_id = *params.reserved;
@@ -1395,7 +1398,7 @@ namespace ccf::kv
       .claims = claims,
       .observer = observer,
       .is_reserved = reserved,
-      .has_any_changes = !all_changes.empty(),
+      .has_any_changes = !all_changes.empty() || pimpl->rust_direct_used,
       .has_snapshot = pimpl->read_txid.has_value(),
       .committing = pimpl->rust_committing,
       .committed = committed,

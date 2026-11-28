@@ -27,6 +27,46 @@ extern "C"
   using ccf_rust_endpoint_callback =
     ccf_rust_result (*)(void* user_data, ccf_rust_endpoint_context* ctx);
   using ccf_rust_drop_callback = void (*)(void* user_data);
+  using ccf_rust_kv_copy_value_fn =
+    void (*)(void* out_ctx, const uint8_t* data, size_t len);
+  using ccf_rust_kv_direct_get_fn = uint8_t (*)(
+    const void* store,
+    void* tx,
+    uint8_t read_only,
+    const uint8_t* map_data,
+    size_t map_len,
+    const uint8_t* key_data,
+    size_t key_len,
+    void* out_ctx,
+    ccf_rust_kv_copy_value_fn copy_cb,
+    uint64_t* snap_ver,
+    uint64_t* commit_view,
+    uint8_t* has_snap);
+  using ccf_rust_kv_direct_has_fn = uint8_t (*)(
+    const void* store,
+    void* tx,
+    uint8_t read_only,
+    const uint8_t* map_data,
+    size_t map_len,
+    const uint8_t* key_data,
+    size_t key_len,
+    int32_t* out_present,
+    uint64_t* snap_ver,
+    uint64_t* commit_view,
+    uint8_t* has_snap);
+  using ccf_rust_kv_direct_write_fn = uint8_t (*)(
+    const void* store,
+    void* tx,
+    uint8_t read_only,
+    const uint8_t* map_data,
+    size_t map_len,
+    const uint8_t* key_data,
+    size_t key_len,
+    const uint8_t* value_data,
+    size_t value_len,
+    uint64_t* snap_ver,
+    uint64_t* commit_view,
+    uint8_t* has_snap);
 #else
 typedef struct ccf_rust_registry ccf_rust_registry;
 typedef struct ccf_rust_endpoint_context ccf_rust_endpoint_context;
@@ -36,6 +76,63 @@ typedef int32_t ccf_rust_auth;
 typedef ccf_rust_result (*ccf_rust_endpoint_callback)(
   void* user_data, ccf_rust_endpoint_context* ctx);
 typedef void (*ccf_rust_drop_callback)(void* user_data);
+typedef void (*ccf_rust_kv_copy_value_fn)(
+  void* out_ctx, const uint8_t* data, size_t len);
+typedef uint8_t (*ccf_rust_kv_direct_get_fn)(
+  const void* store,
+  void* tx,
+  uint8_t read_only,
+  const uint8_t* map_data,
+  size_t map_len,
+  const uint8_t* key_data,
+  size_t key_len,
+  void* out_ctx,
+  ccf_rust_kv_copy_value_fn copy_cb,
+  uint64_t* snap_ver,
+  uint64_t* commit_view,
+  uint8_t* has_snap);
+typedef uint8_t (*ccf_rust_kv_direct_has_fn)(
+  const void* store,
+  void* tx,
+  uint8_t read_only,
+  const uint8_t* map_data,
+  size_t map_len,
+  const uint8_t* key_data,
+  size_t key_len,
+  int32_t* out_present,
+  uint64_t* snap_ver,
+  uint64_t* commit_view,
+  uint8_t* has_snap);
+typedef uint8_t (*ccf_rust_kv_direct_write_fn)(
+  const void* store,
+  void* tx,
+  uint8_t read_only,
+  const uint8_t* map_data,
+  size_t map_len,
+  const uint8_t* key_data,
+  size_t key_len,
+  const uint8_t* value_data,
+  size_t value_len,
+  uint64_t* snap_ver,
+  uint64_t* commit_view,
+  uint8_t* has_snap);
+#endif
+
+  struct ccf_rust_kv_direct
+  {
+    const void* store;
+    void* tx;
+    uint8_t read_only;
+    uint64_t* snap_ver;
+    uint64_t* commit_view;
+    uint8_t* has_snap;
+    uint8_t* compacted_conflict;
+    ccf_rust_kv_direct_get_fn get;
+    ccf_rust_kv_direct_has_fn has;
+    ccf_rust_kv_direct_write_fn write;
+  };
+#ifndef __cplusplus
+  typedef struct ccf_rust_kv_direct ccf_rust_kv_direct;
 #endif
 
 #ifdef __cplusplus
@@ -116,6 +213,8 @@ enum
     ccf_rust_endpoint_context* ctx,
     ccf_rust_slice map_name,
     ccf_rust_slice key);
+  ccf_rust_result ccf_rust_kv_direct_access(
+    ccf_rust_endpoint_context* ctx, ccf_rust_kv_direct* direct);
 
   uint32_t ccf_rust_app_abi_version(void);
   ccf_rust_result ccf_rust_app_register(ccf_rust_registry* registry);

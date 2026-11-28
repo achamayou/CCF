@@ -29,6 +29,7 @@ namespace ccf::kv
     bool rust_committing = false;
     bool rust_committed = false;
     bool rust_aborted = false;
+    bool rust_direct_used = false;
     ~PrivateImpl();
 #endif
 

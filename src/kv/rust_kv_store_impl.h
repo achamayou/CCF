@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ccf/crypto/sha256_hash.h"
+#include "ccf/ds/locking.h"
 #include "ccf/kv/read_only_store.h"
 #include "ccf/kv/serialisers/serialised_entry.h"
 #include "ccf/tx_id.h"
@@ -367,7 +368,7 @@ namespace ccf::kv
 #endif
     };
 
-    class alignas(64) AdaptiveMutex
+    class alignas(64) CCF_CAPABILITY("mutex") AdaptiveMutex
     {
       static constexpr uint32_t SPIN_LIMIT = 2048;
       std::mutex m;
@@ -385,7 +386,7 @@ namespace ccf::kv
     public:
       AdaptiveMutex() = default;
 
-      void lock()
+      void lock() CCF_ACQUIRE()
       {
         if (!held.load(std::memory_order_relaxed) && m.try_lock())
         {
@@ -405,7 +406,7 @@ namespace ccf::kv
         held.store(true, std::memory_order_relaxed);
       }
 
-      bool try_lock()
+      bool try_lock() CCF_TRY_ACQUIRE(true)
       {
         if (!held.load(std::memory_order_relaxed) && m.try_lock())
         {
@@ -415,7 +416,7 @@ namespace ccf::kv
         return false;
       }
 
-      void unlock()
+      void unlock() CCF_RELEASE()
       {
         held.store(false, std::memory_order_relaxed);
         m.unlock();
@@ -423,6 +424,55 @@ namespace ccf::kv
 
       AdaptiveMutex(const AdaptiveMutex&) = delete;
       AdaptiveMutex& operator=(const AdaptiveMutex&) = delete;
+    };
+
+    class CCF_SCOPED_CAPABILITY AdaptiveMutexGuard
+    {
+      AdaptiveMutex& mutex;
+
+    public:
+      explicit AdaptiveMutexGuard(AdaptiveMutex& m) CCF_ACQUIRE(m) : mutex(m)
+      {
+        mutex.lock();
+      }
+
+      ~AdaptiveMutexGuard() CCF_RELEASE()
+      {
+        mutex.unlock();
+      }
+
+      AdaptiveMutexGuard(const AdaptiveMutexGuard&) = delete;
+      AdaptiveMutexGuard& operator=(const AdaptiveMutexGuard&) = delete;
+    };
+
+    class CCF_SCOPED_CAPABILITY DualAdaptiveGuard
+    {
+      AdaptiveMutex& first;
+      AdaptiveMutex& second;
+
+    public:
+      DualAdaptiveGuard(AdaptiveMutex& a, AdaptiveMutex& b) CCF_ACQUIRE(a, b) :
+        first(&a < &b ? a : b),
+        second(&a < &b ? b : a)
+      {
+        first.lock();
+        if (&first != &second)
+        {
+          second.lock();
+        }
+      }
+
+      ~DualAdaptiveGuard() CCF_RELEASE()
+      {
+        if (&first != &second)
+        {
+          second.unlock();
+        }
+        first.unlock();
+      }
+
+      DualAdaptiveGuard(const DualAdaptiveGuard&) = delete;
+      DualAdaptiveGuard& operator=(const DualAdaptiveGuard&) = delete;
     };
 
     class SnapshotPublicMaps
@@ -456,35 +506,38 @@ namespace ccf::kv
     friend class RustReplayEntry;
 
     AdaptiveMutex commit_lock;
-    std::mutex compaction_lock;
-    AdaptiveMutex maps_lock;
-    mutable AdaptiveMutex state_lock;
+    ccf::ds::Mutex compaction_lock CCF_ACQUIRED_AFTER(commit_lock);
+    AdaptiveMutex maps_lock CCF_ACQUIRED_AFTER(compaction_lock);
+    mutable AdaptiveMutex state_lock CCF_ACQUIRED_AFTER(maps_lock);
     std::
       unique_ptr<rust_ffi::NativeStore, decltype(&rust_ffi::ccf_rust_kv_delete)>
         native{rust_ffi::ccf_rust_kv_new(0), &rust_ffi::ccf_rust_kv_delete};
     const uint64_t store_instance_id = next_store_instance_id();
     std::atomic<uint64_t> next_attempt{0};
-    Version head = 0;
-    std::set<Version> open_reservations;
-    Version last_replicated = 0;
-    Version global = 0;
-    View term = 0;
+    Version head CCF_GUARDED_BY(state_lock) = 0;
+    std::set<Version> open_reservations CCF_GUARDED_BY(state_lock);
+    Version last_replicated CCF_GUARDED_BY(state_lock) = 0;
+    Version global CCF_GUARDED_BY(state_lock) = 0;
+    View term CCF_GUARDED_BY(state_lock) = 0;
     std::atomic<View> last_view{0};
-    size_t rollback_count = 0;
-    Version last_committable = NoVersion;
+    size_t rollback_count CCF_GUARDED_BY(state_lock) = 0;
+    Version last_committable CCF_GUARDED_BY(state_lock) = NoVersion;
     const bool is_historical = false;
-    EncryptorPtr encryptor;
-    std::shared_ptr<Consensus> consensus;
-    std::shared_ptr<TxHistory> history;
-    size_t max_entry_size = max_serialised_entry_size;
+    EncryptorPtr encryptor CCF_GUARDED_BY(state_lock);
+    std::shared_ptr<Consensus> consensus CCF_GUARDED_BY(state_lock);
+    std::shared_ptr<TxHistory> history CCF_GUARDED_BY(state_lock);
+    size_t max_entry_size CCF_GUARDED_BY(state_lock) =
+      max_serialised_entry_size;
     std::atomic<bool> snapshot_requested{false};
     std::atomic<StoreReadiness> readiness{StoreReadiness::Ready};
-    std::shared_ptr<ILedgerChunker> chunker;
-    SnapshotterPtr snapshotter;
+    std::shared_ptr<ILedgerChunker> chunker CCF_GUARDED_BY(state_lock);
+    SnapshotterPtr snapshotter CCF_GUARDED_BY(state_lock);
     std::unordered_map<Version, std::tuple<std::unique_ptr<PendingTx>, bool>>
-      pending_txs;
-    std::map<std::string, untyped::MapHook> local_hooks;
-    std::map<std::string, untyped::CommitHook> global_hooks;
+      pending_txs CCF_GUARDED_BY(state_lock);
+    std::map<std::string, untyped::MapHook> local_hooks
+      CCF_GUARDED_BY(state_lock);
+    std::map<std::string, untyped::CommitHook> global_hooks
+      CCF_GUARDED_BY(state_lock);
 
     struct MapDelta
     {
@@ -493,7 +546,7 @@ namespace ccf::kv
     };
 
     using MapDeltaLog = std::deque<std::pair<Version, MapDelta>>;
-    std::map<std::string, MapDeltaLog> map_deltas;
+    std::map<std::string, MapDeltaLog> map_deltas CCF_GUARDED_BY(state_lock);
 
     static void insert_map_delta(
       MapDeltaLog& log, Version version, MapDelta delta)
@@ -596,6 +649,7 @@ namespace ccf::kv
 
     ConsensusHookPtrs record_commit_flat_locked(
       Version version, const rust_detail::FlatMapWrites& maps)
+      CCF_REQUIRES(state_lock)
     {
       ConsensusHookPtrs hooks;
       for (const auto& [name, writes_ptr] : maps)
@@ -618,6 +672,7 @@ namespace ccf::kv
     }
 
     void apply_tx_flags_locked(Version version, bool force_chunk, bool snapshot)
+      CCF_REQUIRES(state_lock)
     {
       if (force_chunk && chunker)
       {
@@ -630,6 +685,7 @@ namespace ccf::kv
     }
 
     bool should_create_ledger_chunk_locked(Version version)
+      CCF_REQUIRES(state_lock)
     {
       const bool chunk = chunker && chunker->is_chunk_end_requested(version);
       const bool snapshot = snapshotter ?
@@ -638,7 +694,7 @@ namespace ccf::kv
       return chunk || snapshot;
     }
 
-    bool mark_reserved_chunk_locked(Version version)
+    bool mark_reserved_chunk_locked(Version version) CCF_REQUIRES(state_lock)
     {
       const auto mark = should_create_ledger_chunk_locked(version);
       if (mark && chunker)
@@ -651,7 +707,7 @@ namespace ccf::kv
     std::shared_ptr<const rust_detail::FlatMapWrite> diff_entries_for(
       Version version, const std::string& name)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       const auto it = map_deltas.find(name);
       if (it == map_deltas.end() || it->second.empty())
       {
@@ -695,7 +751,7 @@ namespace ccf::kv
 
     rust_detail::MapWrites latest_map_deltas()
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       rust_detail::MapWrites writes;
       for (const auto& [name, changes] : map_deltas)
       {
@@ -730,6 +786,21 @@ namespace ccf::kv
       }
     }
 
+    const rust_ffi::NativeStore* native_store() const
+    {
+      return native.get();
+    }
+
+    View latest_view() const
+    {
+      return last_view.load(std::memory_order_acquire);
+    }
+
+    uint64_t next_attempt_id()
+    {
+      return allocate_attempt_id();
+    }
+
     rust_detail::Response operate_tx_read(
       rust_ffi::NativeTx* tx, rust_ffi::Request request) const
     {
@@ -762,19 +833,19 @@ namespace ccf::kv
 
     std::shared_ptr<Consensus> get_consensus() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return consensus;
     }
 
     void set_consensus(const std::shared_ptr<Consensus>& c)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       consensus = c;
     }
 
     std::shared_ptr<TxHistory> get_history() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return history;
     }
 
@@ -782,39 +853,39 @@ namespace ccf::kv
     {
       KV_TRACE(
         if (h) { trace::unsupported(this, "transaction history machinery"); });
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       history = h;
     }
 
     std::shared_ptr<ILedgerChunker> get_chunker() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return chunker;
     }
 
     void set_chunker(const std::shared_ptr<ILedgerChunker>& c)
     {
       KV_TRACE(if (c) { trace::unsupported(this, "ledger chunk machinery"); });
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       chunker = c;
     }
 
     void set_encryptor(const EncryptorPtr& e)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       encryptor = e;
     }
 
     EncryptorPtr get_encryptor() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return encryptor;
     }
 
     void set_snapshotter(const SnapshotterPtr& s)
     {
       KV_TRACE(if (s) { trace::unsupported(this, "snapshot machinery"); });
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       snapshotter = s;
     }
 
@@ -826,13 +897,13 @@ namespace ccf::kv
       {
         throw std::logic_error("Maximum transaction size is not representable");
       }
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       max_entry_size = limit;
     }
 
     size_t get_max_transaction_size() const override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return max_entry_size;
     }
 
@@ -855,60 +926,60 @@ namespace ccf::kv
         "Rust KV backend does not expose C++ AbstractMap handles");
     }
 
-    void lock_maps() override
+    void lock_maps() CCF_ACQUIRE(maps_lock) override
     {
       maps_lock.lock();
     }
 
-    void unlock_maps() override
+    void unlock_maps() CCF_RELEASE(maps_lock) override
     {
       maps_lock.unlock();
     }
 
-    void lock_map_set() override
+    void lock_map_set() CCF_ACQUIRE(maps_lock) override
     {
       maps_lock.lock();
     }
 
-    void unlock_map_set() override
+    void unlock_map_set() CCF_RELEASE(maps_lock) override
     {
       maps_lock.unlock();
     }
 
     Version current_version() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return head;
     }
 
     TxID current_txid() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return {last_view.load(std::memory_order_acquire), head};
     }
 
     std::pair<TxID, Term> current_txid_and_commit_term() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       KV_TRACE(trace::snapshot(this, head, term));
       return {{last_view.load(std::memory_order_acquire), head}, term};
     }
 
     Version compacted_version() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return global;
     }
 
     Term commit_view() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return term;
     }
 
     void initialise_term(View view) override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (term != 0)
       {
         throw std::logic_error("term_of_next_version is already initialised");
@@ -927,7 +998,8 @@ namespace ccf::kv
       Term expected_commit_term) override
     {
       KV_TRACE(trace::unsupported(this, "reserved transaction ID"));
-      std::scoped_lock lock(maps_lock, state_lock);
+      AdaptiveMutexGuard maps_guard(maps_lock);
+      AdaptiveMutexGuard state_guard(state_lock);
       if (term != expected_commit_term)
       {
         return std::nullopt;
@@ -948,7 +1020,8 @@ namespace ccf::kv
     TxID next_txid() override
     {
       KV_TRACE(trace::unsupported(this, "reserved transaction ID"));
-      std::scoped_lock lock(maps_lock, state_lock);
+      AdaptiveMutexGuard maps_guard(maps_lock);
+      AdaptiveMutexGuard state_guard(state_lock);
       auto r = rust_detail::wrap_reply(
         rust_ffi::ccf_rust_kv_reserve_version(native.get()));
       if (r.status == rust_ffi::Status::EXHAUSTED)
@@ -964,7 +1037,7 @@ namespace ccf::kv
 
     bool should_schedule_snapshot()
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (snapshotter != nullptr)
       {
         return snapshotter->should_schedule_snapshot(last_committable);
@@ -1011,7 +1084,7 @@ namespace ccf::kv
       bool force_chunk,
       bool snapshot) override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (term != expected_term || rollback_count != expected_rollback_count)
       {
         return false;
@@ -1025,7 +1098,7 @@ namespace ccf::kv
       View expected_term,
       Version expected_rollback_count) override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       if (term != expected_term || rollback_count != expected_rollback_count)
       {
         return std::nullopt;
@@ -1035,32 +1108,35 @@ namespace ccf::kv
 
     bool should_create_ledger_chunk(Version version) override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return should_create_ledger_chunk_locked(version);
     }
 
     bool should_create_ledger_chunk_unsafe(Version version) override
     {
+      AdaptiveMutexGuard lock(state_lock);
       return should_create_ledger_chunk_locked(version);
     }
 
     bool check_rollback_count(Version expected) override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return rollback_count == expected;
     }
 
     size_t committable_gap() override
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return head - last_committable;
     }
 
     void clear()
     {
       KV_TRACE(trace::unsupported(nullptr, "store clear"));
-      std::scoped_lock lock(
-        commit_lock, compaction_lock, maps_lock, state_lock);
+      AdaptiveMutexGuard commit_guard(commit_lock);
+      ccf::ds::MutexGuard compact_guard(compaction_lock);
+      AdaptiveMutexGuard maps_guard(maps_lock);
+      AdaptiveMutexGuard state_guard(state_lock);
       dispatch_write({.op = rust_ffi::Opcode::CLEAR_STORE}).require();
       head = NoVersion;
       global = NoVersion;
@@ -1079,13 +1155,13 @@ namespace ccf::kv
       const std::string& name, const ccf::kv::untyped::Map::MapHook& hook)
     {
       KV_TRACE(if (hook) { trace::unsupported(this, "local hook"); });
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       local_hooks.insert_or_assign(name, hook);
     }
 
     void unset_map_hook(const std::string& name)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       local_hooks.erase(name);
     }
 
@@ -1093,19 +1169,19 @@ namespace ccf::kv
       const std::string& name, const ccf::kv::untyped::Map::CommitHook& hook)
     {
       KV_TRACE(if (hook) { trace::unsupported(this, "global hook"); });
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       global_hooks.insert_or_assign(name, hook);
     }
 
     void unset_global_hook(const std::string& name)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       global_hooks.erase(name);
     }
 
     void compact(Version v) override
     {
-      std::lock_guard ordered(compaction_lock);
+      ccf::ds::MutexGuard ordered(compaction_lock);
 #ifdef CCF_KV_TRACING
       trace::Environment trace_environment;
 #endif
@@ -1113,7 +1189,7 @@ namespace ccf::kv
       std::shared_ptr<Consensus> cons;
       std::shared_ptr<ILedgerChunker> ch;
       {
-        std::lock_guard lock(state_lock);
+        AdaptiveMutexGuard lock(state_lock);
         snap = snapshotter;
         cons = consensus;
         ch = chunker;
@@ -1130,7 +1206,8 @@ namespace ccf::kv
         callbacks;
       std::vector<std::shared_ptr<const rust_detail::FlatMapWrite>> to_drop;
       {
-        std::scoped_lock lock(maps_lock, state_lock);
+        AdaptiveMutexGuard maps_guard(maps_lock);
+        AdaptiveMutexGuard state_guard(state_lock);
         const auto compact_target = open_reservations.empty() ?
           v :
           std::min(v, *open_reservations.begin() - 1);
@@ -1211,7 +1288,8 @@ namespace ccf::kv
 
     void rollback(const TxID& txid, View new_term) override
     {
-      std::scoped_lock lock(maps_lock, state_lock);
+      AdaptiveMutexGuard maps_guard(maps_lock);
+      AdaptiveMutexGuard state_guard(state_lock);
 #ifdef CCF_KV_TRACING
       trace::Environment trace_environment;
       trace::Rollback trace_rollback(this);

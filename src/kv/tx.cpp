@@ -7,6 +7,7 @@
 #include "kv/compacted_version_conflict.h"
 #include "kv/kv_types.h"
 #ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_direct.h"
 #  include "kv/store.h"
 #endif
 #include "kv/tx_pimpl.h"
@@ -29,6 +30,60 @@ namespace ccf::kv
     {
       rust_ffi::ccf_rust_kv_tx_delete(nullptr, rust_tx);
       rust_tx = nullptr;
+    }
+  }
+
+  namespace
+  {
+    struct BaseTxPimplAccess : BaseTx
+    {
+      static constexpr auto pimpl_member = &BaseTxPimplAccess::pimpl;
+    };
+  }
+
+  bool prepare_rust_direct_tx(
+    BaseTx& tx,
+    bool read_only,
+    const void*& out_store,
+    void*& out_tx,
+    uint8_t& out_has_snap)
+  {
+#  ifdef CCF_KV_TRACING
+    if (trace::enabled())
+    {
+      return false;
+    }
+#  endif
+    auto& s = *(tx.*BaseTxPimplAccess::pimpl_member);
+    if (
+      s.rust_store == nullptr || s.rust_committing ||
+      s.rust_reserved.has_value() || s.rust_explicit_read_txid ||
+      typeid(*s.store) != typeid(Store))
+    {
+      return false;
+    }
+    auto& store = *s.rust_store;
+    s.rust_read_only = read_only;
+    if (s.rust_tx == nullptr)
+    {
+      s.rust_attempt_id = store.next_attempt_id();
+      s.rust_tx = rust_ffi::ccf_rust_kv_tx_new(s.rust_attempt_id);
+    }
+    s.rust_direct_used = true;
+    out_store = store.native_store();
+    out_tx = s.rust_tx;
+    out_has_snap = s.read_txid.has_value() ? 1 : 0;
+    return true;
+  }
+
+  void finish_rust_direct_tx(
+    BaseTx& tx, uint64_t snap_version, uint64_t commit_view, uint8_t has_snap)
+  {
+    auto& s = *(tx.*BaseTxPimplAccess::pimpl_member);
+    if (has_snap != 0 && !s.read_txid.has_value() && s.rust_store != nullptr)
+    {
+      s.commit_view = commit_view;
+      s.read_txid = TxID{s.rust_store->latest_view(), snap_version};
     }
   }
 #endif

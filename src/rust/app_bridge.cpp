@@ -8,6 +8,10 @@
 #include "ccf/odata_error.h"
 #include "ccf/rust_ffi.h"
 #include "kv/compacted_version_conflict.h"
+#ifdef CCF_USE_RUST_KV
+#  include "kv/rust_kv_direct.h"
+#  include "kv/rust_kv_ffi.h"
+#endif
 
 #include <memory>
 #include <optional>
@@ -254,6 +258,13 @@ struct ccf_rust_endpoint_context
   RawMap::Handle::ValueType scratch;
   std::optional<ccf::kv::CompactedVersionConflict> compacted_version_conflict =
     std::nullopt;
+#ifdef CCF_USE_RUST_KV
+  bool direct_active = false;
+  uint64_t direct_snap_version = 0;
+  uint64_t direct_commit_view = 0;
+  uint8_t direct_has_snapshot = 0;
+  uint8_t direct_compacted_conflict = 0;
+#endif
 
   RawMap::ReadOnlyHandle* read_handle(const std::string& map_name)
   {
@@ -289,6 +300,13 @@ struct ccf_rust_endpoint_context
 
   void rethrow_compacted_version_conflict()
   {
+#ifdef CCF_USE_RUST_KV
+    if (direct_compacted_conflict != 0)
+    {
+      throw ccf::kv::CompactedVersionConflict(
+        "Cannot acquire a compacted Rust KV map");
+    }
+#endif
     if (compacted_version_conflict.has_value())
     {
       throw std::move(compacted_version_conflict.value());
@@ -325,6 +343,16 @@ namespace
     {
       const auto result = state->callback(state->user_data, &rust_ctx);
       rust_ctx.rethrow_compacted_version_conflict();
+#ifdef CCF_USE_RUST_KV
+      if (rust_ctx.direct_active)
+      {
+        ccf::kv::finish_rust_direct_tx(
+          *rust_ctx.tx,
+          rust_ctx.direct_snap_version,
+          rust_ctx.direct_commit_view,
+          rust_ctx.direct_has_snapshot);
+      }
+#endif
       if (result != CCF_RUST_OK)
       {
         rpc->set_error(
@@ -678,6 +706,41 @@ extern "C"
       handle->remove(to_vector(key));
       return CCF_RUST_OK;
     });
+  }
+
+  ccf_rust_result ccf_rust_kv_direct_access(
+    ccf_rust_endpoint_context* ctx, ccf_rust_kv_direct* direct)
+  {
+    if (ctx == nullptr || direct == nullptr || ctx->tx == nullptr)
+    {
+      return CCF_RUST_INVALID_ARGUMENT;
+    }
+#ifdef CCF_USE_RUST_KV
+    return run_ffi([&]() {
+      const void* store_ptr = nullptr;
+      void* tx_ptr = nullptr;
+      const bool read_only = (ctx->writable_tx == nullptr);
+      if (!ccf::kv::prepare_rust_direct_tx(
+            *ctx->tx, read_only, store_ptr, tx_ptr, ctx->direct_has_snapshot))
+      {
+        return CCF_RUST_NOT_FOUND;
+      }
+      ctx->direct_active = true;
+      direct->store = store_ptr;
+      direct->tx = tx_ptr;
+      direct->read_only = read_only ? 1 : 0;
+      direct->snap_ver = &ctx->direct_snap_version;
+      direct->commit_view = &ctx->direct_commit_view;
+      direct->has_snap = &ctx->direct_has_snapshot;
+      direct->compacted_conflict = &ctx->direct_compacted_conflict;
+      direct->get = &ccf::kv::rust_ffi::ccf_rust_kv_direct_get;
+      direct->has = &ccf::kv::rust_ffi::ccf_rust_kv_direct_has;
+      direct->write = &ccf::kv::rust_ffi::ccf_rust_kv_direct_write;
+      return CCF_RUST_OK;
+    });
+#else
+    return CCF_RUST_NOT_FOUND;
+#endif
   }
 }
 

@@ -214,6 +214,200 @@ unsafe extern "C" fn ccf_rust_kv_tx_delete(store: *const ConcurrentStore, tx: *m
 }
 
 #[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_direct_get(
+    store: *const c_void,
+    tx: *mut c_void,
+    read_only: u8,
+    map_data: *const u8,
+    map_len: usize,
+    key_data: *const u8,
+    key_len: usize,
+    out_ctx: *mut c_void,
+    copy_cb: CopyValueFn,
+    snap_ver: *mut u64,
+    commit_view: *mut u64,
+    has_snap: *mut u8,
+) -> u8 {
+    if store.is_null()
+        || tx.is_null()
+        || snap_ver.is_null()
+        || commit_view.is_null()
+        || has_snap.is_null()
+    {
+        return Status::InvalidRequest as u8;
+    }
+    let store = unsafe { &*store.cast::<ConcurrentStore>() };
+    let tx = unsafe { &mut *tx.cast::<NativeTx>() };
+    let map = ByteView {
+        data: map_data,
+        size: map_len,
+    };
+    let key = ByteView {
+        data: key_data,
+        size: key_len,
+    };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Status::InvalidRequest as u8;
+    };
+    if !ConcurrentStore::is_valid_map_name(map) {
+        return Status::InvalidRequest as u8;
+    }
+    let snap_ver = unsafe { &mut *snap_ver };
+    let commit_view = unsafe { &mut *commit_view };
+    let has_snap = unsafe { &mut *has_snap };
+    let status = match store.direct_get(
+        tx,
+        read_only != 0,
+        map,
+        key,
+        snap_ver,
+        commit_view,
+        has_snap,
+        |val| match val {
+            Some(bytes) => {
+                unsafe { copy_cb(out_ctx, bytes.as_ptr(), bytes.len()) };
+                Status::Ok
+            }
+            None => Status::Missing,
+        },
+    ) {
+        Ok(Some(status)) => status,
+        Ok(None) => Status::Unavailable,
+        Err(Error::Disabled) => Status::Disabled,
+        Err(Error::Exhausted) => Status::Exhausted,
+    };
+    status as u8
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_direct_has(
+    store: *const c_void,
+    tx: *mut c_void,
+    read_only: u8,
+    map_data: *const u8,
+    map_len: usize,
+    key_data: *const u8,
+    key_len: usize,
+    out_present: *mut i32,
+    snap_ver: *mut u64,
+    commit_view: *mut u64,
+    has_snap: *mut u8,
+) -> u8 {
+    if store.is_null()
+        || tx.is_null()
+        || out_present.is_null()
+        || snap_ver.is_null()
+        || commit_view.is_null()
+        || has_snap.is_null()
+    {
+        return Status::InvalidRequest as u8;
+    }
+    let store = unsafe { &*store.cast::<ConcurrentStore>() };
+    let tx = unsafe { &mut *tx.cast::<NativeTx>() };
+    let map = ByteView {
+        data: map_data,
+        size: map_len,
+    };
+    let key = ByteView {
+        data: key_data,
+        size: key_len,
+    };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Status::InvalidRequest as u8;
+    };
+    if !ConcurrentStore::is_valid_map_name(map) {
+        return Status::InvalidRequest as u8;
+    }
+    let snap_ver = unsafe { &mut *snap_ver };
+    let commit_view = unsafe { &mut *commit_view };
+    let has_snap = unsafe { &mut *has_snap };
+    let status = match store.direct_has(
+        tx,
+        read_only != 0,
+        map,
+        key,
+        snap_ver,
+        commit_view,
+        has_snap,
+    ) {
+        Ok(Some(present)) => {
+            unsafe { *out_present = i32::from(present) };
+            Status::Ok
+        }
+        Ok(None) => Status::Unavailable,
+        Err(Error::Disabled) => Status::Disabled,
+        Err(Error::Exhausted) => Status::Exhausted,
+    };
+    status as u8
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_direct_write(
+    store: *const c_void,
+    tx: *mut c_void,
+    read_only: u8,
+    map_data: *const u8,
+    map_len: usize,
+    key_data: *const u8,
+    key_len: usize,
+    value_data: *const u8,
+    value_len: usize,
+    snap_ver: *mut u64,
+    commit_view: *mut u64,
+    has_snap: *mut u8,
+) -> u8 {
+    if store.is_null()
+        || tx.is_null()
+        || snap_ver.is_null()
+        || commit_view.is_null()
+        || has_snap.is_null()
+    {
+        return Status::InvalidRequest as u8;
+    }
+    if read_only != 0 {
+        return Status::ReadOnly as u8;
+    }
+    let store = unsafe { &*store.cast::<ConcurrentStore>() };
+    let tx = unsafe { &mut *tx.cast::<NativeTx>() };
+    let map = ByteView {
+        data: map_data,
+        size: map_len,
+    };
+    let key = ByteView {
+        data: key_data,
+        size: key_len,
+    };
+    let value = ByteView {
+        data: value_data,
+        size: value_len,
+    };
+    let (Ok(Some(map)), Ok(Some(key)), Ok(value)) = (
+        unsafe { map.as_opt_slice() },
+        unsafe { key.as_opt_slice() },
+        unsafe { value.as_opt_slice() },
+    ) else {
+        return Status::InvalidRequest as u8;
+    };
+    if !ConcurrentStore::is_valid_map_name(map) {
+        return Status::InvalidRequest as u8;
+    }
+    let snap_ver = unsafe { &mut *snap_ver };
+    let commit_view = unsafe { &mut *commit_view };
+    let has_snap = unsafe { &mut *has_snap };
+    let status = match store.direct_write(tx, map, key, value, snap_ver, commit_view, has_snap) {
+        Ok(true) => Status::Ok,
+        Ok(false) => Status::Unavailable,
+        Err(Error::Disabled) => Status::Disabled,
+        Err(Error::Exhausted) => Status::Exhausted,
+    };
+    status as u8
+}
+
+#[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_write(
     tx: *mut NativeTx,
     map: ByteView,

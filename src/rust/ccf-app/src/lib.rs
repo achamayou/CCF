@@ -71,6 +71,96 @@ enum RawAuth {
 
 type RawHandler = unsafe extern "C" fn(*mut c_void, *mut RawEndpointContext) -> i32;
 type RawDrop = unsafe extern "C" fn(*mut c_void);
+type RawCopyValueFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+type RawDirectGetFn = unsafe extern "C" fn(
+    *const c_void,
+    *mut c_void,
+    u8,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut c_void,
+    RawCopyValueFn,
+    *mut u64,
+    *mut u64,
+    *mut u8,
+) -> u8;
+type RawDirectHasFn = unsafe extern "C" fn(
+    *const c_void,
+    *mut c_void,
+    u8,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut i32,
+    *mut u64,
+    *mut u64,
+    *mut u8,
+) -> u8;
+type RawDirectWriteFn = unsafe extern "C" fn(
+    *const c_void,
+    *mut c_void,
+    u8,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *mut u64,
+    *mut u64,
+    *mut u8,
+) -> u8;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawDirectKv {
+    store: *const c_void,
+    tx: *mut c_void,
+    read_only: u8,
+    snap_ver: *mut u64,
+    commit_view: *mut u64,
+    has_snap: *mut u8,
+    compacted_conflict: *mut u8,
+    get: Option<RawDirectGetFn>,
+    has: Option<RawDirectHasFn>,
+    write: Option<RawDirectWriteFn>,
+}
+
+impl RawDirectKv {
+    fn empty() -> Self {
+        Self {
+            store: std::ptr::null(),
+            tx: std::ptr::null_mut(),
+            read_only: 0,
+            snap_ver: std::ptr::null_mut(),
+            commit_view: std::ptr::null_mut(),
+            has_snap: std::ptr::null_mut(),
+            compacted_conflict: std::ptr::null_mut(),
+            get: None,
+            has: None,
+            write: None,
+        }
+    }
+}
+
+// Keep status discriminants in sync with src/kv/rust_kv_ffi.h.
+const KV_STATUS_OK: u8 = 0;
+const KV_STATUS_INVALID_REQUEST: u8 = 3;
+const KV_STATUS_UNAVAILABLE: u8 = 4;
+const KV_STATUS_MISSING: u8 = 6;
+const KV_STATUS_READ_ONLY: u8 = 7;
+
+unsafe extern "C" fn copy_into_vec(ctx: *mut c_void, data: *const u8, len: usize) {
+    if len != 0 {
+        // SAFETY: ctx points to a live Vec<u8> owned by the caller of get().
+        let dst = unsafe { &mut *(ctx.cast::<Vec<u8>>()) };
+        // SAFETY: data/len is a valid readable slice for this callback.
+        dst.extend_from_slice(unsafe { slice::from_raw_parts(data, len) });
+    }
+}
 
 #[cfg(not(test))]
 mod ffi {
@@ -136,6 +226,10 @@ mod ffi {
             map_name: RawSlice,
             key: RawSlice,
         ) -> i32;
+        pub fn ccf_rust_kv_direct_access(
+            ctx: *mut RawEndpointContext,
+            direct: *mut RawDirectKv,
+        ) -> i32;
     }
 }
 
@@ -161,7 +255,7 @@ mod ffi {
     }
 
     macro_rules! failing_ffi {
-        ($name:ident($($arg:ident: $ty:ty),*)) => {
+        ($name:ident($($arg:ident: $ty:ty),* $(,)?)) => {
             pub unsafe extern "C" fn $name($($arg: $ty),*) -> i32 {
                 $(let _ = $arg;)*
                 RawResult::InternalError as i32
@@ -171,16 +265,57 @@ mod ffi {
 
     failing_ffi!(ccf_rust_request_body(ctx: *mut RawEndpointContext, body: *mut RawSlice));
     failing_ffi!(ccf_rust_request_query(ctx: *mut RawEndpointContext, query: *mut RawSlice));
-    failing_ffi!(ccf_rust_request_path_param(ctx: *mut RawEndpointContext, name: RawSlice, value: *mut RawSlice));
-    failing_ffi!(ccf_rust_request_header(ctx: *mut RawEndpointContext, name: RawSlice, value: *mut RawSlice));
+    failing_ffi!(
+        ccf_rust_request_path_param(
+            ctx: *mut RawEndpointContext,
+            name: RawSlice,
+            value: *mut RawSlice,
+        )
+    );
+    failing_ffi!(
+        ccf_rust_request_header(ctx: *mut RawEndpointContext, name: RawSlice, value: *mut RawSlice)
+    );
     failing_ffi!(ccf_rust_response_status(ctx: *mut RawEndpointContext, status: u16));
-    failing_ffi!(ccf_rust_response_header(ctx: *mut RawEndpointContext, name: RawSlice, value: RawSlice));
+    failing_ffi!(
+        ccf_rust_response_header(ctx: *mut RawEndpointContext, name: RawSlice, value: RawSlice)
+    );
     failing_ffi!(ccf_rust_response_body(ctx: *mut RawEndpointContext, body: RawSlice));
-    failing_ffi!(ccf_rust_response_error(ctx: *mut RawEndpointContext, status: u16, code: RawSlice, message: RawSlice));
-    failing_ffi!(ccf_rust_kv_get(ctx: *mut RawEndpointContext, map_name: RawSlice, key: RawSlice, value: *mut RawSlice));
-    failing_ffi!(ccf_rust_kv_has(ctx: *mut RawEndpointContext, map_name: RawSlice, key: RawSlice, present: *mut i32));
-    failing_ffi!(ccf_rust_kv_put(ctx: *mut RawEndpointContext, map_name: RawSlice, key: RawSlice, value: RawSlice));
-    failing_ffi!(ccf_rust_kv_remove(ctx: *mut RawEndpointContext, map_name: RawSlice, key: RawSlice));
+    failing_ffi!(
+        ccf_rust_response_error(
+            ctx: *mut RawEndpointContext,
+            status: u16,
+            code: RawSlice,
+            message: RawSlice,
+        )
+    );
+    failing_ffi!(
+        ccf_rust_kv_get(
+            ctx: *mut RawEndpointContext,
+            map_name: RawSlice,
+            key: RawSlice,
+            value: *mut RawSlice,
+        )
+    );
+    failing_ffi!(
+        ccf_rust_kv_has(
+            ctx: *mut RawEndpointContext,
+            map_name: RawSlice,
+            key: RawSlice,
+            present: *mut i32,
+        )
+    );
+    failing_ffi!(
+        ccf_rust_kv_put(
+            ctx: *mut RawEndpointContext,
+            map_name: RawSlice,
+            key: RawSlice,
+            value: RawSlice,
+        )
+    );
+    failing_ffi!(
+        ccf_rust_kv_remove(ctx: *mut RawEndpointContext, map_name: RawSlice, key: RawSlice)
+    );
+    failing_ffi!(ccf_rust_kv_direct_access(ctx: *mut RawEndpointContext, direct: *mut RawDirectKv));
 }
 
 fn raw_slice(value: &[u8]) -> RawSlice {
@@ -351,12 +486,62 @@ pub trait Codec<T> {
     fn decode(value: &[u8]) -> Result<T, Self::Error>;
 }
 
+#[derive(Clone, Copy)]
+enum DirectKvState {
+    Unchecked,
+    Unavailable,
+    Direct(RawDirectKv),
+}
+
 struct Context<'a> {
     raw: NonNull<RawEndpointContext>,
+    direct: DirectKvState,
     _lifetime: PhantomData<&'a mut RawEndpointContext>,
 }
 
 impl Context<'_> {
+    fn direct_kv(&mut self) -> Option<RawDirectKv> {
+        match self.direct {
+            DirectKvState::Direct(d) => Some(d),
+            DirectKvState::Unavailable => None,
+            DirectKvState::Unchecked => {
+                let mut d = RawDirectKv::empty();
+                // SAFETY: raw is valid for the handler callback and d is writable.
+                let res = unsafe { ffi::ccf_rust_kv_direct_access(self.raw.as_ptr(), &mut d) };
+                if res == RawResult::Ok as i32
+                    && !d.store.is_null()
+                    && !d.tx.is_null()
+                    && !d.snap_ver.is_null()
+                    && !d.commit_view.is_null()
+                    && !d.has_snap.is_null()
+                    && !d.compacted_conflict.is_null()
+                    && d.get.is_some()
+                    && d.has.is_some()
+                    && d.write.is_some()
+                {
+                    self.direct = DirectKvState::Direct(d);
+                    Some(d)
+                } else {
+                    self.direct = DirectKvState::Unavailable;
+                    None
+                }
+            }
+        }
+    }
+
+    fn decode_direct_error(d: &RawDirectKv, status: u8) -> BridgeError {
+        match status {
+            KV_STATUS_UNAVAILABLE => {
+                // SAFETY: compacted_conflict points to stack storage in the C++
+                // bridge frame, live for the duration of the callback.
+                unsafe { *d.compacted_conflict = 1 };
+                BridgeError::Internal
+            }
+            KV_STATUS_INVALID_REQUEST => BridgeError::InvalidArgument,
+            KV_STATUS_READ_ONLY => BridgeError::ReadOnly,
+            _ => BridgeError::Internal,
+        }
+    }
     fn body(&self) -> BridgeResult<&[u8]> {
         let mut value = RawSlice {
             data: std::ptr::null(),
@@ -441,6 +626,33 @@ impl Context<'_> {
     }
 
     fn get(&mut self, map_name: &str, key: &[u8]) -> BridgeResult<Option<Vec<u8>>> {
+        if let Some(d) = self.direct_kv() {
+            let mut out = Vec::new();
+            let get_fn = d.get.unwrap();
+            // SAFETY: DirectKv pointers come from the live C++ endpoint frame
+            // and out/copy_into_vec are valid for the duration of this call.
+            let status = unsafe {
+                get_fn(
+                    d.store,
+                    d.tx,
+                    d.read_only,
+                    map_name.as_ptr(),
+                    map_name.len(),
+                    key.as_ptr(),
+                    key.len(),
+                    (&mut out as *mut Vec<u8>).cast::<c_void>(),
+                    copy_into_vec,
+                    d.snap_ver,
+                    d.commit_view,
+                    d.has_snap,
+                )
+            };
+            return match status {
+                KV_STATUS_OK => Ok(Some(out)),
+                KV_STATUS_MISSING => Ok(None),
+                other => Err(Self::decode_direct_error(&d, other)),
+            };
+        }
         let mut value = RawSlice {
             data: std::ptr::null(),
             len: 0,
@@ -464,6 +676,30 @@ impl Context<'_> {
     }
 
     fn has(&mut self, map_name: &str, key: &[u8]) -> BridgeResult<bool> {
+        if let Some(d) = self.direct_kv() {
+            let mut present = 0;
+            let has_fn = d.has.unwrap();
+            // SAFETY: DirectKv pointers and out_present are valid for this call.
+            let status = unsafe {
+                has_fn(
+                    d.store,
+                    d.tx,
+                    d.read_only,
+                    map_name.as_ptr(),
+                    map_name.len(),
+                    key.as_ptr(),
+                    key.len(),
+                    &mut present,
+                    d.snap_ver,
+                    d.commit_view,
+                    d.has_snap,
+                )
+            };
+            return match status {
+                KV_STATUS_OK => Ok(present != 0),
+                other => Err(Self::decode_direct_error(&d, other)),
+            };
+        }
         let mut present = 0;
         // SAFETY: raw and input buffers are valid for this call.
         decode_result(unsafe {
@@ -478,6 +714,30 @@ impl Context<'_> {
     }
 
     fn put(&mut self, map_name: &str, key: &[u8], value: &[u8]) -> BridgeResult<()> {
+        if let Some(d) = self.direct_kv() {
+            let write_fn = d.write.unwrap();
+            // SAFETY: DirectKv pointers and input slices are valid for this call.
+            let status = unsafe {
+                write_fn(
+                    d.store,
+                    d.tx,
+                    d.read_only,
+                    map_name.as_ptr(),
+                    map_name.len(),
+                    key.as_ptr(),
+                    key.len(),
+                    value.as_ptr(),
+                    value.len(),
+                    d.snap_ver,
+                    d.commit_view,
+                    d.has_snap,
+                )
+            };
+            return match status {
+                KV_STATUS_OK => Ok(()),
+                other => Err(Self::decode_direct_error(&d, other)),
+            };
+        }
         // SAFETY: raw and input buffers are valid for this call.
         decode_result(unsafe {
             ffi::ccf_rust_kv_put(
@@ -490,6 +750,30 @@ impl Context<'_> {
     }
 
     fn remove(&mut self, map_name: &str, key: &[u8]) -> BridgeResult<()> {
+        if let Some(d) = self.direct_kv() {
+            let write_fn = d.write.unwrap();
+            // SAFETY: DirectKv pointers and key slice are valid; null/0 value encodes removal.
+            let status = unsafe {
+                write_fn(
+                    d.store,
+                    d.tx,
+                    d.read_only,
+                    map_name.as_ptr(),
+                    map_name.len(),
+                    key.as_ptr(),
+                    key.len(),
+                    std::ptr::null(),
+                    0,
+                    d.snap_ver,
+                    d.commit_view,
+                    d.has_snap,
+                )
+            };
+            return match status {
+                KV_STATUS_OK => Ok(()),
+                other => Err(Self::decode_direct_error(&d, other)),
+            };
+        }
         // SAFETY: raw and input buffers are valid for this call.
         decode_result(unsafe {
             ffi::ccf_rust_kv_remove(self.raw.as_ptr(), raw_str(map_name), raw_slice(key))
@@ -783,10 +1067,12 @@ unsafe extern "C" fn invoke_handler(
     let result = catch_app_panic(|| match handler {
         Handler::Read(handler) => handler(&mut ReadOnlyContext(Context {
             raw,
+            direct: DirectKvState::Unchecked,
             _lifetime: PhantomData,
         })),
         Handler::Write(handler) => handler(&mut WriteContext(Context {
             raw,
+            direct: DirectKvState::Unchecked,
             _lifetime: PhantomData,
         })),
     });
@@ -799,6 +1085,7 @@ unsafe extern "C" fn invoke_handler(
 
     let mut context = Context {
         raw,
+        direct: DirectKvState::Unavailable,
         _lifetime: PhantomData,
     };
     match context.set_error(&endpoint_error) {

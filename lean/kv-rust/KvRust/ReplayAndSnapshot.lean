@@ -1675,12 +1675,7 @@ private theorem publish_nil_nodup_puts
       unfold Kv.Model.set
       rw [herase]
 
-/-- `Store::replay_indexed_ccf` (with `track_deletes = false`) either rejects and leaves the
-store unchanged, or appends a frame order-equivalent to `Kv.Model.advance` while preserving
-`BranchValid`, `HistoryIndexValid`, `IndexLiveness`, and `IndexKeeps` across both the
-sorted-batch fast path (when the head frame is empty and all writes are unique `Put`s) and
-the fallback `append_replay` path. -/
-theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
+private theorem append_replay_ccf_ok_matches_advance (encode : List U8 → String)
     (inj : Function.Injective encode) (s : CcfKv.engine.Store) (model : Store)
     (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
     (hHead : s.history.activeFrames = prior ++ [head])
@@ -1688,6 +1683,8 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
     (hIdentity : model.nextIdentity = s.history.next_identity.val)
     (version : U64) (hVersion : version.val = head.version.val + 1)
     (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
+    (pending : CcfKv.engine.Assoc CcfKv.engine.Address CcfKv.engine.Write)
+    (hp : pending.val = writes.val.map replayRow)
     (hI : s.history.next_identity.val < U64.max)
     (hD
       : IndexBatchRoom s.history.index (storePins s).length
@@ -1714,33 +1711,26 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
     (ringRoom
       : s.history.log.len.val = s.history.log.slots.val.length
         → 2 * s.history.log.slots.val.length + 1 ≤ Usize.max)
-    : WP.spec (CcfKv.engine.Store.replay_indexed_ccf s version writes false)
-        (fun (result, after) =>
-          (result = .Err .Disabled ∧ after = s)
-          ∨ (result = .Ok ()
-              ∧ ∃ next,
-                  FrameOrderEq (modelFrame encode after.history.index next)
-                    (advance model (encodeReport encode writes)).head
-                  ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
-                  ∧ after.history.next_identity.val = s.history.next_identity.val + 1
-                  ∧ after.history.term = s.history.term
-                  ∧ after.history.global = s.history.global
-                  ∧ after.txs = s.txs
-                  ∧ BranchValid after.history.log
-                  ∧ HistoryIndexValid after.history
-                  ∧ IndexLiveness after.history.index (storePins after)
-                  ∧ IndexKeeps s.history.index after.history.index)) := by
-  unfold CcfKv.engine.Store.replay_indexed_ccf
+    : WP.spec
+        (do
+          let self1 ← CcfKv.engine.Store.append_replay_ccf s version pending false
+          Result.ok (core.result.Result.Ok (), self1))
+        (fun ((result : core.result.Result Unit CcfKv.engine.Error), after) =>
+          result = core.result.Result.Ok ()
+          ∧ ∃ next,
+              FrameOrderEq (modelFrame encode after.history.index next)
+                (advance model (encodeReport encode writes)).head
+              ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
+              ∧ after.history.next_identity.val = s.history.next_identity.val + 1
+              ∧ after.history.term = s.history.term
+              ∧ after.history.global = s.history.global
+              ∧ after.txs = s.txs
+              ∧ BranchValid after.history.log
+              ∧ HistoryIndexValid after.history
+              ∧ IndexLiveness after.history.index (storePins after)
+              ∧ IndexKeeps s.history.index after.history.index) := by
   have hheadRes := history_head s.history prior head hHead valid
-  rw [hheadRes, bind_ok]
-  apply WP.spec_bind
-    (prepare_replay_ccf_matches head.version s.history.next_identity version hVersion hI
-      writes)
-  rintro r (rfl | ⟨pending, rfl, hp⟩)
-  · simp [core.result.Result.Insts.CoreOpsTry.branch,
-      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
-  · simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok]
-    have hlength : pending.val.length = writes.val.length := by simp [hp]
+  · have hlength : pending.val.length = writes.val.length := by simp [hp]
     have hWrite : encodeWrites encode (byteWrites pending.val) = encodeReport encode writes := by
       simp only [hp, byteWrites, encodeWrites, encodeReport, List.map_map, Function.comp_def]
       apply List.map_congr_left
@@ -1758,28 +1748,27 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
         (do
           let self1 ← CcfKv.engine.Store.append_replay s version pending false
           Result.ok (core.result.Result.Ok (), self1))
-        (fun (result, after) =>
-          (result = core.result.Result.Err CcfKv.engine.Error.Disabled ∧ after = s)
-          ∨ (result = core.result.Result.Ok ()
-              ∧ ∃ next,
-                  FrameOrderEq (modelFrame encode after.history.index next)
-                    (advance model (encodeReport encode writes)).head
-                  ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
-                  ∧ after.history.next_identity.val = s.history.next_identity.val + 1
-                  ∧ after.history.term = s.history.term
-                  ∧ after.history.global = s.history.global
-                  ∧ after.txs = s.txs
-                  ∧ BranchValid after.history.log
-                  ∧ HistoryIndexValid after.history
-                  ∧ IndexLiveness after.history.index (storePins after)
-                  ∧ IndexKeeps s.history.index after.history.index)) := by
+        (fun ((result : core.result.Result Unit CcfKv.engine.Error), after) =>
+          result = core.result.Result.Ok ()
+          ∧ ∃ next,
+              FrameOrderEq (modelFrame encode after.history.index next)
+                (advance model (encodeReport encode writes)).head
+              ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
+              ∧ after.history.next_identity.val = s.history.next_identity.val + 1
+              ∧ after.history.term = s.history.term
+              ∧ after.history.global = s.history.global
+              ∧ after.txs = s.txs
+              ∧ BranchValid after.history.log
+              ∧ HistoryIndexValid after.history
+              ∧ IndexLiveness after.history.index (storePins after)
+              ∧ IndexKeeps s.history.index after.history.index) := by
       simp only [CcfKv.engine.Store.append_replay, Bool.false_eq_true, ite_false,
         Aeneas.Std.bind_assoc]
       apply WP.spec_bind
         (prepare_frame_matches_model encode inj s.history prior head (txsPins s.txs.val)
-          valid hHead indexed live model pending version s.history.next_identity hModelHead
-          versionEq hIdentity.symm (hlength.symm ▸ hD) keyRoom (hlength.symm ▸ hR)
-          (hlength.symm ▸ hB))
+          valid hHead indexed live model pending version s.history.next_identity
+          hModelHead versionEq hIdentity.symm (hlength.symm ▸ hD) keyRoom
+          (hlength.symm ▸ hR) (hlength.symm ▸ hB))
       rintro ⟨next, prepared⟩ ⟨arena, same, modelFrameEq, view, arenaLive, preserved, _⟩
       change prepared = { s.history with index := arena } at same
       subst prepared
@@ -1813,10 +1802,20 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
         rw [hf]
         have hp' := (framePins_append s.history.activeFrames next).symm.append_right (txsPins s.txs.val)
         by_cases hz : next.data = 0#u32 <;> simpa [hz] using hp'
-      exact Or.inr
-        ⟨True.intro, next, hWrite ▸ modelFrameEq, hf, by omega, True.intro, True.intro, True.intro,
-          logValid, indexed.append preserved arenaLive.valid next view hf rfl,
-          arenaLive.perm hpinsPerm, preserved⟩
+      exact ⟨
+        True.intro,
+        next,
+        hWrite ▸ modelFrameEq,
+        hf,
+        by omega,
+        True.intro,
+        True.intro,
+        True.intro,
+        logValid,
+        indexed.append preserved arenaLive.valid next view hf rfl,
+        arenaLive.perm hpinsPerm,
+        preserved
+      ⟩
     unfold CcfKv.engine.Store.append_replay_ccf
     rw [Aeneas.Std.bind_assoc, hheadRes, bind_ok]
     unfold CcfKv.radix.RadixRoot.is_empty
@@ -2128,23 +2127,437 @@ theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
                 have hp' :=
                   (framePins_append s.history.activeFrames next).symm.append_right (txsPins s.txs.val)
                 by_cases hz : dataRoot = 0#u32 <;> simpa [next, storePins, hz] using hp'
-              exact Or.inr
-                ⟨
-                  True.intro,
-                  next,
-                  hModelFrameEq,
-                  hf,
-                  by omega,
-                  True.intro,
-                  True.intro,
-                  True.intro,
-                  logValid,
-                  indexed.append haiKeeps haiLive.valid next
-                    (index_rows_view ⟨_, hIndexView⟩) hf rfl,
-                  haiLive.perm hpinsPerm,
-                  haiKeeps
-                ⟩
+              exact ⟨
+                True.intro,
+                next,
+                hModelFrameEq,
+                hf,
+                by omega,
+                True.intro,
+                True.intro,
+                True.intro,
+                logValid,
+                indexed.append haiKeeps haiLive.valid next
+                  (index_rows_view ⟨_, hIndexView⟩) hf rfl,
+                haiLive.perm hpinsPerm,
+                haiKeeps
+              ⟩
     · simp only [hEmpty, decide_false, Bool.false_eq_true, ite_false]
       exact hFallback
+
+/-- `Store::replay_indexed_ccf` (with `track_deletes = false`) either rejects and leaves the
+store unchanged, or appends a frame order-equivalent to `Kv.Model.advance` while preserving
+`BranchValid`, `HistoryIndexValid`, `IndexLiveness`, and `IndexKeeps` across both the
+sorted-batch fast path (when the head frame is empty and all writes are unique `Put`s) and
+the fallback `append_replay` path. -/
+theorem replay_indexed_ccf_matches_advance (encode : List U8 → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (model : Store)
+    (prior : List CcfKv.engine.Frame) (head : CcfKv.engine.Frame)
+    (hHead : s.history.activeFrames = prior ++ [head])
+    (hModelHead : model.head = modelFrame encode s.history.index head)
+    (hIdentity : model.nextIdentity = s.history.next_identity.val)
+    (version : U64) (hVersion : version.val = head.version.val + 1)
+    (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
+    (hI : s.history.next_identity.val < U64.max)
+    (hD
+      : IndexBatchRoom s.history.index (storePins s).length
+          ((indexRows s.history.index head.data).length + writes.val.length)
+          writes.val.length)
+    (hKeys : ∀ row ∈ writes.val, IndexKeyRoom (replayRow row))
+    (hDepth : ∀ row ∈ writes.val, 8 + row.1.map.val.length + row.1.key.val.length ≤ 56)
+    (hDirFast
+      : s.history.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1))
+        < 2147483647)
+    (hRowFast : s.history.index.values.rows.val.length + writes.val.length ≤ 2147483647)
+    (hRefFast
+      : (storePins s).length
+          + 17
+            * (s.history.index.values.dirs.val.length
+                + 2 * (writes.val.length * (112 + 1))
+                + 2)
+          + 1
+        ≤ U32.max)
+    (hR : head.revisions.val.length + writes.val.length ≤ Usize.max)
+    (hB : head.births.val.length + writes.val.length ≤ Usize.max)
+    (valid : BranchValid s.history.log) (indexed : HistoryIndexValid s.history)
+    (live : IndexLiveness s.history.index (storePins s))
+    (ringRoom
+      : s.history.log.len.val = s.history.log.slots.val.length
+        → 2 * s.history.log.slots.val.length + 1 ≤ Usize.max)
+    : WP.spec (CcfKv.engine.Store.replay_indexed_ccf s version writes false)
+        (fun (result, after) =>
+          (result = .Err .Disabled ∧ after = s)
+          ∨ (result = .Ok ()
+              ∧ ∃ next,
+                  FrameOrderEq (modelFrame encode after.history.index next)
+                    (advance model (encodeReport encode writes)).head
+                  ∧ after.history.activeFrames = s.history.activeFrames ++ [next]
+                  ∧ after.history.next_identity.val = s.history.next_identity.val + 1
+                  ∧ after.history.term = s.history.term
+                  ∧ after.history.global = s.history.global
+                  ∧ after.txs = s.txs
+                  ∧ BranchValid after.history.log
+                  ∧ HistoryIndexValid after.history
+                  ∧ IndexLiveness after.history.index (storePins after)
+                  ∧ IndexKeeps s.history.index after.history.index)) := by
+  unfold CcfKv.engine.Store.replay_indexed_ccf
+  have hheadRes := history_head s.history prior head hHead valid
+  rw [hheadRes, bind_ok]
+  apply WP.spec_bind
+    (prepare_replay_ccf_matches head.version s.history.next_identity version hVersion hI
+      writes)
+  rintro r (rfl | ⟨pending, rfl, hp⟩)
+  · simp [core.result.Result.Insts.CoreOpsTry.branch,
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
+  · simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok]
+    exact WP.spec_mono
+      (append_replay_ccf_ok_matches_advance encode inj s model prior head hHead hModelHead
+        hIdentity version hVersion writes pending hp hI hD hKeys hDepth hDirFast hRowFast
+        hRefFast hR hB valid indexed live ringRoom)
+      (fun _ h => Or.inr h)
+
+/-! ## Part 4: Provisional Replacement Replay (`Store::replay_ccf` when `version ≤ head`) -/
+
+private theorem indexView_of_preserves_replay {V : Type}
+    {before after : CcfKv.kv_index.AddressIndex V} {pins : List U32}
+    (hpres : IndexPreservesPins before after pins)
+    {r : U32} (hr : r ∈ pins) {rows : List (CcfKv.engine.Address × V)}
+    (hview : IndexView before r rows)
+    : IndexView after r rows := by
+  obtain ⟨bindings, hsv, hsb⟩ := hview
+  obtain ⟨hsv', hsb'⟩ := hpres r hr bindings hsv
+  exact ⟨bindings, hsv', by rw [hsb', hsb]⟩
+
+/-- Provisional replacement replay: when `0 < version ≤ head.version` and `version - 1 ≥ global`,
+`Store::replay_ccf` validates the writes against the cut at `version - 1`, rolls back any
+provisional suffix above `version - 1`, and appends the replacement frame order-equivalent to
+`Kv.Model.advance` from the cut model while preserving `BranchValid`, `HistoryIndexValid`,
+and `IndexLiveness`. -/
+theorem replay_ccf_replace_matches_advance (encode : List U8 → String)
+    (inj : Function.Injective encode) (s : CcfKv.engine.Store) (prevModel : Store)
+    (prior : List CcfKv.engine.Frame) (head baseFrame prevFrame : CcfKv.engine.Frame)
+    (hHead : s.history.activeFrames = prior ++ [head])
+    (hBaseAt : s.history.activeFrames[0]? = some baseFrame)
+    (hBaseLeGlobal : baseFrame.version.val ≤ s.history.global.val)
+    (hHeadVer : head.version.val = baseFrame.version.val + prior.length)
+    (version : U64) (hPos : 0 < version.val) (hLeHead : version.val ≤ head.version.val)
+    (hGeGlobal : s.history.global.val ≤ version.val - 1)
+    (hPrevAt
+      : s.history.activeFrames[version.val - 1 - baseFrame.version.val]? = some prevFrame)
+    (hPrevVer : prevFrame.version.val = version.val - 1)
+    (hAtCut
+      : ∀ previous : U64,
+          previous.val = version.val - 1 → s.history.at_cut previous = .ok prevFrame)
+    (hModelPrev : prevModel.head = modelFrame encode s.history.index prevFrame)
+    (hIdentity : prevModel.nextIdentity = s.history.next_identity.val)
+    (writes : alloc.vec.Vec (CcfKv.engine.Address × Option CcfKv.engine.Bytes))
+    (hI : s.history.next_identity.val < U64.max)
+    (hD
+      : IndexBatchRoom s.history.index (storePins s).length
+          ((indexRows s.history.index prevFrame.data).length + writes.val.length)
+          writes.val.length)
+    (hKeys : ∀ row ∈ writes.val, IndexKeyRoom (replayRow row))
+    (hDepth : ∀ row ∈ writes.val, 8 + row.1.map.val.length + row.1.key.val.length ≤ 56)
+    (hDirFast
+      : s.history.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1))
+        < 2147483647)
+    (hRowFast : s.history.index.values.rows.val.length + writes.val.length ≤ 2147483647)
+    (hRefFast
+      : (storePins s).length
+          + 17
+            * (s.history.index.values.dirs.val.length
+                + 2 * (writes.val.length * (112 + 1))
+                + 2)
+          + 1
+        ≤ U32.max)
+    (hQueueRoom
+      : 2
+            * (s.history.index.values.dirs.val.length
+                + s.history.index.values.rows.val.length)
+          + 1
+        ≤ Usize.max)
+    (hR : prevFrame.revisions.val.length + writes.val.length ≤ Usize.max)
+    (hB : prevFrame.births.val.length + writes.val.length ≤ Usize.max)
+    (valid : BranchValid s.history.log) (indexed : HistoryIndexValid s.history)
+    (live : IndexLiveness s.history.index (storePins s))
+    (hRingRoom : 2 * s.history.activeFrames.length + 1 ≤ Usize.max)
+    : WP.spec (CcfKv.engine.Store.replay_ccf s version writes false)
+        (fun (result, after) =>
+          (result = .Err .Disabled ∧ after = s)
+          ∨ (result = .Ok ()
+              ∧ ∃ next,
+                  FrameOrderEq (modelFrame encode after.history.index next)
+                    (advance prevModel (encodeReport encode writes)).head
+                  ∧ after.history.activeFrames
+                    = s.history.activeFrames.take
+                        (version.val - 1 - baseFrame.version.val + 1)
+                      ++ [next]
+                  ∧ after.history.next_identity.val = s.history.next_identity.val + 1
+                  ∧ after.history.term = s.history.term
+                  ∧ after.history.global = s.history.global
+                  ∧ after.txs = s.txs
+                  ∧ BranchValid after.history.log
+                  ∧ HistoryIndexValid after.history
+                  ∧ IndexLiveness after.history.index (storePins after))) := by
+  unfold CcfKv.engine.Store.replay_ccf
+  have hne0 : (version != 0#u64) = true := by
+    have : version ≠ 0#u64 := fun h => by
+      have : version.val = 0 := congrArg UScalar.val h; omega
+    simp [this]
+  rw [hne0, ite_eq_left rfl]
+  rw [history_head s.history prior head hHead valid, bind_ok]
+  have hle : version ≤ head.version := hLeHead
+  rw [ite_eq_left hle]
+  have hone : (1#u64 : U64).val = 1 := rfl
+  apply WP.spec_bind (U64.sub_spec (x := version) (y := 1#u64) (by omega))
+  intro previous hprevSub
+  have hprevVal : previous.val = version.val - 1 := by omega
+  have hnotLt : ¬ previous < s.history.global := by
+    change ¬ previous.val < s.history.global.val; omega
+  rw [ite_eq_right hnotLt, hAtCut previous hprevVal, bind_ok]
+  have hVersionEq : version.val = prevFrame.version.val + 1 := by omega
+  apply WP.spec_bind
+    (prepare_replay_ccf_matches prevFrame.version s.history.next_identity version
+      hVersionEq hI writes)
+  rintro r (rfl | ⟨pending, rfl, hp⟩)
+  · simp [core.result.Result.Insts.CoreOpsTry.branch,
+      core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual]
+  · simp only [core.result.Result.Insts.CoreOpsTry.branch, bind_ok]
+    apply WP.spec_bind
+      (history_rollback s.history previous s.history.term prior head baseFrame (txsPins s.txs.val)
+        hHead hBaseAt hBaseLeGlobal hHeadVer (by omega) (le_refl _) valid live hQueueRoom)
+    rintro ⟨rbOut, h1⟩ ⟨cut, hrbOut, hcutVal, h1Valid, h1Frames, h1Ret, h1Gl, h1Nid, h1Term,
+      _, h1Live, h1Pres, h1DirsLen, h1RowsLen⟩
+    subst hrbOut
+    change WP.spec
+      (Aeneas.Std.bind (Result.ok (core.ops.control_flow.ControlFlow.Continue (CcfKv.engine.Output.RolledBack cut)))
+        (fun cf1 =>
+          match cf1 with
+          | core.ops.control_flow.ControlFlow.Continue val1 => do
+              let b ←
+                match val1 with
+                | CcfKv.engine.Output.Unit => Result.ok false
+                | CcfKv.engine.Output.Snapshot _ _ _ => Result.ok false
+                | CcfKv.engine.Output.Acquired _ _ => Result.ok false
+                | CcfKv.engine.Output.Unavailable => Result.ok false
+                | CcfKv.engine.Output.Value _ => Result.ok false
+                | CcfKv.engine.Output.Presence _ => Result.ok false
+                | CcfKv.engine.Output.Previous _ => Result.ok false
+                | CcfKv.engine.Output.Entries _ => Result.ok false
+                | CcfKv.engine.Output.Size _ => Result.ok false
+                | CcfKv.engine.Output.Applied _ _ _ => Result.ok false
+                | CcfKv.engine.Output.Committed _ _ => Result.ok false
+                | CcfKv.engine.Output.Compacted _ => Result.ok false
+                | CcfKv.engine.Output.RolledBack _ => Result.ok true
+                | CcfKv.engine.Output.RollbackRejected => Result.ok false
+              if b then do
+                let self1 ←
+                  CcfKv.engine.Store.append_replay_ccf { s with history := h1 } version pending false
+                Result.ok (core.result.Result.Ok (), self1)
+              else
+                Result.ok (core.result.Result.Err CcfKv.engine.Error.Disabled, { s with history := h1 })
+          | core.ops.control_flow.ControlFlow.Break residual => do
+              let r2 ←
+                core.result.Result.Insts.CoreOpsTry_traitFromResidualResult.from_residual Unit
+                  (core.convert.FromSame CcfKv.engine.Error) residual
+              Result.ok (r2, { s with history := h1 }))) _
+    rw [bind_ok]
+    change WP.spec (Aeneas.Std.bind (Result.ok true) _) _
+    rw [bind_ok, ite_eq_left rfl]
+    have hcutEq : cut.val = version.val - 1 := by omega
+    have hidxLt : version.val - 1 - baseFrame.version.val < s.history.activeFrames.length := by
+      rw [hHead, List.length_append, List.length_singleton]; omega
+    have htakeSplit :
+        s.history.activeFrames.take (version.val - 1 - baseFrame.version.val + 1)
+        = s.history.activeFrames.take (version.val - 1 - baseFrame.version.val) ++ [prevFrame] := by
+      rw [List.take_succ_eq_append_getElem hidxLt]
+      congr 2
+      rw [List.getElem?_eq_getElem hidxLt, Option.some.injEq] at hPrevAt
+      exact hPrevAt
+    have h1FramesSplit :
+        h1.activeFrames
+        = s.history.activeFrames.take (version.val - 1 - baseFrame.version.val) ++ [prevFrame] := by
+      rw [h1Frames, hcutEq, htakeSplit]
+    have h1HistValid : HistoryIndexValid h1 := by
+      refine ⟨h1Live.valid, ?_, ?_⟩
+      · intro frame hframe
+        have hfOld : frame ∈ s.history.activeFrames := by
+          rw [h1Frames] at hframe
+          exact List.mem_of_mem_take hframe
+        by_cases hz : frame.data = 0#u32
+        · have hEmpty : IndexView h1.index frame.data [] := by
+            rw [hz]
+            exact ⟨[], ⟨⟨0, .empty 0⟩, (fun _ h => by cases h), List.Pairwise.nil⟩, rfl⟩
+          exact index_rows_view ⟨[], hEmpty⟩
+        · have hfPin : frame.data ∈ framePins h1.activeFrames ++ txsPins s.txs.val :=
+            List.mem_append_left _ (List.mem_filterMap.mpr ⟨frame, hframe, by simp [hz]⟩)
+          have hv := indexView_of_preserves_replay h1Pres hfPin (indexed.active frame hfOld)
+          exact index_rows_view ⟨_, hv⟩
+      · intro frame hframe
+        rw [h1Ret] at hframe
+        exact indexed.retainedEmpty frame hframe
+    have hprevMemH1 : prevFrame ∈ h1.activeFrames := by
+      rw [h1FramesSplit]; exact List.mem_append_right _ List.mem_cons_self
+    have hprevMemS : prevFrame ∈ s.history.activeFrames := by
+      rw [h1Frames] at hprevMemH1; exact List.mem_of_mem_take hprevMemH1
+    have hprevRowsEq : indexRows h1.index prevFrame.data = indexRows s.history.index prevFrame.data := by
+      by_cases hz : prevFrame.data = 0#u32
+      · rw [hz]
+        have he1 : IndexView h1.index 0#u32 [] :=
+          ⟨[], ⟨⟨0, .empty 0⟩, (fun _ h => by cases h), List.Pairwise.nil⟩, rfl⟩
+        have he2 : IndexView s.history.index 0#u32 [] :=
+          ⟨[], ⟨⟨0, .empty 0⟩, (fun _ h => by cases h), List.Pairwise.nil⟩, rfl⟩
+        rw [index_rows_eq he1, index_rows_eq he2]
+      · have hpPin : prevFrame.data ∈ framePins h1.activeFrames ++ txsPins s.txs.val :=
+          List.mem_append_left _ (List.mem_filterMap.mpr ⟨prevFrame, hprevMemH1, by simp [hz]⟩)
+        have hv := indexView_of_preserves_replay h1Pres hpPin (indexed.active prevFrame hprevMemS)
+        exact index_rows_eq hv
+    have hModelPrevH1 : prevModel.head = modelFrame encode h1.index prevFrame := by
+      rw [hModelPrev]; simp [modelFrame, hprevRowsEq]
+    have h1PinsLe : (storePins { s with history := h1 }).length ≤ (storePins s).length := by
+      simp only [storePins, List.length_append]
+      have hfp : (framePins h1.activeFrames).length ≤ (framePins s.history.activeFrames).length := by
+        rw [h1Frames]
+        have hdrop : s.history.activeFrames =
+            s.history.activeFrames.take (cut.val - baseFrame.version.val + 1)
+            ++ s.history.activeFrames.drop (cut.val - baseFrame.version.val + 1) :=
+          (List.take_append_drop _ _).symm
+        conv_rhs => rw [hdrop]
+        simp only [framePins, List.filterMap_append, List.length_append]
+        exact Nat.le_add_right _ _
+      omega
+    have h1D : IndexBatchRoom h1.index (storePins { s with history := h1 }).length
+        ((indexRows h1.index prevFrame.data).length + writes.val.length) writes.val.length := by
+      rw [hprevRowsEq]
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · rw [h1DirsLen]; exact hD.lookup
+      · rw [h1RowsLen]; exact hD.values
+      · have h := hD.refs; rw [h1DirsLen]; omega
+      · have h := hD.queue; rw [h1DirsLen, h1RowsLen]; exact h
+    have h1DirFast :
+        h1.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1)) < 2147483647 := by
+      rw [h1DirsLen]; exact hDirFast
+    have h1RowFast :
+        h1.index.values.rows.val.length + writes.val.length ≤ 2147483647 := by
+      rw [h1RowsLen]; exact hRowFast
+    have h1RefFast :
+        (storePins { s with history := h1 }).length
+          + 17 * (h1.index.values.dirs.val.length + 2 * (writes.val.length * (112 + 1)) + 2)
+          + 1 ≤ U32.max := by
+      rw [h1DirsLen]; omega
+    have h1RingRoom :
+        h1.log.len.val = h1.log.slots.val.length
+        → 2 * h1.log.slots.val.length + 1 ≤ Usize.max := by
+      intro hfull
+      have hlenEq : h1.log.len.val = h1.activeFrames.length := by
+        change h1.log.len.val = (branchValues h1.log).length
+        exact (branch_values_length h1.log h1Valid).symm
+      have hleLen : h1.activeFrames.length ≤ s.history.activeFrames.length := by
+        rw [h1Frames, List.length_take]; exact Nat.min_le_right _ _
+      omega
+    have hApp := append_replay_ccf_ok_matches_advance encode inj { s with history := h1 } prevModel
+      (s.history.activeFrames.take (version.val - 1 - baseFrame.version.val)) prevFrame
+      h1FramesSplit hModelPrevH1 (by rw [h1Nid]; exact hIdentity) version hVersionEq writes
+      pending hp (by rw [h1Nid]; exact hI) h1D hKeys hDepth h1DirFast h1RowFast h1RefFast
+      hR hB h1Valid h1HistValid h1Live h1RingRoom
+    refine WP.spec_mono hApp ?_
+    rintro ⟨res, after⟩ ⟨hOk, next, hFrameEq, hAFrames, hANid, hATerm, hAGl, hATxs,
+      hAValid, hAHist, hALive, _⟩
+    refine Or.inr ⟨hOk, next, hFrameEq, ?_, ?_, ?_, ?_, hATxs, hAValid, hAHist, hALive⟩
+    · rw [hAFrames, h1Frames, hcutEq]
+    · rw [hANid, h1Nid]
+    · rw [hATerm, h1Term]
+    · rw [hAGl, h1Gl]
+
+/-! ## Part 5: `Store::swap_recovery_maps` Guard Proofs -/
+
+/-- `Store::swap_recovery_maps` rejects with `Error::Disabled` and leaves both stores unchanged
+when the destination store has active transactions. -/
+theorem swap_recovery_maps_rejects_self_txs (s source : CcfKv.engine.Store)
+    (names : alloc.vec.Vec CcfKv.engine.Bytes) (hne : s.txs.val ≠ [])
+    : CcfKv.engine.Store.swap_recovery_maps s source names
+      = .ok (.Err .Disabled, s, source) := by
+  unfold CcfKv.engine.Store.swap_recovery_maps
+  have hemp : alloc.vec.Vec.is_empty s.txs = .ok false := by
+    unfold alloc.vec.Vec.is_empty
+    simp [List.length_eq_zero_iff, hne]
+  dsimp only
+  rw [hemp, bind_ok]
+  rfl
+
+/-- `Store::swap_recovery_maps` rejects with `Error::Disabled` and leaves both stores unchanged
+when the source store has active transactions. -/
+theorem swap_recovery_maps_rejects_source_txs (s source : CcfKv.engine.Store)
+    (names : alloc.vec.Vec CcfKv.engine.Bytes)
+    (hself : s.txs.val = []) (hsrc : source.txs.val ≠ [])
+    : CcfKv.engine.Store.swap_recovery_maps s source names
+      = .ok (.Err .Disabled, s, source) := by
+  unfold CcfKv.engine.Store.swap_recovery_maps
+  have h1 : alloc.vec.Vec.is_empty s.txs = .ok true := by
+    unfold alloc.vec.Vec.is_empty
+    simp [hself]
+  have h2 : alloc.vec.Vec.is_empty source.txs = .ok false := by
+    unfold alloc.vec.Vec.is_empty
+    simp [List.length_eq_zero_iff, hsrc]
+  dsimp only
+  rw [h1, bind_ok, ite_eq_left rfl, h2, bind_ok]
+  rfl
+
+/-- `Store::swap_recovery_maps` rejects with `Error::Disabled` and leaves both stores unchanged
+when `source`'s head version is ahead of the destination store's head version. -/
+theorem swap_recovery_maps_rejects_source_ahead (s source : CcfKv.engine.Store)
+    (names : alloc.vec.Vec CcfKv.engine.Bytes)
+    (sprior dprior : List CcfKv.engine.Frame) (shead dhead : CcfKv.engine.Frame)
+    (hself : s.txs.val = []) (hsrc : source.txs.val = [])
+    (hsHead : source.history.activeFrames = sprior ++ [shead])
+    (hdHead : s.history.activeFrames = dprior ++ [dhead])
+    (hsValid : BranchValid source.history.log) (hdValid : BranchValid s.history.log)
+    (hahead : dhead.version.val < shead.version.val)
+    : CcfKv.engine.Store.swap_recovery_maps s source names
+      = .ok (.Err .Disabled, s, source) := by
+  unfold CcfKv.engine.Store.swap_recovery_maps
+  have h1 : alloc.vec.Vec.is_empty s.txs = .ok true := by
+    unfold alloc.vec.Vec.is_empty; simp [hself]
+  have h2 : alloc.vec.Vec.is_empty source.txs = .ok true := by
+    unfold alloc.vec.Vec.is_empty; simp [hsrc]
+  dsimp only
+  rw [h1, bind_ok, ite_eq_left rfl, h2, bind_ok, ite_eq_left rfl,
+    history_head source.history sprior shead hsHead hsValid, bind_ok,
+    history_head s.history dprior dhead hdHead hdValid, bind_ok]
+  have hgt : shead.version > dhead.version := hahead
+  rw [ite_eq_left hgt]
+
+/-- `Store::swap_recovery_maps` rejects with `Error::Exhausted` and leaves both stores unchanged
+when either store's identity counter is at `U64::MAX`. -/
+theorem swap_recovery_maps_rejects_exhausted (s source : CcfKv.engine.Store)
+    (names : alloc.vec.Vec CcfKv.engine.Bytes)
+    (sprior dprior : List CcfKv.engine.Frame) (shead dhead : CcfKv.engine.Frame)
+    (hself : s.txs.val = []) (hsrc : source.txs.val = [])
+    (hsHead : source.history.activeFrames = sprior ++ [shead])
+    (hdHead : s.history.activeFrames = dprior ++ [dhead])
+    (hsValid : BranchValid source.history.log) (hdValid : BranchValid s.history.log)
+    (hle : shead.version.val ≤ dhead.version.val)
+    (hexh
+      : s.history.next_identity = core.num.U64.MAX
+        ∨ source.history.next_identity = core.num.U64.MAX)
+    : CcfKv.engine.Store.swap_recovery_maps s source names
+      = .ok (.Err .Exhausted, s, source) := by
+  unfold CcfKv.engine.Store.swap_recovery_maps
+  have h1 : alloc.vec.Vec.is_empty s.txs = .ok true := by
+    unfold alloc.vec.Vec.is_empty; simp [hself]
+  have h2 : alloc.vec.Vec.is_empty source.txs = .ok true := by
+    unfold alloc.vec.Vec.is_empty; simp [hsrc]
+  dsimp only
+  rw [h1, bind_ok, ite_eq_left rfl, h2, bind_ok, ite_eq_left rfl,
+    history_head source.history sprior shead hsHead hsValid, bind_ok,
+    history_head s.history dprior dhead hdHead hdValid, bind_ok]
+  have hngt : ¬ shead.version > dhead.version := by
+    change ¬ shead.version.val > dhead.version.val; omega
+  rw [ite_eq_right hngt]
+  rcases hexh with hmax1 | hmax2
+  · rw [ite_eq_left hmax1]
+  · by_cases hmax1 : s.history.next_identity = core.num.U64.MAX
+    · rw [ite_eq_left hmax1]
+    · rw [ite_eq_right hmax1, ite_eq_left hmax2]
 
 end KvRust

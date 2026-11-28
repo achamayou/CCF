@@ -124,6 +124,44 @@ namespace ccf::kv::rust_ffi
     using CopyValueFn = void (*)(void*, const uint8_t*, size_t);
     using AcquireTraceFn = void (*)(void*, Reply, uint64_t, uint64_t);
     using ReplyTraceFn = void (*)(void*, Reply);
+    uint8_t ccf_rust_kv_direct_get(
+      const void* store,
+      void* tx,
+      uint8_t read_only,
+      const uint8_t* map_data,
+      size_t map_len,
+      const uint8_t* key_data,
+      size_t key_len,
+      void* out_ctx,
+      CopyValueFn copy_cb,
+      uint64_t* snap_ver,
+      uint64_t* commit_view,
+      uint8_t* has_snap);
+    uint8_t ccf_rust_kv_direct_has(
+      const void* store,
+      void* tx,
+      uint8_t read_only,
+      const uint8_t* map_data,
+      size_t map_len,
+      const uint8_t* key_data,
+      size_t key_len,
+      int32_t* out_present,
+      uint64_t* snap_ver,
+      uint64_t* commit_view,
+      uint8_t* has_snap);
+    uint8_t ccf_rust_kv_direct_write(
+      const void* store,
+      void* tx,
+      uint8_t read_only,
+      const uint8_t* map_data,
+      size_t map_len,
+      const uint8_t* key_data,
+      size_t key_len,
+      const uint8_t* value_data,
+      size_t value_len,
+      uint64_t* snap_ver,
+      uint64_t* commit_view,
+      uint8_t* has_snap);
     Status ccf_rust_kv_tx_write(
       NativeTx* tx, ByteView map, ByteView key, ByteView value);
     Status ccf_rust_kv_tx_get(

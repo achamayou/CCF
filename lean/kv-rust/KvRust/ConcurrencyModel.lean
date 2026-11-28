@@ -77,7 +77,8 @@ theorem store_retain_root_raw_refines (s : CcfKv.engine.Store)
     (hRootMem : root ≠ 0#u32 → root ∈ storePins s ++ extraPins)
     (hRoom
       : root ≠ 0#u32
-        → radixReferences s.history.index.values.dirs.val (storePins s ++ extraPins) root < U32.max)
+        → radixReferences s.history.index.values.dirs.val (storePins s ++ extraPins) root
+          < U32.max)
     : WP.spec (CcfKv.engine.Store.retain_root_raw s root)
         (fun after =>
           after.history.log = s.history.log
@@ -93,7 +94,8 @@ theorem store_retain_root_raw_refines (s : CcfKv.engine.Store)
           ∧ HistoryIndexValid after.history
           ∧ IndexLiveness after.history.index
               (storePins after ++ (if root = 0#u32 then extraPins else root :: extraPins))
-          ∧ IndexPreservesPins s.history.index after.history.index (storePins s ++ extraPins)) := by
+          ∧ IndexPreservesPins s.history.index after.history.index
+              (storePins s ++ extraPins)) := by
   unfold CcfKv.engine.Store.retain_root_raw
   have hRootRef : root ≠ 0#u32 →
       SingleLinkLive s.history.index.values.dirs.val s.history.index.values.rows.val root
@@ -104,7 +106,8 @@ theorem store_retain_root_raw_refines (s : CcfKv.engine.Store)
     rw [radixReferences_eq]
     exact List.count_pos_iff.mpr (List.mem_append_left _ hmem)
   apply WP.spec_bind
-    (index_retain_root_refines s.history.index (storePins s ++ extraPins) root live hRootRef hRoom)
+    (index_retain_root_refines s.history.index (storePins s ++ extraPins) root live
+      hRootRef hRoom)
   intro ai ⟨hvals, haiLive⟩
   rw [WP.spec_ok]
   have hpres : IndexPreservesPins s.history.index ai (storePins s ++ extraPins) :=
@@ -133,7 +136,10 @@ theorem store_release_root_raw_refines (s : CcfKv.engine.Store)
       : IndexLiveness s.history.index
           (storePins s ++ (if root = 0#u32 then restExtra else root :: restExtra)))
     (queueRoom
-      : 2 * (s.history.index.values.dirs.val.length + s.history.index.values.rows.val.length) + 1
+      : 2
+            * (s.history.index.values.dirs.val.length
+                + s.history.index.values.rows.val.length)
+          + 1
         ≤ Usize.max)
     : WP.spec (CcfKv.engine.Store.release_root_raw s root)
         (fun after =>
@@ -148,7 +154,8 @@ theorem store_release_root_raw_refines (s : CcfKv.engine.Store)
           ∧ BranchValid after.history.log
           ∧ HistoryIndexValid after.history
           ∧ IndexLiveness after.history.index (storePins after ++ restExtra)
-          ∧ IndexPreservesPins s.history.index after.history.index (storePins s ++ restExtra)) := by
+          ∧ IndexPreservesPins s.history.index after.history.index
+              (storePins s ++ restExtra)) := by
   unfold CcfKv.engine.Store.release_root_raw
   have hpermIn :
       (storePins s ++ (if root = 0#u32 then restExtra else root :: restExtra)).Perm
@@ -247,10 +254,12 @@ theorem store_pin_snapshot_stub_refines (s : CcfKv.engine.Store)
         (fun after =>
           after.history = s.history
           ∧ after.recovery_views = s.recovery_views
-          ∧ after.txs.val =
-              Kv.Model.set s.txs.val id
-                { lifecycleNewTx with
-                  snapshot := some { version := version, term := s.history.term } }
+          ∧ after.txs.val
+            = Kv.Model.set s.txs.val id
+                {
+                  lifecycleNewTx with
+                    snapshot := some { version := version, term := s.history.term }
+                }
           ∧ storePins after = storePins s
           ∧ BranchValid after.history.log
           ∧ HistoryIndexValid after.history
@@ -264,8 +273,9 @@ theorem store_pin_snapshot_stub_refines (s : CcfKv.engine.Store)
     unfold CcfKv.U64.Insts.Ccf_kvEngineKey.same
     simp
   apply WP.spec_bind
-    (assoc_set CcfKv.U64.Insts.Ccf_kvEngineKey core.clone.CloneU64 CcfKv.engine.Tx.Insts.CoreCloneClone
-      s.txs id stub hSame (fun _ => rfl) clone_tx hRoom)
+    (assoc_set CcfKv.U64.Insts.Ccf_kvEngineKey core.clone.CloneU64
+      CcfKv.engine.Tx.Insts.CoreCloneClone s.txs id stub hSame (fun _ => rfl) clone_tx
+      hRoom)
   intro txs' htxs'
   rw [WP.spec_ok]
   have hStubEmpty : stub.views.val = [] := by
@@ -289,7 +299,10 @@ theorem store_unpin_snapshot_stub_refines (s : CcfKv.engine.Store)
     (indexed : HistoryIndexValid s.history)
     (live : IndexLiveness s.history.index (storePins s ++ extraPins))
     (queueRoom
-      : 2 * (s.history.index.values.dirs.val.length + s.history.index.values.rows.val.length) + 1
+      : 2
+            * (s.history.index.values.dirs.val.length
+                + s.history.index.values.rows.val.length)
+          + 1
         ≤ Usize.max)
     : WP.spec (CcfKv.engine.Store.unpin_snapshot_stub s id)
         (fun after =>
@@ -304,11 +317,13 @@ theorem store_unpin_snapshot_stub_refines (s : CcfKv.engine.Store)
           ∧ BranchValid after.history.log
           ∧ HistoryIndexValid after.history
           ∧ IndexLiveness after.history.index (storePins after ++ extraPins)
-          ∧ IndexPreservesPins s.history.index after.history.index (storePins s ++ extraPins)) := by
+          ∧ IndexPreservesPins s.history.index after.history.index
+              (storePins s ++ extraPins)) := by
   unfold CcfKv.engine.Store.unpin_snapshot_stub
   apply WP.spec_bind (erase_attempt_matches s.txs id)
   intro txs' htxs'
-  apply WP.spec_bind (history_prune_retained_refines s.history txs' baseFrame hbase0 valid)
+  apply WP.spec_bind
+    (history_prune_retained_refines s.history txs' baseFrame hbase0 valid)
   rintro h1 ⟨hlog, hidx, hgl, htm, hid, hre, hretSub, _⟩
   have h1Queue : 2 * (h1.index.values.dirs.val.length + h1.index.values.rows.val.length) + 1
       ≤ Usize.max := by
@@ -316,8 +331,8 @@ theorem store_unpin_snapshot_stub_refines (s : CcfKv.engine.Store)
   have h1Live : IndexLiveness h1.index (storePins s ++ extraPins) := by
     rw [hidx]; exact live
   apply WP.spec_bind
-    (index_retire_budget_refines h1.index (storePins s ++ extraPins) CcfKv.engine.RETIRE_BUDGET
-      h1Live h1Queue)
+    (index_retire_budget_refines h1.index (storePins s ++ extraPins)
+      CcfKv.engine.RETIRE_BUDGET h1Live h1Queue)
   rintro ⟨_, ai⟩ ⟨haiLive, haiPres, _, _⟩
   change WP.spec (Result.ok _) _
   rw [WP.spec_ok]
@@ -378,7 +393,7 @@ inductive LockMode where
   | unlocked
   | readers (n : Nat)
   | writer
-  deriving DecidableEq
+deriving DecidableEq
 
 /-- An active thread-private reader holding a `HazardSlot` and a `DetachedTx`. -/
 structure HazardReader where
@@ -398,8 +413,8 @@ structure ConcState where
 /-- Every root currently published by any active `HazardSlot` is retained in `hazardRetained`.
 This is the postcondition established by the retain pass of `sync_hazards_locked()`. -/
 def HazardsSynced (cs : ConcState) : Prop :=
-  ∀ slot hr, (slot, hr) ∈ cs.hazardReaders →
-    ∀ r ∈ hr.publishedRoots, r ∈ cs.hazardRetained
+  ∀ slot hr,
+    (slot, hr) ∈ cs.hazardReaders → ∀ r ∈ hr.publishedRoots, r ∈ cs.hazardRetained
 
 /-- All non-zero roots currently published across all active `HazardSlot`s. -/
 def anyHazardUses (readers : List (Nat × HazardReader)) (r : U32) : Prop :=
@@ -413,20 +428,24 @@ structure ConcInv (cs : ConcState) : Prop where
   lockNonZero : ∀ n, cs.lock = .readers n → 0 < n
   retainedNz : ∀ r ∈ cs.hazardRetained, r ≠ 0#u32
   retainedNodup : cs.hazardRetained.Nodup
-  stubsEmpty : ∀ id ∈ cs.hazardPinIds, ∀ tx, (id, tx) ∈ cs.store.txs.val → tx.views.val = []
-  readersPublishedNz :
-    ∀ slot hr, (slot, hr) ∈ cs.hazardReaders → ∀ r ∈ hr.publishedRoots, r ≠ 0#u32
-  readersPublishedBacked :
-    ∀ slot hr, (slot, hr) ∈ cs.hazardReaders →
-      ∀ r ∈ hr.publishedRoots,
-        r ∈ framePins cs.store.history.activeFrames ∨ r ∈ cs.hazardRetained
-  readersTxCovered :
-    ∀ slot hr, (slot, hr) ∈ cs.hazardReaders →
-      ∀ r ∈ txPins hr.tx.tx, r ∈ hr.publishedRoots
-  readersViewsExact :
-    ∀ slot hr, (slot, hr) ∈ cs.hazardReaders →
-      ∀ r rows, (r, rows) ∈ hr.capturedViews →
-        r ∈ hr.publishedRoots ∧ IndexView cs.store.history.index r rows
+  stubsEmpty
+    : ∀ id ∈ cs.hazardPinIds, ∀ tx, (id, tx) ∈ cs.store.txs.val → tx.views.val = []
+  readersPublishedNz
+    : ∀ slot hr, (slot, hr) ∈ cs.hazardReaders → ∀ r ∈ hr.publishedRoots, r ≠ 0#u32
+  readersPublishedBacked
+    : ∀ slot hr,
+        (slot, hr) ∈ cs.hazardReaders
+        → ∀ r ∈ hr.publishedRoots,
+            r ∈ framePins cs.store.history.activeFrames ∨ r ∈ cs.hazardRetained
+  readersTxCovered
+    : ∀ slot hr,
+        (slot, hr) ∈ cs.hazardReaders → ∀ r ∈ txPins hr.tx.tx, r ∈ hr.publishedRoots
+  readersViewsExact
+    : ∀ slot hr,
+        (slot, hr) ∈ cs.hazardReaders
+        → ∀ r rows,
+            (r, rows) ∈ hr.capturedViews
+            → r ∈ hr.publishedRoots ∧ IndexView cs.store.history.index r rows
 
 /-- Remove the first occurrence of `x` from a `Nodup` list (mirrors swap-pop in
 `hazard_retained_roots`). -/
@@ -467,139 +486,169 @@ private theorem mem_removeRoot {xs : List U32} {r x : U32}
 /-- Atomic concurrent transition relation for `RustStore`. -/
 inductive ConcStep : ConcState → ConcState → Prop where
   /-- Acquire `ShardedRwLock::ReadGuard` from unlocked state. -/
-  | acquireReadUnlocked (cs : ConcState)
-      (hLock : cs.lock = .unlocked)
-      : ConcStep cs { cs with lock := .readers 1 }
+  | acquireReadUnlocked (cs : ConcState) (hLock : cs.lock = .unlocked)
+    : ConcStep cs { cs with lock := .readers 1 }
 
   /-- Acquire an additional concurrent `ShardedRwLock::ReadGuard`. -/
-  | acquireReadMore (cs : ConcState) (n : Nat)
-      (hLock : cs.lock = .readers n)
-      : ConcStep cs { cs with lock := .readers (n + 1) }
+  | acquireReadMore (cs : ConcState) (n : Nat) (hLock : cs.lock = .readers n)
+    : ConcStep cs { cs with lock := .readers (n + 1) }
 
   /-- Release one `ShardedRwLock::ReadGuard`. -/
-  | releaseRead (cs : ConcState) (n : Nat)
-      (hLock : cs.lock = .readers (n + 1))
-      : ConcStep cs { cs with lock := if n = 0 then .unlocked else .readers n }
+  | releaseRead (cs : ConcState) (n : Nat) (hLock : cs.lock = .readers (n + 1))
+    : ConcStep cs { cs with lock := if n = 0 then .unlocked else .readers n }
 
   /-- Acquire exclusive `ShardedRwLock::WriteGuard` (requires zero active readers). -/
-  | acquireWrite (cs : ConcState)
-      (hLock : cs.lock = .unlocked)
-      : ConcStep cs { cs with lock := .writer }
+  | acquireWrite (cs : ConcState) (hLock : cs.lock = .unlocked)
+    : ConcStep cs { cs with lock := .writer }
 
   /-- Release exclusive `ShardedRwLock::WriteGuard`. -/
-  | releaseWrite (cs : ConcState)
-      (hLock : cs.lock = .writer)
-      : ConcStep cs { cs with lock := .unlocked }
+  | releaseWrite (cs : ConcState) (hLock : cs.lock = .writer)
+    : ConcStep cs { cs with lock := .unlocked }
 
   /-- Claim a fresh `HazardSlot` for a new empty `DetachedTx` (lock-free CAS on `claimed`). -/
   | claimHazardSlot (cs : ConcState) (slot : Nat) (tx : CcfKv.engine.DetachedTx)
-      (hEmptyViews : tx.tx.views.val = [])
-      : ConcStep cs
-          { cs with
-            hazardReaders := (slot, { tx := tx, publishedRoots := [], capturedViews := [] })
-              :: cs.hazardReaders }
+    (hEmptyViews : tx.tx.views.val = [])
+    : ConcStep cs
+        {
+          cs with
+            hazardReaders :=
+              (slot, { tx := tx, publishedRoots := [], capturedViews := [] })
+              :: cs.hazardReaders
+        }
 
   /-- While holding `ReadGuard`, run the Aeneas-extracted `Store::snapshot_and_acquire_readonly`
   on an active hazard reader's `DetachedTx` and publish the returned non-zero roots into its
   `HazardSlot` before releasing `ReadGuard`. -/
   | readSnapshotAndAcquire (cs : ConcState) (n : Nat)
-      (slot : Nat) (hr : HazardReader) (before after : List (Nat × HazardReader))
-      (map : CcfKv.engine.Bytes)
-      (prior : List CcfKv.engine.Frame) (head baseFrame : CcfKv.engine.Frame)
-      (res : core.result.Result
-        (U64 × U64 × CcfKv.engine.Output × CcfKv.radix.RadixRoot × CcfKv.radix.RadixRoot)
-        CcfKv.engine.Error)
-      (tx' : CcfKv.engine.DetachedTx)
-      (sv st : U64) (out : CcfKv.engine.Output) (r0 r1 : CcfKv.radix.RadixRoot)
-      (hLock : cs.lock = .readers n)
-      (hSplit : cs.hazardReaders = before ++ (slot, hr) :: after)
-      (hFrames : cs.store.history.activeFrames = prior ++ [head])
-      (hBase0 : cs.store.history.activeFrames[0]? = some baseFrame)
-      (hBaseLeGlobal : baseFrame.version.val ≤ cs.store.history.global.val)
-      (hRec : cs.store.recovery_views.val = [])
-      (hActive : hr.tx.tx.phase = .Active)
-      (hUnreg : hr.tx.registered = false)
-      (hMissing : find hr.tx.tx.views.val map = none)
-      (hViewRoom : hr.tx.tx.views.val.length < Usize.max)
-      (hExec : CcfKv.engine.Store.snapshot_and_acquire_readonly cs.store hr.tx map
+    (slot : Nat) (hr : HazardReader) (before after : List (Nat × HazardReader))
+    (map : CcfKv.engine.Bytes)
+    (prior : List CcfKv.engine.Frame) (head baseFrame : CcfKv.engine.Frame)
+    (res
+      : core.result.Result
+          (U64
+            × U64
+            × CcfKv.engine.Output
+            × CcfKv.radix.RadixRoot
+            × CcfKv.radix.RadixRoot)
+          CcfKv.engine.Error)
+    (tx' : CcfKv.engine.DetachedTx)
+    (sv st : U64) (out : CcfKv.engine.Output) (r0 r1 : CcfKv.radix.RadixRoot)
+    (hLock : cs.lock = .readers n)
+    (hSplit : cs.hazardReaders = before ++ (slot, hr) :: after)
+    (hFrames : cs.store.history.activeFrames = prior ++ [head])
+    (hBase0 : cs.store.history.activeFrames[0]? = some baseFrame)
+    (hBaseLeGlobal : baseFrame.version.val ≤ cs.store.history.global.val)
+    (hRec : cs.store.recovery_views.val = [])
+    (hActive : hr.tx.tx.phase = .Active)
+    (hUnreg : hr.tx.registered = false)
+    (hMissing : find hr.tx.tx.views.val map = none)
+    (hViewRoom : hr.tx.tx.views.val.length < Usize.max)
+    (hExec
+      : CcfKv.engine.Store.snapshot_and_acquire_readonly cs.store hr.tx map
         = Result.ok (res, tx'))
-      (hResOk : res = core.result.Result.Ok (sv, st, out, r0, r1))
-      : ConcStep cs
-          { cs with
-            hazardReaders := before ++ (slot,
-              { tx := tx'
-                publishedRoots := [r0, r1].filter (· != 0#u32) ++ hr.publishedRoots
-                capturedViews :=
-                  ([r0, r1].filter (· != 0#u32)).map (fun r => (r, indexRows cs.store.history.index r))
-                  ++ hr.capturedViews }) :: after }
+    (hResOk : res = core.result.Result.Ok (sv, st, out, r0, r1))
+    : ConcStep cs
+        {
+          cs with
+            hazardReaders :=
+              before
+              ++ (
+                    slot,
+                    {
+                      tx := tx'
+                      publishedRoots := [r0, r1].filter (· != 0#u32) ++ hr.publishedRoots
+                      capturedViews :=
+                        ([r0, r1].filter (· != 0#u32)).map
+                          (fun r => (r, indexRows cs.store.history.index r))
+                        ++ hr.capturedViews
+                    }
+                  )
+                  :: after
+        }
 
   /-- Lock-free `release_hazard_slot`: a reader finishes and clears its `HazardSlot`.
   Permitted in ANY lock state (even concurrently with an exclusive writer). -/
   | dropHazardReader (cs : ConcState)
-      (slot : Nat) (hr : HazardReader) (before after : List (Nat × HazardReader))
-      (hSplit : cs.hazardReaders = before ++ (slot, hr) :: after)
-      : ConcStep cs { cs with hazardReaders := before ++ after }
+    (slot : Nat) (hr : HazardReader) (before after : List (Nat × HazardReader))
+    (hSplit : cs.hazardReaders = before ++ (slot, hr) :: after)
+    : ConcStep cs { cs with hazardReaders := before ++ after }
 
   /-- `sync_hazards_locked()` retain step (under `WriteGuard`): calls extracted
   `Store::retain_root_raw` for a root currently published in a `HazardSlot` and not yet
   in `hazardRetained`. -/
   | syncRetainRoot (cs : ConcState) (root : U32) (store' : CcfKv.engine.Store)
-      (hLock : cs.lock = .writer)
-      (hUsed : anyHazardUses cs.hazardReaders root)
-      (hNotRetained : root ∉ cs.hazardRetained)
-      (hRoom
-        : root ≠ 0#u32
-          → radixReferences cs.store.history.index.values.dirs.val
-              (storePins cs.store ++ cs.hazardRetained) root < U32.max)
-      (hExec : CcfKv.engine.Store.retain_root_raw cs.store root = Result.ok store')
-      : ConcStep cs
-          { cs with
+    (hLock : cs.lock = .writer)
+    (hUsed : anyHazardUses cs.hazardReaders root)
+    (hNotRetained : root ∉ cs.hazardRetained)
+    (hRoom
+      : root ≠ 0#u32
+        → radixReferences cs.store.history.index.values.dirs.val
+            (storePins cs.store ++ cs.hazardRetained) root
+          < U32.max)
+    (hExec : CcfKv.engine.Store.retain_root_raw cs.store root = Result.ok store')
+    : ConcStep cs
+        {
+          cs with
             store := store'
-            hazardRetained := root :: cs.hazardRetained }
+            hazardRetained := root :: cs.hazardRetained
+        }
 
   /-- `sync_hazards_locked()` release step (under `WriteGuard`): calls extracted
   `Store::release_root_raw` for a root in `hazardRetained` no longer referenced by ANY
   active `HazardSlot`. -/
   | syncReleaseRoot (cs : ConcState) (root : U32) (store' : CcfKv.engine.Store)
-      (hLock : cs.lock = .writer)
-      (hRetained : root ∈ cs.hazardRetained)
-      (hUnused : ¬anyHazardUses cs.hazardReaders root)
-      (hQueueRoom
-        : 2 * (cs.store.history.index.values.dirs.val.length
-            + cs.store.history.index.values.rows.val.length) + 1 ≤ Usize.max)
-      (hExec : CcfKv.engine.Store.release_root_raw cs.store root = Result.ok store')
-      : ConcStep cs
-          { cs with
+    (hLock : cs.lock = .writer)
+    (hRetained : root ∈ cs.hazardRetained)
+    (hUnused : ¬anyHazardUses cs.hazardReaders root)
+    (hQueueRoom
+      : 2
+            * (cs.store.history.index.values.dirs.val.length
+                + cs.store.history.index.values.rows.val.length)
+          + 1
+        ≤ Usize.max)
+    (hExec : CcfKv.engine.Store.release_root_raw cs.store root = Result.ok store')
+    : ConcStep cs
+        {
+          cs with
             store := store'
-            hazardRetained := removeRoot cs.hazardRetained root }
+            hazardRetained := removeRoot cs.hazardRetained root
+        }
 
   /-- `sync_hazards_locked()` snapshot-pin step (under `WriteGuard`): calls extracted
   `Store::pin_snapshot_stub` for a fresh pin ID. -/
   | syncPinSnapshot (cs : ConcState) (pinId version : U64) (store' : CcfKv.engine.Store)
-      (hLock : cs.lock = .writer)
-      (hFresh : find cs.store.txs.val pinId = none)
-      (hRoom : cs.store.txs.val.length < Usize.max)
-      (hExec : CcfKv.engine.Store.pin_snapshot_stub cs.store pinId version = Result.ok store')
-      : ConcStep cs
-          { cs with
+    (hLock : cs.lock = .writer)
+    (hFresh : find cs.store.txs.val pinId = none)
+    (hRoom : cs.store.txs.val.length < Usize.max)
+    (hExec
+      : CcfKv.engine.Store.pin_snapshot_stub cs.store pinId version = Result.ok store')
+    : ConcStep cs
+        {
+          cs with
             store := store'
-            hazardPinIds := pinId :: cs.hazardPinIds }
+            hazardPinIds := pinId :: cs.hazardPinIds
+        }
 
   /-- `sync_hazards_locked()` snapshot-unpin step (under `WriteGuard`): calls extracted
   `Store::unpin_snapshot_stub` for a tracked snapshot stub pin ID. -/
   | syncUnpinSnapshot (cs : ConcState) (pinId : U64) (baseFrame : CcfKv.engine.Frame)
-      (store' : CcfKv.engine.Store)
-      (hLock : cs.lock = .writer)
-      (hTracked : pinId ∈ cs.hazardPinIds)
-      (hBase0 : cs.store.history.activeFrames[0]? = some baseFrame)
-      (hQueueRoom
-        : 2 * (cs.store.history.index.values.dirs.val.length
-            + cs.store.history.index.values.rows.val.length) + 1 ≤ Usize.max)
-      (hExec : CcfKv.engine.Store.unpin_snapshot_stub cs.store pinId = Result.ok store')
-      : ConcStep cs
-          { cs with
+    (store' : CcfKv.engine.Store)
+    (hLock : cs.lock = .writer)
+    (hTracked : pinId ∈ cs.hazardPinIds)
+    (hBase0 : cs.store.history.activeFrames[0]? = some baseFrame)
+    (hQueueRoom
+      : 2
+            * (cs.store.history.index.values.dirs.val.length
+                + cs.store.history.index.values.rows.val.length)
+          + 1
+        ≤ Usize.max)
+    (hExec : CcfKv.engine.Store.unpin_snapshot_stub cs.store pinId = Result.ok store')
+    : ConcStep cs
+        {
+          cs with
             store := store'
-            hazardPinIds := cs.hazardPinIds.filter (· != pinId) }
+            hazardPinIds := cs.hazardPinIds.filter (· != pinId)
+        }
 
   /-- Exclusive mutating `Store` transition (commit, compact, rollback, replay,
   `install_snapshot`, backfill, `promote_detached_tx`, `end_detached`, etc.) executed under
@@ -608,14 +657,15 @@ inductive ConcStep : ConcState → ConcState → Prop where
   preserving `IndexLiveness` with `extraPins := cs.hazardRetained` and `IndexPreservesPins`
   on `cs.hazardRetained` keeps every concurrent hazard reader live and exact. -/
   | mutateStoreSynced (cs : ConcState) (store' : CcfKv.engine.Store)
-      (hLock : cs.lock = .writer)
-      (hSynced : HazardsSynced cs)
-      (hBranch : BranchValid store'.history.log)
-      (hHist : HistoryIndexValid store'.history)
-      (hLive : IndexLiveness store'.history.index (storePins store' ++ cs.hazardRetained))
-      (hPres : IndexPreservesPins cs.store.history.index store'.history.index cs.hazardRetained)
-      (hStubs : ∀ id ∈ cs.hazardPinIds, ∀ tx, (id, tx) ∈ store'.txs.val → tx.views.val = [])
-      : ConcStep cs { cs with store := store' }
+    (hLock : cs.lock = .writer)
+    (hSynced : HazardsSynced cs)
+    (hBranch : BranchValid store'.history.log)
+    (hHist : HistoryIndexValid store'.history)
+    (hLive : IndexLiveness store'.history.index (storePins store' ++ cs.hazardRetained))
+    (hPres
+      : IndexPreservesPins cs.store.history.index store'.history.index cs.hazardRetained)
+    (hStubs : ∀ id ∈ cs.hazardPinIds, ∀ tx, (id, tx) ∈ store'.txs.val → tx.views.val = [])
+    : ConcStep cs { cs with store := store' }
 
 /-- Multi-step concurrent execution trace (arbitrary interleaving of reader/writer steps). -/
 inductive ConcTrace : ConcState → ConcState → Prop where
@@ -643,12 +693,13 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
   | releaseWrite _ =>
       exact { hInv with lockNonZero := fun _ h => by cases h }
   | claimHazardSlot slot tx hEmptyViews =>
-      refine
-        { hInv with
+      refine {
+        hInv with
           readersPublishedNz := ?_
           readersPublishedBacked := ?_
           readersTxCovered := ?_
-          readersViewsExact := ?_ }
+          readersViewsExact := ?_
+      }
       · intro s hr hm r hrP
         rcases List.mem_cons.mp hm with hEq | hOld
         · cases hEq; cases hrP
@@ -715,12 +766,13 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
                 exact ⟨entry, (List.mem_filter.mp hMemE).1, hInV⟩
               exact List.mem_append_right _ (hInv.readersTxCovered slot hr hOldMem r hrOld)
         | _ => exact False.elim hOut
-      refine
-        { hInv with
+      refine {
+        hInv with
           readersPublishedNz := ?_
           readersPublishedBacked := ?_
           readersTxCovered := ?_
-          readersViewsExact := ?_ }
+          readersViewsExact := ?_
+      }
       · intro s hr1 hm r hrP
         simp only [List.mem_append, List.mem_cons] at hm
         rcases hm with hBef | hEq | hAft
@@ -774,12 +826,14 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
         rcases List.mem_append.mp hp with hb | ha
         · exact List.mem_append_left _ hb
         · exact List.mem_append_right _ (List.mem_cons_of_mem _ ha)
-      exact
-        { hInv with
+      exact {
+        hInv with
           readersPublishedNz := fun s hr1 hm => hInv.readersPublishedNz s hr1 (hSub _ hm)
-          readersPublishedBacked := fun s hr1 hm => hInv.readersPublishedBacked s hr1 (hSub _ hm)
+          readersPublishedBacked :=
+            fun s hr1 hm => hInv.readersPublishedBacked s hr1 (hSub _ hm)
           readersTxCovered := fun s hr1 hm => hInv.readersTxCovered s hr1 (hSub _ hm)
-          readersViewsExact := fun s hr1 hm => hInv.readersViewsExact s hr1 (hSub _ hm) }
+          readersViewsExact := fun s hr1 hm => hInv.readersViewsExact s hr1 (hSub _ hm)
+      }
   | syncRetainRoot root store' hLock hUsed hNotRetained hRoom hExec =>
       obtain ⟨slot, hr, hHrMem, hRootPub⟩ := hUsed
       have hRootNz : root ≠ 0#u32 := hInv.readersPublishedNz slot hr hHrMem root hRootPub
@@ -792,31 +846,36 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
       rw [hExec, WP.spec_ok] at hSpec
       obtain ⟨hlog, _, _, _, _, _, htxs, _, _, hBranch', hHist', hLive', hPres⟩ := hSpec
       simp only [hRootNz, ite_false] at hLive'
-      refine
-        { branchValid := hBranch'
-          histValid := hHist'
-          live := hLive'
-          lockNonZero := hInv.lockNonZero
-          retainedNz := fun r hr => by
+      refine {
+        branchValid := hBranch'
+        histValid := hHist'
+        live := hLive'
+        lockNonZero := hInv.lockNonZero
+        retainedNz :=
+          fun r hr => by
             rcases List.mem_cons.mp hr with rfl | hOld
             · exact hRootNz
             · exact hInv.retainedNz r hOld
-          retainedNodup := List.nodup_cons.mpr ⟨hNotRetained, hInv.retainedNodup⟩
-          stubsEmpty := fun id hId tx hMem => by
+        retainedNodup := List.nodup_cons.mpr ⟨hNotRetained, hInv.retainedNodup⟩
+        stubsEmpty :=
+          fun id hId tx hMem => by
             rw [htxs] at hMem; exact hInv.stubsEmpty id hId tx hMem
-          readersPublishedNz := hInv.readersPublishedNz
-          readersPublishedBacked := fun s hr1 hm r hrP => by
+        readersPublishedNz := hInv.readersPublishedNz
+        readersPublishedBacked :=
+          fun s hr1 hm r hrP => by
             rcases hInv.readersPublishedBacked s hr1 hm r hrP with hf | hret
             · exact Or.inl (by change r ∈ framePins (branchValues store'.history.log); rw [hlog]; exact hf)
             · exact Or.inr (List.mem_cons_of_mem _ hret)
-          readersTxCovered := hInv.readersTxCovered
-          readersViewsExact := fun s hr1 hm r rows hV => by
+        readersTxCovered := hInv.readersTxCovered
+        readersViewsExact :=
+          fun s hr1 hm r rows hV => by
             obtain ⟨hPub, hView⟩ := hInv.readersViewsExact s hr1 hm r rows hV
             have hrInPins : r ∈ storePins cs.store ++ cs.hazardRetained := by
               rcases hInv.readersPublishedBacked s hr1 hm r hPub with hf | hret
               · exact List.mem_append_left _ (List.mem_append_left _ hf)
               · exact List.mem_append_right _ hret
-            exact ⟨hPub, indexView_of_preserves hPres hrInPins hView⟩ }
+            exact ⟨hPub, indexView_of_preserves hPres hrInPins hView⟩
+      }
   | syncReleaseRoot root store' hLock hRetained hUnused hQueueRoom hExec =>
       have hRootNz : root ≠ 0#u32 := hInv.retainedNz root hRetained
       have hPermRet : cs.hazardRetained.Perm (root :: removeRoot cs.hazardRetained root) :=
@@ -831,43 +890,48 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
         root hInv.branchValid hInv.histValid hLiveIn hQueueRoom
       rw [hExec, WP.spec_ok] at hSpec
       obtain ⟨hlog, _, _, _, _, _, htxs, _, hBranch', hHist', hLive', hPres⟩ := hSpec
-      refine
-        { branchValid := hBranch'
-          histValid := hHist'
-          live := hLive'
-          lockNonZero := hInv.lockNonZero
-          retainedNz := fun r hr => hInv.retainedNz r (mem_removeRoot.mp hr).1
-          retainedNodup := removeRoot_nodup root hInv.retainedNodup
-          stubsEmpty := fun id hId tx hMem => by
+      refine {
+        branchValid := hBranch'
+        histValid := hHist'
+        live := hLive'
+        lockNonZero := hInv.lockNonZero
+        retainedNz := fun r hr => hInv.retainedNz r (mem_removeRoot.mp hr).1
+        retainedNodup := removeRoot_nodup root hInv.retainedNodup
+        stubsEmpty :=
+          fun id hId tx hMem => by
             rw [htxs] at hMem; exact hInv.stubsEmpty id hId tx hMem
-          readersPublishedNz := hInv.readersPublishedNz
-          readersPublishedBacked := fun s hr1 hm r hrP => by
+        readersPublishedNz := hInv.readersPublishedNz
+        readersPublishedBacked :=
+          fun s hr1 hm r hrP => by
             have hne : r ≠ root := fun heq => hUnused ⟨s, hr1, hm, heq ▸ hrP⟩
             rcases hInv.readersPublishedBacked s hr1 hm r hrP with hf | hret
             · exact Or.inl (by change r ∈ framePins (branchValues store'.history.log); rw [hlog]; exact hf)
             · exact Or.inr (mem_removeRoot.mpr ⟨hret, hne⟩)
-          readersTxCovered := hInv.readersTxCovered
-          readersViewsExact := fun s hr1 hm r rows hV => by
+        readersTxCovered := hInv.readersTxCovered
+        readersViewsExact :=
+          fun s hr1 hm r rows hV => by
             obtain ⟨hPub, hView⟩ := hInv.readersViewsExact s hr1 hm r rows hV
             have hne : r ≠ root := fun heq => hUnused ⟨s, hr1, hm, heq ▸ hPub⟩
             have hrInRem : r ∈ storePins cs.store ++ removeRoot cs.hazardRetained root := by
               rcases hInv.readersPublishedBacked s hr1 hm r hPub with hf | hret
               · exact List.mem_append_left _ (List.mem_append_left _ hf)
               · exact List.mem_append_right _ (mem_removeRoot.mpr ⟨hret, hne⟩)
-            exact ⟨hPub, indexView_of_preserves hPres hrInRem hView⟩ }
+            exact ⟨hPub, indexView_of_preserves hPres hrInRem hView⟩
+      }
   | syncPinSnapshot pinId version store' hLock hFresh hRoom hExec =>
       have hSpec := store_pin_snapshot_stub_refines cs.store cs.hazardRetained pinId version
         hFresh hRoom hInv.branchValid hInv.histValid hInv.live
       rw [hExec, WP.spec_ok] at hSpec
       obtain ⟨hHistEq, _, hTxsEq, _, hBranch', hHist', hLive'⟩ := hSpec
-      refine
-        { branchValid := hBranch'
-          histValid := hHist'
-          live := hLive'
-          lockNonZero := hInv.lockNonZero
-          retainedNz := hInv.retainedNz
-          retainedNodup := hInv.retainedNodup
-          stubsEmpty := fun id hId tx hMem => by
+      refine {
+        branchValid := hBranch'
+        histValid := hHist'
+        live := hLive'
+        lockNonZero := hInv.lockNonZero
+        retainedNz := hInv.retainedNz
+        retainedNodup := hInv.retainedNodup
+        stubsEmpty :=
+          fun id hId tx hMem => by
             rw [hTxsEq] at hMem
             simp only [Kv.Model.set, List.mem_cons, Prod.mk.injEq] at hMem
             rcases hMem with ⟨rfl, rfl⟩ | hErased
@@ -877,10 +941,11 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
               · have hne := (List.mem_filter.mp hErased).2
                 simp at hne
               · exact hInv.stubsEmpty id hOldId tx hInOld
-          readersPublishedNz := hInv.readersPublishedNz
-          readersPublishedBacked := by rw [hHistEq]; exact hInv.readersPublishedBacked
-          readersTxCovered := hInv.readersTxCovered
-          readersViewsExact := by rw [hHistEq]; exact hInv.readersViewsExact }
+        readersPublishedNz := hInv.readersPublishedNz
+        readersPublishedBacked := by rw [hHistEq]; exact hInv.readersPublishedBacked
+        readersTxCovered := hInv.readersTxCovered
+        readersViewsExact := by rw [hHistEq]; exact hInv.readersViewsExact
+      }
   | syncUnpinSnapshot pinId baseFrame store' hLock hTracked hBase0 hQueueRoom hExec =>
       have hAllEmpty : ∀ tx, (pinId, tx) ∈ cs.store.txs.val → tx.views.val = [] :=
         fun tx hm => hInv.stubsEmpty pinId hTracked tx hm
@@ -888,48 +953,55 @@ theorem conc_step_preserves_inv {cs cs' : ConcState}
         hBase0 hAllEmpty hInv.branchValid hInv.histValid hInv.live hQueueRoom
       rw [hExec, WP.spec_ok] at hSpec
       obtain ⟨hlog, _, _, _, _, hTxsEq, _, _, hBranch', hHist', hLive', hPres⟩ := hSpec
-      refine
-        { branchValid := hBranch'
-          histValid := hHist'
-          live := hLive'
-          lockNonZero := hInv.lockNonZero
-          retainedNz := hInv.retainedNz
-          retainedNodup := hInv.retainedNodup
-          stubsEmpty := fun id hId tx hMem => by
+      refine {
+        branchValid := hBranch'
+        histValid := hHist'
+        live := hLive'
+        lockNonZero := hInv.lockNonZero
+        retainedNz := hInv.retainedNz
+        retainedNodup := hInv.retainedNodup
+        stubsEmpty :=
+          fun id hId tx hMem => by
             have hOldId : id ∈ cs.hazardPinIds := (List.mem_filter.mp hId).1
             rw [hTxsEq] at hMem
             have hOldMem : (id, tx) ∈ cs.store.txs.val := (List.mem_filter.mp hMem).1
             exact hInv.stubsEmpty id hOldId tx hOldMem
-          readersPublishedNz := hInv.readersPublishedNz
-          readersPublishedBacked := fun s hr1 hm r hrP => by
+        readersPublishedNz := hInv.readersPublishedNz
+        readersPublishedBacked :=
+          fun s hr1 hm r hrP => by
             rcases hInv.readersPublishedBacked s hr1 hm r hrP with hf | hret
             · exact Or.inl (by change r ∈ framePins (branchValues store'.history.log); rw [hlog]; exact hf)
             · exact Or.inr hret
-          readersTxCovered := hInv.readersTxCovered
-          readersViewsExact := fun s hr1 hm r rows hV => by
+        readersTxCovered := hInv.readersTxCovered
+        readersViewsExact :=
+          fun s hr1 hm r rows hV => by
             obtain ⟨hPub, hView⟩ := hInv.readersViewsExact s hr1 hm r rows hV
             have hrInPins : r ∈ storePins cs.store ++ cs.hazardRetained := by
               rcases hInv.readersPublishedBacked s hr1 hm r hPub with hf | hret
               · exact List.mem_append_left _ (List.mem_append_left _ hf)
               · exact List.mem_append_right _ hret
-            exact ⟨hPub, indexView_of_preserves hPres hrInPins hView⟩ }
+            exact ⟨hPub, indexView_of_preserves hPres hrInPins hView⟩
+      }
   | mutateStoreSynced store' hLock hSynced hBranch hHist hLive hPres hStubs =>
-      refine
-        { branchValid := hBranch
-          histValid := hHist
-          live := hLive
-          lockNonZero := hInv.lockNonZero
-          retainedNz := hInv.retainedNz
-          retainedNodup := hInv.retainedNodup
-          stubsEmpty := hStubs
-          readersPublishedNz := hInv.readersPublishedNz
-          readersPublishedBacked := fun s hr1 hm r hrP =>
+      refine {
+        branchValid := hBranch
+        histValid := hHist
+        live := hLive
+        lockNonZero := hInv.lockNonZero
+        retainedNz := hInv.retainedNz
+        retainedNodup := hInv.retainedNodup
+        stubsEmpty := hStubs
+        readersPublishedNz := hInv.readersPublishedNz
+        readersPublishedBacked :=
+          fun s hr1 hm r hrP =>
             Or.inr (hSynced s hr1 hm r hrP)
-          readersTxCovered := hInv.readersTxCovered
-          readersViewsExact := fun s hr1 hm r rows hV => by
+        readersTxCovered := hInv.readersTxCovered
+        readersViewsExact :=
+          fun s hr1 hm r rows hV => by
             obtain ⟨hPub, hView⟩ := hInv.readersViewsExact s hr1 hm r rows hV
             have hrRet : r ∈ cs.hazardRetained := hSynced s hr1 hm r hPub
-            exact ⟨hPub, indexView_of_preserves hPres hrRet hView⟩ }
+            exact ⟨hPub, indexView_of_preserves hPres hrRet hView⟩
+      }
 
 /-- Any multi-step concurrent interleaving preserves `ConcInv`. -/
 theorem conc_trace_preserves_inv {cs₀ cs : ConcState}
@@ -952,11 +1024,12 @@ theorem conc_hazard_reads_linearizable_and_no_uaf {cs₀ cs : ConcState}
     (hInv : ConcInv cs₀) (hTrace : ConcTrace cs₀ cs)
     (slot : Nat) (hr : HazardReader) (hActive : (slot, hr) ∈ cs.hazardReaders)
     : (∀ r ∈ hr.publishedRoots,
-          SingleLinkLive cs.store.history.index.values.dirs.val
-            cs.store.history.index.values.rows.val r)
-      ∧ (∀ r rows, (r, rows) ∈ hr.capturedViews →
-          IndexView cs.store.history.index r rows
-          ∧ indexRows cs.store.history.index r = rows) := by
+        SingleLinkLive cs.store.history.index.values.dirs.val
+          cs.store.history.index.values.rows.val r)
+      ∧ (∀ r rows,
+          (r, rows) ∈ hr.capturedViews
+          → IndexView cs.store.history.index r rows
+            ∧ indexRows cs.store.history.index r = rows) := by
   have hNow := conc_trace_preserves_inv hInv hTrace
   refine ⟨?_, ?_⟩
   · intro r hrP

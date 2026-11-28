@@ -826,7 +826,7 @@ namespace ccf::kv::rust_test
       throw std::logic_error("Reserved transaction needs a version");
     }
     auto tx = create_tx();
-    std::lock_guard lock(state_lock);
+    AdaptiveMutexGuard lock(state_lock);
     tx.state->reserved = version;
     tx.state->reserve_epoch = rollback_count;
     return tx;

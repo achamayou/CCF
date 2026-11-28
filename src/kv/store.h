@@ -64,7 +64,7 @@ namespace ccf::kv
 
     ReservedTx create_reserved_tx(const TxID& tx_id)
     {
-      std::lock_guard lock(state_lock);
+      AdaptiveMutexGuard lock(state_lock);
       return {
         this, last_view.load(std::memory_order_acquire), tx_id, rollback_count};
     }

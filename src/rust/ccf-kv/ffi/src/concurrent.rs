@@ -782,6 +782,127 @@ impl ConcurrentStore {
         let mut guard = self.lock.write();
         guard.store.execute(Action::SetTerm(term))
     }
+
+    pub(crate) fn is_valid_map_name(map: &[u8]) -> bool {
+        if map.is_empty() {
+            return false;
+        }
+        let Ok(name) = std::str::from_utf8(map) else {
+            return false;
+        };
+        let stripped = name.strip_prefix("public:").unwrap_or(name);
+        if stripped.starts_with("ccf.")
+            && !stripped.starts_with("ccf.internal.")
+            && !stripped.starts_with("ccf.gov.")
+        {
+            return false;
+        }
+        true
+    }
+
+    fn ensure_direct_map(
+        &self,
+        tx: &mut NativeTx,
+        map: &[u8],
+        snap_ver: &mut u64,
+        commit_view: &mut u64,
+        has_snap: &mut u8,
+    ) -> Result<bool, Error> {
+        match self.acquire_map(tx, Bytes::copy_from(map), None, |_| {})? {
+            (ver, term, Output::Acquired(..)) => {
+                if *has_snap == 0 {
+                    *snap_ver = ver;
+                    *commit_view = term;
+                    *has_snap = 1;
+                }
+                Ok(true)
+            }
+            (ver, term, Output::Unavailable) => {
+                if *has_snap == 0 {
+                    *snap_ver = ver;
+                    *commit_view = term;
+                    *has_snap = 1;
+                }
+                Ok(false)
+            }
+            _ => Err(Error::Disabled),
+        }
+    }
+
+    pub(crate) fn direct_get<R>(
+        &self,
+        tx: &mut NativeTx,
+        read_only: bool,
+        map: &[u8],
+        key: &[u8],
+        snap_ver: &mut u64,
+        commit_view: &mut u64,
+        has_snap: &mut u8,
+        on_val: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> Result<Option<R>, Error> {
+        let mut on_val = Some(on_val);
+        match self.tx_get(tx, false, read_only, false, map, key, |v| {
+            (on_val.take().unwrap())(v)
+        }) {
+            Ok(res) => Ok(Some(res)),
+            Err(Error::Disabled) => {
+                if !self.ensure_direct_map(tx, map, snap_ver, commit_view, has_snap)? {
+                    return Ok(None);
+                }
+                let res = self.tx_get(tx, false, read_only, false, map, key, |v| {
+                    (on_val.take().unwrap())(v)
+                })?;
+                Ok(Some(res))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) fn direct_has(
+        &self,
+        tx: &mut NativeTx,
+        read_only: bool,
+        map: &[u8],
+        key: &[u8],
+        snap_ver: &mut u64,
+        commit_view: &mut u64,
+        has_snap: &mut u8,
+    ) -> Result<Option<bool>, Error> {
+        match self.tx_has(tx, false, read_only, false, map, key) {
+            Ok(present) => Ok(Some(present)),
+            Err(Error::Disabled) => {
+                if !self.ensure_direct_map(tx, map, snap_ver, commit_view, has_snap)? {
+                    return Ok(None);
+                }
+                let present = self.tx_has(tx, false, read_only, false, map, key)?;
+                Ok(Some(present))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) fn direct_write(
+        &self,
+        tx: &mut NativeTx,
+        map: &[u8],
+        key: &[u8],
+        value: Option<&[u8]>,
+        snap_ver: &mut u64,
+        commit_view: &mut u64,
+        has_snap: &mut u8,
+    ) -> Result<bool, Error> {
+        match tx.stage_write_bytes(map, key, value) {
+            Ok(()) => Ok(true),
+            Err(Error::Disabled) => {
+                if !self.ensure_direct_map(tx, map, snap_ver, commit_view, has_snap)? {
+                    return Ok(false);
+                }
+                tx.stage_write_bytes(map, key, value)?;
+                Ok(true)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1171,5 +1292,379 @@ mod tests {
         });
         t1.join().unwrap();
         t2.join().unwrap();
+    }
+
+    #[test]
+    fn direct_kv_fast_path_and_validation() {
+        let store = ConcurrentStore::new(2);
+        seed_store(&store, 2, 4);
+
+        // Map name validation matches C++ parse_map_name.
+        assert!(ConcurrentStore::is_valid_map_name(b"records"));
+        assert!(ConcurrentStore::is_valid_map_name(b"public:records"));
+        assert!(ConcurrentStore::is_valid_map_name(
+            b"public:ccf.gov.members"
+        ));
+        assert!(ConcurrentStore::is_valid_map_name(b"ccf.internal.tree"));
+        assert!(!ConcurrentStore::is_valid_map_name(b""));
+        assert!(!ConcurrentStore::is_valid_map_name(b"ccf.reserved"));
+        assert!(!ConcurrentStore::is_valid_map_name(b"public:ccf.reserved"));
+        assert!(!ConcurrentStore::is_valid_map_name(&[0xff, 0xfe]));
+
+        // Read-write direct put/get/has/empty/remove + commit.
+        let mut tx = NativeTx::new(10);
+        let (mut snap_ver, mut commit_view, mut has_snap) = (0u64, 0u64, 0u8);
+        assert_eq!(
+            store
+                .direct_has(
+                    &mut tx,
+                    false,
+                    b"public:m0",
+                    b"k0000",
+                    &mut snap_ver,
+                    &mut commit_view,
+                    &mut has_snap,
+                )
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(has_snap, 1);
+        assert_eq!(snap_ver, 1);
+        assert_eq!(commit_view, 2);
+
+        // Put a new key, an empty value, and remove an existing key.
+        assert!(
+            store
+                .direct_write(
+                    &mut tx,
+                    b"public:m0",
+                    b"new_k",
+                    Some(b"hello"),
+                    &mut snap_ver,
+                    &mut commit_view,
+                    &mut has_snap,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .direct_write(
+                    &mut tx,
+                    b"public:m0",
+                    b"empty_k",
+                    Some(b""),
+                    &mut snap_ver,
+                    &mut commit_view,
+                    &mut has_snap,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .direct_write(
+                    &mut tx,
+                    b"public:m0",
+                    b"k0000",
+                    None,
+                    &mut snap_ver,
+                    &mut commit_view,
+                    &mut has_snap,
+                )
+                .unwrap()
+        );
+
+        let got_new = store
+            .direct_get(
+                &mut tx,
+                false,
+                b"public:m0",
+                b"new_k",
+                &mut snap_ver,
+                &mut commit_view,
+                &mut has_snap,
+                |v| v.map(|s| s.to_vec()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_new.as_deref(), Some(b"hello".as_slice()));
+        let got_empty = store
+            .direct_get(
+                &mut tx,
+                false,
+                b"public:m0",
+                b"empty_k",
+                &mut snap_ver,
+                &mut commit_view,
+                &mut has_snap,
+                |v| v.map(|s| s.to_vec()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_empty.as_deref(), Some(b"".as_slice()));
+        assert_eq!(
+            store
+                .direct_has(
+                    &mut tx,
+                    false,
+                    b"public:m0",
+                    b"k0000",
+                    &mut snap_ver,
+                    &mut commit_view,
+                    &mut has_snap,
+                )
+                .unwrap(),
+            Some(false)
+        );
+
+        match store.prepare_commit(&mut tx, |_| {}).unwrap() {
+            CommitPreparation::Applied(2, 2) => {}
+            _ => panic!("expected commit at v=2"),
+        }
+        tx.finish(Outcome::Success).unwrap();
+        store.delete_tx(tx);
+
+        // Compaction conflict: reader fixes snapshot on m0 at v=2, writer
+        // updates m1 at v=3 and compacts to v=3, then reader acquires m1.
+        let mut rtx = NativeTx::new(11);
+        let (mut rsnap, mut rview, mut rhas) = (0u64, 0u64, 0u8);
+        assert_eq!(
+            store
+                .direct_has(
+                    &mut rtx,
+                    true,
+                    b"public:m0",
+                    b"new_k",
+                    &mut rsnap,
+                    &mut rview,
+                    &mut rhas,
+                )
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(rsnap, 2);
+
+        let mut wtx = NativeTx::new(12);
+        let (mut wsnap, mut wview, mut whas) = (0u64, 0u64, 0u8);
+        assert!(
+            store
+                .direct_write(
+                    &mut wtx,
+                    b"public:m1",
+                    b"k0000",
+                    Some(b"after_compact"),
+                    &mut wsnap,
+                    &mut wview,
+                    &mut whas,
+                )
+                .unwrap()
+        );
+        match store.prepare_commit(&mut wtx, |_| {}).unwrap() {
+            CommitPreparation::Applied(3, 2) => {}
+            _ => panic!("expected commit at v=3"),
+        }
+        wtx.finish(Outcome::Success).unwrap();
+        store.delete_tx(wtx);
+        store.execute_synced(true, |s| s.compact_ccf(3));
+
+        // Acquiring compacted m1 at snapshot v=2 must report Unavailable (Ok(None)).
+        assert_eq!(
+            store
+                .direct_has(
+                    &mut rtx,
+                    true,
+                    b"public:m1",
+                    b"k0000",
+                    &mut rsnap,
+                    &mut rview,
+                    &mut rhas,
+                )
+                .unwrap(),
+            None
+        );
+        store.delete_tx(rtx);
+    }
+
+    #[test]
+    fn sharded_rwlock_mutual_exclusion_and_visibility() {
+        let lock = Arc::new(ShardedRwLock::new((0u64, 1u64)));
+        let active_readers = Arc::new(AtomicUsize::new(0));
+        let active_writers = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let lock = Arc::clone(&lock);
+            let ar = Arc::clone(&active_readers);
+            let aw = Arc::clone(&active_writers);
+            let stop = Arc::clone(&stop);
+            handles.push(thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    let g = lock.read();
+                    ar.fetch_add(1, Ordering::AcqRel);
+                    assert_eq!(
+                        aw.load(Ordering::Acquire),
+                        0,
+                        "reader entered while writer active"
+                    );
+                    let (a, b) = *g;
+                    assert_eq!(b, a + 1, "torn read under ShardedRwLock");
+                    ar.fetch_sub(1, Ordering::Release);
+                }
+            }));
+        }
+
+        for _ in 0..4 {
+            let lock = Arc::clone(&lock);
+            let ar = Arc::clone(&active_readers);
+            let aw = Arc::clone(&active_writers);
+            handles.push(thread::spawn(move || {
+                for _ in 0..200 {
+                    let mut g = lock.write();
+                    let prev_w = aw.fetch_add(1, Ordering::AcqRel);
+                    assert_eq!(prev_w, 0, "two writers active concurrently");
+                    assert_eq!(
+                        ar.load(Ordering::Acquire),
+                        0,
+                        "writer entered while readers active"
+                    );
+                    let next = g.0 + 1;
+                    g.0 = next;
+                    thread::yield_now();
+                    g.1 = next + 1;
+                    aw.fetch_sub(1, Ordering::Release);
+                }
+            }));
+        }
+
+        for h in handles.drain(8..) {
+            h.join().unwrap();
+        }
+        stop.store(true, Ordering::Release);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let g = lock.read();
+        assert_eq!(*g, (800, 801));
+    }
+
+    #[test]
+    fn exhaustive_hazard_sync_interleavings() {
+        // Deterministically enumerate every interleaving of 2 hazard readers
+        // (acquire -> read -> verify -> drop) and 1 writer performing
+        // 2 overwrites + compactions + final hazard drain.
+        // Total schedules: (3+3+3)! / (3!*3!*3!) = 1680 distinct interleavings.
+        const STEPS_PER_ACTOR: usize = 3;
+
+        fn run_schedule(schedule: &[u8]) {
+            let store = ConcurrentStore::new(2);
+            seed_store(&store, 1, 2);
+
+            let mut r_tx: [Option<NativeTx>; 2] = [None, None];
+            let mut r_expected: [Option<Vec<u8>>; 2] = [None, None];
+            let mut r_step = [0usize; 2];
+            let mut w_step = 0usize;
+            let mut next_id = 10u64;
+
+            for &actor in schedule {
+                match actor {
+                    0 | 1 => {
+                        let idx = actor as usize;
+                        match r_step[idx] {
+                            0 => {
+                                let mut tx = NativeTx::new(next_id);
+                                next_id += 1;
+                                store
+                                    .acquire_map(&mut tx, b("public:m0"), None, |_| {})
+                                    .unwrap();
+                                let v = store
+                                    .tx_get(
+                                        &mut tx,
+                                        false,
+                                        true,
+                                        false,
+                                        b"public:m0",
+                                        b"k0000",
+                                        |val| val.map(|s| s.to_vec()),
+                                    )
+                                    .unwrap();
+                                assert!(v.is_some());
+                                r_expected[idx] = v;
+                                r_tx[idx] = Some(tx);
+                            }
+                            1 => {
+                                let tx = r_tx[idx].as_mut().unwrap();
+                                let v = store
+                                    .tx_get(tx, false, true, false, b"public:m0", b"k0000", |val| {
+                                        val.map(|s| s.to_vec())
+                                    })
+                                    .unwrap();
+                                assert_eq!(
+                                    v, r_expected[idx],
+                                    "hazard-pinned snapshot drifted across interleaving"
+                                );
+                            }
+                            2 => {
+                                let tx = r_tx[idx].take().unwrap();
+                                store.delete_tx(tx);
+                            }
+                            _ => unreachable!(),
+                        }
+                        r_step[idx] += 1;
+                    }
+                    2 => {
+                        let mut wtx = NativeTx::new(next_id);
+                        next_id += 1;
+                        store
+                            .acquire_map(&mut wtx, b("public:m0"), None, |_| {})
+                            .unwrap();
+                        let val = format!("w_{w_step}");
+                        wtx.stage_write_bytes(b"public:m0", b"k0000", Some(val.as_bytes()))
+                            .unwrap();
+                        let ver = match store.prepare_commit(&mut wtx, |_| {}).unwrap() {
+                            CommitPreparation::Applied(v, _) => v,
+                            _ => panic!("expected commit"),
+                        };
+                        wtx.finish(Outcome::Success).unwrap();
+                        store.delete_tx(wtx);
+                        store.execute_synced(true, |s| s.compact_ccf(ver));
+                        w_step += 1;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            // Final hazard drain must release every slot and root.
+            store.execute_synced(true, |s| s.compact_ccf(u64::MAX));
+            let guard = store.lock.write();
+            assert_eq!(store.hazards.claimed_mask.0.load(Ordering::Acquire), 0);
+            assert!(guard.hazards.retained_roots.is_empty());
+            assert!(guard.hazards.pinned_snaps.is_empty());
+        }
+
+        fn dfs(rem: [usize; 3], cur: &mut Vec<u8>, count: &mut usize) {
+            if rem == [0, 0, 0] {
+                run_schedule(cur);
+                *count += 1;
+                return;
+            }
+            for actor in 0..3 {
+                if rem[actor] > 0 {
+                    let mut next = rem;
+                    next[actor] -= 1;
+                    cur.push(actor as u8);
+                    dfs(next, cur, count);
+                    cur.pop();
+                }
+            }
+        }
+
+        let mut cur = Vec::with_capacity(STEPS_PER_ACTOR * 3);
+        let mut count = 0usize;
+        dfs(
+            [STEPS_PER_ACTOR, STEPS_PER_ACTOR, STEPS_PER_ACTOR],
+            &mut cur,
+            &mut count,
+        );
+        assert_eq!(count, 1680);
     }
 }
