@@ -22,9 +22,7 @@ namespace ccf::kv
   {
     if (rust_store != nullptr)
     {
-      rust_store->release_tx_resources(
-        rust_hazard_slot, rust_registered, rust_tx);
-      rust_hazard_slot = -1;
+      rust_store->release_tx_resources(rust_tx);
       rust_tx = nullptr;
     }
     else if (rust_tx != nullptr)
@@ -130,8 +128,6 @@ namespace ccf::kv
     if (!store.acquire_map_for_tx(
           s.rust_tx,
           map_name,
-          s.rust_registered,
-          s.rust_hazard_slot,
           s.rust_reserved,
           s.rust_explicit_read_txid,
           s.read_txid,

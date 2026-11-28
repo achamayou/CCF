@@ -158,26 +158,22 @@ namespace ccf::kv::rust_test
     std::optional<Bytes> get_bytes(ByteView key, bool global)
     {
       Bytes out;
-      Status status;
-      {
-        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-        status = ccf_rust_kv_tx_get(
-          store.native.get(),
-          native_tx,
-          committed,
-          read_only,
-          global,
-          bytes(name),
-          key,
-          &out,
-          +[](void* ctx, const uint8_t* ptr, size_t len) {
-            auto* dst = static_cast<Bytes*>(ctx);
-            if (len != 0)
-            {
-              *dst = Bytes(ptr, ptr + len);
-            }
-          });
-      }
+      const auto status = ccf_rust_kv_tx_get(
+        store.native.get(),
+        native_tx,
+        committed,
+        read_only,
+        global,
+        bytes(name),
+        key,
+        &out,
+        +[](void* ctx, const uint8_t* ptr, size_t len) {
+          auto* dst = static_cast<Bytes*>(ctx);
+          if (len != 0)
+          {
+            *dst = Bytes(ptr, ptr + len);
+          }
+        });
       if (status == Status::MISSING)
       {
         KV_TRACE(
@@ -204,17 +200,14 @@ namespace ccf::kv::rust_test
 
     bool has_bytes(ByteView key, bool global)
     {
-      auto r = [&]() {
-        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-        return wrap_reply(ccf_rust_kv_tx_has(
-          store.native.get(),
-          native_tx,
-          committed,
-          read_only,
-          global,
-          bytes(name),
-          key));
-      }();
+      auto r = wrap_reply(ccf_rust_kv_tx_has(
+        store.native.get(),
+        native_tx,
+        committed,
+        read_only,
+        global,
+        bytes(name),
+        key));
       r.require();
       const bool found = r.number != 0;
       KV_TRACE(const auto k = copy(key); trace::operation(
@@ -227,16 +220,8 @@ namespace ccf::kv::rust_test
 
     std::optional<Version> previous_bytes(ByteView key)
     {
-      auto r = [&]() {
-        Store::ShardedRwLock::ReadGuard guard(store.native_lock);
-        return wrap_reply(ccf_rust_kv_tx_previous(
-          store.native.get(),
-          native_tx,
-          committed,
-          read_only,
-          bytes(name),
-          key));
-      }();
+      auto r = wrap_reply(ccf_rust_kv_tx_previous(
+        store.native.get(), native_tx, committed, read_only, bytes(name), key));
       if (r.status == Status::MISSING)
       {
         KV_TRACE(
@@ -260,7 +245,6 @@ namespace ccf::kv::rust_test
     Response operate(
       Opcode op, ByteView key = {}, ByteView value = {}, bool global = false)
     {
-      Store::ShardedRwLock::ReadGuard guard(store.native_lock);
       return wrap_reply(ccf_rust_kv_tx_operate(
         store.native.get(),
         native_tx,
@@ -586,8 +570,6 @@ namespace ccf::kv::rust_test
       std::optional<TxID> reserved;
       size_t reserve_epoch = 0;
       bool read_only = false;
-      bool registered = false;
-      int hazard_slot = -1;
       bool committing = false;
       bool committed = false;
       bool success = false;
@@ -610,8 +592,7 @@ namespace ccf::kv::rust_test
 
       ~State()
       {
-        store.release_tx_resources(hazard_slot, registered, native_tx);
-        hazard_slot = -1;
+        store.release_tx_resources(native_tx);
         native_tx = nullptr;
       }
     };
@@ -692,8 +673,6 @@ namespace ccf::kv::rust_test
         if (!s.store.acquire_map_for_tx(
               s.native_tx,
               name,
-              s.registered,
-              s.hazard_slot,
               s.reserved,
               /*explicit_read_txid=*/false,
               s.read_txid,

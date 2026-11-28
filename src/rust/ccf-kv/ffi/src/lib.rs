@@ -1,12 +1,16 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the Apache 2.0 License.
 
-//! C ABI for the opt-in C++ tests. This crate is not part of Aeneas extraction.
+//! C ABI and thread-safe concurrency wrapper for `ccf-kv`.
+//! This crate is not part of Aeneas extraction.
+
+mod concurrent;
 
 use ccf_kv::engine::{
-    Action, Address, Bytes, CommitPreparation, DetachedTx, Error, Operation, Outcome, Output,
-    PendingLookup, SnapshotMap, Store, ViewLookup, WriteSet,
+    Action, Address, Bytes, CommitPreparation, Error, Operation, Outcome, Output, SnapshotMap,
+    WriteSet,
 };
+use concurrent::{ConcurrentStore, NativeTx};
 use std::{ffi::c_void, ptr, slice};
 
 // These wire types correspond to src/kv/test/rust_kv_ffi.h.
@@ -98,6 +102,7 @@ impl Request {
 }
 
 #[repr(u8)]
+#[derive(Clone, Copy)]
 enum Status {
     Ok,
     Disabled,
@@ -119,6 +124,7 @@ enum Data {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Reply {
     status: Status,
     number: u64,
@@ -182,35 +188,34 @@ impl Reply {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn ccf_rust_kv_new(term: u64) -> *mut Store {
-    Box::into_raw(Box::new(Store::new(term)))
+extern "C" fn ccf_rust_kv_new(term: u64) -> *mut ConcurrentStore {
+    Box::into_raw(Box::new(ConcurrentStore::new(term)))
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_delete(store: *mut Store) {
+unsafe extern "C" fn ccf_rust_kv_delete(store: *mut ConcurrentStore) {
     // The caller transfers back the unique pointer returned by new.
     drop(unsafe { Box::from_raw(store) });
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn ccf_rust_kv_tx_new(attempt: u64) -> *mut DetachedTx {
-    Box::into_raw(Box::new(DetachedTx::new(attempt)))
+extern "C" fn ccf_rust_kv_tx_new(attempt: u64) -> *mut NativeTx {
+    Box::into_raw(Box::new(NativeTx::new(attempt)))
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_delete(store: *mut Store, tx: *mut DetachedTx) {
+unsafe extern "C" fn ccf_rust_kv_tx_delete(store: *const ConcurrentStore, tx: *mut NativeTx) {
     // The caller transfers back the unique pointer returned by tx_new.
-    // When tx is not registered (e.g. a hazard-pinned ReadOnlyTx), store may be null.
-    let mut tx = unsafe { Box::from_raw(tx) };
-    if tx.is_registered() && !store.is_null() {
-        let store = unsafe { &mut *store };
-        store.end_detached(&mut tx);
+    let tx = unsafe { *Box::from_raw(tx) };
+    if !store.is_null() {
+        let store = unsafe { &*store };
+        store.delete_tx(tx);
     }
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_write(
-    tx: *mut DetachedTx,
+    tx: *mut NativeTx,
     map: ByteView,
     key: ByteView,
     value: ByteView,
@@ -231,11 +236,13 @@ unsafe extern "C" fn ccf_rust_kv_tx_write(
 }
 
 type CopyValueFn = unsafe extern "C" fn(*mut c_void, *const u8, usize);
+type AcquireTraceFn = unsafe extern "C" fn(*mut c_void, Reply, u64, u64);
+type ReplyTraceFn = unsafe extern "C" fn(*mut c_void, Reply);
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_get(
-    store: *const Store,
-    tx: *mut DetachedTx,
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
     inspect_finished: bool,
     read_only: bool,
     global: bool,
@@ -244,215 +251,139 @@ unsafe extern "C" fn ccf_rust_kv_tx_get(
     out_ctx: *mut c_void,
     copy_cb: CopyValueFn,
 ) -> Status {
+    let store = unsafe { &*store };
     let tx = unsafe { &mut *tx };
     let (Ok(Some(map)), Ok(Some(key))) =
         (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
     else {
         return Status::InvalidRequest;
     };
-    if !global && !read_only {
-        match tx.lookup_pending_bytes(map, key, inspect_finished) {
-            Ok(PendingLookup::Put(val)) => {
-                unsafe { copy_cb(out_ctx, val.as_ptr(), val.len()) };
-                return Status::Ok;
+    match store.tx_get(
+        tx,
+        inspect_finished,
+        read_only,
+        global,
+        map,
+        key,
+        |val| match val {
+            Some(bytes) => {
+                unsafe { copy_cb(out_ctx, bytes.as_ptr(), bytes.len()) };
+                Status::Ok
             }
-            Ok(PendingLookup::Remove) => return Status::Missing,
-            Ok(PendingLookup::Miss) => {}
-            Err(Error::Disabled) => return Status::Disabled,
-            Err(Error::Exhausted) => return Status::Exhausted,
-        }
-    }
-    let store = unsafe { &*store };
-    let view = match tx.lookup_view_bytes(map, key, global, inspect_finished) {
-        Ok(v) => v,
-        Err(Error::Disabled) => return Status::Disabled,
-        Err(Error::Exhausted) => return Status::Exhausted,
-    };
-    let cell = match view {
-        ViewLookup::Empty => None,
-        ViewLookup::Root(root) => store.get_cell_bytes(root, map, key),
-        ViewLookup::Recovered(c) => c,
-    };
-    let status = match cell {
-        Some((_, val)) => {
-            unsafe { copy_cb(out_ctx, val.as_ptr(), val.len()) };
-            Status::Ok
-        }
-        None => Status::Missing,
-    };
-    if !global && !inspect_finished && !read_only {
-        let dep = cell.map(|(v, b)| (v, Bytes::copy_from(b)));
-        tx.record_key_dep_bytes(map, key, dep);
-    }
-    status
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_has(
-    store: *const Store,
-    tx: *mut DetachedTx,
-    inspect_finished: bool,
-    read_only: bool,
-    global: bool,
-    map: ByteView,
-    key: ByteView,
-) -> Reply {
-    let tx = unsafe { &mut *tx };
-    let (Ok(Some(map)), Ok(Some(key))) =
-        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
-    else {
-        return Reply::status(Status::InvalidRequest);
-    };
-    if !global && !read_only {
-        match tx.lookup_pending_bytes(map, key, inspect_finished) {
-            Ok(PendingLookup::Put(_)) => {
-                let mut r = Reply::status(Status::Ok);
-                r.number = 1;
-                return r;
-            }
-            Ok(PendingLookup::Remove) => return Reply::status(Status::Ok),
-            Ok(PendingLookup::Miss) => {}
-            Err(error) => return Reply::output(Err(error)),
-        }
-    }
-    let store = unsafe { &*store };
-    let view = match tx.lookup_view_bytes(map, key, global, inspect_finished) {
-        Ok(v) => v,
-        Err(error) => return Reply::output(Err(error)),
-    };
-    let cell = match view {
-        ViewLookup::Empty => None,
-        ViewLookup::Root(root) => store.get_cell_bytes(root, map, key),
-        ViewLookup::Recovered(c) => c,
-    };
-    let present = cell.is_some();
-    if !global && !inspect_finished && !read_only {
-        let dep = cell.map(|(v, b)| (v, Bytes::copy_from(b)));
-        tx.record_key_dep_bytes(map, key, dep);
-    }
-    let mut r = Reply::status(Status::Ok);
-    r.number = u64::from(present);
-    r
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_previous(
-    store: *const Store,
-    tx: *mut DetachedTx,
-    inspect_finished: bool,
-    read_only: bool,
-    map: ByteView,
-    key: ByteView,
-) -> Reply {
-    let tx = unsafe { &mut *tx };
-    let (Ok(Some(map)), Ok(Some(key))) =
-        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
-    else {
-        return Reply::status(Status::InvalidRequest);
-    };
-    let store = unsafe { &*store };
-    let view = match tx.lookup_view_bytes(map, key, false, inspect_finished) {
-        Ok(v) => v,
-        Err(error) => return Reply::output(Err(error)),
-    };
-    let cell = match view {
-        ViewLookup::Empty => None,
-        ViewLookup::Root(root) => store.get_cell_bytes(root, map, key),
-        ViewLookup::Recovered(c) => c,
-    };
-    let version = cell.map(|(v, _)| v);
-    if !inspect_finished && !read_only {
-        let dep = cell.map(|(v, b)| (v, Bytes::copy_from(b)));
-        tx.record_key_dep_bytes(map, key, dep);
-    }
-    match version {
-        Some(v) => {
-            let mut r = Reply::status(Status::Ok);
-            r.number = v;
-            r
-        }
-        None => Reply::status(Status::Missing),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_ro_acquire(
-    store: *const Store,
-    tx: *mut DetachedTx,
-    map: ByteView,
-    out_root0: *mut u32,
-    out_root1: *mut u32,
-    out_local_rev: *mut u64,
-    out_global_rev: *mut u64,
-) -> Reply {
-    let store = unsafe { &*store };
-    let tx = unsafe { &mut *tx };
-    let Ok(Some(map)) = (unsafe { map.optional() }) else {
-        return Reply::status(Status::InvalidRequest);
-    };
-    match store.snapshot_and_acquire_readonly(tx, map) {
-        Ok((version, term, Output::Acquired(local_rev, global_rev), r0, r1)) => {
-            if !out_root0.is_null() {
-                unsafe { *out_root0 = r0 };
-            }
-            if !out_root1.is_null() {
-                unsafe { *out_root1 = r1 };
-            }
-            if !out_local_rev.is_null() {
-                unsafe { *out_local_rev = local_rev };
-            }
-            if !out_global_rev.is_null() {
-                unsafe { *out_global_rev = global_rev };
-            }
-            let mut reply = Reply::status(Status::Ok);
-            reply.number = version;
-            reply.detail = term;
-            reply
-        }
-        Ok((version, term, Output::Unavailable, _, _)) => {
-            let mut reply = Reply::status(Status::Unavailable);
-            reply.number = version;
-            reply.detail = term;
-            reply
-        }
-        Ok((_, _, other, _, _)) => Reply::output(Ok(other)),
-        Err(error) => Reply::output(Err(error)),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_promote(store: *mut Store, tx: *mut DetachedTx) -> Status {
-    let store = unsafe { &mut *store };
-    let tx = unsafe { &mut *tx };
-    match store.promote_detached_tx(tx) {
-        Ok(()) => Status::Ok,
+            None => Status::Missing,
+        },
+    ) {
+        Ok(status) => status,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,
     }
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_retain_root(store: *mut Store, root: u32) {
-    unsafe { &mut *store }.retain_root_raw(root);
+unsafe extern "C" fn ccf_rust_kv_tx_has(
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
+    inspect_finished: bool,
+    read_only: bool,
+    global: bool,
+    map: ByteView,
+    key: ByteView,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    match store.tx_has(tx, inspect_finished, read_only, global, map, key) {
+        Ok(present) => {
+            let mut r = Reply::status(Status::Ok);
+            r.number = u64::from(present);
+            r
+        }
+        Err(error) => Reply::output(Err(error)),
+    }
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_release_root(store: *mut Store, root: u32) {
-    unsafe { &mut *store }.release_root_raw(root);
+unsafe extern "C" fn ccf_rust_kv_tx_previous(
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
+    inspect_finished: bool,
+    read_only: bool,
+    map: ByteView,
+    key: ByteView,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    let (Ok(Some(map)), Ok(Some(key))) =
+        (unsafe { map.as_opt_slice() }, unsafe { key.as_opt_slice() })
+    else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    match store.tx_previous(tx, inspect_finished, read_only, map, key) {
+        Ok(Some(v)) => {
+            let mut r = Reply::status(Status::Ok);
+            r.number = v;
+            r
+        }
+        Ok(None) => Reply::status(Status::Missing),
+        Err(error) => Reply::output(Err(error)),
+    }
+}
+
+fn acquire_reply(res: &Result<(u64, u64, Output), Error>) -> (Reply, u64, u64) {
+    match res {
+        Ok((version, term, Output::Acquired(local_rev, global_rev))) => {
+            let mut reply = Reply::status(Status::Ok);
+            reply.number = *version;
+            reply.detail = *term;
+            (reply, *local_rev, *global_rev)
+        }
+        Ok((version, term, Output::Unavailable)) => {
+            let mut reply = Reply::status(Status::Unavailable);
+            reply.number = *version;
+            reply.detail = *term;
+            (reply, 0, 0)
+        }
+        Ok((_, _, _)) => (Reply::status(Status::InvalidRequest), 0, 0),
+        Err(Error::Disabled) => (Reply::status(Status::Disabled), 0, 0),
+        Err(Error::Exhausted) => (Reply::status(Status::Exhausted), 0, 0),
+    }
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_pin_snapshot(store: *mut Store, id: u64, version: u64) {
-    unsafe { &mut *store }.pin_snapshot_stub(id, version);
+unsafe extern "C" fn ccf_rust_kv_tx_acquire(
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
+    map: ByteView,
+    has_explicit_version: bool,
+    explicit_version: u64,
+    trace_ctx: *mut c_void,
+    trace_cb: Option<AcquireTraceFn>,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    let Ok(Some(map)) = (unsafe { map.optional() }) else {
+        return Reply::status(Status::InvalidRequest);
+    };
+    let explicit = if has_explicit_version {
+        Some(explicit_version)
+    } else {
+        None
+    };
+    let res = store.acquire_map(tx, map, explicit, |locked_res| {
+        if let Some(cb) = trace_cb {
+            let (reply, local_rev, global_rev) = acquire_reply(locked_res);
+            unsafe { cb(trace_ctx, reply, local_rev, global_rev) };
+        }
+    });
+    acquire_reply(&res).0
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_unpin_snapshot(store: *mut Store, id: u64) {
-    unsafe { &mut *store }.unpin_snapshot_stub(id);
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_pending_writes(tx: *const DetachedTx) -> Reply {
+unsafe extern "C" fn ccf_rust_kv_tx_pending_writes(tx: *const NativeTx) -> Reply {
     let tx = unsafe { &*tx };
     match tx.pending_writes() {
         Ok(writes) => {
@@ -465,7 +396,7 @@ unsafe extern "C" fn ccf_rust_kv_tx_pending_writes(tx: *const DetachedTx) -> Rep
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_finish(tx: *mut DetachedTx, outcome: u64) -> Reply {
+unsafe extern "C" fn ccf_rust_kv_tx_finish(tx: *mut NativeTx, outcome: u64) -> Reply {
     let tx = unsafe { &mut *tx };
     let outcome = match outcome {
         0 => Outcome::Success,
@@ -477,53 +408,9 @@ unsafe extern "C" fn ccf_rust_kv_tx_finish(tx: *mut DetachedTx, outcome: u64) ->
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_snapshot_and_acquire(
-    store: *mut Store,
-    tx: *mut DetachedTx,
-    map: ByteView,
-    has_reserved: bool,
-    reserved_version: u64,
-    out_local_rev: *mut u64,
-    out_global_rev: *mut u64,
-) -> Reply {
-    let store = unsafe { &mut *store };
-    let tx = unsafe { &mut *tx };
-    let Ok(Some(map)) = (unsafe { map.optional() }) else {
-        return Reply::status(Status::InvalidRequest);
-    };
-    let reserved = if has_reserved {
-        Some(reserved_version)
-    } else {
-        None
-    };
-    match store.snapshot_and_acquire_detached(tx, map, reserved) {
-        Ok((version, term, Output::Acquired(local_rev, global_rev))) => {
-            if !out_local_rev.is_null() {
-                unsafe { *out_local_rev = local_rev };
-            }
-            if !out_global_rev.is_null() {
-                unsafe { *out_global_rev = global_rev };
-            }
-            let mut reply = Reply::status(Status::Ok);
-            reply.number = version;
-            reply.detail = term;
-            reply
-        }
-        Ok((version, term, Output::Unavailable)) => {
-            let mut reply = Reply::status(Status::Unavailable);
-            reply.number = version;
-            reply.detail = term;
-            reply
-        }
-        Ok((_, _, other)) => Reply::output(Ok(other)),
-        Err(error) => Reply::output(Err(error)),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_reserve_version(store: *mut Store) -> Reply {
-    let store = unsafe { &mut *store };
-    match store.reserve_placeholder_ccf() {
+unsafe extern "C" fn ccf_rust_kv_reserve_version(store: *const ConcurrentStore) -> Reply {
+    let store = unsafe { &*store };
+    match store.reserve_version() {
         Ok(version) => {
             let mut reply = Reply::status(Status::Ok);
             reply.number = version;
@@ -533,55 +420,55 @@ unsafe extern "C" fn ccf_rust_kv_reserve_version(store: *mut Store) -> Reply {
     }
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_tx_commit_reserved(
-    store: *mut Store,
-    tx: *mut DetachedTx,
-    version: u64,
-) -> Reply {
-    let store = unsafe { &mut *store };
-    let tx = unsafe { &mut *tx };
-    match store.backfill_reserved_ccf(tx, version) {
+fn commit_prep_reply(res: &Result<CommitPreparation, Error>) -> Reply {
+    match res {
         Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
         Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
         Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => Reply::status(Status::StaleTerm),
         Ok(CommitPreparation::Rejected(Outcome::Success)) => Reply::status(Status::InvalidRequest),
         Ok(CommitPreparation::Applied(v, term)) => {
             let mut reply = Reply::status(Status::Ok);
-            reply.number = v;
-            reply.detail = term;
+            reply.number = *v;
+            reply.detail = *term;
             reply
         }
-        Err(error) => Reply::output(Err(error)),
+        Err(Error::Disabled) => Reply::status(Status::Disabled),
+        Err(Error::Exhausted) => Reply::status(Status::Exhausted),
     }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ccf_rust_kv_tx_commit_reserved(
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
+    version: u64,
+) -> Reply {
+    let store = unsafe { &*store };
+    let tx = unsafe { &mut *tx };
+    commit_prep_reply(&store.commit_reserved(tx, version))
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_prepare_commit(
-    store: *mut Store,
-    tx: *mut DetachedTx,
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
+    trace_ctx: *mut c_void,
+    trace_cb: Option<ReplyTraceFn>,
 ) -> Reply {
-    let store = unsafe { &mut *store };
+    let store = unsafe { &*store };
     let tx = unsafe { &mut *tx };
-    match store.prepare_ccf_commit_detached(tx) {
-        Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
-        Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
-        Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => Reply::status(Status::StaleTerm),
-        Ok(CommitPreparation::Rejected(Outcome::Success)) => Reply::status(Status::InvalidRequest),
-        Ok(CommitPreparation::Applied(version, term)) => {
-            let mut reply = Reply::status(Status::Ok);
-            reply.number = version;
-            reply.detail = term;
-            reply
+    let res = store.prepare_commit(tx, |locked_res| {
+        if let Some(cb) = trace_cb {
+            unsafe { cb(trace_ctx, commit_prep_reply(locked_res)) };
         }
-        Err(error) => Reply::output(Err(error)),
-    }
+    });
+    commit_prep_reply(&res)
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_tx_operate(
-    store: *const Store,
-    tx: *mut DetachedTx,
+    store: *const ConcurrentStore,
+    tx: *mut NativeTx,
     request: Request,
 ) -> Reply {
     let store = unsafe { &*store };
@@ -590,23 +477,14 @@ unsafe extern "C" fn ccf_rust_kv_tx_operate(
     let Ok(Action::Operate(_, map, op)) = (unsafe { request.action() }) else {
         return Reply::status(Status::InvalidRequest);
     };
-    if !inspect_finished {
-        if let Operation::Write(key, value) = op {
-            return match tx.stage_write(map, key, value) {
-                Ok(()) => Reply::status(Status::Ok),
-                Err(error) => Reply::output(Err(error)),
-            };
-        }
-    }
-    if inspect_finished {
-        Reply::output(tx.inspect_finished(store, map, op))
-    } else {
-        Reply::output(tx.operate(store, map, op))
-    }
+    Reply::output(store.tx_operate(tx, inspect_finished, map, op))
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_execute_read(store: *const Store, request: Request) -> Reply {
+unsafe extern "C" fn ccf_rust_kv_execute_read(
+    store: *const ConcurrentStore,
+    request: Request,
+) -> Reply {
     let store = unsafe { &*store };
     if request.op == 20 {
         return match store.snapshot_maps(request.number) {
@@ -631,8 +509,13 @@ unsafe extern "C" fn ccf_rust_kv_execute_read(store: *const Store, request: Requ
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) -> Reply {
-    let store = unsafe { &mut *store };
+unsafe extern "C" fn ccf_rust_kv_execute(
+    store: *const ConcurrentStore,
+    request: Request,
+    trace_ctx: *mut c_void,
+    trace_cb: Option<ReplyTraceFn>,
+) -> Reply {
+    let store = unsafe { &*store };
     if request.op == 22 {
         return Reply::output(store.clear_idle().map(|()| Output::Unit));
     }
@@ -656,46 +539,50 @@ unsafe extern "C" fn ccf_rust_kv_execute(store: *mut Store, request: Request) ->
         };
     }
     if request.op == 21 {
-        return Reply::output(store.snapshot_at_ccf(request.attempt, request.number));
+        return store.execute_synced(false, |s| {
+            Reply::output(s.snapshot_at_ccf(request.attempt, request.number))
+        });
     }
     if request.op == 18 {
-        return match store.pending_writes(request.attempt) {
+        return store.execute_synced(false, |s| match s.pending_writes(request.attempt) {
             Ok(writes) => {
                 let mut reply = Reply::status(Status::Ok);
                 Reply::writes(&mut reply, writes);
                 reply
             }
             Err(error) => Reply::output(Err(error)),
-        };
+        });
     }
     if request.op == 6 {
-        return match store.prepare_ccf_commit(request.attempt) {
-            Ok(CommitPreparation::ReadOnly) => Reply::status(Status::ReadOnly),
-            Ok(CommitPreparation::Rejected(Outcome::Conflict)) => Reply::status(Status::Conflict),
-            Ok(CommitPreparation::Rejected(Outcome::NoReplicate)) => {
-                Reply::status(Status::StaleTerm)
-            }
-            Ok(CommitPreparation::Rejected(Outcome::Success)) => {
-                Reply::status(Status::InvalidRequest)
-            }
-            Ok(CommitPreparation::Applied(version, term)) => {
-                let mut reply = Reply::status(Status::Ok);
-                reply.number = version;
-                reply.detail = term;
-                reply
-            }
-            Err(error) => Reply::output(Err(error)),
-        };
+        return store.execute_synced(false, |s| {
+            commit_prep_reply(&s.prepare_ccf_commit(request.attempt))
+        });
     }
     let inspect_finished = request.inspect_finished;
     match unsafe { request.action() } {
+        Ok(Action::SetTerm(term)) => Reply::output(store.execute_set_term(term)),
+        Ok(Action::Compact(version)) => store.execute_synced(true, |s| {
+            let reply = Reply::output(Ok(s.compact_ccf(version)));
+            if let Some(cb) = trace_cb {
+                unsafe { cb(trace_ctx, reply) };
+            }
+            reply
+        }),
+        Ok(Action::Rollback(version, term)) => store.execute_synced(true, |s| {
+            let reply = Reply::output(s.execute(Action::Rollback(version, term)));
+            if let Some(cb) = trace_cb {
+                unsafe { cb(trace_ctx, reply) };
+            }
+            reply
+        }),
         Ok(Action::Operate(t, m, op)) if inspect_finished => {
-            Reply::output(store.inspect_finished(t, m, op))
+            store.execute_synced(false, |s| Reply::output(s.inspect_finished(t, m, op)))
         }
         Ok(_) if inspect_finished => Reply::status(Status::InvalidRequest),
-        Ok(Action::Acquire(t, m)) => Reply::output(store.acquire_ccf(t, m)),
-        Ok(Action::Compact(version)) => Reply::output(Ok(store.compact_ccf(version))),
-        Ok(action) => Reply::output(store.execute(action)),
+        Ok(Action::Acquire(t, m)) => {
+            store.execute_synced(false, |s| Reply::output(s.acquire_ccf(t, m)))
+        }
+        Ok(action) => store.execute_synced(false, |s| Reply::output(s.execute(action))),
         Err(()) => Reply::status(Status::InvalidRequest),
     }
 }
@@ -758,7 +645,7 @@ unsafe fn borrow_array<'a, T>(data: *const T, size: usize) -> Result<&'a [T], ()
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_install_snapshot(
-    store: *mut Store,
+    store: *const ConcurrentStore,
     version: u64,
     maps: *const SnapshotInput,
     size: usize,
@@ -789,7 +676,7 @@ unsafe extern "C" fn ccf_rust_kv_install_snapshot(
             cells,
         });
     }
-    match unsafe { &mut *store }.install_snapshot(version, maps) {
+    match unsafe { &*store }.install_snapshot(version, maps) {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,
@@ -798,8 +685,8 @@ unsafe extern "C" fn ccf_rust_kv_install_snapshot(
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_swap_recovery_maps(
-    target: *mut Store,
-    source: *mut Store,
+    target: *const ConcurrentStore,
+    source: *const ConcurrentStore,
     names: *const ByteView,
     size: usize,
 ) -> Status {
@@ -816,8 +703,8 @@ unsafe extern "C" fn ccf_rust_kv_swap_recovery_maps(
         };
         names.push(name);
     }
-    let target = unsafe { &mut *target };
-    let source = unsafe { &mut *source };
+    let target = unsafe { &*target };
+    let source = unsafe { &*source };
     match target.swap_recovery_maps(source, names) {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
@@ -874,7 +761,7 @@ fn empty_view() -> ByteView {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ccf_rust_kv_replay(
-    store: *mut Store,
+    store: *const ConcurrentStore,
     version: u64,
     entries: *const Entry,
     size: usize,
@@ -894,7 +781,7 @@ unsafe extern "C" fn ccf_rust_kv_replay(
         };
         writes.push((Address { map, key }, value));
     }
-    match unsafe { &mut *store }.replay_ccf(version, writes, track_deletes) {
+    match unsafe { &*store }.replay(version, writes, track_deletes) {
         Ok(()) => Status::Ok,
         Err(Error::Disabled) => Status::Disabled,
         Err(Error::Exhausted) => Status::Exhausted,

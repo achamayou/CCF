@@ -109,26 +109,22 @@ namespace ccf::kv::untyped
     const MapHandle::KeyType& key)
   {
     ValueType out;
-    rust_ffi::Status status;
-    {
-      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
-      status = rust_ffi::ccf_rust_kv_tx_get(
-        tx_changes.rust_store->native.get(),
-        tx_changes.rust_tx,
-        *tx_changes.rust_committed,
-        tx_changes.rust_read_only,
-        false,
-        rust_detail::bytes(map_name),
-        rust_detail::bytes(key),
-        &out,
-        +[](void* ctx, const uint8_t* ptr, size_t len) {
-          auto* dst = static_cast<ValueType*>(ctx);
-          if (len != 0)
-          {
-            *dst = ValueType(ptr, ptr + len);
-          }
-        });
-    }
+    const auto status = rust_ffi::ccf_rust_kv_tx_get(
+      tx_changes.rust_store->native.get(),
+      tx_changes.rust_tx,
+      *tx_changes.rust_committed,
+      tx_changes.rust_read_only,
+      false,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key),
+      &out,
+      +[](void* ctx, const uint8_t* ptr, size_t len) {
+        auto* dst = static_cast<ValueType*>(ctx);
+        if (len != 0)
+        {
+          *dst = ValueType(ptr, ptr + len);
+        }
+      });
     if (status == rust_ffi::Status::MISSING)
     {
       KV_TRACE(trace::operation(
@@ -155,16 +151,13 @@ namespace ccf::kv::untyped
   std::optional<Version> MapHandle::get_version_of_previous_write(
     const MapHandle::KeyType& key)
   {
-    auto r = [&]() {
-      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
-      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_previous(
-        tx_changes.rust_store->native.get(),
-        tx_changes.rust_tx,
-        *tx_changes.rust_committed,
-        tx_changes.rust_read_only,
-        rust_detail::bytes(map_name),
-        rust_detail::bytes(key)));
-    }();
+    auto r = rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_previous(
+      tx_changes.rust_store->native.get(),
+      tx_changes.rust_tx,
+      *tx_changes.rust_committed,
+      tx_changes.rust_read_only,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key)));
     if (r.status == rust_ffi::Status::MISSING)
     {
       KV_TRACE(trace::operation(
@@ -187,26 +180,22 @@ namespace ccf::kv::untyped
     const MapHandle::KeyType& key)
   {
     ValueType out;
-    rust_ffi::Status status;
-    {
-      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
-      status = rust_ffi::ccf_rust_kv_tx_get(
-        tx_changes.rust_store->native.get(),
-        tx_changes.rust_tx,
-        *tx_changes.rust_committed,
-        tx_changes.rust_read_only,
-        true,
-        rust_detail::bytes(map_name),
-        rust_detail::bytes(key),
-        &out,
-        +[](void* ctx, const uint8_t* ptr, size_t len) {
-          auto* dst = static_cast<ValueType*>(ctx);
-          if (len != 0)
-          {
-            *dst = ValueType(ptr, ptr + len);
-          }
-        });
-    }
+    const auto status = rust_ffi::ccf_rust_kv_tx_get(
+      tx_changes.rust_store->native.get(),
+      tx_changes.rust_tx,
+      *tx_changes.rust_committed,
+      tx_changes.rust_read_only,
+      true,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key),
+      &out,
+      +[](void* ctx, const uint8_t* ptr, size_t len) {
+        auto* dst = static_cast<ValueType*>(ctx);
+        if (len != 0)
+        {
+          *dst = ValueType(ptr, ptr + len);
+        }
+      });
     if (status == rust_ffi::Status::MISSING)
     {
       KV_TRACE(trace::operation(
@@ -232,17 +221,14 @@ namespace ccf::kv::untyped
 
   bool MapHandle::has(const MapHandle::KeyType& key)
   {
-    auto r = [&]() {
-      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
-      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
-        tx_changes.rust_store->native.get(),
-        tx_changes.rust_tx,
-        *tx_changes.rust_committed,
-        tx_changes.rust_read_only,
-        false,
-        rust_detail::bytes(map_name),
-        rust_detail::bytes(key)));
-    }();
+    auto r = rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
+      tx_changes.rust_store->native.get(),
+      tx_changes.rust_tx,
+      *tx_changes.rust_committed,
+      tx_changes.rust_read_only,
+      false,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key)));
     r.require();
     const bool found = r.number != 0;
     KV_TRACE(trace::operation(
@@ -255,17 +241,14 @@ namespace ccf::kv::untyped
 
   bool MapHandle::has_globally_committed(const MapHandle::KeyType& key)
   {
-    auto r = [&]() {
-      Store::ShardedRwLock::ReadGuard guard(tx_changes.rust_store->native_lock);
-      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
-        tx_changes.rust_store->native.get(),
-        tx_changes.rust_tx,
-        *tx_changes.rust_committed,
-        tx_changes.rust_read_only,
-        true,
-        rust_detail::bytes(map_name),
-        rust_detail::bytes(key)));
-    }();
+    auto r = rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_tx_has(
+      tx_changes.rust_store->native.get(),
+      tx_changes.rust_tx,
+      *tx_changes.rust_committed,
+      tx_changes.rust_read_only,
+      true,
+      rust_detail::bytes(map_name),
+      rust_detail::bytes(key)));
     r.require();
     const bool found = r.number != 0;
     KV_TRACE(trace::operation(

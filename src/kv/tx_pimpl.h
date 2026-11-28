@@ -23,8 +23,6 @@ namespace ccf::kv
     uint64_t rust_attempt_id = 0;
     rust_ffi::NativeTx* rust_tx = nullptr;
     bool rust_read_only = false;
-    bool rust_registered = false;
-    int rust_hazard_slot = -1;
     std::optional<TxID> rust_reserved = std::nullopt;
     size_t rust_reserve_epoch = 0;
     bool rust_explicit_read_txid = false;

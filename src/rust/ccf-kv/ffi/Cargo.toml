@@ -12,6 +12,7 @@ ccf-kv = { path = ".." }
 
 [lints.rust]
 warnings = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ccf_tsan)'] }
 
 [profile.release]
 lto = true

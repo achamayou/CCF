@@ -266,18 +266,12 @@ namespace ccf::kv
         flat_writes.emplace_back(name, std::move(flat));
       }
       const bool replace = id.seqno <= store.head;
-      Status status;
-      {
-        RustStore::ShardedRwLock::WriteGuard native_guard(store.native_lock);
-        store.sync_hazards_locked();
-        status = ccf_rust_kv_replay(
-          store.native.get(),
-          id.seqno,
-          entries.data(),
-          entries.size(),
-          track_deletes_on_missing_keys);
-        store.sync_hazards_locked();
-      }
+      const auto status = ccf_rust_kv_replay(
+        store.native.get(),
+        id.seqno,
+        entries.data(),
+        entries.size(),
+        track_deletes_on_missing_keys);
       if (status != Status::OK)
       {
         LOG_FAIL_FMT(
@@ -645,13 +639,7 @@ namespace ccf::kv
     {
       throw std::logic_error("Cannot swap maps with outstanding reservations");
     }
-    auto* first = this < &source ? this : &source;
-    auto* second = this < &source ? &source : this;
-    ShardedRwLock::WriteGuard first_guard(first->native_lock);
-    ShardedRwLock::WriteGuard second_guard(second->native_lock);
-    sync_hazards_locked();
-    source.sync_hazards_locked();
-    auto response = source.dispatch_read_locked(
+    auto response = source.dispatch_read(
       {.op = Opcode::SNAPSHOT_MAPS, .number = source.head});
     response.require();
     std::vector<std::string> names;
@@ -833,13 +821,8 @@ namespace ccf::kv
         {{bytes(name), image.revision, image.views.size()},
          image.views.data()});
     }
-    Status status;
-    {
-      ShardedRwLock::WriteGuard native_guard(native_lock);
-      sync_hazards_locked();
-      status = ccf_rust_kv_install_snapshot(
-        native.get(), *version, inputs.data(), inputs.size());
-    }
+    const auto status = ccf_rust_kv_install_snapshot(
+      native.get(), *version, inputs.data(), inputs.size());
     if (status != Status::OK)
     {
       LOG_FAIL_FMT(
@@ -907,8 +890,6 @@ namespace ccf::kv
   bool RustStore::acquire_map_for_tx(
     NativeTx* tx,
     const std::string& map_name,
-    bool& registered,
-    int& hazard_slot,
     const std::optional<TxID>& reserved,
     bool explicit_read_txid,
     std::optional<TxID>& read_txid,
@@ -919,198 +900,113 @@ namespace ccf::kv
 #endif
   )
   {
+    const bool has_explicit_ver = reserved.has_value() || explicit_read_txid;
+    const Version explicit_ver = reserved.has_value() ?
+      reserved->seqno - 1 :
+      (read_txid.has_value() ? read_txid->seqno : 0);
+
 #ifdef CCF_KV_TRACING
-    const bool had_snapshot = read_txid.has_value();
-    auto emit_acquire_trace =
-      [&](const Response& res, uint64_t local_rev, uint64_t global_rev) {
-        if (!trace::enabled())
-        {
-          return;
-        }
-        trace::Context trace_context(trace_id);
-        if (!had_snapshot)
-        {
-          trace::snapshot(this, res.number, res.detail);
-        }
-        if (res.status == Status::OK)
-        {
-          trace::operation(
-            trace_id,
-            "map_acquire",
-            map_name,
-            {{"version", local_rev}, {"global", global_rev}});
-        }
-        else
-        {
-          trace::operation(trace_id, "map_unavailable", map_name);
-        }
-      };
-#endif
-    bool acquired = false;
-    if (!registered && !reserved.has_value() && !explicit_read_txid)
+    struct AcquireTraceCtx
     {
-      if (hazard_slot < 0)
+      RustStore* store;
+      trace::Identity trace_id;
+      const std::string* map_name;
+      bool had_snapshot;
+      bool emitted = false;
+    };
+
+    AcquireTraceCtx trace_ctx{
+      this, trace_id, &map_name, read_txid.has_value(), false};
+    auto emit_trace = [](
+                        AcquireTraceCtx* c,
+                        Reply res,
+                        uint64_t local_rev,
+                        uint64_t global_rev) {
+      trace::Context trace_context(c->trace_id);
+      if (!c->had_snapshot)
       {
-        hazard_slot = try_claim_hazard_slot();
+        trace::snapshot(c->store, res.number, res.detail);
       }
-      if (hazard_slot >= 0)
+      if (res.status == Status::OK)
       {
-        auto& slot = hazard_slots[static_cast<size_t>(hazard_slot)];
-        size_t free_entries = 0;
-        for (const auto& existing : slot.roots)
-        {
-          if (existing.load(std::memory_order_relaxed) == 0)
+        trace::operation(
+          c->trace_id,
+          "map_acquire",
+          *c->map_name,
+          {{"version", local_rev}, {"global", global_rev}});
+      }
+      else
+      {
+        trace::operation(c->trace_id, "map_unavailable", *c->map_name);
+      }
+      c->emitted = true;
+    };
+    auto r = wrap_reply(ccf_rust_kv_tx_acquire(
+      native.get(),
+      tx,
+      bytes(map_name),
+      has_explicit_ver,
+      explicit_ver,
+      &trace_ctx,
+      trace::enabled() ?
+        +[](void* ctx, Reply res, uint64_t local_rev, uint64_t global_rev) {
+          if (res.status == Status::OK || res.status == Status::UNAVAILABLE)
           {
-            ++free_entries;
-          }
-        }
-        if (free_entries >= 2)
-        {
-          uint32_t r0 = 0;
-          uint32_t r1 = 0;
-          uint64_t local_rev = 0;
-          uint64_t global_rev = 0;
-          auto r = [&]() {
-            ShardedRwLock::ReadGuard guard(native_lock);
-            auto res = wrap_reply(ccf_rust_kv_tx_ro_acquire(
-              native.get(),
-              tx,
-              bytes(map_name),
-              &r0,
-              &r1,
-              &local_rev,
-              &global_rev));
+            auto* c = static_cast<AcquireTraceCtx*>(ctx);
+            trace::Context trace_context(c->trace_id);
+            if (!c->had_snapshot)
+            {
+              trace::snapshot(c->store, res.number, res.detail);
+            }
             if (res.status == Status::OK)
             {
-              auto add_root = [&](uint32_t root) {
-                if (root == 0)
-                {
-                  return;
-                }
-                for (auto& existing : slot.roots)
-                {
-                  const auto cur = existing.load(std::memory_order_relaxed);
-                  if (cur == root)
-                  {
-                    return;
-                  }
-                  if (cur == 0)
-                  {
-                    existing.store(root, std::memory_order_release);
-                    return;
-                  }
-                }
-              };
-              add_root(r0);
-              add_root(r1);
-              if (slot.snap_plus_one.load(std::memory_order_relaxed) == 0)
-              {
-                slot.snap_plus_one.store(
-                  res.number + 1, std::memory_order_release);
-              }
+              trace::operation(
+                c->trace_id,
+                "map_acquire",
+                *c->map_name,
+                {{"version", local_rev}, {"global", global_rev}});
             }
-            if (res.status == Status::OK || res.status == Status::UNAVAILABLE)
+            else
             {
-              KV_TRACE(emit_acquire_trace(res, local_rev, global_rev));
+              trace::operation(c->trace_id, "map_unavailable", *c->map_name);
             }
-            return res;
-          }();
-          if (r.status == Status::UNAVAILABLE)
-          {
-            if (!read_txid.has_value())
-            {
-              read_txid =
-                TxID{last_view.load(std::memory_order_acquire), r.number};
-            }
-            return false;
+            c->emitted = true;
           }
-          r.require();
-          if (!read_txid.has_value())
-          {
-            commit_view = r.detail;
-            read_txid =
-              TxID{last_view.load(std::memory_order_acquire), r.number};
-          }
-          acquired = true;
-        }
-        else
-        {
-          uint64_t local_rev = 0;
-          uint64_t global_rev = 0;
-          ShardedRwLock::WriteGuard guard(native_lock);
-          const auto pstatus = ccf_rust_kv_tx_promote(native.get(), tx);
-          if (pstatus != Status::OK)
-          {
-            throw std::logic_error(
-              "Unexpected Rust KV promote status " +
-              std::to_string(static_cast<unsigned>(pstatus)));
-          }
-          registered = true;
-          release_hazard_slot(hazard_slot);
-          hazard_slot = -1;
-          auto r = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-            native.get(),
-            tx,
-            bytes(map_name),
-            false,
-            0,
-            &local_rev,
-            &global_rev));
-          if (r.status == Status::OK || r.status == Status::UNAVAILABLE)
-          {
-            KV_TRACE(emit_acquire_trace(r, local_rev, global_rev));
-          }
-          if (r.status == Status::UNAVAILABLE)
-          {
-            return false;
-          }
-          r.require();
-          acquired = true;
-        }
-      }
-    }
-    if (!acquired)
+        } :
+        nullptr));
+#else
+    auto r = wrap_reply(ccf_rust_kv_tx_acquire(
+      native.get(),
+      tx,
+      bytes(map_name),
+      has_explicit_ver,
+      explicit_ver,
+      nullptr,
+      nullptr));
+#endif
+    if (
+      r.status == Status::UNAVAILABLE ||
+      (explicit_read_txid && r.status == Status::DISABLED &&
+       explicit_ver < compacted_version()))
     {
-      const bool has_explicit_ver = reserved.has_value() || explicit_read_txid;
-      const Version explicit_ver = reserved.has_value() ?
-        reserved->seqno - 1 :
-        (read_txid.has_value() ? read_txid->seqno : 0);
-      uint64_t local_rev = 0;
-      uint64_t global_rev = 0;
-      auto r = [&]() {
-        ShardedRwLock::WriteGuard guard(native_lock);
-        auto res = wrap_reply(ccf_rust_kv_tx_snapshot_and_acquire(
-          native.get(),
-          tx,
-          bytes(map_name),
-          has_explicit_ver,
-          explicit_ver,
-          &local_rev,
-          &global_rev));
-        if (res.status == Status::OK || res.status == Status::UNAVAILABLE)
-        {
-          KV_TRACE(emit_acquire_trace(res, local_rev, global_rev));
-        }
-        return res;
-      }();
-      registered = true;
-      if (
-        r.status == Status::UNAVAILABLE ||
-        (explicit_read_txid && r.status == Status::DISABLED &&
-         explicit_ver < compacted_version()))
+#ifdef CCF_KV_TRACING
+      if (trace::enabled() && !trace_ctx.emitted)
       {
-        if (r.status != Status::UNAVAILABLE)
-        {
-          KV_TRACE(emit_acquire_trace(r, local_rev, global_rev));
-        }
-        return false;
+        emit_trace(
+          &trace_ctx, {r.status, r.number, r.detail, 0, nullptr}, 0, 0);
       }
-      r.require();
-      if (!read_txid.has_value())
+#endif
+      if (r.status == Status::UNAVAILABLE && !read_txid.has_value())
       {
-        commit_view = r.detail;
         read_txid = TxID{last_view.load(std::memory_order_acquire), r.number};
       }
+      return false;
+    }
+    r.require();
+    if (!read_txid.has_value())
+    {
+      commit_view = r.detail;
+      read_txid = TxID{last_view.load(std::memory_order_acquire), r.number};
     }
     return true;
   }
@@ -1305,7 +1201,7 @@ namespace ccf::kv
               trace_writes.push_back(
                 {{"map", name},
                  {"key", ccf::ds::to_hex(ks)},
-                 {"value", trace::bytes(nullptr)}});
+                 {"value", trace::Json(nullptr)}});
             }
           }
         }
@@ -1317,38 +1213,41 @@ namespace ccf::kv
       }
 #endif
       auto applied = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
         if (params.is_reserved)
         {
-          // Backfill replaces active frames and releases their old radix roots,
-          // so promote any active hazard-slot pins before mutating the branch.
-          sync_hazards_locked();
+          return wrap_reply(ccf_rust_kv_tx_commit_reserved(
+            native.get(), params.rust_tx, params.reserved->seqno));
         }
-        auto res = params.is_reserved ?
-          wrap_reply(ccf_rust_kv_tx_commit_reserved(
-            native.get(), params.rust_tx, params.reserved->seqno)) :
-          wrap_reply(
-            ccf_rust_kv_tx_prepare_commit(native.get(), params.rust_tx));
-        if (!params.is_reserved)
-        {
-          if (res.status == Status::CONFLICT)
-          {
-            KV_TRACE(trace::local_result("conflict", 0));
-          }
-          else if (res.status == Status::STALE_TERM)
-          {
-            KV_TRACE(trace::local_result("no_replicate", 0));
-          }
-          else if (res.status == Status::READ_ONLY)
-          {
-            KV_TRACE(trace::local_result("success", 0));
-          }
-          else if (res.status == Status::OK)
-          {
-            KV_TRACE(trace::apply(this, res.number, res.detail));
-          }
-        }
-        return res;
+#ifdef CCF_KV_TRACING
+        return wrap_reply(ccf_rust_kv_tx_prepare_commit(
+          native.get(),
+          params.rust_tx,
+          this,
+          trace::enabled() ?
+            +[](void* ctx, Reply res) {
+              auto* store_ptr = static_cast<RustStore*>(ctx);
+              if (res.status == Status::CONFLICT)
+              {
+                trace::local_result("conflict", 0);
+              }
+              else if (res.status == Status::STALE_TERM)
+              {
+                trace::local_result("no_replicate", 0);
+              }
+              else if (res.status == Status::READ_ONLY)
+              {
+                trace::local_result("success", 0);
+              }
+              else if (res.status == Status::OK)
+              {
+                trace::apply(store_ptr, res.number, res.detail);
+              }
+            } :
+            nullptr));
+#else
+        return wrap_reply(ccf_rust_kv_tx_prepare_commit(
+          native.get(), params.rust_tx, nullptr, nullptr));
+#endif
       }();
       if (applied.status == Status::CONFLICT)
       {

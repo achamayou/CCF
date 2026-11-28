@@ -340,7 +340,8 @@ namespace ccf::kv
   //   3. maps_lock       - store-wide structural barriers (lock_maps/apply/
   //                        compact/rollback/replay/snapshot)
   //   4. state_lock      - C++ metadata fields (versions, hooks, pending_txs)
-  //   5. native_lock     - sharded rwlock guarding NativeStore
+  //   5. Rust NativeStore internal ShardedRwLock + HazardTable (never calls
+  //      back into locks 1-4)
   class RustStore : public AbstractStore
   {
   public:
@@ -424,175 +425,6 @@ namespace ccf::kv
       AdaptiveMutex& operator=(const AdaptiveMutex&) = delete;
     };
 
-    class ShardedRwLock
-    {
-      static constexpr size_t NUM_STRIPES = 8;
-      static constexpr uint32_t WRITER_BIT = 0x80000000u;
-      static constexpr uint32_t READER_MASK = 0x7fffffffu;
-      static constexpr uint32_t SPIN_LIMIT = 512;
-
-      static inline void cpu_relax()
-      {
-#if defined(__x86_64__) || defined(_M_X64)
-        __builtin_ia32_pause();
-#elif defined(__aarch64__)
-        asm volatile("yield" ::: "memory");
-#endif
-      }
-
-      struct alignas(64) Stripe
-      {
-        mutable std::atomic<uint32_t> state{0};
-
-        Stripe() = default;
-        Stripe(const Stripe&) = delete;
-        Stripe& operator=(const Stripe&) = delete;
-      };
-
-      alignas(64) mutable std::atomic<bool> write_gate{false};
-      std::array<Stripe, NUM_STRIPES> stripes;
-
-      void lock_write_gate() const
-      {
-        uint32_t spins = 0;
-        for (;;)
-        {
-          if (
-            !write_gate.load(std::memory_order_relaxed) &&
-            !write_gate.exchange(true, std::memory_order_acquire))
-          {
-            return;
-          }
-          if (++spins < SPIN_LIMIT)
-          {
-            cpu_relax();
-          }
-          else
-          {
-            std::this_thread::yield();
-          }
-        }
-      }
-
-      void unlock_write_gate() const
-      {
-        write_gate.store(false, std::memory_order_release);
-      }
-
-      static size_t thread_stripe()
-      {
-        static std::atomic<size_t> next_stripe{0};
-        thread_local const size_t idx =
-          next_stripe.fetch_add(1, std::memory_order_relaxed) &
-          (NUM_STRIPES - 1);
-        return idx;
-      }
-
-    public:
-      class ReadGuard
-      {
-        std::atomic<uint32_t>& state;
-
-      public:
-        explicit ReadGuard(const ShardedRwLock& lock) :
-          state(lock.stripes[thread_stripe()].state)
-        {
-          uint32_t spins = 0;
-          for (;;)
-          {
-            if ((state.load(std::memory_order_relaxed) & WRITER_BIT) == 0)
-            {
-              const uint32_t prev =
-                state.fetch_add(1, std::memory_order_acq_rel);
-              if ((prev & WRITER_BIT) == 0)
-              {
-                return;
-              }
-              state.fetch_sub(1, std::memory_order_release);
-            }
-            if (++spins < SPIN_LIMIT)
-            {
-              cpu_relax();
-            }
-            else
-            {
-              std::this_thread::yield();
-            }
-          }
-        }
-
-        ~ReadGuard()
-        {
-          state.fetch_sub(1, std::memory_order_release);
-        }
-
-        ReadGuard(const ReadGuard&) = delete;
-        ReadGuard& operator=(const ReadGuard&) = delete;
-      };
-
-      class WriteGuard
-      {
-        const ShardedRwLock& lock;
-
-      public:
-        explicit WriteGuard(const ShardedRwLock& lock_) : lock(lock_)
-        {
-          lock.lock_write_gate();
-          // Set WRITER_BIT across all stripes first so readers stop entering
-          // and drain in parallel across every stripe.
-          for (size_t i = 0; i < NUM_STRIPES; ++i)
-          {
-            lock.stripes[i].state.fetch_or(
-              WRITER_BIT, std::memory_order_acq_rel);
-          }
-          for (size_t i = 0; i < NUM_STRIPES; ++i)
-          {
-            uint32_t spins = 0;
-            while ((lock.stripes[i].state.load(std::memory_order_acquire) &
-                    READER_MASK) != 0)
-            {
-              if (++spins < SPIN_LIMIT)
-              {
-                cpu_relax();
-              }
-              else
-              {
-                std::this_thread::yield();
-              }
-            }
-          }
-        }
-
-        ~WriteGuard()
-        {
-          for (size_t i = NUM_STRIPES; i > 0; --i)
-          {
-            lock.stripes[i - 1].state.fetch_and(
-              ~WRITER_BIT, std::memory_order_release);
-          }
-          lock.unlock_write_gate();
-        }
-
-        WriteGuard(const WriteGuard&) = delete;
-        WriteGuard& operator=(const WriteGuard&) = delete;
-      };
-
-      static size_t current_thread_stripe()
-      {
-        return thread_stripe();
-      }
-    };
-
-    static constexpr size_t NUM_HAZARD_SLOTS = 64;
-    static constexpr size_t ROOTS_PER_HAZARD = 12;
-
-    struct alignas(64) HazardSlot
-    {
-      std::atomic<bool> claimed{false};
-      std::atomic<uint64_t> snap_plus_one{0};
-      std::array<std::atomic<uint32_t>, ROOTS_PER_HAZARD> roots{};
-    };
-
     class SnapshotPublicMaps
     {
       struct CapturedMap
@@ -627,14 +459,9 @@ namespace ccf::kv
     std::mutex compaction_lock;
     AdaptiveMutex maps_lock;
     mutable AdaptiveMutex state_lock;
-    mutable ShardedRwLock native_lock;
     std::
       unique_ptr<rust_ffi::NativeStore, decltype(&rust_ffi::ccf_rust_kv_delete)>
         native{rust_ffi::ccf_rust_kv_new(0), &rust_ffi::ccf_rust_kv_delete};
-    std::array<HazardSlot, NUM_HAZARD_SLOTS> hazard_slots;
-    std::vector<uint32_t> hazard_retained_roots;
-    std::vector<std::pair<Version, uint64_t>> hazard_pinned_snaps;
-    uint64_t next_hazard_pin_id = (uint64_t(1) << 63);
     const uint64_t store_instance_id = next_store_instance_id();
     std::atomic<uint64_t> next_attempt{0};
     Version head = 0;
@@ -737,194 +564,19 @@ namespace ccf::kv
       return local.next++;
     }
 
-    int try_claim_hazard_slot()
-    {
-      const size_t start =
-        (ShardedRwLock::current_thread_stripe() * 8) % NUM_HAZARD_SLOTS;
-      for (size_t i = 0; i < NUM_HAZARD_SLOTS; ++i)
-      {
-        const size_t idx = (start + i) % NUM_HAZARD_SLOTS;
-        bool expected = false;
-        if (hazard_slots[idx].claimed.compare_exchange_strong(
-              expected, true, std::memory_order_acq_rel))
-        {
-          return static_cast<int>(idx);
-        }
-      }
-      return -1;
-    }
-
-    void release_hazard_slot(int slot)
-    {
-      const auto idx = static_cast<size_t>(slot);
-      auto& h = hazard_slots[idx];
-      for (auto& r : h.roots)
-      {
-        if (r.load(std::memory_order_relaxed) != 0)
-        {
-          r.store(0, std::memory_order_release);
-        }
-      }
-      if (h.snap_plus_one.load(std::memory_order_relaxed) != 0)
-      {
-        h.snap_plus_one.store(0, std::memory_order_release);
-      }
-      h.claimed.store(false, std::memory_order_release);
-    }
-
-    void sync_hazards_locked()
-    {
-      bool any_claimed = false;
-      for (const auto& slot : hazard_slots)
-      {
-        if (slot.claimed.load(std::memory_order_acquire))
-        {
-          any_claimed = true;
-          break;
-        }
-      }
-      if (
-        !any_claimed && hazard_retained_roots.empty() &&
-        hazard_pinned_snaps.empty())
-      {
-        return;
-      }
-      std::array<uint32_t, NUM_HAZARD_SLOTS * ROOTS_PER_HAZARD> active_roots{};
-      size_t active_root_count = 0;
-      std::array<Version, NUM_HAZARD_SLOTS> active_snaps{};
-      size_t active_snap_count = 0;
-
-      auto contains_root = [&](uint32_t v) {
-        for (size_t i = 0; i < active_root_count; ++i)
-        {
-          if (active_roots[i] == v)
-          {
-            return true;
-          }
-        }
-        return false;
-      };
-      auto contains_snap = [&](Version v) {
-        for (size_t i = 0; i < active_snap_count; ++i)
-        {
-          if (active_snaps[i] == v)
-          {
-            return true;
-          }
-        }
-        return false;
-      };
-
-      for (const auto& slot : hazard_slots)
-      {
-        if (!slot.claimed.load(std::memory_order_acquire))
-        {
-          continue;
-        }
-        const auto sp = slot.snap_plus_one.load(std::memory_order_acquire);
-        if (sp != 0 && !contains_snap(sp - 1))
-        {
-          active_snaps[active_snap_count++] = sp - 1;
-        }
-        for (const auto& r : slot.roots)
-        {
-          const auto root = r.load(std::memory_order_acquire);
-          if (root != 0 && !contains_root(root))
-          {
-            active_roots[active_root_count++] = root;
-          }
-        }
-      }
-
-      for (size_t i = 0; i < active_root_count; ++i)
-      {
-        const auto root = active_roots[i];
-        bool already = false;
-        for (const auto existing : hazard_retained_roots)
-        {
-          if (existing == root)
-          {
-            already = true;
-            break;
-          }
-        }
-        if (!already)
-        {
-          rust_ffi::ccf_rust_kv_retain_root(native.get(), root);
-          hazard_retained_roots.push_back(root);
-        }
-      }
-      for (size_t i = 0; i < hazard_retained_roots.size();)
-      {
-        if (!contains_root(hazard_retained_roots[i]))
-        {
-          rust_ffi::ccf_rust_kv_release_root(
-            native.get(), hazard_retained_roots[i]);
-          hazard_retained_roots[i] = hazard_retained_roots.back();
-          hazard_retained_roots.pop_back();
-        }
-        else
-        {
-          ++i;
-        }
-      }
-      for (size_t i = 0; i < active_snap_count; ++i)
-      {
-        const auto ver = active_snaps[i];
-        bool already = false;
-        for (const auto& [existing_ver, _] : hazard_pinned_snaps)
-        {
-          if (existing_ver == ver)
-          {
-            already = true;
-            break;
-          }
-        }
-        if (!already)
-        {
-          const auto pin_id = next_hazard_pin_id++;
-          rust_ffi::ccf_rust_kv_pin_snapshot(native.get(), pin_id, ver);
-          hazard_pinned_snaps.emplace_back(ver, pin_id);
-        }
-      }
-      for (size_t i = 0; i < hazard_pinned_snaps.size();)
-      {
-        if (!contains_snap(hazard_pinned_snaps[i].first))
-        {
-          rust_ffi::ccf_rust_kv_unpin_snapshot(
-            native.get(), hazard_pinned_snaps[i].second);
-          hazard_pinned_snaps[i] = hazard_pinned_snaps.back();
-          hazard_pinned_snaps.pop_back();
-        }
-        else
-        {
-          ++i;
-        }
-      }
-    }
-
-    rust_detail::Response dispatch_read_locked(rust_ffi::Request request) const
+    rust_detail::Response dispatch_read(rust_ffi::Request request) const
     {
       return rust_detail::wrap_reply(
         rust_ffi::ccf_rust_kv_execute_read(native.get(), request));
     }
 
-    rust_detail::Response dispatch_read(rust_ffi::Request request) const
+    rust_detail::Response dispatch_write(
+      rust_ffi::Request request,
+      void* trace_ctx = nullptr,
+      rust_ffi::ReplyTraceFn trace_cb = nullptr)
     {
-      ShardedRwLock::ReadGuard guard(native_lock);
-      return dispatch_read_locked(request);
-    }
-
-    rust_detail::Response dispatch_write_locked(rust_ffi::Request request)
-    {
-      return rust_detail::wrap_reply(
-        rust_ffi::ccf_rust_kv_execute(native.get(), request));
-    }
-
-    rust_detail::Response dispatch_write(rust_ffi::Request request)
-    {
-      ShardedRwLock::WriteGuard guard(native_lock);
-      return dispatch_write_locked(request);
+      return rust_detail::wrap_reply(rust_ffi::ccf_rust_kv_execute(
+        native.get(), request, trace_ctx, trace_cb));
     }
 
     std::optional<Version> map_revision_at(
@@ -1058,8 +710,6 @@ namespace ccf::kv
     bool acquire_map_for_tx(
       rust_ffi::NativeTx* tx,
       const std::string& map_name,
-      bool& registered,
-      int& hazard_slot,
       const std::optional<TxID>& reserved,
       bool explicit_read_txid,
       std::optional<TxID>& read_txid,
@@ -1072,31 +722,17 @@ namespace ccf::kv
 
     PendingTxInfo commit_tx_impl(TxCommitParams& params);
 
-    void release_tx_resources(
-      int hazard_slot, bool registered, rust_ffi::NativeTx* tx)
+    void release_tx_resources(rust_ffi::NativeTx* tx)
     {
-      if (hazard_slot >= 0)
-      {
-        release_hazard_slot(hazard_slot);
-      }
       if (tx != nullptr)
       {
-        if (registered)
-        {
-          ShardedRwLock::WriteGuard guard(native_lock);
-          rust_ffi::ccf_rust_kv_tx_delete(native.get(), tx);
-        }
-        else
-        {
-          rust_ffi::ccf_rust_kv_tx_delete(nullptr, tx);
-        }
+        rust_ffi::ccf_rust_kv_tx_delete(native.get(), tx);
       }
     }
 
     rust_detail::Response operate_tx_read(
       rust_ffi::NativeTx* tx, rust_ffi::Request request) const
     {
-      ShardedRwLock::ReadGuard guard(native_lock);
       return rust_detail::wrap_reply(
         rust_ffi::ccf_rust_kv_tx_operate(native.get(), tx, request));
     }
@@ -1296,11 +932,8 @@ namespace ccf::kv
       {
         return std::nullopt;
       }
-      auto r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        return rust_detail::wrap_reply(
-          rust_ffi::ccf_rust_kv_reserve_version(native.get()));
-      }();
+      auto r = rust_detail::wrap_reply(
+        rust_ffi::ccf_rust_kv_reserve_version(native.get()));
       if (r.status == rust_ffi::Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV version counter exhausted");
@@ -1316,11 +949,8 @@ namespace ccf::kv
     {
       KV_TRACE(trace::unsupported(this, "reserved transaction ID"));
       std::scoped_lock lock(maps_lock, state_lock);
-      auto r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        return rust_detail::wrap_reply(
-          rust_ffi::ccf_rust_kv_reserve_version(native.get()));
-      }();
+      auto r = rust_detail::wrap_reply(
+        rust_ffi::ccf_rust_kv_reserve_version(native.get()));
       if (r.status == rust_ffi::Status::EXHAUSTED)
       {
         throw std::overflow_error("Rust KV version counter exhausted");
@@ -1431,13 +1061,7 @@ namespace ccf::kv
       KV_TRACE(trace::unsupported(nullptr, "store clear"));
       std::scoped_lock lock(
         commit_lock, compaction_lock, maps_lock, state_lock);
-      {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        sync_hazards_locked();
-        dispatch_write_locked({.op = rust_ffi::Opcode::CLEAR_STORE}).require();
-        hazard_retained_roots.clear();
-        hazard_pinned_snaps.clear();
-      }
+      dispatch_write({.op = rust_ffi::Opcode::CLEAR_STORE}).require();
       head = NoVersion;
       global = NoVersion;
       open_reservations.clear();
@@ -1510,18 +1134,30 @@ namespace ccf::kv
         const auto compact_target = open_reservations.empty() ?
           v :
           std::min(v, *open_reservations.begin() - 1);
-        auto r = [&]() {
-          ShardedRwLock::WriteGuard native_guard(native_lock);
-          sync_hazards_locked();
-          auto res = dispatch_write_locked(
-            {.op = rust_ffi::Opcode::COMPACT, .number = compact_target});
-          sync_hazards_locked();
-          if (res.status == rust_ffi::Status::OK)
-          {
-            KV_TRACE(trace::compact(this, res.number, v));
-          }
-          return res;
-        }();
+#ifdef CCF_KV_TRACING
+        struct CompactTraceCtx
+        {
+          RustStore* store;
+          Version requested;
+        };
+
+        CompactTraceCtx trace_ctx{this, v};
+        auto r = dispatch_write(
+          {.op = rust_ffi::Opcode::COMPACT, .number = compact_target},
+          &trace_ctx,
+          trace::enabled() ?
+            +[](void* ctx, rust_ffi::Reply res) {
+              auto* c = static_cast<CompactTraceCtx*>(ctx);
+              if (res.status == rust_ffi::Status::OK)
+              {
+                trace::compact(c->store, res.number, c->requested);
+              }
+            } :
+            nullptr);
+#else
+        auto r = dispatch_write(
+          {.op = rust_ffi::Opcode::COMPACT, .number = compact_target});
+#endif
         r.require();
         global = r.number;
         if (compact_target > head || compact_target < global)
@@ -1579,25 +1215,39 @@ namespace ccf::kv
 #ifdef CCF_KV_TRACING
       trace::Environment trace_environment;
       trace::Rollback trace_rollback(this);
+
+      struct RollbackTraceCtx
+      {
+        trace::Rollback* trace;
+        Version seqno;
+        View term;
+      };
+
+      RollbackTraceCtx trace_ctx{&trace_rollback, txid.seqno, new_term};
+      auto r = dispatch_write(
+        {.op = rust_ffi::Opcode::ROLLBACK,
+         .attempt = new_term,
+         .number = txid.seqno},
+        &trace_ctx,
+        trace::enabled() ?
+          +[](void* ctx, rust_ffi::Reply res) {
+            auto* c = static_cast<RollbackTraceCtx*>(ctx);
+            if (res.status == rust_ffi::Status::ROLLBACK_REJECTED)
+            {
+              c->trace->rejected(c->seqno, c->term);
+            }
+            else if (res.status == rust_ffi::Status::OK)
+            {
+              c->trace->result(res.number, c->seqno, c->term);
+            }
+          } :
+          nullptr);
+#else
+      auto r = dispatch_write(
+        {.op = rust_ffi::Opcode::ROLLBACK,
+         .attempt = new_term,
+         .number = txid.seqno});
 #endif
-      auto r = [&]() {
-        ShardedRwLock::WriteGuard native_guard(native_lock);
-        sync_hazards_locked();
-        auto res = dispatch_write_locked(
-          {.op = rust_ffi::Opcode::ROLLBACK,
-           .attempt = new_term,
-           .number = txid.seqno});
-        sync_hazards_locked();
-        if (res.status == rust_ffi::Status::ROLLBACK_REJECTED)
-        {
-          KV_TRACE(trace_rollback.rejected(txid.seqno, new_term));
-        }
-        else if (res.status == rust_ffi::Status::OK)
-        {
-          KV_TRACE(trace_rollback.result(res.number, txid.seqno, new_term));
-        }
-        return res;
-      }();
       if (r.status == rust_ffi::Status::ROLLBACK_REJECTED)
       {
         throw std::logic_error(std::format(

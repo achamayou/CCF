@@ -42,6 +42,9 @@ if(NOT TARGET cargo-build_ccf_kv_rust)
     CCF_KV_RUST_RUSTFLAGS
     "-C relocation-model=pic --remap-path-prefix=${CCF_DIR}=CCF --remap-path-prefix=$ENV{HOME}/.cargo=CARGO"
   )
+  if(TSAN)
+    set(CCF_KV_RUST_RUSTFLAGS "${CCF_KV_RUST_RUSTFLAGS} --cfg ccf_tsan")
+  endif()
 
   add_custom_target(
     cargo-build_ccf_kv_rust
